@@ -3,3 +3,10 @@ name = "dmsg-protocol"
 version = "0.1.0"
 edition = "2021"
 description = "dmsg wire framing, versions and limits (ARCH §8)"
+
+[dependencies]
+base64 = "0.22"
+
+[lib]
+name = "dmsg_protocol"
+path = "src/lib.rs"

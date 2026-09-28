@@ -34,12 +34,17 @@ pub fn load_private<P: AsRef<Path>>(path: P) -> Result<[u8; KEY_LEN], String> {
     Ok(k)
 }
 
+/// Public-ключ для private (сырые 32 байта) — сборка bootstrap, сверки.
+pub fn pubkey_of(privk: &[u8; KEY_LEN]) -> [u8; KEY_LEN] {
+    let secret = x25519_dalek::StaticSecret::from(*privk);
+    *x25519_dalek::PublicKey::from(&secret).as_bytes()
+}
+
 /// Вывести public-ключ для private из файла (hex) — нужен bootstrap в P3.
 /// Деривация стандартным X25519 basepoint mult (тот же, что внутри snow).
 pub fn pubkey_hex<P: AsRef<Path>>(path: P) -> Result<String, String> {
     let privk = load_private(path)?;
-    let secret = x25519_dalek::StaticSecret::from(privk);
-    Ok(hex_of(x25519_dalek::PublicKey::from(&secret).as_bytes()))
+    Ok(hex_of(&pubkey_of(&privk)))
 }
 
 fn hex_of(b: &[u8]) -> String {

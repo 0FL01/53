@@ -2,6 +2,8 @@
 //! Лимит — на ПОЛНЫЙ кадр (header + payload), не только payload.
 //! Внутренние структуры не являются wire-контрактом: совместимость — тест-векторами ниже.
 
+pub mod bootstrap;
+
 /// Wire-версия протокола. Неизвестная версия → close.
 pub const VERSION: u8 = 1;
 /// HELLO: payload — ожидаемый клиентом домен.
@@ -12,6 +14,22 @@ pub const OP_WELCOME: u8 = 2;
 /// payload — ожидаемый клиентом домен. Plaintext-HELLO удалён: сверка домена
 /// только внутри шифрованного канала.
 pub const OP_AUTH_DOMAIN: u8 = 3;
+/// Резерв диапазонов: 1–15 auth/enrol, 16+ mailbox и дальше (P4).
+/// ENROL: payload — token 32 байта (device_key берётся из IK-сессии, не из тела).
+pub const OP_ENROL: u8 = 4;
+/// ENROLLED: payload — user_id 16 + contact_id 12 (без дефисов).
+pub const OP_ENROLLED: u8 = 5;
+/// ERROR: payload — код u8: 1 bad/unknown, 2 expired, 3 revoked, 4 bound-to-other.
+/// Коды различимы специально (токен 256 бит не перебрать — оракла нет).
+pub const OP_ERROR: u8 = 6;
+/// Коды ERROR.
+pub const ERR_BAD: u8 = 1;
+/// Коды ERROR.
+pub const ERR_EXPIRED: u8 = 2;
+/// Коды ERROR.
+pub const ERR_REVOKED: u8 = 3;
+/// Коды ERROR.
+pub const ERR_BOUND_OTHER: u8 = 4;
 
 /// Максимальный ПОЛНЫЙ кадр в байтах (ARCH §8: frame до 16 KiB).
 pub const MAX_FRAME: usize = 16 * 1024;

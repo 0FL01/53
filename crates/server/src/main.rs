@@ -7,20 +7,24 @@
 //! close без ban (per-IP ban на общем резолвере отключил бы всех, ARCH §4).
 
 mod db;
+mod enrol;
 mod noise;
 
+use std::collections::HashMap;
 use std::env;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UnixListener};
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 
 use dmsg_protocol::{
-    decode_frame, encode_frame, DOMAIN_MAX, MAX_FRAME, OP_AUTH_DOMAIN, OP_WELCOME,
+    bootstrap, decode_frame, encode_frame, DOMAIN_MAX, ERR_BAD, ERR_BOUND_OTHER, ERR_EXPIRED,
+    ERR_REVOKED, MAX_FRAME, OP_AUTH_DOMAIN, OP_ENROL, OP_ENROLLED, OP_ERROR, OP_WELCOME,
 };
 
 /// Кап незавершённых handshake (≪16 пилота, резерв до транспортных 32).
@@ -34,6 +38,16 @@ struct Counters {
     auth_ok: AtomicU64,
     mismatch: AtomicU64,
     proto_err: AtomicU64,
+    enrol_ok: AtomicU64,
+    enrol_fail: AtomicU64,
+}
+
+/// Разделяемое состояние: db под мьютексом (держать только на TX, никогда через .await).
+struct State {
+    cfg: Arc<Config>,
+    counters: Arc<Counters>,
+    db: Arc<Mutex<rusqlite::Connection>>,
+    live: Arc<Mutex<HashMap<Vec<u8>, Vec<Arc<Notify>>>>>,
 }
 
 struct Config {
@@ -45,6 +59,7 @@ struct Config {
     schema_version: i64,
     noise_key_file: PathBuf,
     noise_private: [u8; noise::KEY_LEN],
+    carrier_cert_file: PathBuf,
 }
 
 fn load_config() -> Result<Config, String> {
@@ -57,6 +72,9 @@ fn load_config() -> Result<Config, String> {
         .unwrap_or("/run/secrets/noise_key".into());
     let noise_private =
         noise::load_private(&noise_key_file).map_err(|e| format!("noise key: {e}"))?;
+    let carrier_cert_file: PathBuf = env::var("CARRIER_CERT_FILE")
+        .map(PathBuf::from)
+        .unwrap_or("/run/secrets/carrier_cert.pem".into());
     Ok(Config {
         domain,
         listen: env::var("MSGD_LISTEN").unwrap_or_else(|_| "127.0.0.1:7000".into()),
@@ -70,6 +88,7 @@ fn load_config() -> Result<Config, String> {
         schema_version: 0, // заполняется в run() после db::open
         noise_key_file,
         noise_private,
+        carrier_cert_file,
     })
 }
 
@@ -92,14 +111,16 @@ async fn write_hs_msg(stream: &mut tokio::net::TcpStream, msg: &[u8]) -> std::io
     stream.write_all(msg).await
 }
 
-/// Один коннект: Noise IK handshake → первое transport-сообщение обязано быть
-/// OP_AUTH_DOMAIN с верным доменом → шифрованный WELCOME. Иначе close + счётчик.
+/// Один коннект: Noise IK handshake → AUTH_DOMAIN → WELCOME → цикл сессии.
+/// device_key — static инициатора из IK (get_remote_static), НЕ из тел сообщений.
+/// После ENROLLED задача регистрирует Notify в live-карте; revoke будит и закрывает.
 async fn handle_conn(
     mut stream: tokio::net::TcpStream,
-    cfg: Arc<Config>,
-    c: Arc<Counters>,
+    st: Arc<State>,
     _permit: tokio::sync::OwnedSemaphorePermit,
 ) {
+    let cfg = &st.cfg;
+    let c = &st.counters;
     let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or("?".into());
     let mut hsbuf = vec![0u8; 65535];
     let mut hs = match snow::Builder::new(noise::PATTERN.parse().expect("pattern"))
@@ -145,6 +166,19 @@ async fn handle_conn(
         return;
     }
     hsbuf.fill(0);
+    // Static инициатора — только из сессии. IK гарантирует его наличие в msg1.
+    let device_key: [u8; 32] = match hs.get_remote_static() {
+        Some(k) if k.len() == 32 => {
+            let mut b = [0u8; 32];
+            b.copy_from_slice(k);
+            b
+        }
+        _ => {
+            c.hs_fail.fetch_add(1, Ordering::Relaxed);
+            eprintln!("msgd: hs no remote static from {peer}");
+            return;
+        }
+    };
     let mut transport = hs.into_transport_mode().expect("IK complete");
     drop(_permit); // слот pre-auth освобождён: handshake завершён
     c.hs_ok.fetch_add(1, Ordering::Relaxed);
@@ -198,17 +232,349 @@ async fn handle_conn(
     }
     out.fill(0);
     c.auth_ok.fetch_add(1, Ordering::Relaxed);
-    // P3: здесь enrolment поверх установленного канала для неизвестных ключей.
+
+    // Цикл сессии: ENROL → CAS → ENROLLED/ERROR. Неизвестное → close.
+    // Revoke/block будит через Notify → graceful close. В конце — deregister.
+    let notify = Arc::new(Notify::new());
+    let mut enrolled_key: Option<Vec<u8>> = None;
+    let close = async {
+        loop {
+            let cipher = read_hs_msg(&mut stream).await.map_err(|_| ())?;
+            let mut plain = vec![0u8; 65535];
+            let n = transport.read_message(&cipher, &mut plain).map_err(|_| ())?;
+            let mut cipher = cipher;
+            cipher.fill(0);
+            let (_, op, payload, _) = decode_frame(&plain[..n]).map_err(|_| ())?;
+            if op != OP_ENROL || payload.len() != 32 {
+                c.proto_err.fetch_add(1, Ordering::Relaxed);
+                return Err(());
+            }
+            // CAS под коротким локом, никогда через .await.
+            let now = now_secs();
+            let res = {
+                let db = st.db.lock().expect("db");
+                enrol::enrol(&db, &payload, &device_key, now)
+            };
+            let reply = match res {
+                Ok(done) => {
+                    c.enrol_ok.fetch_add(1, Ordering::Relaxed);
+                    let mut p = Vec::with_capacity(28);
+                    p.extend_from_slice(&done.user_id);
+                    p.extend_from_slice(done.contact_id.as_bytes());
+                    enrolled_key = Some(device_key.to_vec());
+                    st.live
+                        .lock()
+                        .expect("live")
+                        .entry(device_key.to_vec())
+                        .or_default()
+                        .push(notify.clone());
+                    encode_frame(OP_ENROLLED, &p).expect("fits")
+                }
+                Err(e) => {
+                    c.enrol_fail.fetch_add(1, Ordering::Relaxed);
+                    encode_frame(OP_ERROR, &[enrol_code(&e)]).expect("fits")
+                }
+            };
+            let mut out = vec![0u8; 65535];
+            let wn = transport.write_message(&reply, &mut out).map_err(|_| ())?;
+            write_hs_msg(&mut stream, &out[..wn]).await.map_err(|_| ())?;
+            out.fill(0);
+        }
+        #[allow(unreachable_code)]
+        Ok::<(), ()>(())
+    };
+    tokio::select! {
+        _ = notify.notified() => {
+            eprintln!("msgd: session revoked, closing {peer}");
+        }
+        _ = close => {}
+    }
+    if let Some(k) = enrolled_key {
+        let mut live = st.live.lock().expect("live");
+        if let Some(v) = live.get_mut(&k) {
+            v.retain(|n| !Arc::ptr_eq(n, &notify));
+            if v.is_empty() {
+                live.remove(&k);
+            }
+        }
+    }
 }
 
-async fn serve_msgctl(cfg: Arc<Config>, c: Arc<Counters>) -> std::io::Result<()> {
-    let _ = std::fs::remove_file(&cfg.msgctl_sock);
-    let listener = UnixListener::bind(&cfg.msgctl_sock)?;
-    eprintln!("msgd: msgctl on {}", cfg.msgctl_sock.display());
+fn enrol_code(e: &enrol::EnrolError) -> u8 {
+    match e {
+        enrol::EnrolError::Bad | enrol::EnrolError::Store(_) => ERR_BAD,
+        enrol::EnrolError::Expired => ERR_EXPIRED,
+        enrol::EnrolError::Revoked => ERR_REVOKED,
+        enrol::EnrolError::BoundOther => ERR_BOUND_OTHER,
+    }
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Разбудить живые сессии устройства (revoke/block) → graceful close.
+fn wake_device(st: &State, device_key: &[u8]) {
+    if let Some(v) = st.live.lock().expect("live").remove(device_key) {
+        for n in v {
+            n.notify_waiters();
+        }
+    }
+}
+
+/// Cap строки msgctl: invite-revoke/device-block с 64 hex не влезли бы в 64.
+const MSGCTL_LINE_MAX: usize = 256;
+
+/// Одна команда msgctl. Токены/ключи из аргументов никогда не попадают в логи.
+fn handle_msgctl(st: &State, line: &[u8]) -> String {
+    let text = String::from_utf8_lossy(line);
+    let mut parts = text.split_whitespace();
+    match parts.next().unwrap_or("") {
+        "ping" => "pong\n".into(),
+        "domain" => format!("{}\n", st.cfg.domain),
+        "dbversion" => format!("{}\n", st.cfg.schema_version),
+        "stats" => {
+            let c = &st.counters;
+            format!(
+                "hs_ok={} hs_fail={} pre_auth_full={} auth_ok={} mismatch={} proto_err={} enrol_ok={} enrol_fail={}\n",
+                c.hs_ok.load(Ordering::Relaxed),
+                c.hs_fail.load(Ordering::Relaxed),
+                c.pre_auth_full.load(Ordering::Relaxed),
+                c.auth_ok.load(Ordering::Relaxed),
+                c.mismatch.load(Ordering::Relaxed),
+                c.proto_err.load(Ordering::Relaxed),
+                c.enrol_ok.load(Ordering::Relaxed),
+                c.enrol_fail.load(Ordering::Relaxed),
+            )
+        }
+        "invite-issue" => {
+            let ttl: i64 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(24 * 3600);
+            match msgctl_issue(st, ttl.max(1)) {
+                Ok(uri) => format!("{uri}\n"),
+                Err(_) => "err\n".into(),
+            }
+        }
+        "invite-revoke" => match parts.next().and_then(hex32) {
+            Some(tok) => match msgctl_revoke(st, &tok) {
+                Ok(()) => "ok\n".into(),
+                Err(_) => "err\n".into(),
+            },
+            None => "err\n".into(),
+        },
+        "invite-list" => msgctl_list(st),
+        "device-block" => match parts.next().and_then(hex32) {
+            Some(key) => match msgctl_block(st, &key) {
+                Ok(()) => "ok\n".into(),
+                Err(_) => "err\n".into(),
+            },
+            None => "err\n".into(),
+        },
+        _ => "err\n".into(),
+    }
+}
+
+fn hex32(s: &str) -> Option<[u8; 32]> {
+    if s.len() != 64 {
+        return None;
+    }
+    let mut b = [0u8; 32];
+    for (i, c) in b.iter_mut().enumerate() {
+        *c = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok()?;
+    }
+    Some(b)
+}
+
+/// Выпуск invite: token → INSERT → сборка dmsg://join URI. URI уходит только
+/// в stdout админа (сервер-локально); в логи — лишь факт выпуска, без token.
+fn msgctl_issue(st: &State, ttl_secs: i64) -> Result<String, String> {
+    let mut token = [0u8; 32];
+    getrandom::fill(&mut token).map_err(|e| format!("rng: {e}"))?;
+    let now = now_secs();
+    {
+        let db = st.db.lock().expect("db");
+        db.execute(
+            "INSERT INTO invites(token, created_at, expires_at, revoked) VALUES(?1,?2,?3,0)",
+            rusqlite::params![token.as_slice(), now, now + ttl_secs],
+        )
+        .map_err(|e| format!("insert: {e}"))?;
+    }
+    let cert_der = std::fs::read(&st.cfg.carrier_cert_file)
+        .map_err(|e| format!("carrier cert: {e}"))?;
+    // PEM или DER: PEM начинается с -----BEGIN, DER — с 0x30.
+    let cert_der = if cert_der.starts_with(b"-----BEGIN") {
+        pem_to_der(&cert_der).ok_or("carrier cert: bad PEM")?
+    } else {
+        cert_der
+    };
+    let pubkey = noise::pubkey_of(&st.cfg.noise_private);
+    let uri = bootstrap::build(st.cfg.domain.as_bytes(), &cert_der, &pubkey, &token)
+        .map_err(|e| format!("bootstrap: {e:?}"))?;
+    eprintln!("msgd: invite issued");
+    Ok(uri)
+}
+
+fn pem_to_der(pem: &[u8]) -> Option<Vec<u8>> {
+    let text = std::str::from_utf8(pem).ok()?;
+    let mut b64 = String::new();
+    let mut in_body = false;
+    for line in text.lines() {
+        if line.starts_with("-----BEGIN") {
+            in_body = true;
+            continue;
+        }
+        if line.starts_with("-----END") {
+            break;
+        }
+        if in_body {
+            b64.push_str(line.trim());
+        }
+    }
+    if b64.is_empty() {
+        return None;
+    }
+    b64_standard_decode(&b64)
+}
+
+fn b64_standard_decode(s: &str) -> Option<Vec<u8>> {
+    const T: &[u8; 128] = &{
+        let mut t = [255u8; 128];
+        let mut i = 0u8;
+        while i < 26 {
+            t[(b'A' + i) as usize] = i;
+            t[(b'a' + i) as usize] = 26 + i;
+            i += 1;
+        }
+        let mut j = 0u8;
+        while j < 10 {
+            t[(b'0' + j) as usize] = 52 + j;
+            j += 1;
+        }
+        t[b'+' as usize] = 62;
+        t[b'/' as usize] = 63;
+        t
+    };
+    let s = s.trim_end_matches('=');
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+    let mut acc: u32 = 0;
+    let mut bits = 0;
+    for &ch in s.as_bytes() {
+        if (ch as usize) >= 128 || T[ch as usize] == 255 {
+            return None;
+        }
+        acc = (acc << 6) | T[ch as usize] as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// Отзыв invite: revoke + будим живые сессии привязанного устройства.
+fn msgctl_revoke(st: &State, token: &[u8; 32]) -> Result<(), String> {
+    let bound: Option<Vec<u8>> = {
+        let db = st.db.lock().expect("db");
+        db.execute(
+            "UPDATE invites SET revoked=1 WHERE token=?1",
+            [token.as_slice()],
+        )
+        .map_err(|e| format!("revoke: {e}"))?;
+        db.query_row(
+            "SELECT bound_device_key FROM invites WHERE token=?1",
+            [token.as_slice()],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("lookup: {e}"))?
+    };
+    if let Some(k) = bound {
+        wake_device(st, &k);
+    }
+    eprintln!("msgd: invite revoked");
+    Ok(())
+}
+
+/// Блокировка устройства: revoke + закрыть живые сессии.
+fn msgctl_block(st: &State, device_key: &[u8; 32]) -> Result<(), String> {
+    {
+        let db = st.db.lock().expect("db");
+        db.execute(
+            "UPDATE devices SET revoked=1 WHERE device_key=?1",
+            [device_key.as_slice()],
+        )
+        .map_err(|e| format!("block: {e}"))?;
+    }
+    wake_device(st, device_key);
+    eprintln!("msgd: device blocked");
+    Ok(())
+}
+
+/// Список invites: только префикс токена + мета (полный token — только issue).
+fn msgctl_list(st: &State) -> String {
+    let db = st.db.lock().expect("db");
+    let mut stmt = match db.prepare(
+        "SELECT token, created_at, expires_at, revoked, bound_device_key FROM invites ORDER BY created_at",
+    ) {
+        Ok(s) => s,
+        Err(_) => return "err\n".into(),
+    };
+    let mut out = String::new();
+    let rows = match stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, Vec<u8>>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, i64>(2)?,
+            r.get::<_, i64>(3)?,
+            r.get::<_, Option<Vec<u8>>>(4)?,
+        ))
+    }) {
+        Ok(r) => r,
+        Err(_) => return "err\n".into(),
+    };
+    for row in rows.flatten() {
+        let (tok, created, expires, revoked, bound) = row;
+        out.push_str(&format!(
+            "{} created={} expires={} revoked={} bound={}\n",
+            hex_prefix(&tok),
+            created,
+            expires,
+            revoked,
+            if bound.is_some() { "yes" } else { "no" }
+        ));
+    }
+    out.push_str("ok\n");
+    out
+}
+
+fn hex_prefix(b: &[u8]) -> String {
+    const H: &[u8; 16] = b"0123456789abcdef";
+    b.iter()
+        .take(8)
+        .map(|x| {
+            format!(
+                "{}{}",
+                H[(x >> 4) as usize] as char,
+                H[(x & 15) as usize] as char
+            )
+        })
+        .collect()
+}
+
+async fn serve_msgctl(st: Arc<State>) -> std::io::Result<()> {
+    let _ = std::fs::remove_file(&st.cfg.msgctl_sock);
+    let listener = UnixListener::bind(&st.cfg.msgctl_sock)?;
+    // Сокет только оператору: команды трогают invites/devices.
+    std::fs::set_permissions(
+        &st.cfg.msgctl_sock,
+        std::fs::Permissions::from_mode(0o600),
+    )?;
+    eprintln!("msgd: msgctl on {}", st.cfg.msgctl_sock.display());
     loop {
         let (mut sock, _) = listener.accept().await?;
-        let cfg = cfg.clone();
-        let c = c.clone();
+        let st = st.clone();
         tokio::spawn(async move {
             let mut line = Vec::new();
             let mut buf = [0u8; 1];
@@ -219,28 +585,14 @@ async fn serve_msgctl(cfg: Arc<Config>, c: Arc<Counters>) -> std::io::Result<()>
                         if buf[0] == b'\n' {
                             break;
                         }
-                        if line.len() < 64 {
+                        if line.len() < MSGCTL_LINE_MAX {
                             line.push(buf[0]);
                         }
                     }
                     Err(_) => break,
                 }
             }
-            let reply = match line.as_slice() {
-                b"ping" => "pong\n".to_string(),
-                b"domain" => format!("{}\n", cfg.domain),
-                b"dbversion" => format!("{}\n", cfg.schema_version),
-                b"stats" => format!(
-                    "hs_ok={} hs_fail={} pre_auth_full={} auth_ok={} mismatch={} proto_err={}\n",
-                    c.hs_ok.load(Ordering::Relaxed),
-                    c.hs_fail.load(Ordering::Relaxed),
-                    c.pre_auth_full.load(Ordering::Relaxed),
-                    c.auth_ok.load(Ordering::Relaxed),
-                    c.mismatch.load(Ordering::Relaxed),
-                    c.proto_err.load(Ordering::Relaxed),
-                ),
-                _ => "err\n".to_string(),
-            };
+            let reply = handle_msgctl(&st, &line);
             let _ = sock.write_all(reply.as_bytes()).await;
         });
     }
@@ -249,32 +601,38 @@ async fn serve_msgctl(cfg: Arc<Config>, c: Arc<Counters>) -> std::io::Result<()>
 async fn run(cfg: Config) -> std::io::Result<()> {
     std::fs::create_dir_all(&cfg.data_dir)?;
     std::fs::create_dir_all(&cfg.blobs_dir)?;
-    let schema_version = db::open(cfg.data_dir.join("msgd.db")).map_err(std::io::Error::other)?;
+    // Одно соединение на процесс (WAL + busy_timeout против ложных BUSY).
+    let conn = db::connect(cfg.data_dir.join("msgd.db")).map_err(std::io::Error::other)?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(std::io::Error::other)?;
+    let schema_version = db::migrate(&conn).map_err(std::io::Error::other)?;
     eprintln!("msgd: db schema version {schema_version}");
     let cfg = Config { schema_version, ..cfg };
     eprintln!("msgd: noise listening on {} for domain {}", cfg.listen, cfg.domain);
     eprintln!("msgd: noise key from {}", cfg.noise_key_file.display());
     let listener = TcpListener::bind(&cfg.listen).await?;
-    let cfg = Arc::new(cfg);
-    let counters = Arc::new(Counters::default());
+    let st = Arc::new(State {
+        db: Arc::new(Mutex::new(conn)),
+        live: Arc::new(Mutex::new(HashMap::new())),
+        counters: Arc::new(Counters::default()),
+        cfg: Arc::new(cfg),
+    });
     let pre_auth = Arc::new(Semaphore::new(PRE_AUTH_CAP));
-    let ctl = cfg.clone();
-    let ctl_c = counters.clone();
+    let ctl = st.clone();
     tokio::spawn(async move {
-        if let Err(e) = serve_msgctl(ctl, ctl_c).await {
+        if let Err(e) = serve_msgctl(ctl).await {
             eprintln!("msgd: msgctl error: {e}");
         }
     });
     loop {
         let (stream, _) = listener.accept().await?;
         stream.set_nodelay(true)?;
-        let cfg = cfg.clone();
-        let counters = counters.clone();
+        let st = st.clone();
         // Кап pre-auth: нет слота — сразу close, слот не удерживаем.
         let permit = match pre_auth.clone().try_acquire_owned() {
             Ok(p) => p,
             Err(_) => {
-                counters.pre_auth_full.fetch_add(1, Ordering::Relaxed);
+                st.counters.pre_auth_full.fetch_add(1, Ordering::Relaxed);
                 drop(stream);
                 continue;
             }
@@ -282,7 +640,7 @@ async fn run(cfg: Config) -> std::io::Result<()> {
         tokio::spawn(async move {
             let _ = tokio::time::timeout(
                 Duration::from_secs(10),
-                handle_conn(stream, cfg, counters, permit),
+                handle_conn(stream, st, permit),
             )
             .await;
         });
@@ -304,7 +662,9 @@ async fn main() -> ExitCode {
     match args.next().as_deref() {
         Some("msgctl") => {
             let sock = env::var("MSGCTL_SOCK").unwrap_or("/var/lib/msgd/msgctl.sock".into());
-            let cmd = args.next().unwrap_or_default();
+            // Вся остальная строка — одна команда (invite-revoke <hex> и т.п.).
+            let rest: Vec<String> = args.collect();
+            let cmd = rest.join(" ");
             return match msgctl_client(&sock, &cmd).await {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {

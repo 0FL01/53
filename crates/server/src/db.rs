@@ -65,10 +65,19 @@ CREATE TABLE IF NOT EXISTS blob_meta(
 );
 ";
 
-/// Открыть БД, включить WAL + FULL, применить миграции. Возвращает версию схемы.
-pub fn open<P: AsRef<Path>>(path: P) -> rusqlite::Result<i64> {
+/// Открыть БД с режимом msgd: WAL + FULL. Возвращает соединение (миграции — migrate()).
+pub fn connect<P: AsRef<Path>>(path: P) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
+    Ok(conn)
+}
+
+/// Применить миграции к уже открытому соединению (для тестов на :memory: тоже).
+pub fn migrate(conn: &Connection) -> rusqlite::Result<i64> {
+    migrate_inner(conn)
+}
+
+fn migrate_inner(conn: &Connection) -> rusqlite::Result<i64> {
     conn.execute_batch(MIGRATION_V1)?;
     let version: i64 = conn.query_row(
         "SELECT value FROM meta WHERE key='schema_version'",
@@ -94,9 +103,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("msgd-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("t.db");
-        assert_eq!(open(&db).unwrap(), SCHEMA_VERSION);
+        assert_eq!(migrate(&connect(&db).unwrap()).unwrap(), SCHEMA_VERSION);
         // Повторное открытие идемпотентно, версия та же.
-        assert_eq!(open(&db).unwrap(), SCHEMA_VERSION);
+        assert_eq!(migrate(&connect(&db).unwrap()).unwrap(), SCHEMA_VERSION);
         let conn = Connection::open(&db).unwrap();
         let mode: String = conn
             .query_row("PRAGMA journal_mode", [], |r| r.get(0))

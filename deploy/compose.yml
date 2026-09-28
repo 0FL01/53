@@ -43,8 +43,10 @@ services:
       MSGD_BLOBS_DIR: /var/lib/msgd/blobs
       MSGCTL_SOCK: /var/lib/msgd/msgctl.sock
       NOISE_KEY_FILE: /run/secrets/noise_key
+      CARRIER_CERT_FILE: /run/secrets/carrier_cert.pem
     secrets:
       - noise_key
+      - carrier_cert.pem
     volumes:
       - msgd-data:/var/lib/msgd
       - blobs-data:/var/lib/msgd/blobs
