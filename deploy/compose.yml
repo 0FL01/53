@@ -6,7 +6,7 @@ name: dmsg53
 services:
   slipstream:
     build:
-      context: ../..
+      context: ..
       dockerfile: deploy/Dockerfile.slipstream
     image: dmsg53-slipstream:s1
     command:
@@ -30,7 +30,7 @@ services:
 
   msgd:
     build:
-      context: ../..
+      context: ..
       dockerfile: deploy/Dockerfile.msgd
     image: dmsg53-msgd:s1
     network_mode: "service:slipstream"
