@@ -1,6 +1,6 @@
 # Goal: Бэкенд MVP — транспорт, compose, msgd-stub, деплой n-de2
 
-Status: active
+Status: complete
 Source: пользовательская инструкция 2026-09-28 + исправленный план аудита (m0026), ARCHITECTURE.md §1/§4, WORK_PLAN.md M0/M1
 Last updated: 2026-09-28
 
@@ -47,8 +47,8 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Source: инструкция «потом коммит»; AGENTS.md Commits
   - Acceptance: коммит `<type>(<scope>): <desc>` + `Changes:` 2–4 буллета; `git status` — только intended-файлы
   - Primary evidence: `git log --oneline -1` + `git status --short --branch`
-  - Status: pending
-  - Evidence:
+  - Status: verified
+  - Evidence: `f9d5b17 feat(backend): msgd-stub, compose и деплой S0–S3`, дерево чистое
 
 ### Constraints
 - C1: Не трогать рабочее развёртывание туннеля; отдельный поддомен/IP/сервер (ARCHITECTURE.md §1)
@@ -90,7 +90,7 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 - 2026-09-28: аудит (R-нет, план), 4 ревью, синтез m0026, next: GOAL+S0
 
 ## Completion
-- Resolved outcomes:
-- Commands and artifacts:
-- Constraint and diff-scope check:
-- Final status:
+- Resolved outcomes: R1–R6 verified (GOAL, пин+гейты, compose config, stub-обмен, S3 PASS+рекурсия, коммит f9d5b17)
+- Commands and artifacts: `meson test` 4/4 OK; `compose config` OK; HELLO/WELCOME + msgctl; s3_diag 2/2 ×2; `dig +tcp` NXDOMAIN≠SERVFAIL
+- Constraint and diff-scope check: туннель не тронут; секретов/реальных имён-IP в Git нет; UDP-сокет не менялся; 13 файлов, только intended
+- Final status: complete
