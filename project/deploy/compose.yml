@@ -1,0 +1,63 @@
+# S1: slipstream + msgd как единица развёртывания (ARCH §4).
+# msgd разделяет network namespace slipstream; backend всегда 127.0.0.1:7000.
+# Наружу только DNS-порт. Секреты — ro-mounts, никогда COPY в образ.
+name: dmsg53
+
+services:
+  slipstream:
+    build:
+      context: ../..
+      dockerfile: project/deploy/Dockerfile.slipstream
+    image: dmsg53-slipstream:s1
+    command:
+      - --dns-listen-port=${DNS_INTERNAL_PORT:-5353}
+      - --domain=${DMSG_DOMAIN:?DMSG_DOMAIN is required}
+      - --target-address=${MSGD_ADDR:-127.0.0.1:7000}
+      - --cert=/run/secrets/carrier_cert.pem
+      - --key=/run/secrets/carrier_key.pem
+      - --reset-seed=/run/secrets/reset_seed.hex
+      - --max-connections=32
+      - --idle-timeout-seconds=30
+    ports:
+      - "${DNS_BIND_IP:?DNS_BIND_IP is required}:${DNS_PUBLIC_PORT:-53}:${DNS_INTERNAL_PORT:-5353}/udp"
+    secrets:
+      - carrier_cert.pem
+      - carrier_key.pem
+      - reset_seed.hex
+    restart: unless-stopped
+    # Healthcheck нет: distroless без shell, у slipstream нет HTTP.
+    # Живость пути проверяет S3-диагностика через msgd.
+
+  msgd:
+    build:
+      context: ../..
+      dockerfile: project/deploy/Dockerfile.msgd
+    image: dmsg53-msgd:s1
+    network_mode: "service:slipstream"
+    depends_on:
+      - slipstream
+    environment:
+      DMSG_DOMAIN: "${DMSG_DOMAIN:?DMSG_DOMAIN is required}"
+      MSGD_LISTEN: "127.0.0.1:7000"
+      MSGD_DATA_DIR: /var/lib/msgd
+      MSGCTL_SOCK: /var/lib/msgd/msgctl.sock
+    volumes:
+      - msgd-data:/var/lib/msgd
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 1 bash -c '</dev/tcp/127.0.0.1/7000'"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  msgd-data:
+
+secrets:
+  carrier_cert.pem:
+    file: ${SECRETS_DIR:-./secrets}/carrier_cert.pem
+  carrier_key.pem:
+    file: ${SECRETS_DIR:-./secrets}/carrier_key.pem
+  reset_seed.hex:
+    file: ${SECRETS_DIR:-./secrets}/reset_seed.hex

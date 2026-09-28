@@ -2,3 +2,5 @@
 .opencode
 .opencode.jsonc
 opencode.jsonc
+target/
+project/crates/server/target/

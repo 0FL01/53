@@ -1,0 +1,4 @@
+[submodule "vendor/slipstream"]
+	path = vendor/slipstream
+	url = https://github.com/0FL01/slipstream
+	branch = feat/rust-parity-ab

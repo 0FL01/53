@@ -1,0 +1,26 @@
+# S0 skeleton — single slipstream service, msgd arrives in S1.
+# Build context is the repository root (needs vendor/slipstream submodule).
+# No secrets inside the image (ARCH §4): cert/key/reset-seed mount read-only at runtime.
+ARG DEBIAN_FRONTEND=noninteractive
+FROM debian:bookworm-slim AS builder
+WORKDIR /usr/src/slipstream
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y \
+    python3-pip cmake git pkg-config libssl-dev ninja-build gcc g++ \
+ && pip3 install --user --break-system-packages meson
+COPY vendor/slipstream/ ./
+RUN /root/.local/bin/meson setup \
+    -Db_lto=true \
+    --buildtype=release \
+    --warnlevel=0 \
+    -Ddefault_library=static \
+    meson-build-release \
+ && ninja -C meson-build-release \
+ && cp meson-build-release/slipstream-server /usr/src/slipstream-server
+
+FROM gcr.io/distroless/cc-debian12 AS runtime
+WORKDIR /usr/src/app
+COPY --from=builder --chmod=755 /usr/src/slipstream-server ./
+USER 65532:65532
+ENTRYPOINT ["/usr/src/app/slipstream-server"]
