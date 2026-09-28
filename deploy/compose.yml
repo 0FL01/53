@@ -42,12 +42,15 @@ services:
       MSGD_DATA_DIR: /var/lib/msgd
       MSGD_BLOBS_DIR: /var/lib/msgd/blobs
       MSGCTL_SOCK: /var/lib/msgd/msgctl.sock
+      NOISE_KEY_FILE: /run/secrets/noise_key
+    secrets:
+      - noise_key
     volumes:
       - msgd-data:/var/lib/msgd
       - blobs-data:/var/lib/msgd/blobs
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "timeout 1 bash -c '</dev/tcp/127.0.0.1/7000'"]
+      test: ["CMD", "/usr/local/bin/msgd", "msgctl", "ping"]
       interval: 15s
       timeout: 3s
       retries: 3
@@ -64,3 +67,5 @@ secrets:
     file: ${SECRETS_DIR:-./secrets}/carrier_key.pem
   reset_seed.hex:
     file: ${SECRETS_DIR:-./secrets}/reset_seed.hex
+  noise_key:
+    file: ${SECRETS_DIR:-./secrets}/noise_key

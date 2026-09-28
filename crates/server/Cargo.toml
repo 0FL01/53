@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "io-util", "time"] }
+tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "io-util", "time", "sync"] }
 dmsg-protocol = { path = "../protocol" }
 rusqlite = { version = "0.32", features = ["bundled"] }
+snow = "0.10"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+
+[dev-dependencies]
+snow = "0.10"
+dmsg-protocol = { path = "../protocol" }

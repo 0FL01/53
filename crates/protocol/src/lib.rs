@@ -8,6 +8,10 @@ pub const VERSION: u8 = 1;
 pub const OP_HELLO: u8 = 1;
 /// WELCOME: payload — домен сервера.
 pub const OP_WELCOME: u8 = 2;
+/// AUTH_DOMAIN: первое transport-сообщение после Noise-handshake (P2),
+/// payload — ожидаемый клиентом домен. Plaintext-HELLO удалён: сверка домена
+/// только внутри шифрованного канала.
+pub const OP_AUTH_DOMAIN: u8 = 3;
 
 /// Максимальный ПОЛНЫЙ кадр в байтах (ARCH §8: frame до 16 KiB).
 pub const MAX_FRAME: usize = 16 * 1024;
