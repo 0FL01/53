@@ -1,8 +1,9 @@
 # S1. Контекст сборки — корень репозитория. Секреты монтируются ro на рантайме, не COPY.
 FROM rust:1-bookworm AS builder
 WORKDIR /usr/src/msgd
-COPY crates/server/Cargo.toml crates/server/Cargo.lock* ./
-COPY crates/server/src/ ./src/
+COPY Cargo.toml Cargo.lock ./
+COPY crates/protocol/ ./crates/protocol/
+COPY crates/server/ ./crates/server/
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/src/msgd/target,sharing=locked \
     cargo build --release && cp target/release/msgd /usr/src/msgd-bin

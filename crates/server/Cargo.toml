@@ -5,3 +5,5 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "io-util", "time"] }
+dmsg-protocol = { path = "../protocol" }
+rusqlite = { version = "0.32", features = ["bundled"] }

@@ -40,9 +40,11 @@ services:
       DMSG_DOMAIN: "${DMSG_DOMAIN:?DMSG_DOMAIN is required}"
       MSGD_LISTEN: "127.0.0.1:7000"
       MSGD_DATA_DIR: /var/lib/msgd
+      MSGD_BLOBS_DIR: /var/lib/msgd/blobs
       MSGCTL_SOCK: /var/lib/msgd/msgctl.sock
     volumes:
       - msgd-data:/var/lib/msgd
+      - blobs-data:/var/lib/msgd/blobs
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "timeout 1 bash -c '</dev/tcp/127.0.0.1/7000'"]
@@ -53,6 +55,7 @@ services:
 
 volumes:
   msgd-data:
+  blobs-data:
 
 secrets:
   carrier_cert.pem:
