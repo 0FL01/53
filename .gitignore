@@ -3,4 +3,4 @@
 .opencode.jsonc
 opencode.jsonc
 target/
-project/crates/server/target/
+crates/server/target/

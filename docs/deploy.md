@@ -5,8 +5,8 @@
 ## Подъём
 
 ```sh
-docker compose -f /opt/srv/53/project/deploy/compose.yml --env-file /opt/srv/53/.env up -d --build
-docker compose -f /opt/srv/53/project/deploy/compose.yml --env-file /opt/srv/53/.env ps
+docker compose -f /opt/srv/53/deploy/compose.yml --env-file /opt/srv/53/.env up -d --build
+docker compose -f /opt/srv/53/deploy/compose.yml --env-file /opt/srv/53/.env ps
 ```
 
 Ожидается: `slipstream` Up с маппингом `${DNS_BIND_IP}:53->5353/udp`, `msgd` `healthy`.

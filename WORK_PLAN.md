@@ -102,18 +102,17 @@
 ## Структура репозитория
 
 ```text
-project/
-  android/                 # Kotlin UI и платформенная интеграция
-  crates/
-    protocol/              # версии, bounded framing, wire DTO
-    core/                  # identity, E2E, outbox, transfer, media control
-    server/                # msgd и msgctl
-    mobile-ffi/            # UniFFI facade
-    slipstream-sys/        # узкая C FFI boundary
-  vendor/slipstream/       # исходная ревизия, закреплённая Git
-  deploy/                  # multistage Dockerfiles, Compose, конфиги
-  tests/                   # integration, fixtures, network profiles
-  docs/                    # архитектура, протокол, решения, результаты
+android/                 # Kotlin UI и платформенная интеграция
+crates/
+  protocol/              # версии, bounded framing, wire DTO
+  core/                  # identity, E2E, outbox, transfer, media control
+  server/                # msgd и msgctl
+  mobile-ffi/            # UniFFI facade
+  slipstream-sys/        # узкая C FFI boundary
+vendor/slipstream/       # исходная ревизия, закреплённая Git
+deploy/                  # multistage Dockerfiles, Compose, конфиги
+tests/                   # integration, fixtures, network profiles
+docs/                    # архитектура, протокол, решения, результаты
 ```
 
 Криптография/медиа вначале могут быть модулями core. Дополнительные crates создаются по реальной границе сборки/зависимостей, не для симметрии дерева.

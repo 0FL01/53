@@ -7,7 +7,7 @@ services:
   slipstream:
     build:
       context: ../..
-      dockerfile: project/deploy/Dockerfile.slipstream
+      dockerfile: deploy/Dockerfile.slipstream
     image: dmsg53-slipstream:s1
     command:
       - --dns-listen-port=${DNS_INTERNAL_PORT:-5353}
@@ -31,7 +31,7 @@ services:
   msgd:
     build:
       context: ../..
-      dockerfile: project/deploy/Dockerfile.msgd
+      dockerfile: deploy/Dockerfile.msgd
     image: dmsg53-msgd:s1
     network_mode: "service:slipstream"
     depends_on:
