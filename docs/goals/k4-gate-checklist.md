@@ -41,7 +41,12 @@ R4 пока не закрыта. Ниже сохранены исходные о
 - Сеть аппарата: диагностический DirectTCP через adb reverse/SSH/netns relay.
   Android C/DNS embedding отсутствует: эти результаты НЕ DNS-only acceptance.
 
-## Исходный контракт ручных gates (ожидания не ослаблены)
+## Контракт ручных gates
+
+2026-09-29 пользователь утвердил исполнение следующего плана и политику G8
+из `2026-09-29-client-track.md`: восстановление только с исходным Keystore key;
+после Clear data/uninstall — явная потеря. Прежнее sealed-only обещание superseded,
+а не выполнено; история исходного аппаратного результата сохранена ниже.
 
 | # | Проверка | Как проверять | Ожидание |
 |---|----------|---------------|----------|
@@ -52,7 +57,7 @@ R4 пока не закрыта. Ниже сохранены исходные о
 | G5 | no-GMS аппарат | Аппарат без Play Services | Всё работает (FCM-зависимостей нет — проверить отсутствие gms в APK) |
 | G6 | Отказ разрешений | Запретить камеру/уведомления | Сканер показывает явную ошибку доступа; FGS молча живёт без уведомлений-ошибок (SecurityException глотается) |
 | G7 | Битый/oversized QR | QR с мусором, обрезанный, >8 KiB | Явная строка ошибки («битый QR: …» / oversized), enrol/add не вызываются |
-| G8 | Очистка данных / переустановка | Clear data; reinstall без sealed-копии; reinstall с sealed-копией | Потеря identity показана строкой reinstall_loss; с sealed-копией — unseal и продолжение |
+| G8 | Очистка данных / переустановка | Same-install unseal с исходным ключом; Clear data/reinstall без ключа, в том числе с оставшейся sealed-копией | Same-install restore сохраняет identity; потеря Keystore→явная reinstall_loss и отказ без silent replacement; нового доступа/истории не выдавать за восстановление старой identity |
 | G9 | Пороги | Release APK ≤ 25 MiB; idle PSS ≤ 100 MiB; cold start; скролл 500+ сообщений | Факты вписать сюда; бюджеты — не обещания |
 | G10 | Подмена identity e2e | Второй QR того же ID с другими ключами | `identity_changed`, отправка СТОП до явного confirm (Profile-экран) |
 | G11 | no сети | Авиарежим: send/retry/fetch | Явные transport-ошибки; outbox queued сохраняется; повтор после сети шлёт тот же ciphertext |
@@ -68,7 +73,7 @@ R4 пока не закрыта. Ниже сохранены исходные о
 | G5 | BLOCKED | GMS есть на moto. Отсутствие FCM/GMS dependencies не заменяет no-GMS runtime. |
 | G6 | PASS | На signed-test release отказ камеры дал явную строку; отказ POST_NOTIFICATIONS не убил foreground service, SecurityException/crash не наблюдались. После проверки оба permission восстановлены. |
 | G7 | PASS input/UI; optical PENDING | На аппарате реальные UniFFI и ScannerActivity callback: garbage/truncated/>8 KiB→видимая «битый QR», contact count/account не изменились. Вход callback подан instrumentation без exported debug hook; оптическое считывание этих malformed fixtures камерой не заявляется. |
-| G8 | UNMET sealed-only reinstall | Реальный `pm clear` ТОЛЬКО отдельного `.gate` package: account fresh; Android Keystore master alias удалён. Возврат одной sealed-копии отказал с reinstall_loss, без новой identity/key. Same-install unseal с исходным ключом проверен. Обещание восстановления после uninstall/Clear data одной копией несовместимо с device-bound Keystore и запретом key export/history transfer v1. Ожидание таблицы сохранено, PASS не ставится. |
+| G8 | PASS revised v1 policy; old promise SUPERSEDED | Реальный `pm clear` ТОЛЬКО отдельного `.gate` package: account fresh; Android Keystore master alias удалён. Возврат одной sealed-копии отказал с reinstall_loss, без новой identity/key. Same-install unseal с исходным ключом проверен. Прежнее sealed-only ожидание было UNMET; пользователь затем утвердил честную v1 policy, без key export/history transfer. Старые ключи этим не восстановлены. |
 | G9 | PASS (moto / test-signed release) | Cold main 225 ms; последний финальный release cold 408 ms. Enrolled active FGS idle PSS 83 160 KiB (~81.2 MiB). Отдельная release `.gate` fixture: зашифрованный inbox 551, видимы [550]/[551], UI “551 сообщений”. Gfxinfo 1669 frames: p50/90/95/99=10/12/13/15 ms, janky 1 (0.06%), legacy janky 317 (18.99%); после scroll PSS 92 923 KiB. Release APK ~2.78 MiB. Это синтетическая история, не performance DNS. |
 | G10 | PASS input/UI; optical PENDING | На аппарате real UniFFI + отдельный `.gate`: same ID/new keys через Scanner callback→identity_changed; Chat показывает STOP и сохраняет draft, queued rows 0. Нажатия Profile check/confirm снимают mismatch; последующий send проходит identity check и даёт ожидаемую connect error к закрытому fixture endpoint. Ложный STOP при mismatch=false исправлен. Это не два Android аппарата/оптическое повторное считывание QR. |
 | G11 | PASS (diagnostic TCP/core + UI fixture) | Авиарежим enabled И adb reverse удалён: fetch/retry explicit connect error, send через существующую Olm session→queued. После SIGKILL/возврата сети retry ciphertext byte-identical, peer fetch 1 затем 0 со всеми skips=0. Дополнительно Chat на `.gate` показывает connect error и не теряет draft; error не перетирается history load. Радиосеть восстановлена. Это не Android DNS-radio acceptance. |
