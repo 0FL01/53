@@ -631,6 +631,21 @@ fn handle_msgctl(st: &State, line: &[u8]) -> String {
             },
             None => "err\n".into(),
         },
+        "device-unblock" => match parts.next().and_then(hex32) {
+            Some(key) => match msgctl_unblock(st, &key) {
+                Ok(()) => "ok\n".into(),
+                Err(_) => "err\n".into(),
+            },
+            None => "err\n".into(),
+        },
+        "user-list" => msgctl_users(st),
+        "quotas" => match parts.next() {
+            Some(f) => match valid_prefix(f) {
+                Some(p) => msgctl_quotas(st, Some(&p)),
+                None => "err\n".into(),
+            },
+            None => msgctl_quotas(st, None),
+        },
         "gc" => {
             let now = now_secs();
             let mut db = st.db.lock().expect("db");
@@ -639,8 +654,102 @@ fn handle_msgctl(st: &State, line: &[u8]) -> String {
                 Err(_) => "err\n".into(),
             }
         }
+        "backup" => match msgctl_backup(st) {
+            Ok(rep) => format!("{rep}\n"),
+            Err(_) => "err\n".into(),
+        },
         _ => "err\n".into(),
     }
+}
+
+/// Backup-минимум: VACUUM INTO (атомарный снапшот без остановки записи) +
+/// копия дерева blobs + integrity_check копии + ротация (держать 3).
+/// Секреты НЕ входят (статичны; оператор архивирует secrets/ отдельно, см. runbook).
+/// Файловый кросс-чек blob_meta↔файлы станет осмысленным в M5, когда чанки
+/// лягут на диск; сейчас отчёт содержит оба счётчика без гейта.
+fn msgctl_backup(st: &State) -> Result<String, String> {
+    let ts = now_secs();
+    let snap = st.cfg.data_dir.join("backup").join(format!("snap-{ts}"));
+    std::fs::create_dir_all(snap.join("blobs")).map_err(|e| format!("mkdir: {e}"))?;
+    let db_path = snap.join("msgd.db");
+    {
+        let db = st.db.lock().expect("db");
+        let lit = db_path.to_string_lossy().replace('\'', "''");
+        db.execute_batch(&format!("VACUUM INTO '{lit}'"))
+            .map_err(|e| format!("vacuum: {e}"))?;
+    }
+    // Копия blobs обычным копированием: blobs-data — отдельный FS, хардлинки (EXDEV) невозможны.
+    let (mut files, mut bytes) = (0usize, 0u64);
+    let mut stack = vec![st.cfg.blobs_dir.clone()];
+    while let Some(dir) = stack.pop() {
+        let rd = match std::fs::read_dir(&dir) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        for ent in rd.flatten() {
+            let p = ent.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            let rel = p.strip_prefix(&st.cfg.blobs_dir).map_err(|e| format!("rel: {e}"))?;
+            let dst = snap.join("blobs").join(rel);
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
+            }
+            match std::fs::copy(&p, &dst) {
+                Ok(n) => {
+                    files += 1;
+                    bytes += n;
+                }
+                Err(e) => {
+                    // Гонка с GC/записью: файл ушёл из-под ног — честно прерываем.
+                    return Err(format!("copy: {e}"));
+                }
+            }
+        }
+    }
+    // Verify копии: integrity_check обязан вернуть ровно 'ok'.
+    {
+        let copy = rusqlite::Connection::open(&db_path).map_err(|e| format!("open: {e}"))?;
+        let ok: String = copy
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .map_err(|e| format!("check: {e}"))?;
+        if ok.to_lowercase() != "ok" {
+            return Err("integrity: corrupt".into());
+        }
+    }
+    let db_bytes = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+    // Ротация: держать 3 newest snap-*, старые тереть.
+    if let Ok(rd) = std::fs::read_dir(snap.parent().expect("backup dir")) {
+        let mut snaps: Vec<_> = rd
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_dir()
+                    && p.file_name().and_then(|n| n.to_str()).map(|n| n.starts_with("snap-")).unwrap_or(false)
+            })
+            .collect();
+        snaps.sort();
+        while snaps.len() > 3 {
+            let old = snaps.remove(0);
+            let _ = std::fs::remove_dir_all(&old);
+        }
+    }
+    // Счётчики для отчёта (без гейта до M5).
+    let (rows, _) = {
+        let db = st.db.lock().expect("db");
+        let rows: i64 = db
+            .query_row("SELECT COUNT(*) FROM blob_meta", [], |r| r.get(0))
+            .unwrap_or(0);
+        (rows, 0)
+    };
+    let _ = rows;
+    eprintln!("msgd: backup done");
+    Ok(format!(
+        "backup path={} db={db_bytes} blobs={files} blobs_bytes={bytes}",
+        snap.display()
+    ))
 }
 
 fn hex32(s: &str) -> Option<[u8; 32]> {
@@ -779,7 +888,99 @@ fn msgctl_block(st: &State, device_key: &[u8; 32]) -> Result<(), String> {
     Ok(())
 }
 
-/// Список invites: только префикс токена + мета (полный token — только issue).
+/// Разблокировка устройства: снимает revoked. Сессии не будим — устройство
+/// переподключается само. Это НЕ перепривязка: потерял телефон —
+/// revoke + новый invite (см. runbook), ошибся блокировкой — unblock.
+fn msgctl_unblock(st: &State, device_key: &[u8; 32]) -> Result<(), String> {
+    {
+        let db = st.db.lock().expect("db");
+        db.execute(
+            "UPDATE devices SET revoked=0 WHERE device_key=?1",
+            [device_key.as_slice()],
+        )
+        .map_err(|e| format!("unblock: {e}"))?;
+    }
+    eprintln!("msgd: device unblocked");
+    Ok(())
+}
+
+/// Список пользователей: префикс contact_id + устройства + флаг блокировки.
+/// Полные ID/ключи — никогда (прецедент invite-list).
+fn msgctl_users(st: &State) -> String {
+    let db = st.db.lock().expect("db");
+    let mut stmt = match db.prepare(
+        "SELECT u.contact_id, COUNT(d.device_key), COALESCE(SUM(d.revoked),0)
+         FROM users u LEFT JOIN devices d ON d.user_id=u.user_id
+         GROUP BY u.user_id ORDER BY u.created_at",
+    ) {
+        Ok(s) => s,
+        Err(_) => return "err\n".into(),
+    };
+    let mut out = String::new();
+    let rows: Vec<(String, i64, i64)> = match stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .map(|it| it.collect::<Result<Vec<_>, _>>())
+    {
+        Ok(Ok(v)) => v,
+        _ => return "err\n".into(),
+    };
+    for (contact, devs, blocked) in rows {
+        out.push_str(&format!("{contact} devices={devs} blocked={blocked}\n"));
+    }
+    out.push_str("ok\n");
+    out
+}
+
+/// Префикс contact_id для фильтра quotas: Crockford Base32 без дефисов,
+/// 1–12 символов. Остальное — err (защита LIKE от мусора).
+fn valid_prefix(s: &str) -> Option<String> {
+    if s.is_empty() || s.len() > 12 || !s.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some(s.to_ascii_uppercase())
+}
+
+/// Квоты: та же формула, что mbox::send и blob::reserve (per-user),
+/// иначе дрейф диагностики. Только чтение, лок короткий.
+fn msgctl_quotas(st: &State, filter: Option<&str>) -> String {
+    use dmsg_protocol::{MAILBOX_BYTES_MAX, MAILBOX_EVENTS_MAX};
+    let db = st.db.lock().expect("db");
+    let mut out = format!(
+        "limits events={MAILBOX_EVENTS_MAX} bytes={MAILBOX_BYTES_MAX}\n"
+    );
+    let mut stmt = match db.prepare(
+        "SELECT u.user_id, u.contact_id,
+           (SELECT COUNT(*) FROM mailbox_events m WHERE m.recipient_user_id=u.user_id),
+           (SELECT COALESCE(SUM(LENGTH(m.ciphertext)),0) FROM mailbox_events m WHERE m.recipient_user_id=u.user_id),
+           (SELECT COALESCE(SUM(b.size),0) FROM blob_meta b WHERE b.owner_user_id=u.user_id AND b.state='reserved'),
+           (SELECT COALESCE(SUM(b.size),0) FROM blob_meta b WHERE b.owner_user_id=u.user_id AND b.state<>'reserved')
+         FROM users u ORDER BY u.created_at",
+    ) {
+        Ok(s) => s,
+        Err(_) => return "err\n".into(),
+    };
+    let rows: Vec<(Vec<u8>, String, i64, i64, i64, i64)> = match stmt
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+        })
+        .map(|it| it.collect::<Result<Vec<_>, _>>())
+    {
+        Ok(Ok(v)) => v,
+        _ => return "err\n".into(),
+    };
+    for (_, contact, events, bytes, reserved, blobs) in rows {
+        if let Some(f) = filter {
+            if !contact.starts_with(f) {
+                continue;
+            }
+        }
+        out.push_str(&format!(
+            "{contact} events={events} bytes={bytes} blobs_reserved={reserved} blobs_bytes={blobs}\n"
+        ));
+    }
+    out.push_str("ok\n");
+    out
+}
 fn msgctl_list(st: &State) -> String {
     let db = st.db.lock().expect("db");
     let mut stmt = match db.prepare(
