@@ -1,7 +1,7 @@
 //! Mailbox P4.2: SEND / FETCH / DELIVERY_ACK поверх SQLite.
 //! Правила: server-ACK строго после commit; повтор = прежний accept (UNIQUE);
 //! cursor — отдельной таблицей, двигается в той же TX, что DELIVERY_ACK,
-//! только по непрерывному (гэпы остаются); FETCH cursor не двигает.
+//! только по доставленному префиксу событий получателя; FETCH cursor не двигает.
 //! sender_device всегда из Noise-сессии (аргумент), никогда из тела.
 
 use rusqlite::{Connection, OptionalExtension};
@@ -164,7 +164,8 @@ pub fn fetch(
     Ok(out)
 }
 
-/// DELIVERY_ACK: пометить seq + двинуть cursor по непрерывному — всё в одной TX.
+/// DELIVERY_ACK: пометить seq + двинуть cursor по доставленному префиксу
+/// получателя — всё в одной TX. Глобальные пропуски seq не блокируют cursor.
 /// Возвращает новый cursor.
 pub fn ack(
     conn: &mut Connection,
@@ -189,19 +190,22 @@ pub fn ack(
         .optional()
         .map_err(|e| store("cursor", e))?
         .unwrap_or(0);
-    // Непрерывный вперёд от cursor по доставленным.
+    // seq глобальный: другой получатель и TTL оставляют числовые пропуски.
+    // Проверяем ближайшее событие ЭТОГО получателя, не фильтруя delivered:
+    // первое недоставленное должно остановить cursor даже при ACK хвоста.
     loop {
-        let next: Option<i64> = tx
+        let next: Option<(i64, bool)> = tx
             .query_row(
-                "SELECT seq FROM mailbox_events WHERE recipient_user_id=?1 AND seq=?2 AND delivered=1",
-                rusqlite::params![recipient, cursor + 1],
-                |r| r.get(0),
+                "SELECT seq,delivered FROM mailbox_events
+                 WHERE recipient_user_id=?1 AND seq>?2 ORDER BY seq LIMIT 1",
+                rusqlite::params![recipient, cursor],
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()
             .map_err(|e| store("next", e))?;
         match next {
-            Some(_) => cursor += 1,
-            None => break,
+            Some((seq, true)) => cursor = seq,
+            _ => break,
         }
     }
     tx.execute(

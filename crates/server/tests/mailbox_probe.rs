@@ -293,6 +293,69 @@ async fn replay_dedup_and_reorder() {
 }
 
 #[tokio::test]
+async fn interleaved_recipient_ack_crosses_global_and_ttl_gaps_only() {
+    let srv = start(17221, tmpdir("interleaved", 17221));
+    let tok_a = srv.issue();
+    let tok_b = srv.issue();
+    let (mut a, _) = connect(&srv, None).await;
+    let (mut b, _) = connect(&srv, None).await;
+    a.auth().await;
+    b.auth().await;
+    let user_a = a.enrol(&tok_a).await;
+    let user_b = b.enrol(&tok_b).await;
+
+    // GC removes a global sequence before either recipient's first live event.
+    let db = rusqlite::Connection::open(srv.dir.join("data/msgd.db")).unwrap();
+    db.execute(
+        "INSERT INTO mailbox_events(recipient_user_id,sender_device,message_id,ciphertext,created_at)
+         VALUES(?1,?2,?3,?4,0)",
+        rusqlite::params![
+            user_b.as_slice(),
+            a.device_static().as_slice(),
+            [99u8; 16],
+            b"expired"
+        ],
+    )
+    .unwrap();
+    assert_eq!(srv.msgctl(&["gc"]).trim(), "gc blobs=0 events=1");
+
+    for i in 0..3u8 {
+        assert_eq!(
+            a.xchg(OP_SEND, &send_frame(&user_b, &[i; 16], b"to-b"))
+                .await
+                .unwrap()
+                .0,
+            OP_SEND_ACK
+        );
+        if i < 2 {
+            assert_eq!(
+                b.xchg(OP_SEND, &send_frame(&user_a, &[i; 16], b"to-a"))
+                    .await
+                    .unwrap()
+                    .0,
+                OP_SEND_ACK
+            );
+        }
+    }
+    let be = b.fetch_all().await;
+    let ae = a.fetch_all().await;
+    assert_eq!((be.len(), ae.len()), (3, 2));
+    assert!(be[0].0 > 1 && be[1].0 > be[0].0 + 1);
+    // Mark the last event first: the earliest undelivered event still blocks.
+    assert_eq!(b.ack(&[be[2].0]).await, 0);
+    assert_eq!(b.fetch_all().await.len(), 3);
+    assert_eq!(b.ack(&[be[0].0]).await, be[0].0);
+    assert_eq!(b.fetch_all().await, be[1..]);
+    // Closing the recipient-local gap also crosses its already delivered tail.
+    assert_eq!(b.ack(&[be[1].0]).await, be[2].0);
+    assert!(b.fetch_all().await.is_empty());
+    assert_eq!(b.ack(&[be[2].0]).await, be[2].0, "ACK replay is idempotent");
+    assert_eq!(a.ack(&[ae[1].0]).await, 0);
+    assert_eq!(a.ack(&[ae[0].0]).await, ae[1].0);
+    assert!(a.fetch_all().await.is_empty());
+}
+
+#[tokio::test]
 async fn kill_restart_durable() {
     let dir = tmpdir("restart", 17213);
     let (pair_b, tok_b, msgid) = {
