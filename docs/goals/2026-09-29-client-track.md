@@ -47,8 +47,8 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Source: утверждённый пользователем план ниже, шаг 1; ARCH §5 / WORK_PLAN M1
   - Acceptance: одна закреплённая ревизия C transport; native arm64 library с start/stop/status, без process signals; повторные циклы освобождают sockets/threads/handles
   - Primary evidence: native lifecycle tests + повторный start/stop на moto
-  - Status: in_progress
-  - Evidence: pinned runtime пока CLI: signal handlers/global state; требуется узкий embedding/platform diff
+  - Status: verified
+  - Evidence: `crates/slipstream-sys` строит pinned Git sources только в target с условным embedding.patch. Host lifecycle и штатные protocol/path/pin/runtime 4/4 green; PEM/DER Ready, неверный pin rejected, 8 raw streams, loss terminal ~30 с. На moto API35 arm64 native executable: 64 start/stop cycles, FD/task stable, max stop 54.11 мс; signal handlers unchanged. APK/core integration относится к R7, recursive DNS не заявлен этим тестом
 - R7: DNS transport в core и QR-профиль
   - Source: утверждённый план, шаг 2; ARCH §3/§6/§7
   - Acceptance: сохранённые domain/full DER/Noise pub/resolver; live carrier pinning до enrol; один transport, Rust reconnect/backoff; expired invite не запрещает вход уже зарегистрированного ключа, revoked запрещает
@@ -99,9 +99,9 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 - Forbidden: правки msgd без блокера; Matrix SDK; WebRTC-стек; копипаста diag-main вместо библиотечной функции
 
 ## Current Checkpoint
-- Closes: R6, минимальный TTL regression из R7 независимой итерацией
-- Smallest next action: freeze/commit этот утверждённый план; C embedding start/stop/status + native cross-build. Параллельно regression истечения invite для уже bound device, не меняя revocation
-- Expected evidence: RED→GREEN TTL tests; управляемый C transport build/lifecycle tests и Android load
+- Closes: R7
+- Smallest next action: commit проверенный R6 и TTL regression; backup/deploy server TTL fix; сохранённый DNS profile + единый Rust manager + FFI/Android integration
+- Expected evidence: TTL tests и remote health/DNS smoke; profile/pin/reconnect tests + real Android native DNS connection
 - Replan if: конкретный cross-build/runtime сбой; диагностировать зависимость, не переписывать транспорт и не стирать identity
 
 ## Current State
@@ -117,6 +117,7 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 - 2026-09-29: trait Transport в K1 (direct-TCP за ним); UniFFI только в K4; пагинация — требование сейчас; always-on FGS; contact-QR тем же конвертом; подмена = стоп+confirm; Olm строго K3; identity 0600+шов; ARCH > Hazel-Signal при конфликте
 
 ## Checkpoint History
+- 2026-09-29: утверждённый план frozen `b784328`. R6 native boundary host/Android linked и реально выполнен на moto: 64 lifecycle cycles stable resources/max cancel54.11мс; full-cert pin/raw streams/loss gate green. R7 TTL RED Expired→GREEN same bound device after deadline; revoked invite/device remain rejected; 6 live enrol probes и 10 enrol unit green. Native builds не заменяют Android recursive-DNS acceptance.
 - 2026-09-29: GOAL создан, next: K1 @general
 - 2026-09-29: аппаратный enrol обнаружил отсутствие CameraX camera2 и INTERNET; исправлено. После enrol FGS выявил неверный индекс SQLite в load_olm и новый static key в каждом FFI-коннекте. Регрессионные тесты воспроизвели оба отказа; исправления зелёные, FGS действительно опрашивает живой msgd. Сервер не менялся; backend наружу не открыт.
 - 2026-09-29: paired gate выявил global seq gaps в mailbox ACK и повторный decrypt durable inbox; RED→GREEN, server `995b50f` deployed с backup/DNS smoke, core `a0c97bb`. Android native/Keystore/offline/UI fixes проверены на moto; screen-off 32:21 PASS diagnostic TCP. Connected-test инцидент уничтожил прежнюю identity: новая enrol identity не является восстановлением старой. Теперь graph-stage guard запрещает connected tests без отдельного `.gate`, stateful gates manual-only. G8 sealed-only UNMET подтверждён reset только `.gate`; cleanup завершён.

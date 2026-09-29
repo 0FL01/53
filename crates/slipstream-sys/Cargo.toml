@@ -1,0 +1,12 @@
+[package]
+name = "slipstream-sys"
+version = "0.1.0"
+edition = "2021"
+links = "dmsg_slipstream"
+
+[build-dependencies]
+cmake = "0.1.57"
+openssl-src = "=300.5.4"
+
+[dev-dependencies]
+libc = "0.2"
