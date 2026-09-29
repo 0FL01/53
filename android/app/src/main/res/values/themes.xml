@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Dmsg" parent="Theme.AppCompat.Light.NoActionBar">
+        <item name="colorPrimary">#1a73e8</item>
+    </style>
+</resources>

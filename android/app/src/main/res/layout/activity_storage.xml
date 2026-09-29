@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent">
+<LinearLayout android:orientation="vertical" android:layout_width="match_parent" android:layout_height="wrap_content" android:padding="16dp">
+    <TextView android:id="@+id/plan" android:layout_width="match_parent" android:layout_height="wrap_content" />
+    <Button android:id="@+id/btn_migrate" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Мигрировать в Keystore" />
+    <TextView android:id="@+id/loss" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/reinstall_loss" />
+    <Button android:id="@+id/btn_wipe_cache" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Очистить кэш" />
+    <TextView android:id="@+id/info" android:layout_width="match_parent" android:layout_height="wrap_content" />
+</LinearLayout>
+</ScrollView>

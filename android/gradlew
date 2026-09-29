@@ -1,0 +1,12 @@
+#!/bin/sh
+# Minimal gradlew shim: uses a local Gradle 8.14+/9.x binary.
+# Prefers the cached wrapper distribution, falls back to `gradle` on PATH.
+# Env: ANDROID_HOME must point at the SDK (see ../gradle.properties).
+set -e
+HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+CACHED="$(ls -d "$HOME/.gradle/wrapper/dists/gradle-8.14.3-bin/"*/gradle-8.14.3/bin/gradle 2>/dev/null | head -n1)"
+if [ -n "$CACHED" ]; then
+  exec "$CACHED" -p "$HERE" "$@"
+else
+  exec gradle -p "$HERE" "$@"
+fi

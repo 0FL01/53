@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent">
+<LinearLayout android:orientation="vertical" android:layout_width="match_parent" android:layout_height="wrap_content" android:padding="16dp">
+    <TextView android:id="@+id/my_id" android:layout_width="match_parent" android:layout_height="wrap_content" />
+    <ImageView android:id="@+id/qr" android:layout_width="256dp" android:layout_height="256dp" />
+    <EditText android:id="@+id/peer_id" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="ID контакта (12 символов)" />
+    <Button android:id="@+id/btn_request" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Запросить по ID" />
+    <Button android:id="@+id/btn_accept" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Принять" />
+    <Button android:id="@+id/btn_block" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Заблокировать" />
+    <Button android:id="@+id/btn_confirm" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Подтвердить смену ключа" />
+    <TextView android:id="@+id/info" android:layout_width="match_parent" android:layout_height="wrap_content" />
+</LinearLayout>
+</ScrollView>

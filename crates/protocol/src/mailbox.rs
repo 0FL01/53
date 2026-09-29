@@ -133,6 +133,18 @@ pub fn parse_device(p: &[u8]) -> Option<&[u8]> {
     Some(p)
 }
 
+/// PREKEY: ответ сервера на CLAIM: key_id u32 BE + pubkey 32 (ровно 36).
+/// Формат зафиксирован `claim_reply` (main.rs): сначала id, затем ключ.
+pub fn parse_prekey(p: &[u8]) -> Option<(u32, [u8; 32])> {
+    if p.len() != 36 {
+        return None;
+    }
+    let id = u32::from_be_bytes(p[..4].try_into().ok()?);
+    let mut pubkey = [0u8; 32];
+    pubkey.copy_from_slice(&p[4..]);
+    Some((id, pubkey))
+}
+
 /// BLOB_RESERVE: blob_id 16 + size u32 BE.
 /// size==0 и size>BLOB_SIZE_MAX отвергаются парсером (зеркало blob::reserve,
 // раньше — только сервером после decrypt).
@@ -221,6 +233,16 @@ mod tests {
         let mut bad = p.clone();
         bad.push(0);
         assert!(parse_upload(&bad).is_none());
+    }
+
+    #[test]
+    fn prekey_reply_shape() {
+        // Ответ claim_reply: key_id BE + pubkey 32 = 36 байт ровно.
+        let mut p = 7u32.to_be_bytes().to_vec();
+        p.extend_from_slice(&[0xDDu8; 32]);
+        assert_eq!(parse_prekey(&p).unwrap(), (7, [0xDDu8; 32]));
+        assert!(parse_prekey(&p[..35]).is_none());
+        assert!(parse_prekey(&[]).is_none());
     }
 
     #[test]
