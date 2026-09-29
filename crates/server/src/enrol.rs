@@ -108,6 +108,14 @@ fn enrol_tx(
     if revoked != 0 {
         return Err(EnrolError::Revoked);
     }
+    if bound.as_deref() == Some(device_key) {
+        // TTL ограничивает первую регистрацию, а не вход bound Noise static.
+        // Отзыв и сохранённый JOIN проверяются и после истечения приглашения.
+        if device_revoked(conn, device_key)? {
+            return Err(EnrolError::Revoked);
+        }
+        return saved_answer(conn, device_key);
+    }
     if now > expires_at {
         return Err(EnrolError::Expired);
     }
@@ -121,13 +129,6 @@ fn enrol_tx(
         .optional()
         .map_err(|e| store("device", e))?;
     match (bound, known_user) {
-        (Some(b), _) if b.as_slice() == device_key => {
-            // Replay тем же ключом: сохранённый ответ через JOIN.
-            if device_revoked(conn, device_key)? {
-                return Err(EnrolError::Revoked);
-            }
-            saved_answer(conn, device_key)
-        }
         (Some(_), _) => Err(EnrolError::BoundOther),
         (None, Some(_)) => Err(EnrolError::BoundOther), // ключ уже в другом аккаунте
         (None, None) => {
@@ -236,6 +237,86 @@ mod tests {
         assert_eq!(a, b); // потеря ответа: тот же итог, новых строк нет
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn bound_replay_after_expiry_keeps_identity_and_rows() {
+        let mut conn = mem();
+        let token = [41u8; 32];
+        let key = [42u8; 32];
+        issue(&conn, &token, 1000, 10);
+        let first = enrol(&mut conn, &token, &key, 1001).unwrap();
+        for now in [1010, 1011, 100_000] {
+            assert_eq!(enrol(&mut conn, &token, &key, now), Ok(Enrolled {
+                user_id: first.user_id,
+                contact_id: first.contact_id.clone(),
+            }));
+        }
+        let counts: (i64, i64, i64) = conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM users), (SELECT COUNT(*) FROM devices),
+                    (SELECT COUNT(*) FROM invites)",
+            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).unwrap();
+        assert_eq!(counts, (1, 1, 1));
+        let bound: Vec<u8> = conn.query_row(
+            "SELECT bound_device_key FROM invites WHERE token=?1",
+            [&token[..]], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(bound.as_slice(), key.as_slice());
+    }
+
+    #[test]
+    fn expired_invites_reject_first_bind_and_other_keys() {
+        let mut conn = mem();
+        let used = [43u8; 32];
+        let unused = [44u8; 32];
+        let key = [45u8; 32];
+        issue(&conn, &used, 1000, 10);
+        issue(&conn, &unused, 1000, 10);
+        enrol(&mut conn, &used, &key, 1001).unwrap();
+        for (token, device) in [(&used, &[46u8; 32]), (&unused, &[46u8; 32]), (&unused, &key)] {
+            assert_eq!(enrol(&mut conn, token, device, 1011), Err(EnrolError::Expired));
+        }
+        assert_eq!(enrol(&mut conn, &[47u8; 32], &key, 1011), Err(EnrolError::Bad));
+        let counts: (i64, i64, i64) = conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM users), (SELECT COUNT(*) FROM devices),
+                    (SELECT COUNT(*) FROM invites WHERE bound_device_key IS NOT NULL)",
+            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).unwrap();
+        assert_eq!(counts, (1, 1, 1));
+    }
+
+    #[test]
+    fn expired_bound_replay_still_checks_revocation() {
+        for revoke in ["UPDATE invites SET revoked=1", "UPDATE devices SET revoked=1"] {
+            let mut conn = mem();
+            let token = [48u8; 32];
+            let key = [49u8; 32];
+            issue(&conn, &token, 1000, 10);
+            enrol(&mut conn, &token, &key, 1001).unwrap();
+            conn.execute(revoke, []).unwrap();
+            assert_eq!(enrol(&mut conn, &token, &key, 1011), Err(EnrolError::Revoked));
+        }
+    }
+
+    #[test]
+    fn expired_bound_replay_with_missing_or_corrupt_identity_fails_closed() {
+        for corrupt in [
+            "DELETE FROM devices",
+            "DELETE FROM users",
+            "UPDATE users SET user_id=x'01'; UPDATE devices SET user_id=x'01'",
+            "UPDATE devices SET user_id=NULL",
+        ] {
+            let mut conn = mem();
+            let token = [50u8; 32];
+            let key = [51u8; 32];
+            issue(&conn, &token, 1000, 10);
+            enrol(&mut conn, &token, &key, 1001).unwrap();
+            conn.execute_batch(corrupt).unwrap();
+            let err = enrol(&mut conn, &token, &key, 1011).unwrap_err();
+            assert!(matches!(err, EnrolError::Store(_)));
+            assert_eq!(err.code(), ERR_BAD);
+        }
     }
 
     #[test]

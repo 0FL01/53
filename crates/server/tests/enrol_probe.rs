@@ -195,6 +195,14 @@ fn issue_token(srv: &Server, ttl: &str) -> [u8; 32] {
     b.token
 }
 
+/// Put the fixture deadline in the past without waiting for wall-clock TTL.
+fn expire_token(srv: &Server, token: &[u8]) {
+    let conn = rusqlite::Connection::open(srv.dir.join("data/msgd.db")).unwrap();
+    assert_eq!(conn.execute(
+        "UPDATE invites SET expires_at=0 WHERE token=?1", [token],
+    ).unwrap(), 1);
+}
+
 /// Hex в файл 600 для --file команд (argv-hex удалён, R3/C1).
 fn write_hex(srv: &Server, name: &str, hex: &str) -> String {
     let p = srv.dir.join(name);
@@ -214,10 +222,14 @@ async fn issue_enrol_replay() {
     assert_eq!(op, 5, "ENROLLED");
     assert_eq!(p.len(), 28);
     assert_eq!(p[16..].len(), 12);
-    // replay тем же ключом — тот же ответ
+    // Replay after the invite deadline: the same Noise static keeps its identity.
+    expire_token(&srv, &token);
     let (mut t2, mut s2) = connect_auth_with(&srv, &priv32).await.unwrap();
     let (op2, p2) = enrol(&mut t2, &mut s2, &token).await.unwrap();
     assert_eq!((op2, &p2), (5, &p));
+    let (mut t3, mut s3) = connect_auth(&srv).await.unwrap();
+    let (op3, p3) = enrol(&mut t3, &mut s3, &token).await.unwrap();
+    assert_eq!((op3, p3.as_slice()), (6, &[2u8][..])); // Expired, different key
 }
 
 #[tokio::test]
@@ -245,6 +257,7 @@ async fn revoke_closes_and_rejects() {
     assert_eq!(enrol(&mut t, &mut s, &token).await.unwrap().0, 5);
     let hex: String = token.iter().map(|x| format!("{x:02x}")).collect();
     let f = write_hex(&srv, "tok.hex", &hex);
+    expire_token(&srv, &token);
     assert_eq!(srv.msgctl(&["invite-revoke", "--file", &f]).trim(), "ok");
     // живая сессия закрыта
     let mut tmp = [0u8; 8];
@@ -270,6 +283,7 @@ async fn block_closes_and_rejects_replay() {
     let f = write_hex(&srv, "dev.hex", &dev_hex);
     let (mut t, mut s) = connect_auth_with(&srv, &priv32).await.unwrap();
     assert_eq!(enrol(&mut t, &mut s, &token).await.unwrap().0, 5);
+    expire_token(&srv, &token);
     assert_eq!(srv.msgctl(&["device-block", "--file", &f]).trim(), "ok");
     // живая сессия закрыта
     let mut tmp = [0u8; 8];
@@ -291,6 +305,7 @@ async fn kill_restart_durable() {
     let (mut t, mut s) = connect_auth_with(&srv, &priv32).await.unwrap();
     let (_, p1) = enrol(&mut t, &mut s, &token).await.unwrap();
     drop((t, s));
+    expire_token(&srv, &token);
     srv.kill_restart();
     let (mut t2, mut s2) = connect_auth_with(&srv, &priv32).await.unwrap();
     let (op, p2) = enrol(&mut t2, &mut s2, &token).await.unwrap();
@@ -301,19 +316,11 @@ async fn kill_restart_durable() {
 async fn short_ttl_expires() {
     let srv = start(17206);
     let token = issue_token(&srv, "2");
+    expire_token(&srv, &token);
     let params: snow::params::NoiseParams = PATTERN.parse().unwrap();
     let kp = snow::Builder::new(params).generate_keypair().unwrap();
     let priv32: [u8; 32] = kp.private[..32].try_into().unwrap();
-    // poll тем же ключом до Expired (без sleep-гонки: дедлайн 15с)
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
-    loop {
-        let (mut t, mut s) = connect_auth_with(&srv, &priv32).await.unwrap();
-        let (op, p) = enrol(&mut t, &mut s, &token).await.unwrap();
-        if op == 6 && p.as_slice() == [2u8] {
-            break; // Expired
-        }
-        assert_eq!(op, 5, "must be ENROLLED or Expired");
-        assert!(std::time::Instant::now() < deadline, "TTL never fired");
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
+    let (mut t, mut s) = connect_auth_with(&srv, &priv32).await.unwrap();
+    let (op, p) = enrol(&mut t, &mut s, &token).await.unwrap();
+    assert_eq!((op, p.as_slice()), (6, &[2u8][..])); // Unbound invite: Expired
 }
