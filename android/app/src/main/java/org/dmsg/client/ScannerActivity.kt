@@ -1,6 +1,7 @@
 package org.dmsg.client
 
 import android.Manifest
+import androidx.appcompat.app.AlertDialog
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.widget.Button
@@ -22,14 +23,14 @@ import java.util.concurrent.Executors
 /**
  * Offline QR scanner: both dmsg://join/ and dmsg://contact/.
  * Broken/oversized input -> explicit error string (never silent).
- * Join -> preview (offline) -> enrol; contact -> add + outcome.
+ * Join -> offline preview and explicit approval -> enrol; contact -> add + outcome.
  */
 @ExperimentalGetImage
-class ScannerActivity : AppCompatActivity() {
+class ScannerActivity : DmsgActivity() {
     private lateinit var preview: PreviewView
     private lateinit var result: TextView
     private val exec = Executors.newSingleThreadExecutor()
-    private var done = false
+    @Volatile private var done = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -76,9 +77,16 @@ class ScannerActivity : AppCompatActivity() {
 
     private fun decode(img: androidx.camera.core.ImageProxy): String? {
         return try {
-            val yuv = img.planes[0].buffer
-            val bytes = ByteArray(yuv.remaining())
-            yuv.get(bytes)
+            val plane = img.planes[0]
+            val yuv = plane.buffer
+            val base = yuv.position()
+            val bytes = ByteArray(img.width * img.height)
+            for (row in 0 until img.height) {
+                for (col in 0 until img.width) {
+                    bytes[row * img.width + col] =
+                        yuv.get(base + row * plane.rowStride + col * plane.pixelStride)
+                }
+            }
             val src = PlanarYUVLuminanceSource(
                 bytes, img.width, img.height, 0, 0, img.width, img.height, false
             )
@@ -90,38 +98,49 @@ class ScannerActivity : AppCompatActivity() {
 
     private fun onText(uri: String) {
         done = true
-        runOnUiThread { result.text = "QR: ${uri.take(24)}… обработка…" }
+        runOnUiThread { result.text = "QR считан, проверка…" }
         Thread {
-            val out = handle(uri)
-            runOnUiThread { result.text = out }
+            try {
+                QrGate.route(uri).getOrThrow()
+                val f = Core.facade(this)
+                when (f.qrKind(uri)) {
+                    "join" -> {
+                        val (domain, fp) = f.preview(uri)
+                        runOnUiThread { if (!isFinishing && !isDestroyed) {
+                            AlertDialog.Builder(this)
+                                .setTitle("Подтвердите профиль сервера")
+                                .setMessage("Домен: $domain\nОтпечаток pin: $fp\n\nПроверьте эти данные вне QR перед регистрацией.")
+                                .setNegativeButton("Отмена") { _, _ -> done = false; result.text = "отменено, сканируйте снова" }
+                                .setPositiveButton("Зарегистрировать") { _, _ -> enrol(uri, f) }
+                                .show()
+                            result.text = "ожидается подтверждение сервера"
+                        } }
+                    }
+                    "contact" -> {
+                        val out = try { "контакт: ${f.addQr(uri)}" }
+                            catch (e: Exception) { "ошибка контакта: ${e.message}" }
+                        runOnUiThread { result.text = out }
+                    }
+                }
+            } catch (e: Exception) {
+                runOnUiThread { result.text = "битый QR: ${e.message}" }
+            }
         }.start()
     }
 
-    private fun handle(uri: String): String {
-        val f = Core.facade(this)
-        val route = try {
-            QrGate.route(uri).getOrThrow()
-        } catch (e: DmsgError) {
-            // Explicit scanner error (incl. oversized) before touching core.
-            return "битый QR: ${e.message}"
+    private fun enrol(uri: String, f: DmsgFacade) {
+        val addr = Prefs.addr(this)
+        if (addr.isEmpty()) {
+            result.text = "Укажите адрес транспорта в диагностике, затем сканируйте снова"
+            done = false
+            return
         }
-        return try {
-            when (f.qrKind(uri)) {
-                "join" -> {
-                    val (domain, fp) = f.preview(uri)
-                    val addr = Prefs.addr(this)
-                    if (addr.isEmpty()) "invite: $domain pin=$fp (укажите addr, затем сканируйте снова)"
-                    else {
-                        val id = f.enrol(uri, addr, null)
-                        "enrolled: $id"
-                    }
-                }
-                "contact" -> "контакт: ${f.addQr(uri)}"
-                else -> "неизвестный тип"
-            }
-        } catch (e: Exception) {
-            "битый QR: ${e.message}"
-        }
+        result.text = "регистрация…"
+        Thread {
+            val out = try { "enrolled: ${f.enrol(uri, addr, null)}" }
+                catch (e: Exception) { "ошибка регистрации: ${e.message}" }
+            runOnUiThread { result.text = out }
+        }.start()
     }
 
     override fun onDestroy() {

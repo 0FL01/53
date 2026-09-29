@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- Direct-TCP to msgd (behind the Transport seam; DNS path later).
+         Without this every connect() fails with EPERM. -->
+    <uses-permission android:name="android.permission.INTERNET" />
     <!-- No GMS/FCM: notifications are local only (see DmsgService). -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />

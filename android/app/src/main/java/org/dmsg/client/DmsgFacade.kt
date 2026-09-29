@@ -3,7 +3,7 @@ package org.dmsg.client
 /** UI-level error: only static reasons, never key material / plaintext. */
 class DmsgError(msg: String) : Exception(msg)
 
-data class Dialog(val contactId: String, val state: String)
+data class Dialog(val contactId: String, val state: String, val identityMismatch: Boolean = false)
 data class Msg(val seq: Long, val contactId: String, val text: String)
 data class OutRow(val mid: String, val contactId: String, val status: String)
 data class FetchRes(val received: List<Msg>, val skipped: LongArray, val cursor: Long)

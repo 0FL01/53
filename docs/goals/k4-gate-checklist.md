@@ -1,34 +1,47 @@
 # K4 gate-чеклист: ручные проверки на аппарате
 
-Фаза R4 кодом закрыта (фасад + экраны + миграция + биндинги + unit/моки).
-Ниже — что осталось ручным gate: без аппарата эти пункты НЕ пройдены,
-маскировать их сборкой запрещено.
+R4 пока не закрыта. Ниже сохранены исходные ожидания и отдельно записаны
+измерения; сборка и instrumented doubles не подменяют аппаратные gates.
 
 ## Кодовое evidence (эта среда, 2026-09-29)
 
-- `cargo test -p dmsg-core`: lib 31 OK (26 K1–K3 + 5 ffi), интеграция
-  auth 2 OK, e2e 1 OK, enrol 4 OK. K1–K3 не сломаны.
+- `cargo test --workspace`: core, protocol и server green. Core покрывает
+  encrypted-open/migration, offline queue, повторный приём после reopening,
+   persistent Noise static и load_olm. Финальный прогон: 119 tests passed,
+   0 failed (core 40 unit + 8 integration; protocol 23; server 48).
 - `DMSG_GEN_BINDINGS=1 cargo test -p dmsg-core --test gen_bindings`:
-  `android/app/src/main/java/uniffi/dmsg_core/dmsg_core.kt` (3306 строк).
+  `android/app/src/main/java/uniffi/dmsg_core/dmsg_core.kt`; additive
+  `openEncrypted`, детерминированная нормализация whitespace при генерации.
 - `./gradlew assembleDebug`: BUILD SUCCESSFUL
   (AGP 8.13.2 + Gradle 8.14.3 + KGP 2.2.20, compileSdk 37, minSdk 26,
   build-tools 37.0.0, ANDROID_HOME=~/Android/Sdk).
-- `./gradlew testDebugUnitTest`: 7/7 OK (QrGate 3, Paging 3, Plan 1).
-- APK debug: `app-debug.apk` 6 155 721 байт (~5.9 MiB), package
-  org.dmsg.client v0.4.0-k4. Без `libdmsg_core.so` (см. NDK ниже).
+- `./gradlew testDebugUnitTest`: 13/13 OK (QrGate 3, Paging 6, Plan 1,
+  FfiErrors 2, SingleWorker 1).
+- arm64 native: `ANDROID_NDK_HOME=<NDK r28+> sh android/build-native.sh`.
+  Clean environment whitelist, ThinLTO, strip, max-page-size=16384;
+  output только в gitignored `app/build/nativeLibs`. JNA 5.18.1 Android AAR,
+   а не Java-only JAR/ручной неповторяемый dispatch.
+- Финальные debug/release сборки green. APK unsigned release 2 910 380 байт
+  (~2.78 MiB), test-signed release 2 918 572 байт; debug 7 410 410 байт.
+  `zipalign -c -P 16 4` и LOAD alignment всех четырёх ELF green.
+- На аппарате routine instrumentation: 3/3 passed (encrypted migration/restore,
+  invalid QR, changed identity). Stateful gates выбирались по методам отдельно;
+  skipped operator fixtures при whole-class запуске не считаются PASS.
 
 ## Среда: что есть / чего нет
 
 - Есть: Android SDK (platform android-37, build-tools 37.0.0, platform-tools),
   лицензия SDK принята, Gradle-дистрибутивы в кэше, Rust-таргет
   aarch64-linux-android + cargo-ndk.
-- Нет: NDK (ни в SDK, ни в системе) → `libdmsg_core.so` под arm64 НЕ собран,
-  в APK его нет; экраны при отсутствии либы деградируют явно
-  («core missing», см. Core.kt), а не падают.
-- Нет: устройства/эмулятора (`adb devices` пуст) → установка, запуск,
-  PSS/startup/батарея не измерены.
+- Есть NDK r28c и USB moto g54 5G, Android 15 / API 35 / arm64.
+  Native core, JNA и камера загружаются. Все четыре ELF библиотеки APK имеют
+  LOAD alignment 0x4000. Это статическая 16 KB compatibility, не runtime
+  испытание на 16 KB устройстве; Android 16/17 runtime ещё не проверены.
+- Moto содержит GMS; настоящего no-GMS аппарата в этой сессии нет.
+- Сеть аппарата: диагностический DirectTCP через adb reverse/SSH/netns relay.
+  Android C/DNS embedding отсутствует: эти результаты НЕ DNS-only acceptance.
 
-## Ручной gate (статус: всё PENDING, нужен аппарат + NDK)
+## Исходный контракт ручных gates (ожидания не ослаблены)
 
 | # | Проверка | Как проверять | Ожидание |
 |---|----------|---------------|----------|
@@ -43,6 +56,47 @@
 | G9 | Пороги | Release APK ≤ 25 MiB; idle PSS ≤ 100 MiB; cold start; скролл 500+ сообщений | Факты вписать сюда; бюджеты — не обещания |
 | G10 | Подмена identity e2e | Второй QR того же ID с другими ключами | `identity_changed`, отправка СТОП до явного confirm (Profile-экран) |
 | G11 | no сети | Авиарежим: send/retry/fetch | Явные transport-ошибки; outbox queued сохраняется; повтор после сети шлёт тот же ciphertext |
+
+## Аппаратное evidence и ограничения (2026-09-29)
+
+| Gate | Результат | Evidence / граница |
+|---|---|---|
+| G1 | PARTIAL | Forced deep IDLE + standby rare (bucket 40), два FGS poll через USB ~17 с друг от друга. Doze/возраст последнего ответа раскрыты в UI. USB не доказывает редение радиопути; затем unforce и bucket 10 восстановлены. |
+| G2 | PASS (diagnostic TCP) | 18:36:01–19:08:22 UTC: 32 мин 21 с непрерывного OFF, release PID 32254 не сменился, FGS foreground=true. Монитор read-only: 64 наблюдения OFF/PID за 1860 с; в это время без установок/instrumentation/UI. Message отправлен после OFF и fetched фоном. После выдержки inbox baseline+1, seq уникальны, повторный fetch 0 и cursor не уменьшается. Screen-off PSS 41 751 KiB. Первый прерванный прогон не засчитан. Это не DNS-radio/battery/OEM acceptance. |
+| G3 | PASS (diagnostic TCP) | SIGKILL реального app PID 30048, package stopped=false; ручной restart instrumentation. Account/inbox/outbox сохранились; SHA-256 сохранённого ciphertext совпал до и после retry; queued→accepted. Получатель получил 1 сообщение, следующий fetch 0, все skip counters 0. Это не power-loss/OEM/два Android аппарата. |
+| G4 | PASS | Сначала настоящий foreground service PID 30192, затем `am force-stop`; через 20 с сервисов нет, stopped=true. Instrumentation намеренно прервана force-stop, её “Process crashed” НЕ зеленый unit-тест. Ручной запуск снимает stopped, самозапуска нет. |
+| G5 | BLOCKED | GMS есть на moto. Отсутствие FCM/GMS dependencies не заменяет no-GMS runtime. |
+| G6 | PASS | На signed-test release отказ камеры дал явную строку; отказ POST_NOTIFICATIONS не убил foreground service, SecurityException/crash не наблюдались. После проверки оба permission восстановлены. |
+| G7 | PASS input/UI; optical PENDING | На аппарате реальные UniFFI и ScannerActivity callback: garbage/truncated/>8 KiB→видимая «битый QR», contact count/account не изменились. Вход callback подан instrumentation без exported debug hook; оптическое считывание этих malformed fixtures камерой не заявляется. |
+| G8 | UNMET sealed-only reinstall | Реальный `pm clear` ТОЛЬКО отдельного `.gate` package: account fresh; Android Keystore master alias удалён. Возврат одной sealed-копии отказал с reinstall_loss, без новой identity/key. Same-install unseal с исходным ключом проверен. Обещание восстановления после uninstall/Clear data одной копией несовместимо с device-bound Keystore и запретом key export/history transfer v1. Ожидание таблицы сохранено, PASS не ставится. |
+| G9 | PASS (moto / test-signed release) | Cold main 225 ms; последний финальный release cold 408 ms. Enrolled active FGS idle PSS 83 160 KiB (~81.2 MiB). Отдельная release `.gate` fixture: зашифрованный inbox 551, видимы [550]/[551], UI “551 сообщений”. Gfxinfo 1669 frames: p50/90/95/99=10/12/13/15 ms, janky 1 (0.06%), legacy janky 317 (18.99%); после scroll PSS 92 923 KiB. Release APK ~2.78 MiB. Это синтетическая история, не performance DNS. |
+| G10 | PASS input/UI; optical PENDING | На аппарате real UniFFI + отдельный `.gate`: same ID/new keys через Scanner callback→identity_changed; Chat показывает STOP и сохраняет draft, queued rows 0. Нажатия Profile check/confirm снимают mismatch; последующий send проходит identity check и даёт ожидаемую connect error к закрытому fixture endpoint. Ложный STOP при mismatch=false исправлен. Это не два Android аппарата/оптическое повторное считывание QR. |
+| G11 | PASS (diagnostic TCP/core + UI fixture) | Авиарежим enabled И adb reverse удалён: fetch/retry explicit connect error, send через существующую Olm session→queued. После SIGKILL/возврата сети retry ciphertext byte-identical, peer fetch 1 затем 0 со всеми skips=0. Дополнительно Chat на `.gate` показывает connect error и не теряет draft; error не перетирается history load. Радиосеть восстановлена. Это не Android DNS-radio acceptance. |
+
+### Найденные ошибки и данные
+
+- CameraX camera2 и INTERNET отсутствовали; исправлены. load_olm читал pickle
+  дважды вместо next_key_id; FFI создавал новый Noise static на reconnect;
+  воспроизведены regression tests и исправлены без server identity reset.
+- Paired device gate обнаружил global-seq gap в server ACK и повторное Olm
+  decrypt уже сохранённого message. RED→GREEN tests, server fix `995b50f`,
+  backup перед обновлением. Msgd+Slipstream пересозданы только в отдельном
+  развёртывании, ключи/volumes сохранены; health healthy, recursive DNS Noise
+  smoke PASS (8.2 с, adapter replies 59/errors 10/dropped 22).
+- **Инцидент тестирования:** прежний `connectedDebugAndroidTest` был ошибочно
+  запущен на основном package; AGP удалил app/Keystore после тестов и потерял
+  прежнюю identity. Пользователь уведомлён; восстановление старых ключей НЕ
+  произошло. Позже enrol создал новую identity. Теперь connected tests
+  требуют `-PgateInstall=true`, отдельный applicationId `.gate`; stateful gates
+  запускаются вручную по одному `am instrument -e class ...#method`.
+- Секретные fixtures только в `.local`/app sandbox с 0600, без URI в argv/logs.
+   Настоящие имена/IP развёртывания не вносятся в трекаемые документы.
+- Cleanup завершён: временные invite/peer DB/sealed fixtures и USB/SSH/netns
+  relay удалены; `.gate` и instrumentation packages удалены, основной package
+  НЕ удалён. На нём финальный test-signed release, enrolled=true, FGS выключен.
+  Airplane=0, forced idle=false, standby=10, stay-on=15; camera/notifications
+  granted восстановлены. Диагностический loopback profile остался, но без моста
+  offline; самостоятельный DNS-клиент этим не заявляется. Msgd healthy/pong.
 
 ## Запреты (проверено кодом, не аппаратом)
 

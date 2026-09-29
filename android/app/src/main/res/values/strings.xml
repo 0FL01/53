@@ -2,10 +2,10 @@
 <resources>
     <string name="app_name">dmsg</string>
     <!-- Honest reinstall disclosure (K4 audit): shown in Storage screen. -->
-    <string name="reinstall_loss">Переустановка без переноса sealed-копии стирает identity: учётка, контакты и история не восстанавливаются. Перенос истории в v1 не входит.</string>
+    <string name="reinstall_loss">Очистка данных и переустановка удаляют Keystore-ключ. Даже сохранившаяся sealed-копия без этого ключа не восстановит identity, контакты и историю. Перенос истории в v1 не входит.</string>
     <string name="economy_desc">«На связи»: опрос каждые ~15 с. «Экономия»: только флаг интервала (~5 мин), второго сервиса нет; мгновенные входящие не обещаются.</string>
     <string name="core_missing">Ядро недоступно (нет native lib). Экраны работают в ограниченном режиме.</string>
     <string name="fgs_title">dmsg на связи</string>
-    <string name="fgs_body">Канал держится. Новых сообщений: %1$d</string>
+    <string name="fgs_body">Фоновая связь включена; доставка зависит от сети и Doze. Новых сообщений: %1$d</string>
     <string name="notif_channel">Связь</string>
 </resources>

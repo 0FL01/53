@@ -8,17 +8,24 @@ import uniffi.dmsg_core.StoragePlan
 import uniffi.dmsg_core.pageLimit
 import uniffi.dmsg_core.qrKind
 import uniffi.dmsg_core.storagePlan
+import java.io.File
 
 /** Real facade over generated UniFFI bindings (commands/events only). */
-class UniFfiFacade(dbPath: String) : DmsgFacade {
-    private val core: DmsgClient = DmsgClient.open(dbPath)
+class UniFfiFacade(private val dbPath: String, key: ByteArray) : DmsgFacade {
+    private val core: DmsgClient = try { DmsgClient.openEncrypted(dbPath, key) }
+        catch (e: FfiException) { throw DmsgError(ffiErrorMessage(e)) }
 
     private inline fun <T> wrap(block: () -> T): T {
         try {
-            return block()
+            return synchronized(Core.storeLock) {
+                if (!File(dbPath).exists() && File("$dbPath.sealed").exists()) {
+                    throw DmsgError("sealed identity: restore in Storage before use")
+                }
+                block()
+            }
         } catch (e: FfiException) {
             // Generated error type carries only static reasons (no secrets).
-            throw DmsgError(e.message ?: "core error")
+            throw DmsgError(ffiErrorMessage(e))
         }
     }
 
@@ -56,10 +63,10 @@ class UniFfiFacade(dbPath: String) : DmsgFacade {
     override fun get(id: String): Dialog? = wrap {
         try {
             val c = core.contactGet(id)
-            Dialog(c.contactId, c.state)
+            Dialog(c.contactId, c.state, c.identityMismatch)
         } catch (e: FfiException) {
             // UnknownContact -> null card (not an error screen).
-            if (e is FfiException.UnknownContact) null else throw DmsgError(e.message ?: "core error")
+            if (e is FfiException.UnknownContact) null else throw DmsgError(ffiErrorMessage(e))
         }
     }
 

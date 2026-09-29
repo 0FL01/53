@@ -5,6 +5,8 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.ListView
@@ -13,10 +15,19 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 
 /** Dialogs list: paginated contacts via facade (no full dumps). */
-class MainActivity : AppCompatActivity() {
+class MainActivity : DmsgActivity() {
     private lateinit var status: TextView
     private lateinit var list: ListView
     private val rows = mutableListOf<String>()
+    private var refreshToken = 0L
+    private var accountLabel: String? = null
+    private val handler = Handler(Looper.getMainLooper())
+    private val ticker = object : Runnable {
+        override fun run() {
+            accountLabel?.let { status.text = "$it ${DmsgService.pollStatus()}" }
+            handler.postDelayed(this, 5_000)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -47,29 +58,42 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         refresh()
+        handler.post(ticker)
+    }
+
+    override fun onPause() {
+        refreshToken++
+        handler.removeCallbacks(ticker)
+        super.onPause()
     }
 
     private fun refresh() {
+        val token = ++refreshToken
         Thread {
-            val f = Core.facade(this)
+            val newRows = mutableListOf<String>()
+            var label: String? = null
             val txt = try {
+                val f = Core.facade(applicationContext)
                 if (!f.isReady()) getString(R.string.core_missing)
                 else {
                     val (enrolled, myId) = f.account()
-                    rows.clear()
                     var cursor: String? = null
-                    repeat(10) {
+                    do {
                         val (page, next) = f.contacts(cursor, 50)
-                        rows.addAll(page.map { it.contactId })
+                        newRows.addAll(page.map { it.contactId })
                         cursor = next
-                        if (next == null) return@repeat
-                    }
-                    "me=$myId enrolled=$enrolled fgs=${DmsgService.running(this)}"
+                    } while (cursor != null)
+                    label = "me=$myId enrolled=$enrolled"
+                    "$label ${DmsgService.pollStatus()}"
                 }
             } catch (e: Exception) {
                 "error: ${e.message}"
             }
             runOnUiThread {
+                if (token != refreshToken || isFinishing || isDestroyed) return@runOnUiThread
+                rows.clear()
+                rows.addAll(newRows)
+                accountLabel = label
                 status.text = txt
                 (list.adapter as ArrayAdapter<*>).notifyDataSetChanged()
             }
@@ -82,7 +106,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun toggleFgs() {
         if (DmsgService.running(this)) DmsgService.stop(this) else DmsgService.start(this)
-        refresh()
+        status.postDelayed({ if (!isFinishing && !isDestroyed) refresh() }, 500)
     }
 
     private fun askNotifPerm() {

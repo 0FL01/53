@@ -8,6 +8,7 @@
     <Button android:id="@+id/btn_request" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Запросить по ID" />
     <Button android:id="@+id/btn_accept" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Принять" />
     <Button android:id="@+id/btn_block" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Заблокировать" />
+    <Button android:id="@+id/btn_check" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Проверить статус ключа" />
     <Button android:id="@+id/btn_confirm" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Подтвердить смену ключа" />
     <TextView android:id="@+id/info" android:layout_width="match_parent" android:layout_height="wrap_content" />
 </LinearLayout>

@@ -5,6 +5,10 @@
     <TextView android:id="@+id/account" android:layout_width="match_parent" android:layout_height="wrap_content" />
     <TextView android:id="@+id/fgs" android:layout_width="match_parent" android:layout_height="wrap_content" />
     <TextView android:id="@+id/economy_desc" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/economy_desc" />
+    <EditText android:id="@+id/profile_addr" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="addr (DirectTCP diagnostics)" android:inputType="textUri" />
+    <EditText android:id="@+id/profile_domain" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="tunnel domain" android:inputType="textUri" />
+    <EditText android:id="@+id/profile_pub" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="pinned Noise server pubkey (64 hex)" android:inputType="textNoSuggestions" />
+    <Button android:id="@+id/btn_save_profile" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Сохранить профиль" />
     <Button android:id="@+id/btn_economy" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Экономия: вкл/выкл" />
     <Button android:id="@+id/btn_reconnect" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Переподключить (refill)" />
     <TextView android:id="@+id/stats" android:layout_width="match_parent" android:layout_height="wrap_content" />

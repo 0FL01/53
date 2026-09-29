@@ -32,6 +32,20 @@ object Prefs {
         c.getSharedPreferences(F, Context.MODE_PRIVATE).edit().putString("server_pub", hex).apply()
     }
 
+    /** One validated profile write; no partial addr/domain/pub updates. Public data only. */
+    fun setTransport(c: Context, addr: String, domain: String, serverPubHex: String) {
+        if (addr.isBlank() || addr.length > 256 || domain.isBlank() || domain.length > 253 ||
+            domain.any { it.isWhitespace() } || serverPubHex.length != 64 ||
+            hexToBytes(serverPubHex)?.size != 32
+        ) throw DmsgError("неверный addr/domain/server_pub (нужен 32-байтовый hex ключ)")
+        val ok = c.getSharedPreferences(F, Context.MODE_PRIVATE).edit()
+            .putString("addr", addr.trim())
+            .putString("domain", domain.trim())
+            .putString("server_pub", serverPubHex.lowercase())
+            .commit()
+        if (!ok) throw DmsgError("не удалось сохранить профиль")
+    }
+
     /** "Economy" is only a poll-interval flag (no second service impl). */
     fun economy(c: Context): Boolean =
         c.getSharedPreferences(F, Context.MODE_PRIVATE).getBoolean(ECONOMY, false)

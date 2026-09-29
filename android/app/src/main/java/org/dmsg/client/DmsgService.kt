@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 
@@ -25,6 +26,15 @@ class DmsgService : Service() {
         const val ACTION_STOP = "org.dmsg.client.STOP"
         const val POLL_NORMAL_MS = 15_000L
         const val POLL_ECONOMY_MS = 300_000L
+        private const val TAG = "DmsgService"
+        @Volatile private var lastPollMs = 0L
+        @Volatile private var lastPollError = "ожидание опроса"
+
+        fun pollStatus(): String = if (!Worker.running) "FGS выключен" else {
+            val elapsed = (System.currentTimeMillis() - lastPollMs) / 1000
+            if (lastPollMs == 0L) "FGS: $lastPollError (Doze может задерживать)"
+            else "последний ответ ${elapsed}с назад; $lastPollError (Doze может задерживать)"
+        }
 
         fun start(c: Context) {
             c.startForegroundService(Intent(c, DmsgService::class.java))
@@ -34,7 +44,7 @@ class DmsgService : Service() {
             c.stopService(Intent(c, DmsgService::class.java))
         }
 
-        fun running(c: Context): Boolean = Worker.alive
+        fun running(c: Context): Boolean = Worker.running
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -84,48 +94,58 @@ class DmsgService : Service() {
 
     /** Poll loop: reconnect (refill) -> fetch -> retry. Backoff on failure. */
     private object Worker {
-        @Volatile var alive = false
-        private var thread: Thread? = null
+        private var app: Context? = null
+        private val worker = SingleWorker { loop(requireNotNull(app)) }
+        val running: Boolean get() = worker.running
 
         fun start(c: Context) {
-            if (alive) return
-            alive = true
-            val app = c.applicationContext
-            thread = Thread({
-                var backoff = 5_000L
-                var total = 0
-                while (alive) {
-                    try {
-                        val n = pollOnce(app)
-                        total += n
-                        backoff = 5_000L
-                        app.notify(app.buildCountNotif(total))
-                    } catch (_: Exception) {
-                        backoff = minOf(backoff * 2, 120_000L)
-                    }
-                    val interval = if (Prefs.economy(app)) POLL_ECONOMY_MS else POLL_NORMAL_MS
-                    try {
-                        Thread.sleep(maxOf(interval, backoff))
-                    } catch (_: InterruptedException) {
-                        break
-                    }
+            app = c.applicationContext
+            worker.start()
+        }
+
+        private fun loop(app: Context) {
+            var backoff = 5_000L
+            var total = 0
+            while (worker.running && !Thread.currentThread().isInterrupted) {
+                try {
+                    val n = pollOnce(app)
+                    total += n
+                    backoff = 5_000L
+                    lastPollMs = System.currentTimeMillis()
+                    lastPollError = "доступен"
+                    app.notify(app.buildCountNotif(total))
+                    // Gate-observable poll outcome (no secrets: counts only).
+                    Log.d(TAG, "poll ok n=$n total=$total")
+                } catch (e: Exception) {
+                    // Fatal VM/Linkage errors are not transient network errors.
+                    Log.w(TAG, "poll fail: ${e.javaClass.simpleName}: ${e.message}")
+                    lastPollError = if (e is DmsgError) "ошибка: ${e.message}"
+                        else "ошибка ${e.javaClass.simpleName}"
+                    backoff = minOf(backoff * 2, 120_000L)
                 }
-            }, "dmsg-poll").also { it.isDaemon = true; it.start() }
+                val interval = if (Prefs.economy(app)) POLL_ECONOMY_MS else POLL_NORMAL_MS
+                try {
+                    Thread.sleep(maxOf(interval, backoff))
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    break
+                }
+            }
         }
 
         fun stop() {
-            alive = false
-            thread?.interrupt()
-            thread = null
+            worker.stop()
         }
 
         private fun pollOnce(app: Context): Int {
             val f = Core.facade(app)
-            if (!f.isReady()) return 0
+            if (!f.isReady()) throw DmsgError("core is not ready")
             val addr = Prefs.addr(app)
             val pub = Prefs.serverPub(app)
             val domain = Prefs.domain(app)
-            if (addr.isEmpty() || pub == null || domain.isEmpty()) return 0
+            if (addr.isEmpty() || pub == null || domain.isEmpty()) {
+                throw DmsgError("transport is not configured")
+            }
             f.reconnect(addr, pub, domain)
             val rep = f.fetch(addr, pub, domain)
             f.retry(addr, pub, domain)

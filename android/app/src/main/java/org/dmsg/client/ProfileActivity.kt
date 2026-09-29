@@ -11,7 +11,7 @@ import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 
 /** Profile + contact-QR show + request/accept/block/confirm. */
-class ProfileActivity : AppCompatActivity() {
+class ProfileActivity : DmsgActivity() {
     private lateinit var myId: TextView
     private lateinit var qr: ImageView
     private lateinit var peerId: EditText
@@ -28,6 +28,13 @@ class ProfileActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btn_accept).setOnClickListener { act { accept(peer()); "accepted" } }
         findViewById<Button>(R.id.btn_block).setOnClickListener { act { block(peer()); "blocked" } }
         findViewById<Button>(R.id.btn_confirm).setOnClickListener { act { confirm(peer()); "confirmed" } }
+        findViewById<Button>(R.id.btn_check).setOnClickListener {
+            act { get(peer())?.let {
+                "${it.state} identity_changed=${it.identityMismatch}" +
+                    if (it.identityMismatch) "; отправка СТОП до confirm" else ""
+            }
+                ?: "нет контакта" }
+        }
     }
 
     override fun onResume() {

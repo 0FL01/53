@@ -1,5 +1,5 @@
 # Проект 53 — DNS-мессенджер (протокол dmsg) поверх отдельного развёртывания slipstream
-Решение, план и бэкенд S0–S3 (деплой на n-de2:/opt/srv/53); первая точка — M0 из WORK_PLAN.md.
+Бэкенд S0–S3 на n-de2:/opt/srv/53; Rust core и Android shell — в `crates/core/` и `android/`. Статус приёмки клиента — `docs/goals/k4-gate-checklist.md`.
 
 ## Map
 - `ARCHITECTURE.md` — инварианты: переиспользование C-транспорта, границы v1, crypto-слои
@@ -13,10 +13,16 @@
 - Держать границы v1: 1 authoritative endpoint, 1 устройство на аккаунт, только лички, пилот ≤16 устройств; без федерации/HA/групп/мультиустройства/видео/ботов по ARCHITECTURE.md §1
 - Секреты только read-only файлами, не в Git/образ/логи/argv; данные — в volumes (ARCHITECTURE.md §4)
 - Не коммитить `.local/`, `.opencode/` — они в `.gitignore`
+- `connectedDebugAndroidTest` удаляет target package/Keystore: только `-PgateInstall=true` (отдельный `.gate`). Рабочую identity не стирать; одноразовые device gates запускать по методам вручную `am instrument`.
+- Kotlin UniFFI bindings не править вручную; генерировать host-cdylib тестом ниже. USB/SSH DirectTCP smoke не выдавать за Android DNS acceptance.
 
 ## Verify
 - `git status --short --branch` — перед каждым коммитом только intended-файлы
-- Сборок/тестов в этом репо пока нет; транспортные проверки запускаются из закреплённой ревизии по её докам, команды сюда не выдумывать
+- `cargo build -p msgd && cargo test --workspace` — сервер нужен живым core integration harness
+- `cargo build -p dmsg-core && DMSG_GEN_BINDINGS=1 cargo test -p dmsg-core --test gen_bindings` — перегенерация bindings
+- `ANDROID_NDK_HOME=<NDK r28+> sh android/build-native.sh` — arm64 native; бинарники только в build/, clean env без credentials
+- Из `android/`: `ANDROID_HOME="$HOME/Android/Sdk" ANDROID_SDK_ROOT="$HOME/Android/Sdk" ./gradlew testDebugUnitTest assembleDebug assembleRelease` — сборки и JVM; runtime gates отдельно
+- Транспортные проверки — из закреплённой ревизии по её докам, не изобретать команды
 
 ## Docs
 - `ARCHITECTURE.md` — читать перед любым протокольным/крипто/медиа-решением

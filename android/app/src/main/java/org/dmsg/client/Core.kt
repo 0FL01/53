@@ -9,11 +9,17 @@ import java.io.File
  * Missing native lib -> Unready facade (screens degrade, no crash).
  */
 object Core {
+    internal val storeLock = Any()
     fun dbFile(c: Context): File = File(c.filesDir, "core.db")
 
-    fun facade(c: Context): DmsgFacade {
-        return try {
-            UniFfiFacade(dbFile(c).absolutePath)
+    fun facade(c: Context): DmsgFacade = synchronized(storeLock) {
+        try {
+            // System linker reads from the APK even when JNA cannot;
+            // JNA reuses the already-loaded lib on first Native.load.
+            System.loadLibrary("dmsg_core")
+            val k = SecureStore.key(c)
+            try { UniFfiFacade(dbFile(c).absolutePath, k) }
+            finally { k.fill(0) }
         } catch (e: UnsatisfiedLinkError) {
             Unready(e.message ?: "no native lib")
         } catch (e: ExceptionInInitializerError) {

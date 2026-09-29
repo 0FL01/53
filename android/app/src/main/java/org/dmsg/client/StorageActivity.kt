@@ -6,7 +6,7 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 
 /** Storage settings: Keystore plan, migrate, wipe cache. */
-class StorageActivity : AppCompatActivity() {
+class StorageActivity : DmsgActivity() {
     private lateinit var plan: TextView
     private lateinit var info: TextView
 
@@ -16,6 +16,7 @@ class StorageActivity : AppCompatActivity() {
         plan = findViewById(R.id.plan)
         info = findViewById(R.id.info)
         findViewById<Button>(R.id.btn_migrate).setOnClickListener { migrate() }
+        findViewById<Button>(R.id.btn_unseal).setOnClickListener { restore() }
         findViewById<Button>(R.id.btn_wipe_cache).setOnClickListener { wipeCache() }
     }
 
@@ -39,7 +40,19 @@ class StorageActivity : AppCompatActivity() {
         Thread {
             val out = try {
                 SecureStore.seal(this)
-                "migrated: plaintext wiped, sealed copy kept"
+                "encrypted migration + same-install sealed snapshot ready"
+            } catch (e: Exception) {
+                "error: ${e.message}"
+            }
+            runOnUiThread { info.text = out; showPlan() }
+        }.start()
+    }
+
+    private fun restore() {
+        Thread {
+            val out = try {
+                SecureStore.unseal(this)
+                "restored: identity verified"
             } catch (e: Exception) {
                 "error: ${e.message}"
             }

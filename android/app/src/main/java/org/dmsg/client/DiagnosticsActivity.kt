@@ -2,14 +2,18 @@ package org.dmsg.client
 
 import android.os.Bundle
 import android.widget.Button
+import android.widget.EditText
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 
 /** Diagnostics: account, FGS state, economy flag, outbox stats, refill. */
-class DiagnosticsActivity : AppCompatActivity() {
+class DiagnosticsActivity : DmsgActivity() {
     private lateinit var account: TextView
     private lateinit var fgs: TextView
     private lateinit var stats: TextView
+    private lateinit var addr: EditText
+    private lateinit var domain: EditText
+    private lateinit var pub: EditText
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -17,6 +21,18 @@ class DiagnosticsActivity : AppCompatActivity() {
         account = findViewById(R.id.account)
         fgs = findViewById(R.id.fgs)
         stats = findViewById(R.id.stats)
+        addr = findViewById(R.id.profile_addr)
+        domain = findViewById(R.id.profile_domain)
+        pub = findViewById(R.id.profile_pub)
+        addr.setText(Prefs.addr(this))
+        domain.setText(Prefs.domain(this))
+        pub.setText(Prefs.serverPub(this)?.let { Prefs.bytesToHex(it) } ?: "")
+        findViewById<Button>(R.id.btn_save_profile).setOnClickListener {
+            stats.text = try {
+                Prefs.setTransport(this, addr.text.toString(), domain.text.toString(), pub.text.toString())
+                "профиль сохранён (проверка Noise только при подключении)"
+            } catch (e: DmsgError) { "error: ${e.message}" }
+        }
         findViewById<Button>(R.id.btn_economy).setOnClickListener {
             Prefs.setEconomy(this, !Prefs.economy(this))
             show()
@@ -44,7 +60,7 @@ class DiagnosticsActivity : AppCompatActivity() {
             }
             runOnUiThread {
                 account.text = a
-                fgs.text = "fgs=${DmsgService.running(this)} (Doze/force-stop limits apply, see gate)"
+                fgs.text = DmsgService.pollStatus() + " (Doze/force-stop limits apply)"
                 stats.text = s
             }
         }.start()

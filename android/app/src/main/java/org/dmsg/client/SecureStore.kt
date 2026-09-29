@@ -1,67 +1,135 @@
 package org.dmsg.client
 
 import android.content.Context
+import android.database.sqlite.SQLiteDatabase
 import androidx.security.crypto.EncryptedFile
 import androidx.security.crypto.MasterKeys
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.security.SecureRandom
 
-/**
- * Keystore-wrap master key + EncryptedFile sealing (security-crypto 1.0.0:
- * MasterKeys.getOrCreate + Builder(File, Context, alias, Scheme)).
- *
- * Model (K4 audit):
- * - live DB stays in app-private storage (sandbox + 0600 semantics);
- *   the Keystore-held master key seals a copy (EncryptedFile) as the
- *   transferable backup and as the migration target;
- * - migration plaintext -> Keystore-wrap + wipe of the source bytes;
- * - reinstall without the sealed copy = identity loss (shown in UI, see
- *   strings.reinstall_loss). No silent recovery, no cloud backup of history.
- */
+/** Keystore-sealed data key; Rust encrypts secrets, ratchets and inbox in the live DB. */
 object SecureStore {
     fun legacyDb(c: Context): File = File(c.filesDir, "core.db")
+    /** Optional same-install snapshot. Not a transferable backup: Keystore key is device-bound. */
     fun sealedDb(c: Context): File = File(c.filesDir, "core.db.sealed")
+    private fun wrappedKey(c: Context): File = File(c.filesDir, "core.key.sealed")
 
-    private fun alias(c: Context): String =
-        MasterKeys.getOrCreate(MasterKeys.AES256_GCM_SPEC)
+    private fun sealed(c: Context, f: File): EncryptedFile = EncryptedFile.Builder(
+        f, c, MasterKeys.getOrCreate(MasterKeys.AES256_GCM_SPEC),
+        EncryptedFile.FileEncryptionScheme.AES256_GCM_HKDF_4KB
+    ).build()
 
-    private fun sealed(c: Context, f: File): EncryptedFile =
-        EncryptedFile.Builder(
-            f, c, alias(c),
-            EncryptedFile.FileEncryptionScheme.AES256_GCM_HKDF_4KB
-        ).build()
-
-    /** Seal current DB bytes into the wrapped file (migration / backup step). */
-    @Throws(DmsgError::class)
-    fun seal(c: Context) {
-        val src = legacyDb(c)
-        if (!src.exists()) throw DmsgError("no legacy db")
-        val dst = sealedDb(c)
-        try {
-            src.inputStream().use { inp ->
-                sealed(c, dst).openFileOutput().use { out -> inp.copyTo(out) }
+    private fun checkpoint(f: File) {
+        SQLiteDatabase.openDatabase(f.absolutePath, null, SQLiteDatabase.OPEN_READWRITE).use { db ->
+            db.rawQuery("PRAGMA wal_checkpoint(TRUNCATE)", null).use { cur ->
+                if (!cur.moveToFirst() || cur.getInt(0) != 0) throw DmsgError("storage checkpoint busy")
             }
-        } catch (e: Exception) {
-            dst.delete()
-            throw DmsgError("seal failed: ${e.message}")
         }
-        wipe(src)
     }
 
-    /** Restore sealed copy back to the live path (same device only). */
-    @Throws(DmsgError::class)
-    fun unseal(c: Context) {
+    /** Never generate a replacement key for an encrypted DB or orphaned snapshot. */
+    fun key(c: Context): ByteArray = synchronized(Core.storeLock) {
+        val file = wrappedKey(c)
+        if (file.exists()) {
+            try {
+                sealed(c, file).openFileInput().use { inp ->
+                    val bytes = inp.readBytes()
+                    if (bytes.size != 32) throw DmsgError("wrapped key length invalid")
+                    return@synchronized bytes
+                }
+            } catch (_: Exception) {
+                throw DmsgError("wrapped key unavailable: identity cannot be restored on this install")
+            }
+        }
+        if (sealedDb(c).exists()) throw DmsgError("sealed copy without Keystore key: reinstall_loss")
+        val db = legacyDb(c)
+        if (db.exists()) {
+            try {
+                SQLiteDatabase.openDatabase(db.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { sql ->
+                    sql.rawQuery("SELECT name FROM sqlite_master WHERE type='table' AND name='core_storage'", null).use {
+                        if (it.moveToFirst()) throw DmsgError("Keystore key missing: reinstall_loss")
+                    }
+                }
+            } catch (e: DmsgError) {
+                throw e
+            } catch (_: Exception) {
+                throw DmsgError("storage cannot be inspected safely")
+            }
+        }
+        val fresh = ByteArray(32).also { SecureRandom().nextBytes(it) }
+        val staging = File(c.filesDir, "key-staging").also { it.mkdirs() }
+        val tmp = File(staging, file.name) // same basename: EncryptedFile authenticates filename
+        try {
+            tmp.delete()
+            sealed(c, tmp).openFileOutput().use { it.write(fresh) }
+            Files.move(tmp.toPath(), file.toPath(), StandardCopyOption.ATOMIC_MOVE)
+        } catch (_: Exception) {
+            fresh.fill(0)
+            throw DmsgError("could not create wrapped key")
+        } finally {
+            tmp.delete()
+            staging.delete()
+        }
+        fresh
+    }
+
+    /** Migrate legacy columns first, checkpoint WAL, then keep an encrypted same-install snapshot. */
+    fun seal(c: Context) = synchronized(Core.storeLock) {
+        val db = legacyDb(c)
+        if (!db.exists()) throw DmsgError("no live db")
+        val k = key(c)
+        try {
+            // Opens/migrates the DB and verifies the key; never copy an unencrypted legacy file.
+            UniFfiFacade(db.absolutePath, k).account()
+            checkpoint(db)
+            val out = sealedDb(c)
+            val staging = File(c.filesDir, "backup-staging").also { it.mkdirs() }
+            val tmp = File(staging, out.name)
+            try {
+                tmp.delete()
+                db.inputStream().use { input ->
+                    sealed(c, tmp).openFileOutput().use { encrypted -> input.copyTo(encrypted) }
+                }
+                Files.move(tmp.toPath(), out.toPath(),
+                    StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            } catch (_: Exception) {
+                throw DmsgError("storage backup failed; existing backup unchanged")
+            } finally {
+                tmp.delete()
+                staging.delete()
+            }
+        } finally { k.fill(0) }
+    }
+
+    /** Restore only into an empty live path, verify under the original device-bound key. */
+    fun unseal(c: Context) = synchronized(Core.storeLock) {
         val src = sealedDb(c)
         if (!src.exists()) throw DmsgError("no sealed copy")
+        val live = legacyDb(c)
+        if (live.exists()) throw DmsgError("live db already exists; refusing to overwrite identity")
+        val k = key(c)
+        val staging = File(c.filesDir, "restore-staging").also { it.mkdirs() }
+        val tmp = File(staging, live.name)
         try {
-            sealed(c, src).openFileInput().use { inp ->
-                legacyDb(c).outputStream().use { out -> inp.copyTo(out) }
+            tmp.delete()
+            sealed(c, src).openFileInput().use { encrypted ->
+                tmp.outputStream().use { output -> encrypted.copyTo(output); output.fd.sync() }
             }
-        } catch (e: Exception) {
-            throw DmsgError("unseal failed: ${e.message}")
+            UniFfiFacade(tmp.absolutePath, k).account()
+            checkpoint(tmp)
+            Files.move(tmp.toPath(), live.toPath(), StandardCopyOption.ATOMIC_MOVE)
+        } catch (_: Exception) {
+            throw DmsgError("unseal failed: sealed copy or Keystore key unavailable")
+        } finally {
+            k.fill(0)
+            wipe(tmp)
+            staging.delete()
         }
     }
 
-    /** Overwrite + delete (migration wipe of the plaintext source). */
+    /** Best effort on cache copies; filesystem wear-leveling prevents physical erase claims. */
     fun wipe(f: File) {
         try {
             if (f.exists()) {
@@ -77,12 +145,13 @@ object SecureStore {
                 }
             }
         } catch (_: Exception) {
-        } finally {
-            f.delete()
-        }
+        } finally { f.delete() }
     }
 
-    /** Storage plan from file presence (facade mirrors Rust storage_plan). */
-    fun plan(c: Context): String =
-        Core.facade(c).storagePlan(legacyDb(c).exists(), sealedDb(c).exists())
+    fun plan(c: Context): String = when {
+        wrappedKey(c).exists() -> "ready"
+        sealedDb(c).exists() -> "reinstall_loss"
+        legacyDb(c).exists() -> "migrate"
+        else -> "fresh"
+    }
 }
