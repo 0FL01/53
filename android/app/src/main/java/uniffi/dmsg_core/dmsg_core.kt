@@ -756,17 +756,19 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
-// N.B. the name of the extension is very misleading, since it is 
-// rather `InterfaceTooLargeException`, caused by too many methods 
+// N.B. the name of the extension is very misleading, since it is
+// rather `InterfaceTooLargeException`, caused by too many methods
 // in the interface for large crates.
 //
 // By splitting the otherwise huge interface into two parts
-// * UniffiLib 
+// * UniffiLib
 // * IntegrityCheckingUniffiLib (this)
 // we allow for ~2x as many methods in the UniffiLib interface.
-// 
-// The `ffi_uniffi_contract_version` method and all checksum methods are put 
+//
+// The `ffi_uniffi_contract_version` method and all checksum methods are put
 // into `IntegrityCheckingUniffiLib` and these methods are called only once,
 // when the library is loaded.
 internal interface IntegrityCheckingUniffiLib : Library {
@@ -813,6 +815,8 @@ fun uniffi_dmsg_core_checksum_method_dmsgclient_send_text(
 ): Short
 fun uniffi_dmsg_core_checksum_constructor_dmsgclient_open(
 ): Short
+fun uniffi_dmsg_core_checksum_constructor_dmsgclient_open_encrypted(
+): Short
 fun ffi_dmsg_core_uniffi_contract_version(
 ): Int
 
@@ -825,8 +829,8 @@ internal interface UniffiLib : Library {
         internal val INSTANCE: UniffiLib by lazy {
             val componentName = "dmsg_core"
             // For large crates we prevent `MethodTooLargeException` (see #2340)
-            // N.B. the name of the extension is very misleading, since it is 
-            // rather `InterfaceTooLargeException`, caused by too many methods 
+            // N.B. the name of the extension is very misleading, since it is
+            // rather `InterfaceTooLargeException`, caused by too many methods
             // in the interface for large crates.
             //
             // By splitting the otherwise huge interface into two parts
@@ -834,7 +838,7 @@ internal interface UniffiLib : Library {
             // * IntegrityCheckingUniffiLib
             // And all checksum methods are put into `IntegrityCheckingUniffiLib`
             // we allow for ~2x as many methods in the UniffiLib interface.
-            // 
+            //
             // Thus we first load the library with `loadIndirect` as `IntegrityCheckingUniffiLib`
             // so that we can (optionally!) call `uniffiCheckApiChecksums`...
             loadIndirect<IntegrityCheckingUniffiLib>(componentName)
@@ -849,12 +853,12 @@ internal interface UniffiLib : Library {
             // to trigger this issue, the performance impact is negligible, running on
             // a macOS M1 machine the `loadIndirect` call takes ~50ms.
             val lib = loadIndirect<UniffiLib>(componentName)
-            // No need to check the contract version and checksums, since 
+            // No need to check the contract version and checksums, since
             // we already did that with `IntegrityCheckingUniffiLib` above.
             // Loading of library with integrity check done.
             lib
         }
-        
+
         // The Cleaner for the whole library
         internal val CLEANER: UniffiCleaner by lazy {
             UniffiCleaner.create()
@@ -862,59 +866,61 @@ internal interface UniffiLib : Library {
     }
 
     // FFI functions
-    fun uniffi_dmsg_core_fn_clone_dmsgclient(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_dmsg_core_fn_clone_dmsgclient(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
 ): Pointer
-fun uniffi_dmsg_core_fn_free_dmsgclient(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_dmsg_core_fn_free_dmsgclient(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
 ): Unit
-fun uniffi_dmsg_core_fn_constructor_dmsgclient_open(`dbPath`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_dmsg_core_fn_constructor_dmsgclient_open(`dbPath`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): Pointer
-fun uniffi_dmsg_core_fn_method_dmsgclient_account_info(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_dmsg_core_fn_constructor_dmsgclient_open_encrypted(`dbPath`: RustBuffer.ByValue,`key`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): Pointer
+fun uniffi_dmsg_core_fn_method_dmsgclient_account_info(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
-fun uniffi_dmsg_core_fn_method_dmsgclient_add_contact_qr(`ptr`: Pointer,`uri`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_dmsg_core_fn_method_dmsgclient_add_contact_qr(`ptr`: Pointer,`uri`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
-fun uniffi_dmsg_core_fn_method_dmsgclient_contact_accept(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_dmsg_core_fn_method_dmsgclient_contact_accept(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): Unit
-fun uniffi_dmsg_core_fn_method_dmsgclient_contact_block(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_dmsg_core_fn_method_dmsgclient_contact_block(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): Unit
-fun uniffi_dmsg_core_fn_method_dmsgclient_contact_confirm(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_dmsg_core_fn_method_dmsgclient_contact_confirm(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): Unit
-fun uniffi_dmsg_core_fn_method_dmsgclient_contact_get(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_dmsg_core_fn_method_dmsgclient_contact_get(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
-fun uniffi_dmsg_core_fn_method_dmsgclient_contact_request(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_dmsg_core_fn_method_dmsgclient_contact_request(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
-fun uniffi_dmsg_core_fn_method_dmsgclient_contacts_page(`ptr`: Pointer,`cursor`: RustBuffer.ByValue,`limit`: Int,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_dmsg_core_fn_method_dmsgclient_contacts_page(`ptr`: Pointer,`cursor`: RustBuffer.ByValue,`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
-fun uniffi_dmsg_core_fn_method_dmsgclient_enrol_from_qr(`ptr`: Pointer,`qr`: RustBuffer.ByValue,`addr`: RustBuffer.ByValue,`expectedPinDer`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_dmsg_core_fn_method_dmsgclient_enrol_from_qr(`ptr`: Pointer,`qr`: RustBuffer.ByValue,`addr`: RustBuffer.ByValue,`expectedPinDer`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
-fun uniffi_dmsg_core_fn_method_dmsgclient_enrol_preview(`ptr`: Pointer,`qr`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_dmsg_core_fn_method_dmsgclient_enrol_preview(`ptr`: Pointer,`qr`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
-fun uniffi_dmsg_core_fn_method_dmsgclient_fetch(`ptr`: Pointer,`addr`: RustBuffer.ByValue,`serverPub`: RustBuffer.ByValue,`domain`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_dmsg_core_fn_method_dmsgclient_fetch(`ptr`: Pointer,`addr`: RustBuffer.ByValue,`serverPub`: RustBuffer.ByValue,`domain`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
-fun uniffi_dmsg_core_fn_method_dmsgclient_inbox_page(`ptr`: Pointer,`cursor`: Long,`limit`: Int,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_dmsg_core_fn_method_dmsgclient_inbox_page(`ptr`: Pointer,`cursor`: Long,`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
-fun uniffi_dmsg_core_fn_method_dmsgclient_my_contact_qr(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_dmsg_core_fn_method_dmsgclient_my_contact_qr(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
-fun uniffi_dmsg_core_fn_method_dmsgclient_outbox_page(`ptr`: Pointer,`cursor`: Long,`limit`: Int,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_dmsg_core_fn_method_dmsgclient_outbox_page(`ptr`: Pointer,`cursor`: Long,`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
-fun uniffi_dmsg_core_fn_method_dmsgclient_reconnect(`ptr`: Pointer,`addr`: RustBuffer.ByValue,`serverPub`: RustBuffer.ByValue,`domain`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_dmsg_core_fn_method_dmsgclient_reconnect(`ptr`: Pointer,`addr`: RustBuffer.ByValue,`serverPub`: RustBuffer.ByValue,`domain`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): Int
-fun uniffi_dmsg_core_fn_method_dmsgclient_retry_queued(`ptr`: Pointer,`addr`: RustBuffer.ByValue,`serverPub`: RustBuffer.ByValue,`domain`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_dmsg_core_fn_method_dmsgclient_retry_queued(`ptr`: Pointer,`addr`: RustBuffer.ByValue,`serverPub`: RustBuffer.ByValue,`domain`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
-fun uniffi_dmsg_core_fn_method_dmsgclient_send_text(`ptr`: Pointer,`addr`: RustBuffer.ByValue,`serverPub`: RustBuffer.ByValue,`domain`: RustBuffer.ByValue,`contactId`: RustBuffer.ByValue,`text`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_dmsg_core_fn_method_dmsgclient_send_text(`ptr`: Pointer,`addr`: RustBuffer.ByValue,`serverPub`: RustBuffer.ByValue,`domain`: RustBuffer.ByValue,`contactId`: RustBuffer.ByValue,`text`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
-fun uniffi_dmsg_core_fn_func_page_limit(`limit`: Int,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_dmsg_core_fn_func_page_limit(`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
 ): Int
-fun uniffi_dmsg_core_fn_func_qr_kind(`uri`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_dmsg_core_fn_func_qr_kind(`uri`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
-fun uniffi_dmsg_core_fn_func_storage_plan(`hasLegacyDb`: Byte,`hasWrappedDb`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_dmsg_core_fn_func_storage_plan(`hasLegacyDb`: Byte,`hasWrappedDb`: Byte,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
-fun ffi_dmsg_core_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_dmsg_core_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
-fun ffi_dmsg_core_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_dmsg_core_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
-fun ffi_dmsg_core_rustbuffer_free(`buf`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_dmsg_core_rustbuffer_free(`buf`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): Unit
-fun ffi_dmsg_core_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Long,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_dmsg_core_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 fun ffi_dmsg_core_rust_future_poll_u8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
 ): Unit
@@ -922,7 +928,7 @@ fun ffi_dmsg_core_rust_future_cancel_u8(`handle`: Long,
 ): Unit
 fun ffi_dmsg_core_rust_future_free_u8(`handle`: Long,
 ): Unit
-fun ffi_dmsg_core_rust_future_complete_u8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_dmsg_core_rust_future_complete_u8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): Byte
 fun ffi_dmsg_core_rust_future_poll_i8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
 ): Unit
@@ -930,7 +936,7 @@ fun ffi_dmsg_core_rust_future_cancel_i8(`handle`: Long,
 ): Unit
 fun ffi_dmsg_core_rust_future_free_i8(`handle`: Long,
 ): Unit
-fun ffi_dmsg_core_rust_future_complete_i8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_dmsg_core_rust_future_complete_i8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): Byte
 fun ffi_dmsg_core_rust_future_poll_u16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
 ): Unit
@@ -938,7 +944,7 @@ fun ffi_dmsg_core_rust_future_cancel_u16(`handle`: Long,
 ): Unit
 fun ffi_dmsg_core_rust_future_free_u16(`handle`: Long,
 ): Unit
-fun ffi_dmsg_core_rust_future_complete_u16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_dmsg_core_rust_future_complete_u16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): Short
 fun ffi_dmsg_core_rust_future_poll_i16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
 ): Unit
@@ -946,7 +952,7 @@ fun ffi_dmsg_core_rust_future_cancel_i16(`handle`: Long,
 ): Unit
 fun ffi_dmsg_core_rust_future_free_i16(`handle`: Long,
 ): Unit
-fun ffi_dmsg_core_rust_future_complete_i16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_dmsg_core_rust_future_complete_i16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): Short
 fun ffi_dmsg_core_rust_future_poll_u32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
 ): Unit
@@ -954,7 +960,7 @@ fun ffi_dmsg_core_rust_future_cancel_u32(`handle`: Long,
 ): Unit
 fun ffi_dmsg_core_rust_future_free_u32(`handle`: Long,
 ): Unit
-fun ffi_dmsg_core_rust_future_complete_u32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_dmsg_core_rust_future_complete_u32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): Int
 fun ffi_dmsg_core_rust_future_poll_i32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
 ): Unit
@@ -962,7 +968,7 @@ fun ffi_dmsg_core_rust_future_cancel_i32(`handle`: Long,
 ): Unit
 fun ffi_dmsg_core_rust_future_free_i32(`handle`: Long,
 ): Unit
-fun ffi_dmsg_core_rust_future_complete_i32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_dmsg_core_rust_future_complete_i32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): Int
 fun ffi_dmsg_core_rust_future_poll_u64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
 ): Unit
@@ -970,7 +976,7 @@ fun ffi_dmsg_core_rust_future_cancel_u64(`handle`: Long,
 ): Unit
 fun ffi_dmsg_core_rust_future_free_u64(`handle`: Long,
 ): Unit
-fun ffi_dmsg_core_rust_future_complete_u64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_dmsg_core_rust_future_complete_u64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): Long
 fun ffi_dmsg_core_rust_future_poll_i64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
 ): Unit
@@ -978,7 +984,7 @@ fun ffi_dmsg_core_rust_future_cancel_i64(`handle`: Long,
 ): Unit
 fun ffi_dmsg_core_rust_future_free_i64(`handle`: Long,
 ): Unit
-fun ffi_dmsg_core_rust_future_complete_i64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_dmsg_core_rust_future_complete_i64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): Long
 fun ffi_dmsg_core_rust_future_poll_f32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
 ): Unit
@@ -986,7 +992,7 @@ fun ffi_dmsg_core_rust_future_cancel_f32(`handle`: Long,
 ): Unit
 fun ffi_dmsg_core_rust_future_free_f32(`handle`: Long,
 ): Unit
-fun ffi_dmsg_core_rust_future_complete_f32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_dmsg_core_rust_future_complete_f32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): Float
 fun ffi_dmsg_core_rust_future_poll_f64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
 ): Unit
@@ -994,7 +1000,7 @@ fun ffi_dmsg_core_rust_future_cancel_f64(`handle`: Long,
 ): Unit
 fun ffi_dmsg_core_rust_future_free_f64(`handle`: Long,
 ): Unit
-fun ffi_dmsg_core_rust_future_complete_f64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_dmsg_core_rust_future_complete_f64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): Double
 fun ffi_dmsg_core_rust_future_poll_pointer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
 ): Unit
@@ -1002,7 +1008,7 @@ fun ffi_dmsg_core_rust_future_cancel_pointer(`handle`: Long,
 ): Unit
 fun ffi_dmsg_core_rust_future_free_pointer(`handle`: Long,
 ): Unit
-fun ffi_dmsg_core_rust_future_complete_pointer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_dmsg_core_rust_future_complete_pointer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): Pointer
 fun ffi_dmsg_core_rust_future_poll_rust_buffer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
 ): Unit
@@ -1010,7 +1016,7 @@ fun ffi_dmsg_core_rust_future_cancel_rust_buffer(`handle`: Long,
 ): Unit
 fun ffi_dmsg_core_rust_future_free_rust_buffer(`handle`: Long,
 ): Unit
-fun ffi_dmsg_core_rust_future_complete_rust_buffer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_dmsg_core_rust_future_complete_rust_buffer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 fun ffi_dmsg_core_rust_future_poll_void(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
 ): Unit
@@ -1018,7 +1024,7 @@ fun ffi_dmsg_core_rust_future_cancel_void(`handle`: Long,
 ): Unit
 fun ffi_dmsg_core_rust_future_free_void(`handle`: Long,
 ): Unit
-fun ffi_dmsg_core_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_dmsg_core_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): Unit
 
 }
@@ -1097,6 +1103,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_dmsg_core_checksum_constructor_dmsgclient_open() != 28712.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_dmsg_core_checksum_constructor_dmsgclient_open_encrypted() != 11807.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
 }
 
 /**
@@ -1169,7 +1178,7 @@ inline fun <T : Disposable?, R> T.use(block: (T) -> R) =
         }
     }
 
-/** 
+/**
  * Used to instantiate an interface without an actual pointer, for fakes in tests, mostly.
  *
  * @suppress
@@ -1511,94 +1520,94 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
  * Фасад ядра для Kotlin. Send+Sync по построению (только путь-строка).
  */
 public interface DmsgClientInterface {
-    
+
     /**
      * Учётка: enrolled + свой contact_id (None — свежая установка).
      */
     fun `accountInfo`(): AccountInfo
-    
+
     /**
      * Обработать сканированный contact-QR (pin/seen по правилам contacts).
      */
     fun `addContactQr`(`uri`: kotlin.String): QrOutcome
-    
+
     /**
      * Согласие на контакт.
      */
     fun `contactAccept`(`contactId`: kotlin.String)
-    
+
     /**
      * Блок (терминален в v1).
      */
     fun `contactBlock`(`contactId`: kotlin.String)
-    
+
     /**
      * Явное подтверждение подмены (seen → pin).
      */
     fun `contactConfirm`(`contactId`: kotlin.String)
-    
+
     /**
      * Карточка контакта (ключи не возвращаются).
      */
     fun `contactGet`(`contactId`: kotlin.String): ContactInfo
-    
+
     /**
      * Запрос на добавление по ID (без ключей). Возвращает state.
      */
     fun `contactRequest`(`contactId`: kotlin.String): kotlin.String
-    
+
     /**
      * Страница контактов (cursor — contact_id, None = сначала).
      */
     fun `contactsPage`(`cursor`: kotlin.String?, `limit`: kotlin.UInt): ContactsPage
-    
+
     /**
      * Полный enrol из QR (сеть). pin_der — ожидаемый DER для сверки
      * (None — доверие сканированному QR как корню, см. enrol.rs).
      */
     fun `enrolFromQr`(`qr`: kotlin.String, `addr`: kotlin.String, `expectedPinDer`: kotlin.ByteArray?): EnrolledInfo
-    
+
     /**
      * Офлайн-предпросмотр invite: domain + pin-fingerprint, без сети.
      */
     fun `enrolPreview`(`qr`: kotlin.String): Preview
-    
+
     /**
      * Приём пачки: FETCH → decrypt → inbox → ACK (событие для FGS/нотификаций).
      */
     fun `fetch`(`addr`: kotlin.String, `serverPub`: kotlin.ByteArray, `domain`: kotlin.String): FetchReport
-    
+
     /**
      * Страница входящих (cursor — seq, 0 = сначала).
      */
     fun `inboxPage`(`cursor`: kotlin.Long, `limit`: kotlin.UInt): InboxPage
-    
+
     /**
      * Свой contact-QR для показа (требует enrol).
      */
     fun `myContactQr`(): kotlin.String
-    
+
     /**
      * Страница outbox без ciphertext (cursor — внутренний rowid).
      */
     fun `outboxPage`(`cursor`: kotlin.Long, `limit`: kotlin.UInt): OutboxPage
-    
+
     /**
      * Побудка после переподключения FGS: login + refill (возвращает запас).
      */
     fun `reconnect`(`addr`: kotlin.String, `serverPub`: kotlin.ByteArray, `domain`: kotlin.String): kotlin.UInt
-    
+
     /**
      * Ретрай недоставленного тем же ciphertext (пачками, прогресс в DB).
      */
     fun `retryQueued`(`addr`: kotlin.String, `serverPub`: kotlin.ByteArray, `domain`: kotlin.String): RetryReport
-    
+
     /**
      * Отправить текст (login + refill + claim + одна TX + SEND). Возвращает
      * message_id hex. Блокирующий вызов для FGS/композера.
      */
     fun `sendText`(`addr`: kotlin.String, `serverPub`: kotlin.ByteArray, `domain`: kotlin.String, `contactId`: kotlin.String, `text`: kotlin.String): kotlin.String
-    
+
     companion object
 }
 
@@ -1687,7 +1696,7 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
         }
     }
 
-    
+
     /**
      * Учётка: enrolled + свой contact_id (None — свежая установка).
      */
@@ -1701,9 +1710,9 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
     }
     )
     }
-    
 
-    
+
+
     /**
      * Обработать сканированный contact-QR (pin/seen по правилам contacts).
      */
@@ -1717,54 +1726,54 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
     }
     )
     }
-    
 
-    
+
+
     /**
      * Согласие на контакт.
      */
     @Throws(FfiException::class)override fun `contactAccept`(`contactId`: kotlin.String)
-        = 
+        =
     callWithPointer {
     uniffiRustCallWithError(FfiException) { _status ->
     UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_contact_accept(
         it, FfiConverterString.lower(`contactId`),_status)
 }
     }
-    
-    
 
-    
+
+
+
     /**
      * Блок (терминален в v1).
      */
     @Throws(FfiException::class)override fun `contactBlock`(`contactId`: kotlin.String)
-        = 
+        =
     callWithPointer {
     uniffiRustCallWithError(FfiException) { _status ->
     UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_contact_block(
         it, FfiConverterString.lower(`contactId`),_status)
 }
     }
-    
-    
 
-    
+
+
+
     /**
      * Явное подтверждение подмены (seen → pin).
      */
     @Throws(FfiException::class)override fun `contactConfirm`(`contactId`: kotlin.String)
-        = 
+        =
     callWithPointer {
     uniffiRustCallWithError(FfiException) { _status ->
     UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_contact_confirm(
         it, FfiConverterString.lower(`contactId`),_status)
 }
     }
-    
-    
 
-    
+
+
+
     /**
      * Карточка контакта (ключи не возвращаются).
      */
@@ -1778,9 +1787,9 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
     }
     )
     }
-    
 
-    
+
+
     /**
      * Запрос на добавление по ID (без ключей). Возвращает state.
      */
@@ -1794,9 +1803,9 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
     }
     )
     }
-    
 
-    
+
+
     /**
      * Страница контактов (cursor — contact_id, None = сначала).
      */
@@ -1810,9 +1819,9 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
     }
     )
     }
-    
 
-    
+
+
     /**
      * Полный enrol из QR (сеть). pin_der — ожидаемый DER для сверки
      * (None — доверие сканированному QR как корню, см. enrol.rs).
@@ -1827,9 +1836,9 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
     }
     )
     }
-    
 
-    
+
+
     /**
      * Офлайн-предпросмотр invite: domain + pin-fingerprint, без сети.
      */
@@ -1843,9 +1852,9 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
     }
     )
     }
-    
 
-    
+
+
     /**
      * Приём пачки: FETCH → decrypt → inbox → ACK (событие для FGS/нотификаций).
      */
@@ -1859,9 +1868,9 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
     }
     )
     }
-    
 
-    
+
+
     /**
      * Страница входящих (cursor — seq, 0 = сначала).
      */
@@ -1875,9 +1884,9 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
     }
     )
     }
-    
 
-    
+
+
     /**
      * Свой contact-QR для показа (требует enrol).
      */
@@ -1891,9 +1900,9 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
     }
     )
     }
-    
 
-    
+
+
     /**
      * Страница outbox без ciphertext (cursor — внутренний rowid).
      */
@@ -1907,9 +1916,9 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
     }
     )
     }
-    
 
-    
+
+
     /**
      * Побудка после переподключения FGS: login + refill (возвращает запас).
      */
@@ -1923,9 +1932,9 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
     }
     )
     }
-    
 
-    
+
+
     /**
      * Ретрай недоставленного тем же ciphertext (пачками, прогресс в DB).
      */
@@ -1939,9 +1948,9 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
     }
     )
     }
-    
 
-    
+
+
     /**
      * Отправить текст (login + refill + claim + одна TX + SEND). Возвращает
      * message_id hex. Блокирующий вызов для FGS/композера.
@@ -1956,13 +1965,13 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
     }
     )
     }
-    
 
-    
 
-    
+
+
+
     companion object {
-        
+
     /**
      * Открыть фасад над app-private файлом DB (файл создаётся лениво store).
      */ fun `open`(`dbPath`: kotlin.String): DmsgClient {
@@ -1973,11 +1982,26 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
 }
     )
     }
-    
 
-        
+
+
+    /**
+     * Android passes a random 32-byte key unwrapped by Keystore. Existing
+     * encrypted DBs are verified immediately; no wrong-key fresh install.
+     */
+    @Throws(FfiException::class) fun `openEncrypted`(`dbPath`: kotlin.String, `key`: kotlin.ByteArray): DmsgClient {
+            return FfiConverterTypeDmsgClient.lift(
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_constructor_dmsgclient_open_encrypted(
+        FfiConverterString.lower(`dbPath`),FfiConverterByteArray.lower(`key`),_status)
+}
+    )
     }
-    
+
+
+
+    }
+
 }
 
 /**
@@ -2014,10 +2038,10 @@ public object FfiConverterTypeDmsgClient: FfiConverter<DmsgClient, Pointer> {
  * Состояние учётки для UI.
  */
 data class AccountInfo (
-    var `enrolled`: kotlin.Boolean, 
+    var `enrolled`: kotlin.Boolean,
     var `contactId`: kotlin.String?
 ) {
-    
+
     companion object
 }
 
@@ -2049,15 +2073,15 @@ public object FfiConverterTypeAccountInfo: FfiConverterRustBuffer<AccountInfo> {
  * Карточка контакта для UI (без ключей — ключи через границу не ходят).
  */
 data class ContactInfo (
-    var `contactId`: kotlin.String, 
-    var `state`: kotlin.String, 
-    var `hasKeys`: kotlin.Boolean, 
+    var `contactId`: kotlin.String,
+    var `state`: kotlin.String,
+    var `hasKeys`: kotlin.Boolean,
     /**
      * true — отправка СТОП до явного confirm (подмена).
      */
     var `identityMismatch`: kotlin.Boolean
 ) {
-    
+
     companion object
 }
 
@@ -2095,10 +2119,10 @@ public object FfiConverterTypeContactInfo: FfiConverterRustBuffer<ContactInfo> {
  * Строка списка диалогов/контактов (id + state, без ключей).
  */
 data class ContactRow (
-    var `contactId`: kotlin.String, 
+    var `contactId`: kotlin.String,
     var `state`: kotlin.String
 ) {
-    
+
     companion object
 }
 
@@ -2130,10 +2154,10 @@ public object FfiConverterTypeContactRow: FfiConverterRustBuffer<ContactRow> {
  * Страница контактов: cursor — contact_id последней строки (None = сначала).
  */
 data class ContactsPage (
-    var `rows`: List<ContactRow>, 
+    var `rows`: List<ContactRow>,
     var `nextCursor`: kotlin.String?
 ) {
-    
+
     companion object
 }
 
@@ -2167,7 +2191,7 @@ public object FfiConverterTypeContactsPage: FfiConverterRustBuffer<ContactsPage>
 data class EnrolledInfo (
     var `contactId`: kotlin.String
 ) {
-    
+
     companion object
 }
 
@@ -2196,14 +2220,14 @@ public object FfiConverterTypeEnrolledInfo: FfiConverterRustBuffer<EnrolledInfo>
  * Событие приёма пачки: числа, а не строки (см. FetchResult).
  */
 data class FetchReport (
-    var `received`: List<ReceivedMsg>, 
-    var `skippedUnknown`: kotlin.ULong, 
-    var `skippedBlocked`: kotlin.ULong, 
-    var `skippedUndecryptable`: kotlin.ULong, 
-    var `skippedMismatch`: kotlin.ULong, 
+    var `received`: List<ReceivedMsg>,
+    var `skippedUnknown`: kotlin.ULong,
+    var `skippedBlocked`: kotlin.ULong,
+    var `skippedUndecryptable`: kotlin.ULong,
+    var `skippedMismatch`: kotlin.ULong,
     var `cursor`: kotlin.ULong
 ) {
-    
+
     companion object
 }
 
@@ -2247,10 +2271,10 @@ public object FfiConverterTypeFetchReport: FfiConverterRustBuffer<FetchReport> {
  * Страница входящих: cursor — seq последней строки (0 = сначала).
  */
 data class InboxPage (
-    var `rows`: List<InboxRow>, 
+    var `rows`: List<InboxRow>,
     var `nextCursor`: kotlin.Long?
 ) {
-    
+
     companion object
 }
 
@@ -2282,11 +2306,11 @@ public object FfiConverterTypeInboxPage: FfiConverterRustBuffer<InboxPage> {
  * Одна входящая строка (plaintext уже расшифрован ядром).
  */
 data class InboxRow (
-    var `seq`: kotlin.Long, 
-    var `contactId`: kotlin.String, 
+    var `seq`: kotlin.Long,
+    var `contactId`: kotlin.String,
     var `text`: kotlin.String
 ) {
-    
+
     companion object
 }
 
@@ -2321,10 +2345,10 @@ public object FfiConverterTypeInboxRow: FfiConverterRustBuffer<InboxRow> {
  * Страница outbox (queued + accepted): cursor — внутренний rowid.
  */
 data class OutboxPage (
-    var `rows`: List<OutboxRow>, 
+    var `rows`: List<OutboxRow>,
     var `nextCursor`: kotlin.Long?
 ) {
-    
+
     companion object
 }
 
@@ -2356,11 +2380,11 @@ public object FfiConverterTypeOutboxPage: FfiConverterRustBuffer<OutboxPage> {
  * Одна outbox-строка БЕЗ ciphertext (им владеет Rust).
  */
 data class OutboxRow (
-    var `messageIdHex`: kotlin.String, 
-    var `contactId`: kotlin.String, 
+    var `messageIdHex`: kotlin.String,
+    var `contactId`: kotlin.String,
     var `status`: kotlin.String
 ) {
-    
+
     companion object
 }
 
@@ -2395,10 +2419,10 @@ public object FfiConverterTypeOutboxRow: FfiConverterRustBuffer<OutboxRow> {
  * Офлайн-предпросмотр invite (domain + pin-fingerprint, без сети).
  */
 data class Preview (
-    var `domain`: kotlin.String, 
+    var `domain`: kotlin.String,
     var `pinFingerprintHex`: kotlin.String
 ) {
-    
+
     companion object
 }
 
@@ -2430,12 +2454,12 @@ public object FfiConverterTypePreview: FfiConverterRustBuffer<Preview> {
  * Одно расшифрованное входящее (событие приёма).
  */
 data class ReceivedMsg (
-    var `contactId`: kotlin.String, 
-    var `text`: kotlin.String, 
-    var `messageIdHex`: kotlin.String, 
+    var `contactId`: kotlin.String,
+    var `text`: kotlin.String,
+    var `messageIdHex`: kotlin.String,
     var `seq`: kotlin.ULong
 ) {
-    
+
     companion object
 }
 
@@ -2473,12 +2497,12 @@ public object FfiConverterTypeReceivedMsg: FfiConverterRustBuffer<ReceivedMsg> {
  * Событие ретрая outbox.
  */
 data class RetryReport (
-    var `resent`: kotlin.ULong, 
-    var `accepted`: kotlin.ULong, 
-    var `delivered`: kotlin.ULong, 
+    var `resent`: kotlin.ULong,
+    var `accepted`: kotlin.ULong,
+    var `delivered`: kotlin.ULong,
     var `skipped`: kotlin.ULong
 ) {
-    
+
     companion object
 }
 
@@ -2519,171 +2543,171 @@ public object FfiConverterTypeRetryReport: FfiConverterRustBuffer<RetryReport> {
  * ключей, plaintext, token здесь нет по построению мапперов ниже).
  */
 sealed class FfiException: kotlin.Exception() {
-    
+
     class BadArgs(
-        
+
         val v1: kotlin.String
         ) : FfiException() {
         override val message
             get() = "v1=${ v1 }"
     }
-    
+
     class BadQr(
-        
+
         val v1: kotlin.String
         ) : FfiException() {
         override val message
             get() = "v1=${ v1 }"
     }
-    
+
     class PinMismatch(
         ) : FfiException() {
         override val message
             get() = ""
     }
-    
+
     class NotEnrolled(
         ) : FfiException() {
         override val message
             get() = ""
     }
-    
+
     class UnknownContact(
         ) : FfiException() {
         override val message
             get() = ""
     }
-    
+
     class NotAccepted(
         ) : FfiException() {
         override val message
             get() = ""
     }
-    
+
     class Blocked(
         ) : FfiException() {
         override val message
             get() = ""
     }
-    
+
     class IdentityMismatch(
         ) : FfiException() {
         override val message
             get() = ""
     }
-    
+
     class NothingToConfirm(
         ) : FfiException() {
         override val message
             get() = ""
     }
-    
+
     class MissingKeys(
         ) : FfiException() {
         override val message
             get() = ""
     }
-    
+
     class NoPeerPrekeys(
         ) : FfiException() {
         override val message
             get() = ""
     }
-    
+
     class UploadRejected(
         ) : FfiException() {
         override val message
             get() = ""
     }
-    
+
     class Quota(
         ) : FfiException() {
         override val message
             get() = ""
     }
-    
+
     class Revoked(
         ) : FfiException() {
         override val message
             get() = ""
     }
-    
+
     class BadToken(
         ) : FfiException() {
         override val message
             get() = ""
     }
-    
+
     class Expired(
         ) : FfiException() {
         override val message
             get() = ""
     }
-    
+
     class BoundOther(
         ) : FfiException() {
         override val message
             get() = ""
     }
-    
+
     class Busy(
         ) : FfiException() {
         override val message
             get() = ""
     }
-    
+
     class BadText(
         ) : FfiException() {
         override val message
             get() = ""
     }
-    
+
     class Transport(
-        
+
         val v1: kotlin.String
         ) : FfiException() {
         override val message
             get() = "v1=${ v1 }"
     }
-    
+
     class Store(
-        
+
         val v1: kotlin.String
         ) : FfiException() {
         override val message
             get() = "v1=${ v1 }"
     }
-    
+
     class Crypto(
-        
+
         val v1: kotlin.String
         ) : FfiException() {
         override val message
             get() = "v1=${ v1 }"
     }
-    
+
     class Protocol(
-        
+
         val v1: kotlin.String
         ) : FfiException() {
         override val message
             get() = "v1=${ v1 }"
     }
-    
+
     class Server(
-        
+
         val v1: kotlin.String
         ) : FfiException() {
         override val message
             get() = "v1=${ v1 }"
     }
-    
+
 
     companion object ErrorHandler : UniffiRustCallStatusErrorHandler<FfiException> {
         override fun lift(error_buf: RustBuffer.ByValue): FfiException = FfiConverterTypeFfiError.lift(error_buf)
     }
 
-    
+
 }
 
 /**
@@ -2691,7 +2715,7 @@ sealed class FfiException: kotlin.Exception() {
  */
 public object FfiConverterTypeFfiError : FfiConverterRustBuffer<FfiException> {
     override fun read(buf: ByteBuffer): FfiException {
-        
+
 
         return when(buf.getInt()) {
             1 -> FfiException.BadArgs(
@@ -2961,7 +2985,7 @@ public object FfiConverterTypeFfiError : FfiConverterRustBuffer<FfiException> {
  */
 
 enum class QrKind {
-    
+
     JOIN,
     CONTACT;
     companion object
@@ -2994,7 +3018,7 @@ public object FfiConverterTypeQrKind: FfiConverterRustBuffer<QrKind> {
  */
 
 enum class QrOutcome {
-    
+
     ADDED,
     UNCHANGED,
     IDENTITY_CHANGED;
@@ -3030,7 +3054,7 @@ public object FfiConverterTypeQrOutcome: FfiConverterRustBuffer<QrOutcome> {
  */
 
 enum class StoragePlan {
-    
+
     FRESH_INSTALL,
     MIGRATE_LEGACY,
     READY_WRAPPED;
@@ -3274,7 +3298,7 @@ public object FfiConverterSequenceTypeReceivedMsg: FfiConverterRustBuffer<List<R
 }
     )
     }
-    
+
 
         /**
          * Классифицировать сканированный QR (оба формата). Битый/oversized —
@@ -3288,7 +3312,7 @@ public object FfiConverterSequenceTypeReceivedMsg: FfiConverterRustBuffer<List<R
 }
     )
     }
-    
+
 
         /**
          * Решение хранилища при старте по наличию файлов (чистая функция —
@@ -3301,6 +3325,6 @@ public object FfiConverterSequenceTypeReceivedMsg: FfiConverterRustBuffer<List<R
 }
     )
     }
-    
+
 
 

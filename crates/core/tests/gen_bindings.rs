@@ -33,6 +33,12 @@ fn gen_kotlin_bindings() {
         false,
     )
     .expect("generate kotlin bindings");
+    // UniFFI templates contain trailing spaces; normalize deterministically so
+    // regenerated tracked bindings pass the repository's diff whitespace gate.
+    let generated = out.join("uniffi/dmsg_core/dmsg_core.kt");
+    let source = std::fs::read_to_string(&generated).expect("read generated bindings");
+    let normalized = source.lines().map(str::trim_end).collect::<Vec<_>>().join("\n") + "\n";
+    std::fs::write(&generated, normalized).expect("normalize generated bindings");
     assert!(
         out.join("uniffi/dmsg_core/dmsg_core.kt").exists(),
         "dmsg_core.kt missing after generate"

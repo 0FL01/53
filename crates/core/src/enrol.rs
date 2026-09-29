@@ -153,13 +153,31 @@ pub async fn enrol_from_qr(
     db_path: &std::path::Path,
     expected_pin_der: Option<&[u8]>,
 ) -> Result<Enrolled, EnrolError> {
+    enrol_from_qr_mode(qr, addr, db_path, expected_pin_der, None).await
+}
+
+/// Enrol through the same authenticated encrypted store as all FFI commands.
+pub async fn enrol_from_qr_encrypted(
+    qr: &str, addr: &str, db_path: &std::path::Path,
+    expected_pin_der: Option<&[u8]>, key: &[u8],
+) -> Result<Enrolled, EnrolError> {
+    enrol_from_qr_mode(qr, addr, db_path, expected_pin_der, Some(key)).await
+}
+
+async fn enrol_from_qr_mode(
+    qr: &str, addr: &str, db_path: &std::path::Path,
+    expected_pin_der: Option<&[u8]>, key: Option<&[u8]>,
+) -> Result<Enrolled, EnrolError> {
     let b = bootstrap::parse(qr).map_err(qr_err)?;
     if let Some(exp) = expected_pin_der {
         if b.cert_der.as_slice() != exp {
             return Err(EnrolError::PinMismatch);
         }
     }
-    let conn = crate::store::open(db_path).map_err(EnrolError::Store)?;
+    let conn = match key {
+        Some(k) => crate::store::open_encrypted(db_path, k),
+        None => crate::store::open(db_path),
+    }.map_err(EnrolError::Store)?;
     let privkey = match crate::store::load_identity(&conn).map_err(EnrolError::Store)? {
         Some(k) => k,
         None => gen_static()?,

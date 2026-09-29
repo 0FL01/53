@@ -182,4 +182,130 @@ async fn two_cores_talk_e2e_through_live_msgd() {
     let r2 = a.fetch_and_decrypt(&mut ta).await.expect("fetch2");
     assert_eq!(r2.received.len(), 1);
     assert_eq!((r2.received[0].text.as_str(), r2.received[0].contact_id.as_str()), ("hi alice", eb.contact_id.as_str()));
+
+    // Global mailbox seq now alternates recipients. Both directions must drain
+    // despite those gaps, with no replay counted as an undecryptable event.
+    let a_empty = a.fetch_and_decrypt(&mut ta).await.expect("a second fetch");
+    assert!(a_empty.received.is_empty());
+    a.send_text(&mut ta, &eb.contact_id, "after reverse gap")
+        .await
+        .expect("send3");
+    let r3 = b.fetch_and_decrypt(&mut tb).await.expect("fetch3");
+    assert_eq!(r3.received.len(), 1);
+    assert_eq!(r3.received[0].text, "after reverse gap");
+    let b_empty = b
+        .fetch_and_decrypt(&mut tb)
+        .await
+        .expect("b second fetch after gap");
+    assert!(b_empty.received.is_empty());
+    b.send_text(&mut tb, &ea.contact_id, "after forward gap")
+        .await
+        .expect("send4");
+    let r4 = a.fetch_and_decrypt(&mut ta).await.expect("fetch4");
+    assert_eq!(r4.received.len(), 1);
+    assert_eq!(r4.received[0].text, "after forward gap");
+    let a_empty2 = a
+        .fetch_and_decrypt(&mut ta)
+        .await
+        .expect("a second fetch after new gap");
+    assert!(a_empty2.received.is_empty());
+    let skips: Vec<_> = [&r2, &a_empty, &r3, &b_empty, &r4, &a_empty2]
+        .iter()
+        .map(|r| {
+            (
+                r.skipped_unknown,
+                r.skipped_blocked,
+                r.skipped_undecryptable,
+                r.skipped_mismatch,
+            )
+        })
+        .collect();
+    assert_eq!(
+        skips,
+        vec![(0, 0, 0, 0); 6],
+        "bidirectional fetches must have zero skipped events"
+    );
+
+    // Android's synchronous facade opens a fresh transport for EVERY command.
+    // Each one must authenticate with the persisted Noise static, not a new key.
+    drop(a);
+    drop(b);
+    let server_pub = bootstrap::parse(&uri_a).expect("bootstrap").noise_pubkey.to_vec();
+    let addr = srv.addr.clone();
+    tokio::task::spawn_blocking(move || {
+        let a = dmsg_core::ffi::DmsgClient::open(db_a.to_string_lossy().into_owned());
+        let b = dmsg_core::ffi::DmsgClient::open(db_b.to_string_lossy().into_owned());
+        for _ in 0..2 {
+            assert!(a.reconnect(addr.clone(), server_pub.clone(), DOMAIN.into()).expect("ffi reconnect a") >= 8);
+            assert!(b.reconnect(addr.clone(), server_pub.clone(), DOMAIN.into()).expect("ffi reconnect b") >= 8);
+        }
+        let mid = a.send_text(addr.clone(), server_pub.clone(), DOMAIN.into(), eb.contact_id.clone(),
+            "ffi roundtrip".into()).expect("ffi send");
+        assert_eq!(mid.len(), 32);
+        let fetched = b.fetch(addr.clone(), server_pub.clone(), DOMAIN.into()).expect("ffi fetch");
+        assert_eq!(fetched.received.len(), 1);
+        assert_eq!(fetched.received[0].text, "ffi roundtrip");
+        let retry = a.retry_queued(addr.clone(), server_pub.clone(), DOMAIN.into()).expect("ffi retry");
+        assert!(retry.delivered >= 1);
+        assert!(b.fetch(addr.clone(), server_pub.clone(), DOMAIN.into()).expect("ffi dedup fetch").received.is_empty());
+        assert_eq!(a.account_info().expect("ffi account").contact_id, Some(ea.contact_id));
+
+        drop(a);
+        drop(b);
+        // Migrate live plaintext identities; every subsequent FFI operation
+        // must take the encrypted path through store, enrol and chat.
+        let a = dmsg_core::ffi::DmsgClient::open_encrypted(db_a.to_string_lossy().into_owned(), vec![19;32])
+            .expect("sealed a");
+        let b = dmsg_core::ffi::DmsgClient::open_encrypted(db_b.to_string_lossy().into_owned(), vec![20;32])
+            .expect("sealed b");
+        a.reconnect(addr.clone(), server_pub.clone(), DOMAIN.into()).expect("sealed reconnect");
+        let mid = a.send_text(addr.clone(), server_pub.clone(), DOMAIN.into(), eb.contact_id.clone(),
+            "sealed ffi message".into()).expect("sealed send");
+        assert_eq!(mid.len(), 32);
+        let report = b.fetch(addr.clone(), server_pub.clone(), DOMAIN.into()).expect("sealed fetch");
+        assert_eq!(report.received[0].text, "sealed ffi message");
+        assert!(a.retry_queued(addr.clone(), server_pub.clone(), DOMAIN.into()).expect("sealed retry").delivered >= 1);
+        assert!(b.inbox_page(0, 100).expect("sealed inbox page").rows.iter().any(|r| r.text == "sealed ffi message"));
+
+        let before_bad_key = a.outbox_page(0, 100).expect("before bad key").rows.len();
+        assert!(matches!(a.send_text(addr.clone(), vec![42; 32], DOMAIN.into(),
+            eb.contact_id.clone(), "must not queue".into()), Err(dmsg_core::ffi::FfiError::Transport(_))));
+        assert_eq!(a.outbox_page(0, 100).expect("after bad key").rows.len(), before_bad_key,
+            "a failed Noise handshake cannot enqueue offline ciphertext");
+
+        // FFI dispatch with no network uses the already persisted Olm session;
+        // retry after restoration sends the exact ciphertext committed offline.
+        let offline_addr = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("free port");
+            let addr = listener.local_addr().expect("addr").to_string();
+            drop(listener);
+            addr
+        };
+        let offline_mid = a.send_text(offline_addr.clone(), server_pub.clone(), DOMAIN.into(),
+            eb.contact_id.clone(), "offline-to-online".into()).expect("offline queued");
+        let queued = a.outbox_page(0, 100).expect("queued page");
+        assert_eq!(queued.rows.iter().filter(|r| r.message_id_hex == offline_mid && r.status == "queued").count(), 1);
+        let saved = dmsg_core::store::outbox_queued(
+            &dmsg_core::store::open_encrypted(&db_a, &[19; 32]).expect("sealed db"), 0, 100
+        ).expect("saved rows").0.into_iter().find(|(_, mid, _, _, _)| {
+            mid.iter().map(|b| format!("{b:02x}")).collect::<String>() == offline_mid
+        }).expect("offline row").3;
+        assert!(saved.windows(b"offline-to-online".len()).all(|w| w != b"offline-to-online"));
+        assert!(b.fetch(addr.clone(), server_pub.clone(), DOMAIN.into()).expect("no premature send").received.is_empty());
+        let stats = a.retry_queued(addr.clone(), server_pub.clone(), DOMAIN.into()).expect("restored retry");
+        assert!(stats.resent >= 1);
+        let after = dmsg_core::store::outbox_queued(
+            &dmsg_core::store::open_encrypted(&db_a, &[19; 32]).expect("sealed db"), 0, 100
+        ).expect("saved rows").0.into_iter().find(|(_, mid, _, _, _)| {
+            mid.iter().map(|b| format!("{b:02x}")).collect::<String>() == offline_mid
+        }).expect("restored row").3;
+        assert_eq!(saved, after, "retry must use the byte-identical ciphertext from offline queue");
+        let restored = b.fetch(addr.clone(), server_pub.clone(), DOMAIN.into()).expect("restored fetch");
+        assert_eq!(restored.received.len(), 1);
+        assert_eq!(restored.received[0].text, "offline-to-online");
+        assert_eq!(restored.received[0].message_id_hex, offline_mid);
+
+        assert!(dmsg_core::ffi::DmsgClient::open(db_a.to_string_lossy().into_owned()).account_info().is_err());
+        assert!(dmsg_core::ffi::DmsgClient::open_encrypted(db_a.to_string_lossy().into_owned(), vec![21;32]).is_err());
+    }).await.expect("ffi worker");
 }

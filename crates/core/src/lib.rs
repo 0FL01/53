@@ -25,6 +25,7 @@ pub mod contacts;
 pub mod enrol;
 pub mod ffi;
 pub mod olm;
+mod secure;
 pub mod store;
 pub mod supervisor;
 pub mod transport;

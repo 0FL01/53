@@ -20,7 +20,21 @@ use std::sync::Arc;
 use crate::contacts::{self, Contact};
 use crate::enrol::EnrolError;
 use crate::olm::OlmError;
-use crate::transport::Transport;
+use crate::transport::TransportError;
+
+enum ConnectFailure {
+    Local(FfiError),
+    Transport(TransportError),
+}
+
+impl ConnectFailure {
+    fn into_ffi(self) -> FfiError {
+        match self {
+            Self::Local(e) => e,
+            Self::Transport(e) => FfiError::Transport(e.to_string()),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // DTO: команды возвращают записи, события — отчёты. Всё Clone для UniFFI.
@@ -345,6 +359,7 @@ pub fn storage_plan(has_legacy_db: bool, has_wrapped_db: bool) -> StoragePlan {
 #[derive(uniffi::Object)]
 pub struct DmsgClient {
     db_path: String,
+    key: Option<[u8; 32]>,
 }
 
 fn hex(b: &[u8]) -> String {
@@ -382,7 +397,33 @@ fn parse_transport_args(
 
 impl DmsgClient {
     fn conn(&self) -> Result<rusqlite::Connection, FfiError> {
-        crate::store::open(Path::new(&self.db_path)).map_err(FfiError::Store)
+        match &self.key {
+            Some(k) => crate::store::open_encrypted(Path::new(&self.db_path), k),
+            None => crate::store::open(Path::new(&self.db_path)),
+        }.map_err(FfiError::Store)
+    }
+
+    fn core(&self) -> Result<crate::chat::Core, FfiError> {
+        match &self.key {
+            Some(k) => crate::chat::Core::open_encrypted(Path::new(&self.db_path), k),
+            None => crate::chat::Core::open(Path::new(&self.db_path)),
+        }.map_err(map_olm)
+    }
+
+    /// Enrolled commands must use the same Noise static as enrolment. The
+    /// ephemeral K1 constructor authenticates as a different device each time.
+    async fn connect(
+        &self,
+        addr: &str,
+        server_pub: &[u8; 32],
+        domain: &[u8],
+    ) -> Result<crate::transport::DirectTcp, ConnectFailure> {
+        let device_priv = crate::store::load_identity(&self.conn().map_err(ConnectFailure::Local)?)
+            .map_err(|e| ConnectFailure::Local(FfiError::Store(e)))?
+            .ok_or(ConnectFailure::Local(FfiError::NotEnrolled))?;
+        crate::transport::initiate_with_key(addr, server_pub, domain, &device_priv)
+            .await
+            .map_err(ConnectFailure::Transport)
     }
 }
 
@@ -391,7 +432,17 @@ impl DmsgClient {
     /// Открыть фасад над app-private файлом DB (файл создаётся лениво store).
     #[uniffi::constructor]
     pub fn open(db_path: String) -> Arc<Self> {
-        Arc::new(Self { db_path })
+        Arc::new(Self { db_path, key: None })
+    }
+
+    /// Android passes a random 32-byte key unwrapped by Keystore. Existing
+    /// encrypted DBs are verified immediately; no wrong-key fresh install.
+    #[uniffi::constructor]
+    pub fn open_encrypted(db_path: String, key: Vec<u8>) -> Result<Arc<Self>, FfiError> {
+        let key: [u8; 32] = key.try_into()
+            .map_err(|_| FfiError::BadArgs("storage key must be 32 bytes".into()))?;
+        crate::store::open_encrypted(Path::new(&db_path), &key).map_err(FfiError::Store)?;
+        Ok(Arc::new(Self { db_path, key: Some(key) }))
     }
 
     /// Учётка: enrolled + свой contact_id (None — свежая установка).
@@ -426,14 +477,20 @@ impl DmsgClient {
             .build()
             .map_err(|e| FfiError::Transport(format!("runtime: {e}")))?;
         let db = Path::new(&self.db_path).to_path_buf();
-        rt.block_on(crate::enrol::enrol_from_qr(&qr, &addr, &db, expected_pin_der.as_deref()))
+        let enrol = async {
+            match &self.key {
+                Some(k) => crate::enrol::enrol_from_qr_encrypted(&qr, &addr, &db, expected_pin_der.as_deref(), k).await,
+                None => crate::enrol::enrol_from_qr(&qr, &addr, &db, expected_pin_der.as_deref()).await,
+            }
+        };
+        rt.block_on(enrol)
             .map(|e| EnrolledInfo { contact_id: e.contact_id })
             .map_err(map_enrol)
     }
 
     /// Свой contact-QR для показа (требует enrol).
     pub fn my_contact_qr(&self) -> Result<String, FfiError> {
-        let core = crate::chat::Core::open(Path::new(&self.db_path)).map_err(map_olm)?;
+        let core = self.core()?;
         let (uid, cid) = core.my_account().map_err(map_olm)?;
         let (ed, curve) = core.identity_keys();
         let dev = core.device_pub();
@@ -562,11 +619,20 @@ impl DmsgClient {
             .build()
             .map_err(|e| FfiError::Transport(format!("runtime: {e}")))?;
         rt.block_on(async {
-            let mut core =
-                crate::chat::Core::open(Path::new(&self.db_path)).map_err(map_olm)?;
-            let mut t = crate::transport::DirectTcp::new(addr, sp, dom)
-                .map_err(|e| FfiError::BadArgs(e.to_string()))?;
-            t.connect().await.map_err(|e| FfiError::Transport(e.to_string()))?;
+            let mut core = self.core()?;
+            core.preflight_text(&contact_id, &text).map_err(map_olm)?;
+            let mut t = match self.connect(&addr, &sp, &dom).await {
+                Ok(t) => t,
+                // Only a failed TCP connect is an offline send. A failed
+                // Noise/domain handshake or local auth/store error is not.
+                Err(ConnectFailure::Transport(TransportError::Io(e))) if e.starts_with("connect: ") => {
+                    return match core.queue_text_existing_session(&contact_id, &text).map_err(map_olm)? {
+                        Some(mid) => Ok(hex(&mid)),
+                        None => Err(FfiError::Transport(format!("io: {e}"))),
+                    };
+                }
+                Err(e) => return Err(e.into_ffi()),
+            };
             let mid =
                 core.send_text(&mut t, &contact_id, &text).await.map_err(map_olm)?;
             Ok(hex(&mid))
@@ -589,11 +655,8 @@ impl DmsgClient {
             .build()
             .map_err(|e| FfiError::Transport(format!("runtime: {e}")))?;
         rt.block_on(async {
-            let mut core =
-                crate::chat::Core::open(Path::new(&self.db_path)).map_err(map_olm)?;
-            let mut t = crate::transport::DirectTcp::new(addr, sp, dom)
-                .map_err(|e| FfiError::BadArgs(e.to_string()))?;
-            t.connect().await.map_err(|e| FfiError::Transport(e.to_string()))?;
+            let mut core = self.core()?;
+            let mut t = self.connect(&addr, &sp, &dom).await.map_err(ConnectFailure::into_ffi)?;
             let s = core.retry_queued(&mut t).await.map_err(map_olm)?;
             Ok(RetryReport {
                 resent: s.resent as u64,
@@ -620,11 +683,8 @@ impl DmsgClient {
             .build()
             .map_err(|e| FfiError::Transport(format!("runtime: {e}")))?;
         rt.block_on(async {
-            let mut core =
-                crate::chat::Core::open(Path::new(&self.db_path)).map_err(map_olm)?;
-            let mut t = crate::transport::DirectTcp::new(addr, sp, dom)
-                .map_err(|e| FfiError::BadArgs(e.to_string()))?;
-            t.connect().await.map_err(|e| FfiError::Transport(e.to_string()))?;
+            let mut core = self.core()?;
+            let mut t = self.connect(&addr, &sp, &dom).await.map_err(ConnectFailure::into_ffi)?;
             let r = core.fetch_and_decrypt(&mut t).await.map_err(map_olm)?;
             Ok(FetchReport {
                 received: r
@@ -662,11 +722,8 @@ impl DmsgClient {
             .build()
             .map_err(|e| FfiError::Transport(format!("runtime: {e}")))?;
         rt.block_on(async {
-            let mut core =
-                crate::chat::Core::open(Path::new(&self.db_path)).map_err(map_olm)?;
-            let mut t = crate::transport::DirectTcp::new(addr, sp, dom)
-                .map_err(|e| FfiError::BadArgs(e.to_string()))?;
-            t.connect().await.map_err(|e| FfiError::Transport(e.to_string()))?;
+            let mut core = self.core()?;
+            let mut t = self.connect(&addr, &sp, &dom).await.map_err(ConnectFailure::into_ffi)?;
             core.on_reconnect(&mut t).await.map_err(map_olm)
         })
     }
@@ -676,13 +733,98 @@ impl DmsgClient {
 mod tests {
     use super::*;
 
+    fn enrolled_client(name: &str) -> (DmsgClient, std::path::PathBuf) {
+        let (c, dir) = tmp_client(name);
+        let conn = c.conn().expect("db");
+        crate::store::save_identity(&conn, &[3; 32]).expect("identity");
+        crate::store::save_account(&conn, &[4; 16], "ALICE0000001").expect("account");
+        crate::store::save_token(&conn, &[5; 32]).expect("token");
+        drop(conn);
+        (c, dir)
+    }
+
+    fn peer_contact(c: &DmsgClient) -> (String, vodozemac::olm::Account) {
+        let peer = vodozemac::olm::Account::new();
+        let id = "BOBB00000002".to_string();
+        let qr = contacts::build_qr(&id, &[6; 16], &[7; 32],
+            peer.ed25519_key().as_bytes(), peer.curve25519_key().as_bytes()).expect("qr");
+        assert_eq!(c.add_contact_qr(qr).expect("add"), QrOutcome::Added);
+        c.contact_accept(id.clone()).expect("accept");
+        (id, peer)
+    }
+
+    fn install_session(c: &DmsgClient, id: &str, peer: &mut vodozemac::olm::Account) {
+        peer.generate_one_time_keys(1);
+        let ot = *peer.one_time_keys().values().next().expect("one-time").as_bytes();
+        let core = c.core().expect("core");
+        let (account, _) = crate::olm::load_or_create(&c.conn().expect("db")).expect("account pickle");
+        let session = crate::olm::outbound(&account, &crate::olm::curve_identity(peer), &ot).expect("session");
+        crate::store::save_session(&c.conn().expect("db"), id,
+            &crate::olm::pickle_session(&session).expect("pickle"),
+            &crate::olm::ed_identity(peer), &crate::olm::curve_identity(peer)).expect("persist");
+        drop(core);
+    }
+
+    fn offline_addr() -> String {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("port");
+        let addr = l.local_addr().expect("addr").to_string();
+        drop(l);
+        addr
+    }
+
+    fn offline_send(c: &DmsgClient, addr: &str, id: &str, text: &str) -> Result<String, FfiError> {
+        c.send_text(addr.into(), vec![1; 32], "offline.test".into(), id.into(), text.into())
+    }
+
+    #[test]
+    fn offline_send_existing_session_queues_ciphertext_via_ffi() {
+        let (c, dir) = enrolled_client("queued-existing");
+        let (id, mut peer) = peer_contact(&c);
+        install_session(&c, &id, &mut peer);
+        let c = DmsgClient::open_encrypted(c.db_path.clone(), vec![19; 32]).expect("encrypted");
+        let text = "queued-plaintext-sentinel";
+        let mid = offline_send(&c, &offline_addr(), &id, text).expect("queued");
+        let page = c.outbox_page(0, 10).expect("outbox");
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.rows[0].message_id_hex, mid);
+        assert_eq!(page.rows[0].status, "queued");
+        let raw = std::fs::read(&c.db_path).expect("db bytes");
+        assert!(!raw.windows(text.len()).any(|w| w == text.as_bytes()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn offline_send_changed_identity_stops_before_queue() {
+        let (c, dir) = enrolled_client("queued-mismatch");
+        let (id, mut peer) = peer_contact(&c);
+        install_session(&c, &id, &mut peer);
+        let evil = contacts::build_qr(&id, &[6; 16], &[7; 32], &[9; 32], &[8; 32]).expect("evil");
+        assert_eq!(c.add_contact_qr(evil).expect("change"), QrOutcome::IdentityChanged);
+        assert_eq!(offline_send(&c, &offline_addr(), &id, "secret"), Err(FfiError::IdentityMismatch));
+        assert!(c.outbox_page(0, 10).expect("outbox").rows.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn offline_send_without_session_returns_transport_and_no_plaintext() {
+        let (c, dir) = enrolled_client("queued-no-session");
+        let (id, _) = peer_contact(&c);
+        let c = DmsgClient::open_encrypted(c.db_path.clone(), vec![19; 32]).expect("encrypted");
+        let text = "no-session-plaintext-sentinel";
+        assert!(matches!(offline_send(&c, &offline_addr(), &id, text), Err(FfiError::Transport(_))));
+        assert!(c.outbox_page(0, 10).expect("outbox").rows.is_empty());
+        let raw = std::fs::read(&c.db_path).expect("db bytes");
+        assert!(!raw.windows(text.len()).any(|w| w == text.as_bytes()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     fn tmp_client(name: &str) -> (DmsgClient, std::path::PathBuf) {
         let dir =
             std::env::temp_dir().join(format!("dmsg-k4-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("tmpdir");
         let db = dir.join("core.db");
         let _ = std::fs::remove_file(&db);
-        (DmsgClient { db_path: db.to_string_lossy().into_owned() }, dir)
+        (DmsgClient { db_path: db.to_string_lossy().into_owned(), key: None }, dir)
     }
 
     fn sample_join() -> String {

@@ -14,8 +14,8 @@
 //!   ([`Core::on_reconnect`][crate::chat]), send-path (начало send_text).
 //!   COUNT после upload — refill-сигнал сервера.
 //!
-//! Пиклы Account/Session — serde_json в том же файле 0600, что device_priv
-//! (та же модель угроз; шифрование пиклов — non-goal v1).
+//! Пиклы Account/Session сериализуются через store; encrypted-open шифрует
+//! обе колонки перед SQLite, legacy Rust harness сохраняет прежний формат.
 
 use dmsg_protocol::{
     mailbox as mp, ERR_BAD, ERR_BUSY, ERR_NO_PREKEY, ERR_QUOTA, ERR_REVOKED, OP_CLAIM, OP_COUNT,

@@ -166,6 +166,22 @@ async fn happy_reconnect_and_second_key_refused() {
     let db_b = srv.dir.join("b-core.db");
     let r = enrol_from_qr(&uri, &srv.addr, &db_b, Some(FAKE_DER)).await;
     assert_eq!(r, Err(EnrolError::BoundOther));
+
+    let sealed_uri = srv.issue("sealed-invite", "3600");
+    let db_c = srv.dir.join("c-core.db");
+    let addr = srv.addr.clone();
+    tokio::task::spawn_blocking(move || {
+        let client = dmsg_core::ffi::DmsgClient::open_encrypted(
+            db_c.to_string_lossy().into_owned(), vec![0x37; 32],
+        ).expect("encrypted constructor");
+        let enrolled = client.enrol_from_qr(sealed_uri.clone(), addr.clone(), Some(FAKE_DER.to_vec()))
+            .expect("encrypted enrol");
+        let repeated = client.enrol_from_qr(sealed_uri, addr, Some(FAKE_DER.to_vec()))
+            .expect("encrypted enrol replay");
+        assert_eq!(enrolled, repeated);
+        assert_eq!(client.account_info().expect("sealed account").contact_id, Some(enrolled.contact_id));
+        assert!(dmsg_core::store::open(&db_c).is_err());
+    }).await.expect("encrypted ffi worker");
 }
 
 #[tokio::test]
