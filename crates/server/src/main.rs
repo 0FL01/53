@@ -7,8 +7,11 @@
 //! close без ban (per-IP ban на общем резолвере отключил бы всех, ARCH §4).
 
 mod db;
+mod blob;
 mod enrol;
+mod mbox;
 mod noise;
+mod prekey;
 
 use std::collections::HashMap;
 use std::env;
@@ -23,8 +26,11 @@ use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::{Notify, Semaphore};
 
 use dmsg_protocol::{
-    bootstrap, decode_frame, encode_frame, DOMAIN_MAX, ERR_BAD, ERR_BOUND_OTHER, ERR_EXPIRED,
-    ERR_REVOKED, MAX_FRAME, OP_AUTH_DOMAIN, OP_ENROL, OP_ENROLLED, OP_ERROR, OP_WELCOME,
+    bootstrap, decode_frame, encode_frame, mailbox as mp, DOMAIN_MAX, ERR_BAD, ERR_BOUND_OTHER,
+    ERR_EXPIRED, ERR_NO_PREKEY, ERR_QUOTA, ERR_REVOKED, MAX_FRAME, OP_AUTH_DOMAIN, OP_BLOB_RESERVE,
+    OP_BLOB_RESERVED, OP_CLAIM, OP_COUNT, OP_COUNT_RESP, OP_DELIVERY_ACK, OP_ENROL, OP_ENROLLED,
+    OP_ERROR, OP_FETCH, OP_FETCH_RESP, OP_PREKEY, OP_SEND, OP_SEND_ACK, OP_UPLOAD_PREKEYS,
+    OP_WELCOME, ST_ACCEPTED, ST_DELIVERED,
 };
 
 /// Кап незавершённых handshake (≪16 пилота, резерв до транспортных 32).
@@ -40,6 +46,12 @@ struct Counters {
     proto_err: AtomicU64,
     enrol_ok: AtomicU64,
     enrol_fail: AtomicU64,
+    send_ok: AtomicU64,
+    send_dedup: AtomicU64,
+    send_fail: AtomicU64,
+    fetch_ok: AtomicU64,
+    ack_ok: AtomicU64,
+    mbox_err: AtomicU64,
 }
 
 /// Разделяемое состояние: db под мьютексом (держать только на TX, никогда через .await).
@@ -233,10 +245,12 @@ async fn handle_conn(
     out.fill(0);
     c.auth_ok.fetch_add(1, Ordering::Relaxed);
 
-    // Цикл сессии: ENROL → CAS → ENROLLED/ERROR. Неизвестное → close.
-    // Revoke/block будит через Notify → graceful close. В конце — deregister.
+    // Цикл сессии: до enrol — только ENROL; после — ENROL(replay)/SEND/FETCH/DELIVERY_ACK.
+    // Неизвестное → close. Revoke/block будит через Notify → graceful close.
+    // В конце — deregister. DB-транзакции короткие, никогда через .await.
     let notify = Arc::new(Notify::new());
     let mut enrolled_key: Option<Vec<u8>> = None;
+    let mut enrolled_user: Option<[u8; 16]> = None;
     let close = async {
         loop {
             let cipher = read_hs_msg(&mut stream).await.map_err(|_| ())?;
@@ -245,35 +259,26 @@ async fn handle_conn(
             let mut cipher = cipher;
             cipher.fill(0);
             let (_, op, payload, _) = decode_frame(&plain[..n]).map_err(|_| ())?;
-            if op != OP_ENROL || payload.len() != 32 {
+            let reply = if op == OP_ENROL && payload.len() == 32 {
+                enrol_reply(&st, &c, &device_key, &payload, &notify, &mut enrolled_key, &mut enrolled_user)?
+            } else if enrolled_user.is_some() {
+                let user = enrolled_user.expect("checked");
+                match op {
+                    OP_SEND => send_reply(&st, &c, &device_key, &payload)?,
+                    OP_FETCH => fetch_reply(&st, &c, &user, &device_key, &payload)?,
+                    OP_DELIVERY_ACK => ack_reply(&st, &c, &user, &device_key, &payload)?,
+                    OP_UPLOAD_PREKEYS => upload_reply(&st, &c, &user, &device_key, &payload)?,
+                    OP_CLAIM => claim_reply(&st, &c, &payload)?,
+                    OP_COUNT => count_reply(&st, &c, &payload)?,
+                    OP_BLOB_RESERVE => reserve_reply(&st, &c, &user, &payload)?,
+                    _ => {
+                        c.proto_err.fetch_add(1, Ordering::Relaxed);
+                        return Err(());
+                    }
+                }
+            } else {
                 c.proto_err.fetch_add(1, Ordering::Relaxed);
                 return Err(());
-            }
-            // CAS под коротким локом, никогда через .await.
-            let now = now_secs();
-            let res = {
-                let db = st.db.lock().expect("db");
-                enrol::enrol(&db, &payload, &device_key, now)
-            };
-            let reply = match res {
-                Ok(done) => {
-                    c.enrol_ok.fetch_add(1, Ordering::Relaxed);
-                    let mut p = Vec::with_capacity(28);
-                    p.extend_from_slice(&done.user_id);
-                    p.extend_from_slice(done.contact_id.as_bytes());
-                    enrolled_key = Some(device_key.to_vec());
-                    st.live
-                        .lock()
-                        .expect("live")
-                        .entry(device_key.to_vec())
-                        .or_default()
-                        .push(notify.clone());
-                    encode_frame(OP_ENROLLED, &p).expect("fits")
-                }
-                Err(e) => {
-                    c.enrol_fail.fetch_add(1, Ordering::Relaxed);
-                    encode_frame(OP_ERROR, &[enrol_code(&e)]).expect("fits")
-                }
             };
             let mut out = vec![0u8; 65535];
             let wn = transport.write_message(&reply, &mut out).map_err(|_| ())?;
@@ -309,6 +314,254 @@ fn enrol_code(e: &enrol::EnrolError) -> u8 {
     }
 }
 
+/// ENROL → CAS под коротким локом → ENROLLED/ERROR. Регистрирует live-сессию.
+#[allow(clippy::too_many_arguments)]
+fn enrol_reply(
+    st: &State,
+    c: &Counters,
+    device_key: &[u8; 32],
+    payload: &[u8],
+    notify: &Arc<Notify>,
+    enrolled_key: &mut Option<Vec<u8>>,
+    enrolled_user: &mut Option<[u8; 16]>,
+) -> Result<Vec<u8>, ()> {
+    let now = now_secs();
+    let res = {
+        let db = st.db.lock().expect("db");
+        enrol::enrol(&db, payload, device_key, now)
+    };
+    match res {
+        Ok(done) => {
+            c.enrol_ok.fetch_add(1, Ordering::Relaxed);
+            let mut p = Vec::with_capacity(28);
+            p.extend_from_slice(&done.user_id);
+            p.extend_from_slice(done.contact_id.as_bytes());
+            *enrolled_key = Some(device_key.to_vec());
+            *enrolled_user = Some(done.user_id);
+            st.live
+                .lock()
+                .expect("live")
+                .entry(device_key.to_vec())
+                .or_default()
+                .push(notify.clone());
+            Ok(encode_frame(OP_ENROLLED, &p).expect("fits"))
+        }
+        Err(e) => {
+            c.enrol_fail.fetch_add(1, Ordering::Relaxed);
+            Ok(encode_frame(OP_ERROR, &[enrol_code(&e)]).expect("fits"))
+        }
+    }
+}
+
+fn mbox_code(e: &mbox::MboxError) -> u8 {
+    match e {
+        mbox::MboxError::Bad | mbox::MboxError::Store(_) => ERR_BAD,
+        mbox::MboxError::Quota => ERR_QUOTA,
+    }
+}
+
+/// SEND → quota-в-TX → INSERT ON CONFLICT → commit → SEND_ACK.
+/// Повтор возвращает прежний accept (send_dedup), не новое событие.
+fn send_reply(st: &State, c: &Counters, device_key: &[u8; 32], payload: &[u8]) -> Result<Vec<u8>, ()> {
+    let s = mp::parse_send(payload).ok_or_else(|| {
+        c.proto_err.fetch_add(1, Ordering::Relaxed);
+    })?;
+    let now = now_secs();
+    let res = {
+        let mut db = st.db.lock().expect("db");
+        mbox::send(&mut db, device_key, s.recipient, s.message_id, s.ciphertext, now)
+    };
+    match res {
+        Ok(mbox::SendOutcome::New(_)) => {
+            c.send_ok.fetch_add(1, Ordering::Relaxed);
+            let mut p = Vec::with_capacity(17);
+            p.extend_from_slice(s.message_id);
+            p.push(ST_ACCEPTED);
+            Ok(encode_frame(OP_SEND_ACK, &p).expect("fits"))
+        }
+        Ok(mbox::SendOutcome::Exists(_, delivered)) => {
+            c.send_dedup.fetch_add(1, Ordering::Relaxed);
+            let mut p = Vec::with_capacity(17);
+            p.extend_from_slice(s.message_id);
+            // Повтор после доставки сообщает актуальный статус (ST_DELIVERED),
+            // иначе — прежний accept. Нового события нет в обоих случаях.
+            p.push(if delivered { ST_DELIVERED } else { ST_ACCEPTED });
+            Ok(encode_frame(OP_SEND_ACK, &p).expect("fits"))
+        }
+        Err(e) => {
+            c.send_fail.fetch_add(1, Ordering::Relaxed);
+            Ok(encode_frame(OP_ERROR, &[mbox_code(&e)]).expect("fits"))
+        }
+    }
+}
+
+/// FETCH → пачка после cursor (влезает в кадр) → FETCH_RESP.
+fn fetch_reply(
+    st: &State,
+    c: &Counters,
+    user: &[u8; 16],
+    device_key: &[u8; 32],
+    payload: &[u8],
+) -> Result<Vec<u8>, ()> {
+    if !payload.is_empty() {
+        c.proto_err.fetch_add(1, Ordering::Relaxed);
+        return Err(());
+    }
+    let rows = {
+        let db = st.db.lock().expect("db");
+        mbox::fetch(&db, user, device_key)
+    }
+    .map_err(|_| {
+        c.mbox_err.fetch_add(1, Ordering::Relaxed);
+    })?;
+    // Пакуем, пока влезает в кадр (заголовок 4 + count 2 + записи).
+    let mut p = vec![0u8, 0u8];
+    let mut n: usize = 0;
+    for e in &rows {
+        let need = 8 + 32 + 16 + 2 + e.ciphertext.len();
+        if 4 + p.len() + need > dmsg_protocol::MAX_FRAME || n >= dmsg_protocol::FETCH_BATCH_MAX {
+            break;
+        }
+        p.extend_from_slice(&(e.seq as u64).to_be_bytes());
+        p.extend_from_slice(&e.sender);
+        p.extend_from_slice(&e.message_id);
+        p.extend_from_slice(&(e.ciphertext.len() as u16).to_be_bytes());
+        p.extend_from_slice(&e.ciphertext);
+        n += 1;
+    }
+    p[0] = (n >> 8) as u8;
+    p[1] = n as u8;
+    c.fetch_ok.fetch_add(1, Ordering::Relaxed);
+    Ok(encode_frame(OP_FETCH_RESP, &p).expect("fits"))
+}
+
+/// DELIVERY_ACK → cursor по непрерывному в той же TX → ответ: cursor u64.
+fn ack_reply(
+    st: &State,
+    c: &Counters,
+    user: &[u8; 16],
+    device_key: &[u8; 32],
+    payload: &[u8],
+) -> Result<Vec<u8>, ()> {
+    let seqs = mp::parse_delivery_ack(payload).ok_or_else(|| {
+        c.proto_err.fetch_add(1, Ordering::Relaxed);
+    })?;
+    let seqs: Vec<i64> = seqs.into_iter().map(|s| s as i64).collect();
+    let cursor = {
+        let mut db = st.db.lock().expect("db");
+        mbox::ack(&mut db, user, device_key, &seqs)
+    }
+    .map_err(|_| {
+        c.mbox_err.fetch_add(1, Ordering::Relaxed);
+    })?;
+    c.ack_ok.fetch_add(1, Ordering::Relaxed);
+    Ok(encode_frame(OP_DELIVERY_ACK, &(cursor as u64).to_be_bytes()).expect("fits"))
+}
+
+/// UPLOAD_PREKEYS → binding-check → ответ COUNT_RESP (refill-сигнал).
+fn upload_reply(
+    st: &State,
+    c: &Counters,
+    user: &[u8; 16],
+    device_key: &[u8; 32],
+    payload: &[u8],
+) -> Result<Vec<u8>, ()> {
+    let (identity, entries) = mp::parse_upload(payload).ok_or_else(|| {
+        c.proto_err.fetch_add(1, Ordering::Relaxed);
+    })?;
+    let entries: Vec<prekey::Entry> = entries
+        .into_iter()
+        .map(|(key_id, one_time, pubkey, sig)| prekey::Entry { key_id, one_time, pubkey, sig })
+        .collect();
+    let res = {
+        let mut db = st.db.lock().expect("db");
+        prekey::upload(&mut db, device_key, user, identity, &entries)
+    };
+    match res {
+        Ok(left) => {
+            c.ack_ok.fetch_add(1, Ordering::Relaxed);
+            Ok(encode_frame(OP_COUNT_RESP, &(left as u32).to_be_bytes()).expect("fits"))
+        }
+        Err(prekey::PrekeyError::IdentityChanged) => {
+            c.mbox_err.fetch_add(1, Ordering::Relaxed);
+            Ok(encode_frame(OP_ERROR, &[ERR_BAD]).expect("fits"))
+        }
+        Err(_) => {
+            c.proto_err.fetch_add(1, Ordering::Relaxed);
+            Ok(encode_frame(OP_ERROR, &[ERR_BAD]).expect("fits"))
+        }
+    }
+}
+
+/// CLAIM → PREKEY или ERROR no-prekey.
+fn claim_reply(st: &State, c: &Counters, payload: &[u8]) -> Result<Vec<u8>, ()> {
+    let device = mp::parse_device(payload).ok_or_else(|| {
+        c.proto_err.fetch_add(1, Ordering::Relaxed);
+    })?;
+    let got = {
+        let mut db = st.db.lock().expect("db");
+        prekey::claim(&mut db, device)
+    }
+    .map_err(|_| {
+        c.mbox_err.fetch_add(1, Ordering::Relaxed);
+    })?;
+    match got {
+        Some((id, pubkey)) => {
+            let mut p = Vec::with_capacity(36);
+            p.extend_from_slice(&id.to_be_bytes());
+            p.extend_from_slice(&pubkey);
+            Ok(encode_frame(OP_PREKEY, &p).expect("fits"))
+        }
+        None => Ok(encode_frame(OP_ERROR, &[ERR_NO_PREKEY]).expect("fits")),
+    }
+}
+
+/// COUNT → COUNT_RESP.
+fn count_reply(st: &State, c: &Counters, payload: &[u8]) -> Result<Vec<u8>, ()> {
+    let device = mp::parse_device(payload).ok_or_else(|| {
+        c.proto_err.fetch_add(1, Ordering::Relaxed);
+    })?;
+    let n = {
+        let db = st.db.lock().expect("db");
+        prekey::count(&db, device)
+    }
+    .map_err(|_| {
+        c.mbox_err.fetch_add(1, Ordering::Relaxed);
+    })?;
+    Ok(encode_frame(OP_COUNT_RESP, &(n as u32).to_be_bytes()).expect("fits"))
+}
+
+fn blob_code(e: &blob::BlobError) -> u8 {
+    match e {
+        blob::BlobError::Bad | blob::BlobError::Store(_) => ERR_BAD,
+        blob::BlobError::Quota => ERR_QUOTA,
+    }
+}
+
+/// BLOB_RESERVE → BLOB_RESERVED или ERROR quota.
+fn reserve_reply(
+    st: &State,
+    c: &Counters,
+    user: &[u8; 16],
+    payload: &[u8],
+) -> Result<Vec<u8>, ()> {
+    let (blob_id, size) = mp::parse_reserve(payload).ok_or_else(|| {
+        c.proto_err.fetch_add(1, Ordering::Relaxed);
+    })?;
+    let now = now_secs();
+    let res = {
+        let mut db = st.db.lock().expect("db");
+        blob::reserve(&mut db, user, blob_id, size as i64, now)
+    };
+    match res {
+        Ok(()) => Ok(encode_frame(OP_BLOB_RESERVED, blob_id).expect("fits")),
+        Err(e) => {
+            c.mbox_err.fetch_add(1, Ordering::Relaxed);
+            Ok(encode_frame(OP_ERROR, &[blob_code(&e)]).expect("fits"))
+        }
+    }
+}
+
 fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -339,7 +592,7 @@ fn handle_msgctl(st: &State, line: &[u8]) -> String {
         "stats" => {
             let c = &st.counters;
             format!(
-                "hs_ok={} hs_fail={} pre_auth_full={} auth_ok={} mismatch={} proto_err={} enrol_ok={} enrol_fail={}\n",
+                "hs_ok={} hs_fail={} pre_auth_full={} auth_ok={} mismatch={} proto_err={} enrol_ok={} enrol_fail={} send_ok={} send_dedup={} send_fail={} fetch_ok={} ack_ok={} mbox_err={}\n",
                 c.hs_ok.load(Ordering::Relaxed),
                 c.hs_fail.load(Ordering::Relaxed),
                 c.pre_auth_full.load(Ordering::Relaxed),
@@ -348,6 +601,12 @@ fn handle_msgctl(st: &State, line: &[u8]) -> String {
                 c.proto_err.load(Ordering::Relaxed),
                 c.enrol_ok.load(Ordering::Relaxed),
                 c.enrol_fail.load(Ordering::Relaxed),
+                c.send_ok.load(Ordering::Relaxed),
+                c.send_dedup.load(Ordering::Relaxed),
+                c.send_fail.load(Ordering::Relaxed),
+                c.fetch_ok.load(Ordering::Relaxed),
+                c.ack_ok.load(Ordering::Relaxed),
+                c.mbox_err.load(Ordering::Relaxed),
             )
         }
         "invite-issue" => {
@@ -372,6 +631,14 @@ fn handle_msgctl(st: &State, line: &[u8]) -> String {
             },
             None => "err\n".into(),
         },
+        "gc" => {
+            let now = now_secs();
+            let mut db = st.db.lock().expect("db");
+            match blob::gc(&mut db, now) {
+                Ok((b, e)) => format!("gc blobs={b} events={e}\n"),
+                Err(_) => "err\n".into(),
+            }
+        }
         _ => "err\n".into(),
     }
 }
@@ -622,6 +889,24 @@ async fn run(cfg: Config) -> std::io::Result<()> {
     tokio::spawn(async move {
         if let Err(e) = serve_msgctl(ctl).await {
             eprintln!("msgd: msgctl error: {e}");
+        }
+    });
+    // GC: orphan-sweep 24ч + TTL 7 сут + caps, раз в 5 минут под коротким локом.
+    let gc_st = st.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(300));
+        loop {
+            tick.tick().await;
+            let now = now_secs();
+            let r = {
+                let mut db = gc_st.db.lock().expect("db");
+                blob::gc(&mut db, now)
+            };
+            match r {
+                Ok((b, e)) if b + e > 0 => eprintln!("msgd: gc swept {b} blobs, {e} events"),
+                Ok(_) => {}
+                Err(e) => eprintln!("msgd: gc error: {e:?}"),
+            }
         }
     });
     loop {

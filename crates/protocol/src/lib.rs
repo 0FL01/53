@@ -3,6 +3,7 @@
 //! Внутренние структуры не являются wire-контрактом: совместимость — тест-векторами ниже.
 
 pub mod bootstrap;
+pub mod mailbox;
 
 /// Wire-версия протокола. Неизвестная версия → close.
 pub const VERSION: u8 = 1;
@@ -30,6 +31,42 @@ pub const ERR_EXPIRED: u8 = 2;
 pub const ERR_REVOKED: u8 = 3;
 /// Коды ERROR.
 pub const ERR_BOUND_OTHER: u8 = 4;
+/// Коды ERROR.
+pub const ERR_NO_PREKEY: u8 = 5;
+/// Коды ERROR.
+pub const ERR_QUOTA: u8 = 6;
+/// Диапазон 16+ — mailbox и дальше (P4).
+/// SEND: recipient 16 + message_id 16 + ciphertext (rest, ≤ CIPHERTEXT_MAX).
+pub const OP_SEND: u8 = 16;
+/// SEND_ACK: message_id 16 + status u8 (ST_*). Только после commit.
+pub const OP_SEND_ACK: u8 = 17;
+/// FETCH: пустой payload — сервер отдаёт пачку после cursor (свой user/device из сессии).
+pub const OP_FETCH: u8 = 18;
+/// FETCH_RESP: count u16 + записи (seq u64 + sender 32 + msgid 16 + ctlen u16 + ct).
+pub const OP_FETCH_RESP: u8 = 19;
+/// DELIVERY_ACK: count u16 + seq u64*. Cursor двигается по непрерывному.
+pub const OP_DELIVERY_ACK: u8 = 20;
+/// UPLOAD_PREKEYS: identity 32 + count u16 + записи (key_id u32 + one_time u8 + pubkey 32 + sig 64).
+/// Подпись: Ed25519 identity-ключом по (device_key || key_id BE || pubkey).
+pub const OP_UPLOAD_PREKEYS: u8 = 21;
+/// CLAIM: запросить один unconsumed one-time key: device_key 32.
+pub const OP_CLAIM: u8 = 22;
+/// COUNT: запросить число unconsumed: device_key 32.
+pub const OP_COUNT: u8 = 23;
+/// PREKEY: ответ на CLAIM: key_id u32 + pubkey 32.
+pub const OP_PREKEY: u8 = 24;
+/// COUNT_RESP: ответ на COUNT: count u32 BE.
+pub const OP_COUNT_RESP: u8 = 25;
+/// BLOB_RESERVE: blob_id 16 + size u32 BE.
+pub const OP_BLOB_RESERVE: u8 = 26;
+/// BLOB_RESERVED: ответ: blob_id 16.
+pub const OP_BLOB_RESERVED: u8 = 27;
+/// Статусы доставки (без «прочитано» — read receipts отложены).
+pub const ST_ACCEPTED: u8 = 1;
+/// Статусы доставки (без «прочитано» — read receipts отложены).
+pub const ST_DELIVERED: u8 = 2;
+/// Статусы доставки (без «прочитано» — read receipts отложены).
+pub const ST_ERROR: u8 = 3;
 
 /// Максимальный ПОЛНЫЙ кадр в байтах (ARCH §8: frame до 16 KiB).
 pub const MAX_FRAME: usize = 16 * 1024;
@@ -47,6 +84,18 @@ pub const MAILBOX_EVENTS_MAX: usize = 512;
 pub const MAILBOX_BYTES_MAX: usize = 32 * 1024 * 1024;
 /// TTL недоставленных данных и blobs, секунд (7 суток).
 pub const DATA_TTL_SECS: u64 = 7 * 24 * 3600;
+/// Sweep незавершённых blob-reservation, секунд (24 часа).
+pub const BLOB_RESERVE_TTL_SECS: u64 = 24 * 3600;
+/// Максимум ciphertext в SEND: кадр минус recipient+msgid.
+pub const CIPHERTEXT_MAX: usize = MAX_PAYLOAD - 32;
+/// Максимум событий в одном FETCH_RESP (кап пачки).
+pub const FETCH_BATCH_MAX: usize = 32;
+/// Длина user_id / message_id / blob_id / device static.
+pub const ID_LEN: usize = 16;
+/// Длина device static / identity / prekey pubkey.
+pub const KEY_LEN32: usize = 32;
+/// Длина Ed25519-подписи prekey.
+pub const SIG_LEN: usize = 64;
 
 /// Ошибка декодирования кадра.
 #[derive(Debug, PartialEq, Eq)]

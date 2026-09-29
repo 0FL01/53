@@ -1,4 +1,4 @@
-# dmsg protocol: bootstrap invite (P3)
+# dmsg protocol: bootstrap invite (P3), mailbox (P4)
 
 Приглашение — bearer-токен + данные для подключения. Приватных ключей в нём нет.
 
@@ -25,7 +25,8 @@ QR — тот же payload (байты до base64). Сканер офлайн, 
 ## Opcode (wire v1, резервы)
 
 - `1–15` — auth/enrol: `HELLO=1` (legacy, удалён с P2), `WELCOME=2`, `AUTH_DOMAIN=3`, `ENROL=4` (token 32), `ENROLLED=5` (user_id 16 + contact_id 12 без дефисов), `ERROR=6` (код u8).
-- `16+` — mailbox и дальше (P4).
+- `16+` — mailbox (P4): `SEND=16` (recipient_user 16 + sender_msg_id 16 + ciphertext ≤ CIPHERTEXT_MAX) → `SEND_ACK=17` (status + sender_msg_id); `FETCH=18` (batch ≤ 32) → `FETCH_RESP=19` (seq8 + recipient 16 + sender_device 32 + msg_id 16 + ciphertext); `DELIVERY_ACK=20` (список seq8, селективный); `UPLOAD_PREKEYS=21` (пачки device 32 + key_id 4 + pubkey 32 + sig 64); `CLAIM=22` (device 32) → `PREKEY=24` (device 32 + key_id 4 + pubkey 32 + sig 64) или `ERROR 5`; `COUNT=23` → `COUNT_RESP=25` (unconsumed u32); `BLOB_RESERVE=26` (blob_id 16 + size u32) → `BLOB_RESERVED=27`.
+- Статусы `SEND_ACK`: `1` accepted, `2` delivered, `3` error. Коды ERROR: `5` no-prekey, `6` quota (1–4 — enrol, см. ниже).
 
 ## Коды ERROR
 

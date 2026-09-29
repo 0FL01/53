@@ -1,11 +1,11 @@
-//! SQLite проводка P1: открытие (WAL + synchronous=FULL), миграции схемы v1.
-//! Бизнес-логики нет — только схема и версия. ACK после commit появится с mailbox (P4).
+//! SQLite: открытие (WAL + synchronous=FULL), миграции схемы v1→v3.
+//! v2: cursors (закладка получателя). v3: device_identities (binding prekeys).
 
 use rusqlite::Connection;
 use std::path::Path;
 
 /// Текущая версия схемы.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 3;
 
 const MIGRATION_V1: &str = "
 CREATE TABLE IF NOT EXISTS meta(
@@ -65,6 +65,23 @@ CREATE TABLE IF NOT EXISTS blob_meta(
 );
 ";
 
+const MIGRATION_V2: &str = "
+CREATE TABLE IF NOT EXISTS cursors(
+  recipient_user_id BLOB NOT NULL,
+  device_key BLOB NOT NULL,
+  last_seq INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(recipient_user_id, device_key)
+);
+";
+
+const MIGRATION_V3: &str = "
+CREATE TABLE IF NOT EXISTS device_identities(
+  device_key BLOB PRIMARY KEY,
+  user_id BLOB NOT NULL,
+  identity_pubkey BLOB NOT NULL
+);
+";
+
 /// Открыть БД с режимом msgd: WAL + FULL. Возвращает соединение (миграции — migrate()).
 pub fn connect<P: AsRef<Path>>(path: P) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
@@ -79,6 +96,8 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<i64> {
 
 fn migrate_inner(conn: &Connection) -> rusqlite::Result<i64> {
     conn.execute_batch(MIGRATION_V1)?;
+    conn.execute_batch(MIGRATION_V2)?;
+    conn.execute_batch(MIGRATION_V3)?;
     let version: i64 = conn.query_row(
         "SELECT value FROM meta WHERE key='schema_version'",
         [],
