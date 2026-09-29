@@ -4,12 +4,37 @@
 //! Первая загрузка фиксирует identity; смена identity → отказ (тест P4.4).
 
 use rusqlite::{Connection, OptionalExtension};
+use dmsg_protocol::{ERR_BAD, ERR_BUSY};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum PrekeyError {
     Bad,
     IdentityChanged,
+    /// SQLITE_BUSY: повторить позже (wire ERR_BUSY=7). Маппится ДО схлопывания в Store.
+    Busy,
     Store(String),
+}
+
+/// Wire-код ошибки (см. dmsg_protocol::ERR_*).
+impl PrekeyError {
+    pub fn code(&self) -> u8 {
+        match self {
+            PrekeyError::Bad | PrekeyError::IdentityChanged | PrekeyError::Store(_) => ERR_BAD,
+            PrekeyError::Busy => ERR_BUSY,
+        }
+    }
+}
+
+/// SQLITE_BUSY → Busy, остальное — Store с контекстом. Вызывать на КАЖДОМ
+/// rusqlite-результате до схлопывания, иначе busy утонет в Store→ERR_BAD.
+fn store(prefix: &str, e: rusqlite::Error) -> PrekeyError {
+    if matches!(&e, rusqlite::Error::SqliteFailure(f, _)
+        if f.code == rusqlite::ErrorCode::DatabaseBusy)
+    {
+        PrekeyError::Busy
+    } else {
+        PrekeyError::Store(format!("{prefix}: {e}"))
+    }
 }
 
 pub struct Entry<'a> {
@@ -55,7 +80,7 @@ pub fn upload(
             return Err(PrekeyError::Bad);
         }
     }
-    let tx = conn.transaction().map_err(|e| PrekeyError::Store(e.to_string()))?;
+    let tx = conn.transaction().map_err(|e| store("begin", e))?;
     let stored: Option<Vec<u8>> = tx
         .query_row(
             "SELECT identity_pubkey FROM device_identities WHERE device_key=?1",
@@ -63,14 +88,14 @@ pub fn upload(
             |r| r.get(0),
         )
         .optional()
-        .map_err(|e| PrekeyError::Store(e.to_string()))?;
+        .map_err(|e| store("identity", e))?;
     match stored {
         None => {
             tx.execute(
                 "INSERT INTO device_identities(device_key,user_id,identity_pubkey) VALUES(?1,?2,?3)",
                 rusqlite::params![device, user, identity],
             )
-            .map_err(|e| PrekeyError::Store(e.to_string()))?;
+            .map_err(|e| store("identity", e))?;
         }
         Some(prev) if prev.as_slice() != identity => return Err(PrekeyError::IdentityChanged),
         Some(_) => {}
@@ -82,7 +107,7 @@ pub fn upload(
              ON CONFLICT(device_key,key_id) DO UPDATE SET pubkey=excluded.pubkey,signature=excluded.signature",
             rusqlite::params![device, e.key_id, e.pubkey, e.sig, e.one_time],
         )
-        .map_err(|e| PrekeyError::Store(e.to_string()))?;
+        .map_err(|e| store("prekey", e))?;
     }
     let n: i64 = tx
         .query_row(
@@ -90,14 +115,14 @@ pub fn upload(
             [device],
             |r| r.get(0),
         )
-        .map_err(|e| PrekeyError::Store(e.to_string()))?;
-    tx.commit().map_err(|e| PrekeyError::Store(e.to_string()))?;
+        .map_err(|e| store("count", e))?;
+    tx.commit().map_err(|e| store("commit", e))?;
     Ok(n)
 }
 
 /// Claim: атомарно забрать один unconsumed one-time key (SELECT+UPDATE в TX).
 pub fn claim(conn: &mut Connection, device: &[u8]) -> Result<Option<(u32, Vec<u8>)>, PrekeyError> {
-    let tx = conn.transaction().map_err(|e| PrekeyError::Store(e.to_string()))?;
+    let tx = conn.transaction().map_err(|e| store("begin", e))?;
     let row: Option<(u32, Vec<u8>)> = tx
         .query_row(
             "SELECT key_id,pubkey FROM prekeys WHERE device_key=?1 AND one_time=1 AND consumed=0 ORDER BY key_id LIMIT 1",
@@ -105,15 +130,15 @@ pub fn claim(conn: &mut Connection, device: &[u8]) -> Result<Option<(u32, Vec<u8
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()
-        .map_err(|e| PrekeyError::Store(e.to_string()))?;
+        .map_err(|e| store("claim", e))?;
     if let Some((id, _)) = row {
         tx.execute(
             "UPDATE prekeys SET consumed=1 WHERE device_key=?1 AND key_id=?2",
             rusqlite::params![device, id],
         )
-        .map_err(|e| PrekeyError::Store(e.to_string()))?;
+        .map_err(|e| store("consume", e))?;
     }
-    tx.commit().map_err(|e| PrekeyError::Store(e.to_string()))?;
+    tx.commit().map_err(|e| store("commit", e))?;
     Ok(row)
 }
 
@@ -124,7 +149,7 @@ pub fn count(conn: &Connection, device: &[u8]) -> Result<i64, PrekeyError> {
         [device],
         |r| r.get(0),
     )
-    .map_err(|e| PrekeyError::Store(e.to_string()))
+    .map_err(|e| store("count", e))
 }
 
 #[cfg(test)]
@@ -184,5 +209,13 @@ mod tests {
             upload(&mut conn, &dev, &user, &opub, &oe).unwrap_err(),
             PrekeyError::IdentityChanged
         );
+    }
+
+    #[test]
+    fn sqlite_busy_maps_to_busy_code() {
+        let e = rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(5), None);
+        assert_eq!(store("t", e), PrekeyError::Busy);
+        assert_eq!(PrekeyError::Busy.code(), dmsg_protocol::ERR_BUSY);
+        assert_eq!(dmsg_protocol::ERR_BUSY, 7);
     }
 }

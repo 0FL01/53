@@ -173,14 +173,17 @@ async fn replay_msg1_gives_no_session() {
 
 #[tokio::test]
 async fn oversize_handshake_closed() {
+    // Bound wire-чтения сервера: MAX_FRAME+16 = 16400 (кадр + Noise-tag).
+    // 16401 и u16::MAX закрываются сразу, не дожидаясь тела.
     let srv = start(17114);
-    let mut s = TcpStream::connect(format!("127.0.0.1:{}", srv.port)).await.unwrap();
-    // заявленная длина больше MAX_FRAME
-    s.write_all(&u16::MAX.to_be_bytes()).await.unwrap();
-    s.write_all(&[0u8; 64]).await.unwrap();
-    let mut tmp = [0u8; 8];
-    let r = tokio::time::timeout(Duration::from_secs(12), s.read(&mut tmp)).await;
-    assert!(matches!(r, Ok(Ok(0))) || matches!(r, Ok(Err(_))), "must close, got {r:?}");
+    for len in [16401u16, u16::MAX] {
+        let mut s = TcpStream::connect(format!("127.0.0.1:{}", srv.port)).await.unwrap();
+        s.write_all(&len.to_be_bytes()).await.unwrap();
+        s.write_all(&[0u8; 64]).await.unwrap();
+        let mut tmp = [0u8; 8];
+        let r = tokio::time::timeout(Duration::from_secs(12), s.read(&mut tmp)).await;
+        assert!(matches!(r, Ok(Ok(0))) || matches!(r, Ok(Err(_))), "len={len}: must close, got {r:?}");
+    }
 }
 
 #[tokio::test]

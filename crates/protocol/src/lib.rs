@@ -20,7 +20,8 @@ pub const OP_AUTH_DOMAIN: u8 = 3;
 pub const OP_ENROL: u8 = 4;
 /// ENROLLED: payload — user_id 16 + contact_id 12 (без дефисов).
 pub const OP_ENROLLED: u8 = 5;
-/// ERROR: payload — код u8: 1 bad/unknown, 2 expired, 3 revoked, 4 bound-to-other.
+/// ERROR: payload — код u8: 1 bad/unknown, 2 expired, 3 revoked, 4 bound-to-other,
+/// 5 no-prekey, 6 quota, 7 busy. ERROR=6 — это opcode кадра, не путать с payload-кодом 6.
 /// Коды различимы специально (токен 256 бит не перебрать — оракла нет).
 pub const OP_ERROR: u8 = 6;
 /// Коды ERROR.
@@ -35,6 +36,10 @@ pub const ERR_BOUND_OTHER: u8 = 4;
 pub const ERR_NO_PREKEY: u8 = 5;
 /// Коды ERROR.
 pub const ERR_QUOTA: u8 = 6;
+/// Коды ERROR: SQLITE_BUSY — повторить позже (retryable).
+/// Правило для клиентов: любой неизвестный payload-код считать retryable (C4),
+/// старые клиенты уже так себя ведут, новые коды их не ломают.
+pub const ERR_BUSY: u8 = 7;
 /// Диапазон 16+ — mailbox и дальше (P4).
 /// SEND: recipient 16 + message_id 16 + ciphertext (rest, ≤ CIPHERTEXT_MAX).
 pub const OP_SEND: u8 = 16;
@@ -88,6 +93,9 @@ pub const DATA_TTL_SECS: u64 = 7 * 24 * 3600;
 pub const BLOB_RESERVE_TTL_SECS: u64 = 24 * 3600;
 /// Максимум ciphertext в SEND: кадр минус recipient+msgid.
 pub const CIPHERTEXT_MAX: usize = MAX_PAYLOAD - 32;
+/// Максимум wire-ciphertext одного attachment, 512 KiB.
+/// Зеркало blob::BLOB_SIZE_MAX: парсер parse_reserve режет раньше БД.
+pub const BLOB_SIZE_MAX: u32 = 512 * 1024;
 /// Максимум событий в одном FETCH_RESP (кап пачки).
 pub const FETCH_BATCH_MAX: usize = 32;
 /// Длина user_id / message_id / blob_id / device static.
@@ -110,6 +118,9 @@ pub enum FrameError {
 
 /// Декодировать один кадр из начала буфера.
 /// Возвращает `(version, opcode, payload)` и полную длину кадра в байтах.
+/// Контракт: длина из сети — через usize::from (без as); переполнение
+/// HEADER_LEN+len — Oversize через checked_add; срез — только после проверки
+/// total против реальной длины (no panic на сетевых байтах).
 pub fn decode_frame(buf: &[u8]) -> Result<(u8, u8, &[u8], usize), FrameError> {
     if buf.len() < HEADER_LEN {
         return Err(FrameError::Truncated);
@@ -118,7 +129,7 @@ pub fn decode_frame(buf: &[u8]) -> Result<(u8, u8, &[u8], usize), FrameError> {
     if ver != VERSION {
         return Err(FrameError::UnknownVersion(ver));
     }
-    let len = u16::from_be_bytes([buf[2], buf[3]]) as usize;
+    let len = usize::from(u16::from_be_bytes([buf[2], buf[3]]));
     let total = HEADER_LEN
         .checked_add(len)
         .filter(|&t| t <= MAX_FRAME)
@@ -130,14 +141,18 @@ pub fn decode_frame(buf: &[u8]) -> Result<(u8, u8, &[u8], usize), FrameError> {
 }
 
 /// Закодировать кадр. Ошибка — если payload не влезает в MAX_FRAME.
+/// Длина в заголовок — через u16::try_from (без as; после проверки всегда Ok,
+/// т.к. MAX_PAYLOAD < u16::MAX).
 pub fn encode_frame(opcode: u8, payload: &[u8]) -> Result<Vec<u8>, FrameError> {
     if payload.len() > MAX_PAYLOAD {
         return Err(FrameError::Oversize(HEADER_LEN + payload.len()));
     }
+    let len16 = u16::try_from(payload.len())
+        .map_err(|_| FrameError::Oversize(HEADER_LEN + payload.len()))?;
     let mut out = Vec::with_capacity(HEADER_LEN + payload.len());
     out.push(VERSION);
     out.push(opcode);
-    out.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    out.extend_from_slice(&len16.to_be_bytes());
     out.extend_from_slice(payload);
     Ok(out)
 }

@@ -195,6 +195,13 @@ fn issue_token(srv: &Server, ttl: &str) -> [u8; 32] {
     b.token
 }
 
+/// Hex в файл 600 для --file команд (argv-hex удалён, R3/C1).
+fn write_hex(srv: &Server, name: &str, hex: &str) -> String {
+    let p = srv.dir.join(name);
+    std::fs::write(&p, format!("{hex}\n")).unwrap();
+    p.to_str().unwrap().to_string()
+}
+
 #[tokio::test]
 async fn issue_enrol_replay() {
     let srv = start(17201);
@@ -237,7 +244,8 @@ async fn revoke_closes_and_rejects() {
     let (mut t, mut s) = connect_auth_with(&srv, &priv32).await.unwrap();
     assert_eq!(enrol(&mut t, &mut s, &token).await.unwrap().0, 5);
     let hex: String = token.iter().map(|x| format!("{x:02x}")).collect();
-    assert_eq!(srv.msgctl(&["invite-revoke", &hex]).trim(), "ok");
+    let f = write_hex(&srv, "tok.hex", &hex);
+    assert_eq!(srv.msgctl(&["invite-revoke", "--file", &f]).trim(), "ok");
     // живая сессия закрыта
     let mut tmp = [0u8; 8];
     let r = tokio::time::timeout(Duration::from_secs(3), s.read(&mut tmp)).await;
@@ -259,9 +267,10 @@ async fn block_closes_and_rejects_replay() {
     let priv32: [u8; 32] = kp.private[..32].try_into().unwrap();
     let dev_pub = PublicKey::from(&StaticSecret::from(priv32));
     let dev_hex: String = dev_pub.as_bytes().iter().map(|x| format!("{x:02x}")).collect();
+    let f = write_hex(&srv, "dev.hex", &dev_hex);
     let (mut t, mut s) = connect_auth_with(&srv, &priv32).await.unwrap();
     assert_eq!(enrol(&mut t, &mut s, &token).await.unwrap().0, 5);
-    assert_eq!(srv.msgctl(&["device-block", &dev_hex]).trim(), "ok");
+    assert_eq!(srv.msgctl(&["device-block", "--file", &f]).trim(), "ok");
     // живая сессия закрыта
     let mut tmp = [0u8; 8];
     let r = tokio::time::timeout(Duration::from_secs(3), s.read(&mut tmp)).await;

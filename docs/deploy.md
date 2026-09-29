@@ -35,17 +35,20 @@ S=/var/lib/msgd/msgctl.sock
 docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl stats       # счётчики
 docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl user-list    # пользователи (префиксы)
 docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl quotas       # квоты vs лимиты
-docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl invite-issue  # URI только сюда, не в логи
-docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl invite-revoke <hex-токена>
-docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl device-block <hex-ключа>
+docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl invite-issue --out-file /var/lib/msgd/invite.txt  # URI только в файл 0600 (refuse-if-exists)
+docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl invite-revoke --file /path/token.hex
+docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl device-block --file /path/devkey.hex
 docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl backup        # снапшот db+blobs
 ```
 
-Ошибся блокировкой — `device-unblock <hex>`. Потерял телефон — `device-block` + новый `invite-issue` (перепривязки старого ключа нет; unblock для этого не использовать).
+Секреты — только файлами 600, hex в argv запрещён (светится в `ps`).
+Без `--out-file` URI печатается в stdout + warning (только руками, не в скрипты/логи).
+
+Ошибся блокировкой — `device-unblock --file <hex-файл>`. Потерял телефон — `device-block --file` + новый `invite-issue --out-file` (перепривязки старого ключа нет; unblock для этого не использовать).
 
 ## Backup / restore
 
-- `backup` кладёт `snap-<ts>/` (msgd.db + blobs/) в volume, держит 3 штуки, проверяет `integrity_check`.
+- `backup` кладёт `snap-<ts>/` (msgd.db + blobs/) в volume, держит 3 штуки (ротация — до записи нового; недоснапшот удаляется), проверяет `integrity_check`.
 - Покрывает: битую БД, ошибку оператора. НЕ покрывает: смерть диска (тот же диск, SPOF).
 - Секреты в снапшот не входят (статичны): архивировать `secrets/` отдельно одной командой `cp -a`.
 - Рестор (только руками, drill — на отдельной копии, никогда поверх прода):

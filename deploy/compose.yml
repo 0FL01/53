@@ -21,9 +21,19 @@ services:
     ports:
       - "${DNS_BIND_IP:?DNS_BIND_IP is required}:${DNS_PUBLIC_PORT:-53}:${DNS_INTERNAL_PORT:-5353}/udp"
     secrets:
-      - carrier_cert.pem
-      - carrier_key.pem
-      - reset_seed.hex
+      - source: carrier_cert.pem
+        target: carrier_cert.pem
+        mode: 0444
+      - source: carrier_key.pem
+        target: carrier_key.pem
+        uid: "65532"
+        gid: "65532"
+        mode: 0400
+      - source: reset_seed.hex
+        target: reset_seed.hex
+        uid: "65532"
+        gid: "65532"
+        mode: 0400
     restart: unless-stopped
     # Healthcheck нет: distroless без shell, у slipstream нет HTTP.
     # Живость пути проверяет S3-диагностика через msgd.
@@ -45,8 +55,14 @@ services:
       NOISE_KEY_FILE: /run/secrets/noise_key
       CARRIER_CERT_FILE: /run/secrets/carrier_cert.pem
     secrets:
-      - noise_key
-      - carrier_cert.pem
+      - source: noise_key
+        target: noise_key
+        uid: "65532"
+        gid: "65532"
+        mode: 0400
+      - source: carrier_cert.pem
+        target: carrier_cert.pem
+        mode: 0444
     volumes:
       - msgd-data:/var/lib/msgd
       - blobs-data:/var/lib/msgd/blobs

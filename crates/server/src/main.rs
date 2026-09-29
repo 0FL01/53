@@ -5,6 +5,9 @@
 //! OP_AUTH_DOMAIN внутри шифрованного канала. Неизвестный key после handshake
 //! получает только enrolment API (мясо P3). Pre-auth bounded: кап + timeout,
 //! close без ban (per-IP ban на общем резолвере отключил бы всех, ARCH §4).
+//! R1: deadline 10s — только handshake-фаза и pre-enrol чтения; живая сессия —
+//! per-read idle 600s (счётчик idle_close). Двухкап pre 8 / post 20, cleanup
+//! live/pre-карт через SessionGuard/Drop, pre-auth реестр device→Notify.
 
 mod db;
 mod blob;
@@ -26,8 +29,8 @@ use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::{Notify, Semaphore};
 
 use dmsg_protocol::{
-    bootstrap, decode_frame, encode_frame, mailbox as mp, DOMAIN_MAX, ERR_BAD, ERR_BOUND_OTHER,
-    ERR_EXPIRED, ERR_NO_PREKEY, ERR_QUOTA, ERR_REVOKED, MAX_FRAME, OP_AUTH_DOMAIN, OP_BLOB_RESERVE,
+    bootstrap, decode_frame, encode_frame, mailbox as mp, DOMAIN_MAX, ERR_BAD,
+    ERR_NO_PREKEY, ERR_REVOKED, MAX_FRAME, OP_AUTH_DOMAIN, OP_BLOB_RESERVE,
     OP_BLOB_RESERVED, OP_CLAIM, OP_COUNT, OP_COUNT_RESP, OP_DELIVERY_ACK, OP_ENROL, OP_ENROLLED,
     OP_ERROR, OP_FETCH, OP_FETCH_RESP, OP_PREKEY, OP_SEND, OP_SEND_ACK, OP_UPLOAD_PREKEYS,
     OP_WELCOME, ST_ACCEPTED, ST_DELIVERED,
@@ -35,15 +38,27 @@ use dmsg_protocol::{
 
 /// Кап незавершённых handshake (≪16 пилота, резерв до транспортных 32).
 const PRE_AUTH_CAP: usize = 8;
+/// Кап post-handshake сессий: permit держится до конца handle_conn.
+const POST_AUTH_CAP: usize = 20;
+/// Deadline handshake-фазы (IK + AUTH_DOMAIN/WELCOME) и pre-enrol чтений.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Per-read idle-timeout живой сессии после ENROL (счётчик idle_close).
+const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+/// Transport-буферы: MAX_FRAME plaintext + 16 Noise-tag + 2 length-prefix.
+const HS_BUF_LEN: usize = MAX_FRAME + 18; // 16402
+/// Bound шифртекста на wire: MAX_FRAME + 16 tag.
+const CIPHER_BOUND: usize = MAX_FRAME + 16; // 16400
 
 #[derive(Default)]
 struct Counters {
     hs_ok: AtomicU64,
     hs_fail: AtomicU64,
     pre_auth_full: AtomicU64,
+    post_auth_full: AtomicU64,
     auth_ok: AtomicU64,
     mismatch: AtomicU64,
     proto_err: AtomicU64,
+    idle_close: AtomicU64,
     enrol_ok: AtomicU64,
     enrol_fail: AtomicU64,
     send_ok: AtomicU64,
@@ -60,6 +75,10 @@ struct State {
     counters: Arc<Counters>,
     db: Arc<Mutex<rusqlite::Connection>>,
     live: Arc<Mutex<HashMap<Vec<u8>, Vec<Arc<Notify>>>>>,
+    /// Pre-auth реестр device_key→Notify: handshake пройден, ENROL ещё нет.
+    /// Минимальный: только живые pre-enrol сессии, lifetime ограничен 10s
+    /// pre-enrol чтением + Drop-чисткой. revoke/block будит обе карты.
+    pre: Arc<Mutex<HashMap<Vec<u8>, Vec<Arc<Notify>>>>>,
 }
 
 struct Config {
@@ -104,13 +123,14 @@ fn load_config() -> Result<Config, String> {
     })
 }
 
-/// Прочитать length-prefixed сообщение (2 байта BE + тело), bound MAX_FRAME.
-/// Формат handshake-сообщений Noise (не app-фреймы).
+/// Прочитать length-prefixed сообщение (2 байта BE + тело), bound CIPHER_BOUND.
+/// Формат handshake-сообщений Noise (не app-фреймы) и transport-шифртекста:
+/// кадр до MAX_FRAME + 16 Noise-tag.
 async fn read_hs_msg(stream: &mut tokio::net::TcpStream) -> Result<Vec<u8>, &'static str> {
     let mut hdr = [0u8; 2];
     stream.read_exact(&mut hdr).await.map_err(|_| "eof")?;
     let len = u16::from_be_bytes(hdr) as usize;
-    if len == 0 || len > MAX_FRAME {
+    if len == 0 || len > CIPHER_BOUND {
         return Err("oversize");
     }
     let mut buf = vec![0u8; len];
@@ -118,23 +138,94 @@ async fn read_hs_msg(stream: &mut tokio::net::TcpStream) -> Result<Vec<u8>, &'st
     Ok(buf)
 }
 
+/// То же с deadline: handshake-фаза — HANDSHAKE_TIMEOUT, живая сессия — IDLE_TIMEOUT.
+async fn read_hs_msg_timeout(
+    stream: &mut tokio::net::TcpStream,
+    d: Duration,
+) -> Result<Vec<u8>, &'static str> {
+    tokio::time::timeout(d, read_hs_msg(stream)).await.map_err(|_| "timeout")?
+}
+
 async fn write_hs_msg(stream: &mut tokio::net::TcpStream, msg: &[u8]) -> std::io::Result<()> {
     stream.write_all(&(msg.len() as u16).to_be_bytes()).await?;
     stream.write_all(msg).await
 }
 
+/// Cleanup live/pre-карт через Drop: владеет notify и ключами.
+/// No-op, пока сессия нигде не зарегистрирована (оба key None): коннект,
+/// упавший до регистрации, ничего не трогает.
+struct SessionGuard {
+    live: Arc<Mutex<HashMap<Vec<u8>, Vec<Arc<Notify>>>>>,
+    pre: Arc<Mutex<HashMap<Vec<u8>, Vec<Arc<Notify>>>>>,
+    pre_key: Option<Vec<u8>>,
+    live_key: Option<Vec<u8>>,
+    notify: Arc<Notify>,
+}
+
+impl SessionGuard {
+    fn unlist(
+        map: &Arc<Mutex<HashMap<Vec<u8>, Vec<Arc<Notify>>>>>,
+        key: &[u8],
+        notify: &Arc<Notify>,
+    ) {
+        let mut m = map.lock().expect("session map");
+        if let Some(v) = m.get_mut(key) {
+            v.retain(|n| !Arc::ptr_eq(n, notify));
+            if v.is_empty() {
+                m.remove(key);
+            }
+        }
+    }
+
+    /// ENROL-успех: снять с pre-карты, встать в live. Идемпотентно
+    /// (replay ENROL тем же ключом не плодит дубликаты).
+    fn enrol(&mut self, device_key: &[u8]) {
+        if let Some(pk) = self.pre_key.take() {
+            Self::unlist(&self.pre, &pk, &self.notify);
+        }
+        if self.live_key.as_deref() == Some(device_key) {
+            return;
+        }
+        if let Some(prev) = self.live_key.take() {
+            Self::unlist(&self.live, &prev, &self.notify);
+        }
+        self.live
+            .lock()
+            .expect("live")
+            .entry(device_key.to_vec())
+            .or_default()
+            .push(self.notify.clone());
+        self.live_key = Some(device_key.to_vec());
+    }
+}
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        if let Some(k) = self.live_key.take() {
+            Self::unlist(&self.live, &k, &self.notify);
+        }
+        if let Some(k) = self.pre_key.take() {
+            Self::unlist(&self.pre, &k, &self.notify);
+        }
+    }
+}
+
 /// Один коннект: Noise IK handshake → AUTH_DOMAIN → WELCOME → цикл сессии.
 /// device_key — static инициатора из IK (get_remote_static), НЕ из тел сообщений.
+/// Timeout 10s — только handshake-фаза (IK + AUTH_DOMAIN/WELCOME) и pre-enrol
+/// чтения; живая сессия после ENROL — per-read idle 600s (счётчик idle_close).
 /// После ENROLLED задача регистрирует Notify в live-карте; revoke будит и закрывает.
+/// Cleanup обеих карт — SessionGuard/Drop, владеющий ключами и notify.
 async fn handle_conn(
     mut stream: tokio::net::TcpStream,
     st: Arc<State>,
-    _permit: tokio::sync::OwnedSemaphorePermit,
+    pre_permit: tokio::sync::OwnedSemaphorePermit,
+    post_auth: Arc<Semaphore>,
 ) {
     let cfg = &st.cfg;
     let c = &st.counters;
     let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or("?".into());
-    let mut hsbuf = vec![0u8; 65535];
+    let mut hsbuf = vec![0u8; HS_BUF_LEN];
     let mut hs = match snow::Builder::new(noise::PATTERN.parse().expect("pattern"))
         .local_private_key(&cfg.noise_private)
         .and_then(|b| b.build_responder())
@@ -146,8 +237,8 @@ async fn handle_conn(
             return;
         }
     };
-    // IK: <- читаем msg1, -> пишем msg2.
-    let msg1 = match read_hs_msg(&mut stream).await {
+    // IK: <- читаем msg1 (deadline 10s — часть handshake-фазы).
+    let msg1 = match read_hs_msg_timeout(&mut stream, HANDSHAKE_TIMEOUT).await {
         Ok(m) => m,
         Err(e) => {
             c.hs_fail.fetch_add(1, Ordering::Relaxed);
@@ -192,11 +283,37 @@ async fn handle_conn(
         }
     };
     let mut transport = hs.into_transport_mode().expect("IK complete");
-    drop(_permit); // слот pre-auth освобождён: handshake завершён
     c.hs_ok.fetch_add(1, Ordering::Relaxed);
+    // Двухкап: post-auth слот на весь остаток коннекта (permit до конца функции).
+    // Нет слота — сразу close + счётчик. Pre-слот освобождаем только здесь.
+    let _post_permit = match post_auth.try_acquire_owned() {
+        Ok(p) => p,
+        Err(_) => {
+            c.post_auth_full.fetch_add(1, Ordering::Relaxed);
+            eprintln!("msgd: post-auth full, closing {peer}");
+            return;
+        }
+    };
+    drop(pre_permit);
+    // Pre-auth реестр: handshake пройден, ENROL ещё нет. revoke/block по
+    // привязанному устройству будит и такие сессии (wake_device смотрит обе карты).
+    let notify = Arc::new(Notify::new());
+    st.pre
+        .lock()
+        .expect("pre")
+        .entry(device_key.to_vec())
+        .or_default()
+        .push(notify.clone());
+    let mut guard = SessionGuard {
+        live: st.live.clone(),
+        pre: st.pre.clone(),
+        pre_key: Some(device_key.to_vec()),
+        live_key: None,
+        notify: notify.clone(),
+    };
 
-    // Транспорт: читаем шифрованное → decrypt → app-фрейм.
-    let cipher = match read_hs_msg(&mut stream).await {
+    // Транспорт: читаем шифрованное → decrypt → app-фрейм (deadline 10s).
+    let cipher = match read_hs_msg_timeout(&mut stream, HANDSHAKE_TIMEOUT).await {
         Ok(m) => m,
         Err(e) => {
             c.proto_err.fetch_add(1, Ordering::Relaxed);
@@ -204,7 +321,7 @@ async fn handle_conn(
             return;
         }
     };
-    let mut plain = vec![0u8; 65535];
+    let mut plain = vec![0u8; HS_BUF_LEN];
     let n = match transport.read_message(&cipher, &mut plain) {
         Ok(n) => n,
         Err(e) => {
@@ -213,6 +330,12 @@ async fn handle_conn(
             return;
         }
     };
+    debug_assert!(n <= MAX_FRAME);
+    if n > MAX_FRAME {
+        c.proto_err.fetch_add(1, Ordering::Relaxed);
+        eprintln!("msgd: plaintext over bound from {peer}");
+        return;
+    }
     let mut cipher = cipher;
     cipher.fill(0);
     let (ver, op, payload, _) = match decode_frame(&plain[..n]) {
@@ -230,7 +353,7 @@ async fn handle_conn(
         return;
     }
     let inner = encode_frame(OP_WELCOME, cfg.domain.as_bytes()).expect("domain fits");
-    let mut out = vec![0u8; 65535];
+    let mut out = vec![0u8; HS_BUF_LEN];
     let wn = match transport.write_message(&inner, &mut out) {
         Ok(n) => n,
         Err(e) => {
@@ -247,20 +370,35 @@ async fn handle_conn(
 
     // Цикл сессии: до enrol — только ENROL; после — ENROL(replay)/SEND/FETCH/DELIVERY_ACK.
     // Неизвестное → close. Revoke/block будит через Notify → graceful close.
-    // В конце — deregister. DB-транзакции короткие, никогда через .await.
-    let notify = Arc::new(Notify::new());
-    let mut enrolled_key: Option<Vec<u8>> = None;
+    // Pre-enrol чтения — 10s (реестр не залипает); после ENROL — per-read idle 600s.
+    // DB-транзакции короткие, никогда через .await.
     let mut enrolled_user: Option<[u8; 16]> = None;
     let close = async {
         loop {
-            let cipher = read_hs_msg(&mut stream).await.map_err(|_| ())?;
-            let mut plain = vec![0u8; 65535];
+            let idle = if enrolled_user.is_some() { IDLE_TIMEOUT } else { HANDSHAKE_TIMEOUT };
+            let cipher = match read_hs_msg_timeout(&mut stream, idle).await {
+                Ok(m) => m,
+                Err(_) => {
+                    if enrolled_user.is_some() {
+                        c.idle_close.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        c.proto_err.fetch_add(1, Ordering::Relaxed);
+                    }
+                    return Err(());
+                }
+            };
+            let mut plain = vec![0u8; HS_BUF_LEN];
             let n = transport.read_message(&cipher, &mut plain).map_err(|_| ())?;
+            debug_assert!(n <= MAX_FRAME);
+            if n > MAX_FRAME {
+                c.proto_err.fetch_add(1, Ordering::Relaxed);
+                return Err(());
+            }
             let mut cipher = cipher;
             cipher.fill(0);
             let (_, op, payload, _) = decode_frame(&plain[..n]).map_err(|_| ())?;
             let reply = if op == OP_ENROL && payload.len() == 32 {
-                enrol_reply(&st, &c, &device_key, &payload, &notify, &mut enrolled_key, &mut enrolled_user)?
+                enrol_reply(&st, &c, &device_key, &payload, &mut guard, &mut enrolled_user)?
             } else if enrolled_user.is_some() {
                 let user = enrolled_user.expect("checked");
                 match op {
@@ -268,9 +406,9 @@ async fn handle_conn(
                     OP_FETCH => fetch_reply(&st, &c, &user, &device_key, &payload)?,
                     OP_DELIVERY_ACK => ack_reply(&st, &c, &user, &device_key, &payload)?,
                     OP_UPLOAD_PREKEYS => upload_reply(&st, &c, &user, &device_key, &payload)?,
-                    OP_CLAIM => claim_reply(&st, &c, &payload)?,
-                    OP_COUNT => count_reply(&st, &c, &payload)?,
-                    OP_BLOB_RESERVE => reserve_reply(&st, &c, &user, &payload)?,
+                    OP_CLAIM => claim_reply(&st, &c, &device_key, &payload)?,
+                    OP_COUNT => count_reply(&st, &c, &device_key, &payload)?,
+                    OP_BLOB_RESERVE => reserve_reply(&st, &c, &user, &device_key, &payload)?,
                     _ => {
                         c.proto_err.fetch_add(1, Ordering::Relaxed);
                         return Err(());
@@ -280,7 +418,7 @@ async fn handle_conn(
                 c.proto_err.fetch_add(1, Ordering::Relaxed);
                 return Err(());
             };
-            let mut out = vec![0u8; 65535];
+            let mut out = vec![0u8; HS_BUF_LEN];
             let wn = transport.write_message(&reply, &mut out).map_err(|_| ())?;
             write_hs_msg(&mut stream, &out[..wn]).await.map_err(|_| ())?;
             out.fill(0);
@@ -294,41 +432,29 @@ async fn handle_conn(
         }
         _ = close => {}
     }
-    if let Some(k) = enrolled_key {
-        let mut live = st.live.lock().expect("live");
-        if let Some(v) = live.get_mut(&k) {
-            v.retain(|n| !Arc::ptr_eq(n, &notify));
-            if v.is_empty() {
-                live.remove(&k);
-            }
-        }
-    }
+    // Cleanup — Drop guard (владеет live_key/pre_key/notify); _post_permit
+    // жив до конца функции и освобождает post-слот только здесь.
 }
 
 fn enrol_code(e: &enrol::EnrolError) -> u8 {
-    match e {
-        enrol::EnrolError::Bad | enrol::EnrolError::Store(_) => ERR_BAD,
-        enrol::EnrolError::Expired => ERR_EXPIRED,
-        enrol::EnrolError::Revoked => ERR_REVOKED,
-        enrol::EnrolError::BoundOther => ERR_BOUND_OTHER,
-    }
+    e.code()
 }
 
-/// ENROL → CAS под коротким локом → ENROLLED/ERROR. Регистрирует live-сессию.
+/// ENROL → CAS под коротким локом → ENROLLED/ERROR. Регистрирует live-сессию
+/// через guard (pre→live), replay идемпотентен.
 #[allow(clippy::too_many_arguments)]
 fn enrol_reply(
     st: &State,
     c: &Counters,
     device_key: &[u8; 32],
     payload: &[u8],
-    notify: &Arc<Notify>,
-    enrolled_key: &mut Option<Vec<u8>>,
+    guard: &mut SessionGuard,
     enrolled_user: &mut Option<[u8; 16]>,
 ) -> Result<Vec<u8>, ()> {
     let now = now_secs();
     let res = {
-        let db = st.db.lock().expect("db");
-        enrol::enrol(&db, payload, device_key, now)
+        let mut db = st.db.lock().expect("db");
+        enrol::enrol(&mut db, payload, device_key, now)
     };
     match res {
         Ok(done) => {
@@ -336,14 +462,8 @@ fn enrol_reply(
             let mut p = Vec::with_capacity(28);
             p.extend_from_slice(&done.user_id);
             p.extend_from_slice(done.contact_id.as_bytes());
-            *enrolled_key = Some(device_key.to_vec());
+            guard.enrol(device_key);
             *enrolled_user = Some(done.user_id);
-            st.live
-                .lock()
-                .expect("live")
-                .entry(device_key.to_vec())
-                .or_default()
-                .push(notify.clone());
             Ok(encode_frame(OP_ENROLLED, &p).expect("fits"))
         }
         Err(e) => {
@@ -353,24 +473,39 @@ fn enrol_reply(
     }
 }
 
-fn mbox_code(e: &mbox::MboxError) -> u8 {
-    match e {
-        mbox::MboxError::Bad | mbox::MboxError::Store(_) => ERR_BAD,
-        mbox::MboxError::Quota => ERR_QUOTA,
-    }
+/// Свежая проверка revoked по device_key сессии. Вызывать, удерживая db-лок
+/// от SELECT до конца TX действия: при одном соединении за Mutex это
+/// сериализует re-check с msgctl_block/revoke — эквивалент same-TX проверки
+/// (конкурентная TX между SELECT и действием невозможна).
+/// Неизвестный key → fail-closed (считать отозванным).
+fn is_revoked(db: &rusqlite::Connection, device_key: &[u8]) -> bool {
+    db.query_row(
+        "SELECT revoked FROM devices WHERE device_key=?1",
+        [device_key],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|v| v != 0)
+    .unwrap_or(true)
 }
 
-/// SEND → quota-в-TX → INSERT ON CONFLICT → commit → SEND_ACK.
+fn mbox_code(e: &mbox::MboxError) -> u8 {
+    e.code()
+}
+
+/// SEND → per-op re-check revoked → quota-в-TX → INSERT ON CONFLICT → commit → SEND_ACK.
 /// Повтор возвращает прежний accept (send_dedup), не новое событие.
+/// Отозванному — ERROR REVOKED без закрытия (закрытие придёт через Notify).
 fn send_reply(st: &State, c: &Counters, device_key: &[u8; 32], payload: &[u8]) -> Result<Vec<u8>, ()> {
     let s = mp::parse_send(payload).ok_or_else(|| {
         c.proto_err.fetch_add(1, Ordering::Relaxed);
     })?;
     let now = now_secs();
-    let res = {
-        let mut db = st.db.lock().expect("db");
-        mbox::send(&mut db, device_key, s.recipient, s.message_id, s.ciphertext, now)
-    };
+    let mut db = st.db.lock().expect("db");
+    if is_revoked(&db, device_key) {
+        c.send_fail.fetch_add(1, Ordering::Relaxed);
+        return Ok(encode_frame(OP_ERROR, &[ERR_REVOKED]).expect("fits"));
+    }
+    let res = mbox::send(&mut db, device_key, s.recipient, s.message_id, s.ciphertext, now);
     match res {
         Ok(mbox::SendOutcome::New(_)) => {
             c.send_ok.fetch_add(1, Ordering::Relaxed);
@@ -407,11 +542,12 @@ fn fetch_reply(
         c.proto_err.fetch_add(1, Ordering::Relaxed);
         return Err(());
     }
-    let rows = {
-        let db = st.db.lock().expect("db");
-        mbox::fetch(&db, user, device_key)
+    let db = st.db.lock().expect("db");
+    if is_revoked(&db, device_key) {
+        c.mbox_err.fetch_add(1, Ordering::Relaxed);
+        return Ok(encode_frame(OP_ERROR, &[ERR_REVOKED]).expect("fits"));
     }
-    .map_err(|_| {
+    let rows = mbox::fetch(&db, user, device_key).map_err(|_| {
         c.mbox_err.fetch_add(1, Ordering::Relaxed);
     })?;
     // Пакуем, пока влезает в кадр (заголовок 4 + count 2 + записи).
@@ -447,11 +583,12 @@ fn ack_reply(
         c.proto_err.fetch_add(1, Ordering::Relaxed);
     })?;
     let seqs: Vec<i64> = seqs.into_iter().map(|s| s as i64).collect();
-    let cursor = {
-        let mut db = st.db.lock().expect("db");
-        mbox::ack(&mut db, user, device_key, &seqs)
+    let mut db = st.db.lock().expect("db");
+    if is_revoked(&db, device_key) {
+        c.mbox_err.fetch_add(1, Ordering::Relaxed);
+        return Ok(encode_frame(OP_ERROR, &[ERR_REVOKED]).expect("fits"));
     }
-    .map_err(|_| {
+    let cursor = mbox::ack(&mut db, user, device_key, &seqs).map_err(|_| {
         c.mbox_err.fetch_add(1, Ordering::Relaxed);
     })?;
     c.ack_ok.fetch_add(1, Ordering::Relaxed);
@@ -473,10 +610,12 @@ fn upload_reply(
         .into_iter()
         .map(|(key_id, one_time, pubkey, sig)| prekey::Entry { key_id, one_time, pubkey, sig })
         .collect();
-    let res = {
-        let mut db = st.db.lock().expect("db");
-        prekey::upload(&mut db, device_key, user, identity, &entries)
-    };
+    let mut db = st.db.lock().expect("db");
+    if is_revoked(&db, device_key) {
+        c.mbox_err.fetch_add(1, Ordering::Relaxed);
+        return Ok(encode_frame(OP_ERROR, &[ERR_REVOKED]).expect("fits"));
+    }
+    let res = prekey::upload(&mut db, device_key, user, identity, &entries);
     match res {
         Ok(left) => {
             c.ack_ok.fetch_add(1, Ordering::Relaxed);
@@ -486,23 +625,24 @@ fn upload_reply(
             c.mbox_err.fetch_add(1, Ordering::Relaxed);
             Ok(encode_frame(OP_ERROR, &[ERR_BAD]).expect("fits"))
         }
-        Err(_) => {
+        Err(e) => {
             c.proto_err.fetch_add(1, Ordering::Relaxed);
-            Ok(encode_frame(OP_ERROR, &[ERR_BAD]).expect("fits"))
+            Ok(encode_frame(OP_ERROR, &[e.code()]).expect("fits"))
         }
     }
 }
 
-/// CLAIM → PREKEY или ERROR no-prekey.
-fn claim_reply(st: &State, c: &Counters, payload: &[u8]) -> Result<Vec<u8>, ()> {
+/// CLAIM → per-op re-check revoked вызывателя → PREKEY или ERROR no-prekey.
+fn claim_reply(st: &State, c: &Counters, device_key: &[u8; 32], payload: &[u8]) -> Result<Vec<u8>, ()> {
     let device = mp::parse_device(payload).ok_or_else(|| {
         c.proto_err.fetch_add(1, Ordering::Relaxed);
     })?;
-    let got = {
-        let mut db = st.db.lock().expect("db");
-        prekey::claim(&mut db, device)
+    let mut db = st.db.lock().expect("db");
+    if is_revoked(&db, device_key) {
+        c.mbox_err.fetch_add(1, Ordering::Relaxed);
+        return Ok(encode_frame(OP_ERROR, &[ERR_REVOKED]).expect("fits"));
     }
-    .map_err(|_| {
+    let got = prekey::claim(&mut db, device).map_err(|_| {
         c.mbox_err.fetch_add(1, Ordering::Relaxed);
     })?;
     match got {
@@ -516,43 +656,44 @@ fn claim_reply(st: &State, c: &Counters, payload: &[u8]) -> Result<Vec<u8>, ()> 
     }
 }
 
-/// COUNT → COUNT_RESP.
-fn count_reply(st: &State, c: &Counters, payload: &[u8]) -> Result<Vec<u8>, ()> {
+/// COUNT → per-op re-check revoked вызывателя → COUNT_RESP.
+fn count_reply(st: &State, c: &Counters, device_key: &[u8; 32], payload: &[u8]) -> Result<Vec<u8>, ()> {
     let device = mp::parse_device(payload).ok_or_else(|| {
         c.proto_err.fetch_add(1, Ordering::Relaxed);
     })?;
-    let n = {
-        let db = st.db.lock().expect("db");
-        prekey::count(&db, device)
+    let db = st.db.lock().expect("db");
+    if is_revoked(&db, device_key) {
+        c.mbox_err.fetch_add(1, Ordering::Relaxed);
+        return Ok(encode_frame(OP_ERROR, &[ERR_REVOKED]).expect("fits"));
     }
-    .map_err(|_| {
+    let n = prekey::count(&db, device).map_err(|_| {
         c.mbox_err.fetch_add(1, Ordering::Relaxed);
     })?;
     Ok(encode_frame(OP_COUNT_RESP, &(n as u32).to_be_bytes()).expect("fits"))
 }
 
 fn blob_code(e: &blob::BlobError) -> u8 {
-    match e {
-        blob::BlobError::Bad | blob::BlobError::Store(_) => ERR_BAD,
-        blob::BlobError::Quota => ERR_QUOTA,
-    }
+    e.code()
 }
 
-/// BLOB_RESERVE → BLOB_RESERVED или ERROR quota.
+/// BLOB_RESERVE → per-op re-check revoked вызывателя → BLOB_RESERVED или ERROR quota.
 fn reserve_reply(
     st: &State,
     c: &Counters,
     user: &[u8; 16],
+    device_key: &[u8; 32],
     payload: &[u8],
 ) -> Result<Vec<u8>, ()> {
     let (blob_id, size) = mp::parse_reserve(payload).ok_or_else(|| {
         c.proto_err.fetch_add(1, Ordering::Relaxed);
     })?;
     let now = now_secs();
-    let res = {
-        let mut db = st.db.lock().expect("db");
-        blob::reserve(&mut db, user, blob_id, size as i64, now)
-    };
+    let mut db = st.db.lock().expect("db");
+    if is_revoked(&db, device_key) {
+        c.mbox_err.fetch_add(1, Ordering::Relaxed);
+        return Ok(encode_frame(OP_ERROR, &[ERR_REVOKED]).expect("fits"));
+    }
+    let res = blob::reserve(&mut db, user, blob_id, size as i64, now);
     match res {
         Ok(()) => Ok(encode_frame(OP_BLOB_RESERVED, blob_id).expect("fits")),
         Err(e) => {
@@ -570,35 +711,82 @@ fn now_secs() -> i64 {
 }
 
 /// Разбудить живые сессии устройства (revoke/block) → graceful close.
+/// Смотрит обе карты (live + pre-auth, включая pre-enrol сессии).
+/// Вызывается СТРОГО после commit: msgctl_block/revoke держат только короткие
+/// локи, wake — после их снятия, иначе окно block→notify пропускает SEND.
 fn wake_device(st: &State, device_key: &[u8]) {
-    if let Some(v) = st.live.lock().expect("live").remove(device_key) {
-        for n in v {
-            n.notify_waiters();
+    let mut targets = Vec::new();
+    {
+        let mut live = st.live.lock().expect("live");
+        if let Some(v) = live.remove(device_key) {
+            targets.extend(v);
         }
+    }
+    {
+        let mut pre = st.pre.lock().expect("pre");
+        if let Some(v) = pre.remove(device_key) {
+            targets.extend(v);
+        }
+    }
+    for n in targets {
+        n.notify_waiters();
     }
 }
 
-/// Cap строки msgctl: invite-revoke/device-block с 64 hex не влезли бы в 64.
+/// Cap строки msgctl: overlong → `err line-too-long` из read-loop (ниже).
+/// Молчаливой резки нет: резка рвала hex пополам и давала ложный err/revoke не того.
 const MSGCTL_LINE_MAX: usize = 256;
 
+/// Лишних аргументов быть не должно: true, если после разбора команды
+/// в строке ничего не осталось.
+fn msgctl_no_more(parts: &mut std::str::SplitWhitespace<'_>) -> bool {
+    parts.next().is_none()
+}
+
 /// Одна команда msgctl. Токены/ключи из аргументов никогда не попадают в логи.
+/// Строгость R3: лишние аргументы — `err` у всех команд (безопасно: сокет
+/// локальный 0600, сетевых msgctl-клиентов нет — C4); строка длиннее
+/// MSGCTL_LINE_MAX — `err line-too-long` (режет read-loop, не здесь).
 fn handle_msgctl(st: &State, line: &[u8]) -> String {
     let text = String::from_utf8_lossy(line);
     let mut parts = text.split_whitespace();
     match parts.next().unwrap_or("") {
-        "ping" => "pong\n".into(),
-        "domain" => format!("{}\n", st.cfg.domain),
-        "dbversion" => format!("{}\n", st.cfg.schema_version),
+        "ping" => {
+            if msgctl_no_more(&mut parts) {
+                "pong\n".into()
+            } else {
+                "err\n".into()
+            }
+        }
+        "domain" => {
+            if msgctl_no_more(&mut parts) {
+                format!("{}\n", st.cfg.domain)
+            } else {
+                "err\n".into()
+            }
+        }
+        "dbversion" => {
+            if msgctl_no_more(&mut parts) {
+                format!("{}\n", st.cfg.schema_version)
+            } else {
+                "err\n".into()
+            }
+        }
         "stats" => {
+            if !msgctl_no_more(&mut parts) {
+                return "err\n".into();
+            }
             let c = &st.counters;
             format!(
-                "hs_ok={} hs_fail={} pre_auth_full={} auth_ok={} mismatch={} proto_err={} enrol_ok={} enrol_fail={} send_ok={} send_dedup={} send_fail={} fetch_ok={} ack_ok={} mbox_err={}\n",
+                "hs_ok={} hs_fail={} pre_auth_full={} post_auth_full={} auth_ok={} mismatch={} proto_err={} idle_close={} enrol_ok={} enrol_fail={} send_ok={} send_dedup={} send_fail={} fetch_ok={} ack_ok={} mbox_err={}\n",
                 c.hs_ok.load(Ordering::Relaxed),
                 c.hs_fail.load(Ordering::Relaxed),
                 c.pre_auth_full.load(Ordering::Relaxed),
+                c.post_auth_full.load(Ordering::Relaxed),
                 c.auth_ok.load(Ordering::Relaxed),
                 c.mismatch.load(Ordering::Relaxed),
                 c.proto_err.load(Ordering::Relaxed),
+                c.idle_close.load(Ordering::Relaxed),
                 c.enrol_ok.load(Ordering::Relaxed),
                 c.enrol_fail.load(Ordering::Relaxed),
                 c.send_ok.load(Ordering::Relaxed),
@@ -610,73 +798,143 @@ fn handle_msgctl(st: &State, line: &[u8]) -> String {
             )
         }
         "invite-issue" => {
-            let ttl: i64 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(24 * 3600);
+            // ttl опционален; мусор вместо числа — err (молчаливого дефолта нет).
+            let ttl: i64 = match parts.next() {
+                None => 24 * 3600,
+                Some(v) => match v.parse() {
+                    Ok(t) => t,
+                    Err(_) => return "err\n".into(),
+                },
+            };
+            if !msgctl_no_more(&mut parts) {
+                return "err\n".into();
+            }
             match msgctl_issue(st, ttl.max(1)) {
                 Ok(uri) => format!("{uri}\n"),
                 Err(_) => "err\n".into(),
             }
         }
-        "invite-revoke" => match parts.next().and_then(hex32) {
-            Some(tok) => match msgctl_revoke(st, &tok) {
+        "invite-revoke" => match parts.next().map(hex32) {
+            Some(Some(tok)) if msgctl_no_more(&mut parts) => match msgctl_revoke(st, &tok) {
                 Ok(()) => "ok\n".into(),
                 Err(_) => "err\n".into(),
             },
-            None => "err\n".into(),
+            _ => "err\n".into(),
         },
-        "invite-list" => msgctl_list(st),
-        "device-block" => match parts.next().and_then(hex32) {
-            Some(key) => match msgctl_block(st, &key) {
+        "invite-list" => {
+            if msgctl_no_more(&mut parts) {
+                msgctl_list(st)
+            } else {
+                "err\n".into()
+            }
+        }
+        "device-block" => match parts.next().map(hex32) {
+            Some(Some(key)) if msgctl_no_more(&mut parts) => match msgctl_block(st, &key) {
                 Ok(()) => "ok\n".into(),
                 Err(_) => "err\n".into(),
             },
-            None => "err\n".into(),
+            _ => "err\n".into(),
         },
-        "device-unblock" => match parts.next().and_then(hex32) {
-            Some(key) => match msgctl_unblock(st, &key) {
+        "device-unblock" => match parts.next().map(hex32) {
+            Some(Some(key)) if msgctl_no_more(&mut parts) => match msgctl_unblock(st, &key) {
                 Ok(()) => "ok\n".into(),
                 Err(_) => "err\n".into(),
             },
-            None => "err\n".into(),
+            _ => "err\n".into(),
         },
-        "user-list" => msgctl_users(st),
+        "user-list" => {
+            if msgctl_no_more(&mut parts) {
+                msgctl_users(st)
+            } else {
+                "err\n".into()
+            }
+        }
         "quotas" => match parts.next() {
             Some(f) => match valid_prefix(f) {
-                Some(p) => msgctl_quotas(st, Some(&p)),
-                None => "err\n".into(),
+                Some(p) if msgctl_no_more(&mut parts) => msgctl_quotas(st, Some(&p)),
+                _ => "err\n".into(),
             },
             None => msgctl_quotas(st, None),
         },
         "gc" => {
+            if !msgctl_no_more(&mut parts) {
+                return "err\n".into();
+            }
             let now = now_secs();
+            let t0 = std::time::Instant::now();
             let mut db = st.db.lock().expect("db");
             match blob::gc(&mut db, now) {
-                Ok((b, e)) => format!("gc blobs={b} events={e}\n"),
+                Ok((b, e)) => {
+                    eprintln!("msgd: gc lock_hold_ms={}", t0.elapsed().as_millis());
+                    format!("gc blobs={b} events={e}\n")
+                }
                 Err(_) => "err\n".into(),
             }
         }
-        "backup" => match msgctl_backup(st) {
-            Ok(rep) => format!("{rep}\n"),
-            Err(_) => "err\n".into(),
-        },
+        "backup" => {
+            if !msgctl_no_more(&mut parts) {
+                return "err\n".into();
+            }
+            match msgctl_backup(st) {
+                Ok(rep) => format!("{rep}\n"),
+                Err(_) => "err\n".into(),
+            }
+        }
         _ => "err\n".into(),
     }
 }
 
 /// Backup-минимум: VACUUM INTO (атомарный снапшот без остановки записи) +
-/// копия дерева blobs + integrity_check копии + ротация (держать 3).
+/// копия дерева blobs + integrity_check копии. Ротация «держать 3» — ДО записи
+/// нового снапшота (старых остаётся ≤2, новый не становится 4-м и не упирается
+/// в место рядом со старыми). Любая ошибка после mkdir чистит недоснапшот
+/// (remove_dir_all), мусора snap-* не копится.
 /// Секреты НЕ входят (статичны; оператор архивирует secrets/ отдельно, см. runbook).
 /// Файловый кросс-чек blob_meta↔файлы станет осмысленным в M5, когда чанки
 /// лягут на диск; сейчас отчёт содержит оба счётчика без гейта.
 fn msgctl_backup(st: &State) -> Result<String, String> {
+    prune_snaps(st, 2);
     let ts = now_secs();
     let snap = st.cfg.data_dir.join("backup").join(format!("snap-{ts}"));
+    match backup_inner(st, &snap) {
+        Ok(rep) => Ok(rep),
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&snap);
+            Err(e)
+        }
+    }
+}
+
+/// Ротация snap-*: оставить newest `keep`, старые тереть. Вызывается ДО записи
+/// нового снапшота, поэтому keep=2 при политике «держать 3».
+fn prune_snaps(st: &State, keep: usize) {
+    if let Ok(rd) = std::fs::read_dir(st.cfg.data_dir.join("backup")) {
+        let mut snaps: Vec<_> = rd
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_dir()
+                    && p.file_name().and_then(|n| n.to_str()).map(|n| n.starts_with("snap-")).unwrap_or(false)
+            })
+            .collect();
+        snaps.sort();
+        while snaps.len() > keep {
+            let old = snaps.remove(0);
+            let _ = std::fs::remove_dir_all(&old);
+        }
+    }
+}
+
+fn backup_inner(st: &State, snap: &std::path::Path) -> Result<String, String> {
     std::fs::create_dir_all(snap.join("blobs")).map_err(|e| format!("mkdir: {e}"))?;
     let db_path = snap.join("msgd.db");
     {
+        let t0 = std::time::Instant::now();
         let db = st.db.lock().expect("db");
         let lit = db_path.to_string_lossy().replace('\'', "''");
         db.execute_batch(&format!("VACUUM INTO '{lit}'"))
             .map_err(|e| format!("vacuum: {e}"))?;
+        eprintln!("msgd: backup vacuum lock_hold_ms={}", t0.elapsed().as_millis());
     }
     // Копия blobs обычным копированием: blobs-data — отдельный FS, хардлинки (EXDEV) невозможны.
     let (mut files, mut bytes) = (0usize, 0u64);
@@ -720,22 +978,6 @@ fn msgctl_backup(st: &State) -> Result<String, String> {
         }
     }
     let db_bytes = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
-    // Ротация: держать 3 newest snap-*, старые тереть.
-    if let Ok(rd) = std::fs::read_dir(snap.parent().expect("backup dir")) {
-        let mut snaps: Vec<_> = rd
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| {
-                p.is_dir()
-                    && p.file_name().and_then(|n| n.to_str()).map(|n| n.starts_with("snap-")).unwrap_or(false)
-            })
-            .collect();
-        snaps.sort();
-        while snaps.len() > 3 {
-            let old = snaps.remove(0);
-            let _ = std::fs::remove_dir_all(&old);
-        }
-    }
     // Счётчики для отчёта (без гейта до M5).
     let (rows, _) = {
         let db = st.db.lock().expect("db");
@@ -851,6 +1093,7 @@ fn b64_standard_decode(s: &str) -> Option<Vec<u8>> {
 }
 
 /// Отзыв invite: revoke + будим живые сессии привязанного устройства.
+/// Порядок: сначала commit UPDATE (автокоммит), wake_device — строго после.
 fn msgctl_revoke(st: &State, token: &[u8; 32]) -> Result<(), String> {
     let bound: Option<Vec<u8>> = {
         let db = st.db.lock().expect("db");
@@ -874,6 +1117,7 @@ fn msgctl_revoke(st: &State, token: &[u8; 32]) -> Result<(), String> {
 }
 
 /// Блокировка устройства: revoke + закрыть живые сессии.
+/// Порядок: сначала commit UPDATE (автокоммит), wake_device — строго после.
 fn msgctl_block(st: &State, device_key: &[u8; 32]) -> Result<(), String> {
     {
         let db = st.db.lock().expect("db");
@@ -1045,6 +1289,7 @@ async fn serve_msgctl(st: Arc<State>) -> std::io::Result<()> {
         let st = st.clone();
         tokio::spawn(async move {
             let mut line = Vec::new();
+            let mut too_long = false;
             let mut buf = [0u8; 1];
             loop {
                 match sock.read(&mut buf).await {
@@ -1053,14 +1298,25 @@ async fn serve_msgctl(st: Arc<State>) -> std::io::Result<()> {
                         if buf[0] == b'\n' {
                             break;
                         }
+                        // Переполнение флагается, остаток строки дочитывается
+                        // без хранения: ответ — `err line-too-long`, не резка.
+                        if too_long {
+                            continue;
+                        }
                         if line.len() < MSGCTL_LINE_MAX {
                             line.push(buf[0]);
+                        } else {
+                            too_long = true;
                         }
                     }
                     Err(_) => break,
                 }
             }
-            let reply = handle_msgctl(&st, &line);
+            let reply = if too_long {
+                "err line-too-long\n".to_string()
+            } else {
+                handle_msgctl(&st, &line)
+            };
             let _ = sock.write_all(reply.as_bytes()).await;
         });
     }
@@ -1082,38 +1338,25 @@ async fn run(cfg: Config) -> std::io::Result<()> {
     let st = Arc::new(State {
         db: Arc::new(Mutex::new(conn)),
         live: Arc::new(Mutex::new(HashMap::new())),
+        pre: Arc::new(Mutex::new(HashMap::new())),
         counters: Arc::new(Counters::default()),
         cfg: Arc::new(cfg),
     });
     let pre_auth = Arc::new(Semaphore::new(PRE_AUTH_CAP));
+    let post_auth = Arc::new(Semaphore::new(POST_AUTH_CAP));
     let ctl = st.clone();
     tokio::spawn(async move {
         if let Err(e) = serve_msgctl(ctl).await {
             eprintln!("msgd: msgctl error: {e}");
         }
     });
-    // GC: orphan-sweep 24ч + TTL 7 сут + caps, раз в 5 минут под коротким локом.
-    let gc_st = st.clone();
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(300));
-        loop {
-            tick.tick().await;
-            let now = now_secs();
-            let r = {
-                let mut db = gc_st.db.lock().expect("db");
-                blob::gc(&mut db, now)
-            };
-            match r {
-                Ok((b, e)) if b + e > 0 => eprintln!("msgd: gc swept {b} blobs, {e} events"),
-                Ok(_) => {}
-                Err(e) => eprintln!("msgd: gc error: {e:?}"),
-            }
-        }
-    });
+    // GC только ручной (msgctl gc): объёмы пилота малые, таймер убран —
+    // оператор гоняет по runbook. Замер удержания лока — в gc/backup путях.
     loop {
         let (stream, _) = listener.accept().await?;
         stream.set_nodelay(true)?;
         let st = st.clone();
+        let post = post_auth.clone();
         // Кап pre-auth: нет слота — сразу close, слот не удерживаем.
         let permit = match pre_auth.clone().try_acquire_owned() {
             Ok(p) => p,
@@ -1123,23 +1366,178 @@ async fn run(cfg: Config) -> std::io::Result<()> {
                 continue;
             }
         };
+        // Глобального timeout на коннект нет (сессии живут дольше 10s):
+        // handshake-deadline 10s живёт внутри handle_conn (per-read),
+        // живая сессия после ENROL — per-read idle 600s.
         tokio::spawn(async move {
-            let _ = tokio::time::timeout(
-                Duration::from_secs(10),
-                handle_conn(stream, st, permit),
-            )
-            .await;
+            handle_conn(stream, st, permit, post).await;
         });
     }
 }
 
-async fn msgctl_client(sock: &str, cmd: &str) -> std::io::Result<()> {
+/// Одна команда на сервер по сокету 0600. Возвращает сырой ответ (печатает вызывающий).
+async fn msgctl_client(sock: &str, cmd: &str) -> std::io::Result<String> {
     let mut stream = tokio::net::UnixStream::connect(sock).await?;
     stream.write_all(format!("{cmd}\n").as_bytes()).await?;
     let mut out = Vec::new();
     stream.read_to_end(&mut out).await?;
-    print!("{}", String::from_utf8_lossy(&out));
+    Ok(String::from_utf8_lossy(&out).into_owned())
+}
+
+/// Секретные команды — ТОЛЬКО через `--file <path>`: argv-варианты с hex
+/// удалены (hex в argv светится в `ps`, подтверждено дважды — C1).
+/// Иначе usage/exit 2.
+fn secret_file_arg(sub: &str, rest: &[String]) -> Option<String> {
+    if rest.len() == 3 && rest[1] == "--file" {
+        return Some(rest[2].clone());
+    }
+    eprintln!("usage: msgd msgctl {sub} --file <path-600>");
+    None
+}
+
+/// Файл с hex читается целиком, trim (хвостовой newline от `echo` — норма).
+fn read_secret_hex(path: &str) -> Result<String, String> {
+    std::fs::read_to_string(path)
+        .map_err(|e| format!("read {path}: {e}"))
+        .map(|s| s.trim().to_string())
+}
+
+/// Запись секрета 0600 с refuse-if-exists (как noise::keygen).
+fn write_secret_file(path: &str, data: &[u8]) -> Result<(), String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    if std::path::Path::new(path).exists() {
+        return Err(format!("refuse: {path} exists"));
+    }
+    let mut opt = std::fs::OpenOptions::new();
+    opt.write(true).create_new(true).mode(0o600);
+    use std::io::Write;
+    opt.open(path)
+        .and_then(|mut f| f.write_all(data))
+        .map_err(|e| format!("write {path}: {e}"))?;
     Ok(())
+}
+
+/// `invite-issue [--out-file <path>] [ttl]`: структурные ошибки → usage/exit 2.
+/// ttl идёт на сервер как есть (невалидный режет сервер строгим err).
+fn issue_args(rest: &[String]) -> Option<(Option<String>, Option<String>)> {
+    let usage = || {
+        eprintln!("usage: msgd msgctl invite-issue [--out-file <file>] [ttl_secs]");
+        None
+    };
+    let mut out_file = None;
+    let mut ttl = None;
+    let mut i = 1;
+    while i < rest.len() {
+        if rest[i] == "--out-file" {
+            if out_file.is_some() {
+                return usage();
+            }
+            i += 1;
+            if i >= rest.len() {
+                return usage();
+            }
+            out_file = Some(rest[i].clone());
+        } else if rest[i].starts_with("--") || ttl.is_some() {
+            return usage();
+        } else {
+            ttl = Some(rest[i].clone());
+        }
+        i += 1;
+    }
+    Some((out_file, ttl))
+}
+
+/// msgctl-клиент: разбор секретных команд локально (файлы), остальное —
+/// passthrough на сервер (ping/stats/user-list/quotas/invite-list/gc/backup
+/// без hex — как были).
+async fn msgctl_dispatch(sock: &str, rest: &[String]) -> ExitCode {
+    match rest.first().map(|s| s.as_str()).unwrap_or("") {
+        "invite-revoke" | "device-block" | "device-unblock" => {
+            let sub = &rest[0];
+            let path = match secret_file_arg(sub, rest) {
+                Some(p) => p,
+                None => return ExitCode::from(2),
+            };
+            let hex = match read_secret_hex(&path) {
+                Ok(h) => h,
+                Err(e) => {
+                    eprintln!("{sub}: {e}");
+                    return ExitCode::from(1);
+                }
+            };
+            if hex32(&hex).is_none() {
+                eprintln!("usage: msgd msgctl {sub} --file <path-600>");
+                return ExitCode::from(2);
+            }
+            match msgctl_client(sock, &format!("{sub} {hex}")).await {
+                Ok(reply) => {
+                    print!("{reply}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("msgctl: {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        "invite-issue" => {
+            let (out_file, ttl) = match issue_args(rest) {
+                Some(v) => v,
+                None => return ExitCode::from(2),
+            };
+            let cmd = match ttl {
+                Some(t) => format!("invite-issue {t}"),
+                None => "invite-issue".to_string(),
+            };
+            let reply = match msgctl_client(sock, &cmd).await {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("msgctl: {e}");
+                    return ExitCode::from(1);
+                }
+            };
+            match out_file {
+                Some(p) => {
+                    let uri = reply.trim();
+                    if !uri.starts_with("dmsg://join/") {
+                        print!("{reply}");
+                        return ExitCode::SUCCESS;
+                    }
+                    match write_secret_file(&p, format!("{uri}\n").as_bytes()) {
+                        Ok(()) => {
+                            println!("ok");
+                            ExitCode::SUCCESS
+                        }
+                        Err(e) => {
+                            eprintln!("invite-issue: {e}");
+                            ExitCode::from(1)
+                        }
+                    }
+                }
+                // Сокет 0600 и оператор локальный — warning, не err.
+                None => {
+                    eprintln!(
+                        "msgctl: warning: invite URI goes to stdout; prefer --out-file <file> (0600, refuse-if-exists)"
+                    );
+                    print!("{reply}");
+                    ExitCode::SUCCESS
+                }
+            }
+        }
+        _ => {
+            let cmd = rest.join(" ");
+            match msgctl_client(sock, &cmd).await {
+                Ok(reply) => {
+                    print!("{reply}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("msgctl: {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+    }
 }
 
 #[tokio::main]
@@ -1148,16 +1546,10 @@ async fn main() -> ExitCode {
     match args.next().as_deref() {
         Some("msgctl") => {
             let sock = env::var("MSGCTL_SOCK").unwrap_or("/var/lib/msgd/msgctl.sock".into());
-            // Вся остальная строка — одна команда (invite-revoke <hex> и т.п.).
+            // Секретные подкоманды разбираются локально (--file/--out-file),
+            // остальное — passthrough на сервер. Hex в argv запрещён (C1).
             let rest: Vec<String> = args.collect();
-            let cmd = rest.join(" ");
-            return match msgctl_client(&sock, &cmd).await {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    eprintln!("msgctl: {e}");
-                    ExitCode::from(1)
-                }
-            };
+            return msgctl_dispatch(&sock, &rest).await;
         }
         Some("keygen") => {
             let mut out: Option<String> = None;

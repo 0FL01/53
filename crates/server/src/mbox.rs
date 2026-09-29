@@ -5,7 +5,7 @@
 //! sender_device всегда из Noise-сессии (аргумент), никогда из тела.
 
 use rusqlite::{Connection, OptionalExtension};
-use dmsg_protocol::{FETCH_BATCH_MAX, MAILBOX_BYTES_MAX, MAILBOX_EVENTS_MAX};
+use dmsg_protocol::{ERR_BAD, ERR_BUSY, ERR_QUOTA, FETCH_BATCH_MAX, MAILBOX_BYTES_MAX, MAILBOX_EVENTS_MAX};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum MboxError {
@@ -13,8 +13,33 @@ pub enum MboxError {
     Bad,
     /// Квота: 512 событий или 32 MiB.
     Quota,
+    /// SQLITE_BUSY: повторить позже (wire ERR_BUSY=7). Маппится ДО схлопывания в Store.
+    Busy,
     /// Ошибка SQLite.
     Store(String),
+}
+
+/// Wire-код ошибки (см. dmsg_protocol::ERR_*).
+impl MboxError {
+    pub fn code(&self) -> u8 {
+        match self {
+            MboxError::Bad | MboxError::Store(_) => ERR_BAD,
+            MboxError::Quota => ERR_QUOTA,
+            MboxError::Busy => ERR_BUSY,
+        }
+    }
+}
+
+/// SQLITE_BUSY → Busy, остальное — Store с контекстом. Вызывать на КАЖДОМ
+/// rusqlite-результате до схлопывания, иначе busy утонет в Store→ERR_BAD.
+fn store(prefix: &str, e: rusqlite::Error) -> MboxError {
+    if matches!(&e, rusqlite::Error::SqliteFailure(f, _)
+        if f.code == rusqlite::ErrorCode::DatabaseBusy)
+    {
+        MboxError::Busy
+    } else {
+        MboxError::Store(format!("{prefix}: {e}"))
+    }
 }
 
 /// seq нужен тестам и будущей диагностике; wire отвечает message_id+status.
@@ -40,19 +65,19 @@ pub fn send(
     let known: bool = conn
         .query_row("SELECT 1 FROM users WHERE user_id=?1", [recipient], |_| Ok(()))
         .optional()
-        .map_err(|e| MboxError::Store(e.to_string()))?
+        .map_err(|e| store("user", e))?
         .is_some();
     if !known {
         return Err(MboxError::Bad);
     }
-    let tx = conn.transaction().map_err(|e| MboxError::Store(e.to_string()))?;
+    let tx = conn.transaction().map_err(|e| store("begin", e))?;
     let (count, bytes): (i64, Option<i64>) = tx
         .query_row(
             "SELECT COUNT(*), COALESCE(SUM(LENGTH(ciphertext)),0) FROM mailbox_events WHERE recipient_user_id=?1",
             [recipient],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .map_err(|e| MboxError::Store(e.to_string()))?;
+        .map_err(|e| store("quota", e))?;
     if count >= MAILBOX_EVENTS_MAX as i64
         || bytes.unwrap_or(0) + ciphertext.len() as i64 > MAILBOX_BYTES_MAX as i64
     {
@@ -64,7 +89,7 @@ pub fn send(
              VALUES(?1,?2,?3,?4,?5) ON CONFLICT(sender_device,message_id) DO NOTHING",
             rusqlite::params![recipient, sender_device, message_id, ciphertext, now],
         )
-        .map_err(|e| MboxError::Store(e.to_string()))?;
+        .map_err(|e| store("insert", e))?;
     let seq: i64 = if inserted == 1 {
         tx.last_insert_rowid()
     } else {
@@ -73,7 +98,7 @@ pub fn send(
             rusqlite::params![sender_device, message_id],
             |r| r.get(0),
         )
-        .map_err(|e| MboxError::Store(e.to_string()))?
+        .map_err(|e| store("seq", e))?
     };
     // Повтор после доставки сообщает отправителю актуальный статус.
     let delivered: bool = tx
@@ -82,8 +107,8 @@ pub fn send(
             rusqlite::params![sender_device, message_id],
             |r| r.get::<_, i64>(0).map(|v| v != 0),
         )
-        .map_err(|e| MboxError::Store(e.to_string()))?;
-    tx.commit().map_err(|e| MboxError::Store(e.to_string()))?;
+        .map_err(|e| store("delivered", e))?;
+    tx.commit().map_err(|e| store("commit", e))?;
     Ok(if inserted == 1 {
         SendOutcome::New(seq)
     } else {
@@ -111,14 +136,14 @@ pub fn fetch(
             |r| r.get(0),
         )
         .optional()
-        .map_err(|e| MboxError::Store(e.to_string()))?
+        .map_err(|e| store("cursor", e))?
         .unwrap_or(0);
     let mut stmt = conn
         .prepare(
             "SELECT seq,sender_device,message_id,ciphertext FROM mailbox_events
              WHERE recipient_user_id=?1 AND seq>?2 ORDER BY seq LIMIT ?3",
         )
-        .map_err(|e| MboxError::Store(e.to_string()))?;
+        .map_err(|e| store("prepare", e))?;
     let rows = stmt
         .query_map(
             rusqlite::params![recipient, cursor, FETCH_BATCH_MAX as i64],
@@ -131,10 +156,10 @@ pub fn fetch(
                 })
             },
         )
-        .map_err(|e| MboxError::Store(e.to_string()))?;
+        .map_err(|e| store("fetch", e))?;
     let mut out = Vec::new();
     for r in rows {
-        out.push(r.map_err(|e| MboxError::Store(e.to_string()))?);
+        out.push(r.map_err(|e| store("row", e))?);
     }
     Ok(out)
 }
@@ -147,13 +172,13 @@ pub fn ack(
     device: &[u8],
     seqs: &[i64],
 ) -> Result<i64, MboxError> {
-    let tx = conn.transaction().map_err(|e| MboxError::Store(e.to_string()))?;
+    let tx = conn.transaction().map_err(|e| store("begin", e))?;
     for seq in seqs {
         tx.execute(
             "UPDATE mailbox_events SET delivered=1 WHERE recipient_user_id=?1 AND seq=?2",
             rusqlite::params![recipient, seq],
         )
-        .map_err(|e| MboxError::Store(e.to_string()))?;
+        .map_err(|e| store("mark", e))?;
     }
     let mut cursor: i64 = tx
         .query_row(
@@ -162,7 +187,7 @@ pub fn ack(
             |r| r.get(0),
         )
         .optional()
-        .map_err(|e| MboxError::Store(e.to_string()))?
+        .map_err(|e| store("cursor", e))?
         .unwrap_or(0);
     // Непрерывный вперёд от cursor по доставленным.
     loop {
@@ -173,7 +198,7 @@ pub fn ack(
                 |r| r.get(0),
             )
             .optional()
-            .map_err(|e| MboxError::Store(e.to_string()))?;
+            .map_err(|e| store("next", e))?;
         match next {
             Some(_) => cursor += 1,
             None => break,
@@ -184,8 +209,8 @@ pub fn ack(
          ON CONFLICT(recipient_user_id,device_key) DO UPDATE SET last_seq=excluded.last_seq",
         rusqlite::params![recipient, device, cursor],
     )
-    .map_err(|e| MboxError::Store(e.to_string()))?;
-    tx.commit().map_err(|e| MboxError::Store(e.to_string()))?;
+    .map_err(|e| store("cursor", e))?;
+    tx.commit().map_err(|e| store("commit", e))?;
     Ok(cursor)
 }
 
@@ -238,6 +263,14 @@ mod tests {
             send(&mut conn, &s, &[9u8; 16], &[4u8; 16], b"x", 12).unwrap_err(),
             MboxError::Bad
         );
+    }
+
+    #[test]
+    fn sqlite_busy_maps_to_busy_code() {
+        let e = rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(5), None);
+        assert_eq!(store("t", e), MboxError::Busy);
+        assert_eq!(MboxError::Busy.code(), dmsg_protocol::ERR_BUSY);
+        assert_eq!(MboxError::Quota.code(), dmsg_protocol::ERR_QUOTA);
     }
 
     #[test]

@@ -354,6 +354,23 @@ async fn corrupt_passthrough_and_unknown_version() {
 #[tokio::test]
 async fn oversize_close() {
     let srv = start(17216, tmpdir("oversize", 17216));
+    // 1) Transport-bound: length-prefix 16401 (> MAX_FRAME+16=16400) → close без ответа.
+    {
+        let tok = srv.issue();
+        let (mut c, _) = connect(&srv, None).await;
+        c.auth().await;
+        c.enrol(&tok).await;
+        {
+            use tokio::io::AsyncWriteExt;
+            c.s.write_all(&16401u16.to_be_bytes()).await.unwrap();
+            c.s.write_all(&[0xBBu8; 64]).await.unwrap();
+        }
+        let mut tmp = [0u8; 8];
+        let r = tokio::time::timeout(Duration::from_secs(12), c.s.read(&mut tmp)).await;
+        assert!(matches!(r, Ok(Ok(0))) || matches!(r, Ok(Err(_))), "must close, got {r:?}");
+    }
+    // 2) Кадр больше MAX_FRAME целиком → close. Строим вручную (encode_frame отказал бы).
+    //    Plaintext-кадр 16388 → шифртекст 16404 > bound 16400: close уже на transport-read.
     let tok = srv.issue();
     let (mut c, _) = connect(&srv, None).await;
     c.auth().await;
@@ -363,7 +380,8 @@ async fn oversize_close() {
     let mut raw_frame = vec![1u8, OP_SEND];
     raw_frame.extend_from_slice(&(big.len() as u16).to_be_bytes());
     raw_frame.extend_from_slice(&big);
-    // u16 не вмещает >65535, но MAX_FRAME=16384 — шлём ровно лимит+1 через Noise:
+    // u16 не вмещает >65535, но MAX_FRAME=16384 — шлём ровно лимит+1 через Noise.
+    // (bound transport-чтения 16400 тоже превышен: см. часть 1 выше).
     let mut buf = vec![0u8; 70000];
     let n = c.t.write_message(&raw_frame, &mut buf).unwrap();
     {

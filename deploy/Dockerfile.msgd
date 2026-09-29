@@ -11,5 +11,5 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 FROM debian:bookworm-slim AS runtime
 COPY --from=builder --chmod=755 /usr/src/msgd-bin /usr/local/bin/msgd
 USER 65532:65532
-EXPOSE 7000
+# EXPOSE нет: backend только в shared netns slipstream (127.0.0.1:7000), наружу только DNS-порт.
 ENTRYPOINT ["/usr/local/bin/msgd"]
