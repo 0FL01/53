@@ -107,7 +107,7 @@ fn backup_restore_start() {
         child: spawn(p0 + 1, &rest, &key),
         port: p0 + 1,
     };
-    assert_eq!(ctl(&rest, &["dbversion"]), "3\n");
+    assert_eq!(ctl(&rest, &["dbversion"]), "4\n");
     assert_eq!(ctl(&rest, &["invite-list"]), before);
     srv2.child.kill().ok();
     std::fs::remove_dir_all(&base).ok();

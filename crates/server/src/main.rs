@@ -729,7 +729,9 @@ fn wake_device(st: &State, device_key: &[u8]) {
         }
     }
     for n in targets {
-        n.notify_waiters();
+        // Each session has exactly one consumer. Keep a permit if revocation
+        // wins before its select/notified future is first polled.
+        n.notify_one();
     }
 }
 
@@ -821,6 +823,26 @@ fn handle_msgctl(st: &State, line: &[u8]) -> String {
             },
             _ => "err\n".into(),
         },
+        "invite-rebind" => {
+            let key = match parts.next().and_then(hex32) {
+                Some(k) => k,
+                None => return "err\n".into(),
+            };
+            let ttl: i64 = match parts.next() {
+                None => 24 * 3600,
+                Some(v) => match v.parse() {
+                    Ok(t) => t,
+                    Err(_) => return "err\n".into(),
+                },
+            };
+            if !msgctl_no_more(&mut parts) {
+                return "err\n".into();
+            }
+            match msgctl_rebind(st, &key, ttl.max(1)) {
+                Ok(uri) => format!("{uri}\n"),
+                Err(_) => "err\n".into(),
+            }
+        }
         "invite-list" => {
             if msgctl_no_more(&mut parts) {
                 msgctl_list(st)
@@ -995,7 +1017,7 @@ fn backup_inner(st: &State, snap: &std::path::Path) -> Result<String, String> {
 }
 
 fn hex32(s: &str) -> Option<[u8; 32]> {
-    if s.len() != 64 {
+    if s.len() != 64 || !s.is_ascii() {
         return None;
     }
     let mut b = [0u8; 32];
@@ -1019,6 +1041,12 @@ fn msgctl_issue(st: &State, ttl_secs: i64) -> Result<String, String> {
         )
         .map_err(|e| format!("insert: {e}"))?;
     }
+    let uri = invite_uri(st, &token)?;
+    eprintln!("msgd: invite issued");
+    Ok(uri)
+}
+
+fn invite_uri(st: &State, token: &[u8; 32]) -> Result<String, String> {
     let cert_der = std::fs::read(&st.cfg.carrier_cert_file)
         .map_err(|e| format!("carrier cert: {e}"))?;
     // PEM или DER: PEM начинается с -----BEGIN, DER — с 0x30.
@@ -1028,9 +1056,24 @@ fn msgctl_issue(st: &State, ttl_secs: i64) -> Result<String, String> {
         cert_der
     };
     let pubkey = noise::pubkey_of(&st.cfg.noise_private);
-    let uri = bootstrap::build(st.cfg.domain.as_bytes(), &cert_der, &pubkey, &token)
-        .map_err(|e| format!("bootstrap: {e:?}"))?;
-    eprintln!("msgd: invite issued");
+    bootstrap::build(st.cfg.domain.as_bytes(), &cert_der, &pubkey, token)
+        .map_err(|e| format!("bootstrap: {e:?}"))
+}
+
+fn msgctl_rebind(st: &State, old_device: &[u8; 32], ttl_secs: i64) -> Result<String, ()> {
+    let mut token = [0u8; 32];
+    getrandom::fill(&mut token).map_err(|_| ())?;
+    // Build before mutations: missing/corrupt bootstrap material must not block
+    // a device without issuing a usable invitation.
+    let uri = invite_uri(st, &token).map_err(|_| ())?;
+    let now = now_secs();
+    let expires = now.checked_add(ttl_secs).ok_or(())?;
+    {
+        let mut db = st.db.lock().expect("db");
+        enrol::issue_rebind(&mut db, old_device, &token, now, expires).map_err(|_| ())?;
+    }
+    wake_device(st, old_device);
+    eprintln!("msgd: rebind invite issued");
     Ok(uri)
 }
 
@@ -1133,16 +1176,11 @@ fn msgctl_block(st: &State, device_key: &[u8; 32]) -> Result<(), String> {
 }
 
 /// Разблокировка устройства: снимает revoked. Сессии не будим — устройство
-/// переподключается само. Это НЕ перепривязка: потерял телефон —
-/// revoke + новый invite (см. runbook), ошибся блокировкой — unblock.
+/// переподключается само. Проверка single-device и UPDATE — в одной TX.
 fn msgctl_unblock(st: &State, device_key: &[u8; 32]) -> Result<(), String> {
     {
-        let db = st.db.lock().expect("db");
-        db.execute(
-            "UPDATE devices SET revoked=0 WHERE device_key=?1",
-            [device_key.as_slice()],
-        )
-        .map_err(|e| format!("unblock: {e}"))?;
+        let mut db = st.db.lock().expect("db");
+        enrol::unblock(&mut db, device_key).map_err(|_| "unblock failed".to_string())?;
     }
     eprintln!("msgd: device unblocked");
     Ok(())
@@ -1447,11 +1485,95 @@ fn issue_args(rest: &[String]) -> Option<(Option<String>, Option<String>)> {
     Some((out_file, ttl))
 }
 
+fn rebind_args(rest: &[String]) -> Option<(String, String, Option<String>)> {
+    let mut source = None;
+    let mut dest = None;
+    let mut ttl = None;
+    let mut i = 1;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--file" | "--out-file" => {
+                let slot = if rest[i] == "--file" { &mut source } else { &mut dest };
+                i += 1;
+                if slot.is_some() || i >= rest.len() || rest[i].starts_with("--") {
+                    return None;
+                }
+                *slot = Some(rest[i].clone());
+            }
+            v if !v.starts_with("--") && ttl.is_none() => {
+                // Canonicalize locally, so whitespace/oversize argv cannot
+                // inject extra commands into the private socket protocol.
+                ttl = Some(v.parse::<i64>().ok()?.to_string());
+            }
+            _ => return None,
+        }
+        i += 1;
+    }
+    Some((source?, dest?, ttl))
+}
+
+async fn rebind_dispatch(sock: &str, rest: &[String]) -> ExitCode {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let (source, dest, ttl) = match rebind_args(rest) {
+        Some(args) => args,
+        None => {
+            eprintln!("usage: msgd msgctl invite-rebind --file <old-device-public.hex> --out-file <new-file> [ttl_secs]");
+            return ExitCode::from(2);
+        }
+    };
+    let key = match read_secret_hex(&source).ok().and_then(|h| hex32(&h)) {
+        Some(k) => k,
+        None => {
+            eprintln!("invite-rebind: invalid-source");
+            return ExitCode::from(1);
+        }
+    };
+    // Reserve the 0600 output before the destructive server operation. Existing
+    // paths (including symlinks) or missing parents fail without a request.
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true).create_new(true).mode(0o600).open(&dest)
+    {
+        Ok(f) => f,
+        Err(_) => {
+            eprintln!("invite-rebind: output-unavailable");
+            return ExitCode::from(1);
+        }
+    };
+    let key_hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
+    let cmd = match ttl {
+        Some(t) => format!("invite-rebind {key_hex} {t}"),
+        None => format!("invite-rebind {key_hex}"),
+    };
+    let result = match msgctl_client(sock, &cmd).await {
+        Ok(reply) => match bootstrap::parse(reply.trim()) {
+            Ok(invite) => {
+                if file.write_all(reply.as_bytes()).and_then(|()| file.sync_all()).is_ok() {
+                    println!("ok");
+                    return ExitCode::SUCCESS;
+                }
+                // The server already committed. Never reactivate the old key;
+                // best-effort retire the unusable invitation, without logging it.
+                let token_hex: String = invite.token.iter().map(|b| format!("{b:02x}")).collect();
+                let _ = msgctl_client(sock, &format!("invite-revoke {token_hex}")).await;
+                "output-failed"
+            }
+            Err(_) => "rejected",
+        },
+        Err(_) => "transport-failed",
+    };
+    drop(file);
+    let _ = std::fs::remove_file(&dest);
+    eprintln!("invite-rebind: {result}");
+    ExitCode::from(1)
+}
+
 /// msgctl-клиент: разбор секретных команд локально (файлы), остальное —
 /// passthrough на сервер (ping/stats/user-list/quotas/invite-list/gc/backup
 /// без hex — как были).
 async fn msgctl_dispatch(sock: &str, rest: &[String]) -> ExitCode {
     match rest.first().map(|s| s.as_str()).unwrap_or("") {
+        "invite-rebind" => rebind_dispatch(sock, rest).await,
         "invite-revoke" | "device-block" | "device-unblock" => {
             let sub = &rest[0];
             let path = match secret_file_arg(sub, rest) {
@@ -1614,5 +1736,38 @@ async fn main() -> ExitCode {
             eprintln!("msgd: config: {e}");
             ExitCode::from(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod rebind_session_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn revoke_before_first_notify_poll_closes_live_and_pre_sessions() {
+        let live_notify = Arc::new(Notify::new());
+        let pre_notify = Arc::new(Notify::new());
+        let key = vec![71u8; 32];
+        let st = State {
+            cfg: Arc::new(Config {
+                domain: "rebind.test".into(), listen: String::new(),
+                data_dir: PathBuf::new(), blobs_dir: PathBuf::new(),
+                msgctl_sock: PathBuf::new(), schema_version: db::SCHEMA_VERSION,
+                noise_key_file: PathBuf::new(), noise_private: [0u8; 32],
+                carrier_cert_file: PathBuf::new(),
+            }),
+            db: Arc::new(Mutex::new(rusqlite::Connection::open_in_memory().unwrap())),
+            counters: Arc::new(Counters::default()),
+            live: Arc::new(Mutex::new(HashMap::from([(key.clone(), vec![live_notify.clone()])]))),
+            pre: Arc::new(Mutex::new(HashMap::from([(key.clone(), vec![pre_notify.clone()])]))),
+        };
+        // Session registration has happened, but its select has not polled
+        // notified() yet: rebind must not lose the committed revocation signal.
+        wake_device(&st, &key);
+        for notify in [live_notify, pre_notify] {
+            tokio::time::timeout(Duration::from_millis(100), notify.notified()).await.unwrap();
+        }
+        assert!(st.live.lock().unwrap().is_empty());
+        assert!(st.pre.lock().unwrap().is_empty());
     }
 }

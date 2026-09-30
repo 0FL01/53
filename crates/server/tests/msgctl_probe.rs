@@ -94,6 +94,142 @@ fn write_file(dir: &std::path::Path, name: &str, content: &str) -> std::path::Pa
     p
 }
 
+fn seed_rebind_account(srv: &Server) -> rusqlite::Connection {
+    let db = rusqlite::Connection::open(srv.dir.join("data/msgd.db")).unwrap();
+    db.execute("INSERT INTO users VALUES(?1,'0123456789AB',1)", [[31u8; 16].as_slice()]).unwrap();
+    db.execute("INSERT INTO devices VALUES(?1,?2,1,0)",
+        rusqlite::params![[32u8; 32].as_slice(), [31u8; 16].as_slice()],
+    ).unwrap();
+    db.execute("INSERT INTO invites(token,created_at,expires_at,bound_device_key) VALUES(?1,1,2,?2)",
+        rusqlite::params![[33u8; 32].as_slice(), [32u8; 32].as_slice()],
+    ).unwrap();
+    db
+}
+
+fn rebind_counts(db: &rusqlite::Connection) -> (i64, i64, i64) {
+    db.query_row("SELECT (SELECT COUNT(*) FROM invites),
+        (SELECT COUNT(*) FROM invites WHERE revoked=0),
+        (SELECT COUNT(*) FROM devices WHERE revoked=0)", [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    ).unwrap()
+}
+
+#[test]
+fn rebind_requires_public_key_file_and_secret_output_file() {
+    let srv = start(17418);
+    let db = seed_rebind_account(&srv);
+    let source = write_file(&srv.dir, "public.hex", &format!("{}\n", "20".repeat(32)));
+    let dest = srv.dir.join("rebind.txt");
+    let source = source.to_str().unwrap();
+    let dest = dest.to_str().unwrap();
+    for args in [
+        vec!["invite-rebind"],
+        vec!["invite-rebind", "--file", source],
+        vec!["invite-rebind", "--out-file", dest],
+        vec!["invite-rebind", "--file", source, "--out-file", dest, "--file", source],
+        vec!["invite-rebind", "--file", source, "--out-file", dest, "bad"],
+    ] {
+        let out = ctl_full(&srv, &args);
+        assert_eq!(out.status.code(), Some(2));
+        assert!(out.stdout.is_empty());
+        assert_eq!(rebind_counts(&db), (1, 1, 1));
+    }
+    let out = ctl_full(&srv, &["invite-rebind", "--file", source, "--out-file", dest, "3600"]);
+    assert!(out.status.success());
+    assert_eq!(out.stdout, b"ok\n");
+    assert!(out.stderr.is_empty());
+    let body = std::fs::read_to_string(dest).unwrap();
+    let invite = dmsg_protocol::bootstrap::parse(body.trim()).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(std::fs::metadata(dest).unwrap().permissions().mode() & 0o777, 0o600);
+    let target: Vec<u8> = db.query_row("SELECT rebind_user_id FROM invites WHERE token=?1",
+        [invite.token.as_slice()], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(target, [31u8; 16]);
+    assert_eq!(rebind_counts(&db), (2, 1, 0));
+    // Existing output must fail BEFORE a second rebind request.
+    let out = ctl_full(&srv, &["invite-rebind", "--file", source, "--out-file", dest]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    assert_eq!(std::fs::read_to_string(dest).unwrap(), body);
+    assert_eq!(rebind_counts(&db), (2, 1, 0));
+    // A retry with a new destination supersedes the unreachable/unused invite.
+    let retry = srv.dir.join("retry.txt");
+    assert_eq!(ctl(&srv, &["invite-rebind", "--file", source, "--out-file", retry.to_str().unwrap()]), "ok\n");
+    assert_eq!(rebind_counts(&db), (3, 1, 0));
+    let revoked: i64 = db.query_row("SELECT revoked FROM invites WHERE token=?1",
+        [invite.token.as_slice()], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(revoked, 1);
+}
+
+#[test]
+fn rebind_failures_are_static_and_have_no_db_side_effects() {
+    let srv = start(17419);
+    let db = seed_rebind_account(&srv);
+    let source = write_file(&srv.dir, "public.hex", &"20".repeat(32));
+    let bad = write_file(&srv.dir, "bad.hex", &"é".repeat(32));
+    let unknown = write_file(&srv.dir, "unknown.hex", &"00".repeat(32));
+    let dest = srv.dir.join("rebind.txt");
+    let missing_parent = srv.dir.join("missing/rebind.txt");
+    for (source, output, ttl) in [
+        (&bad, &dest, "3600"), (&unknown, &dest, "3600"),
+        (&source, &missing_parent, "3600"), (&source, &dest, "9223372036854775807"),
+    ] {
+        let out = ctl_full(&srv, &["invite-rebind", "--file", source.to_str().unwrap(),
+            "--out-file", output.to_str().unwrap(), ttl]);
+        assert_eq!(out.status.code(), Some(1));
+        assert!(out.stdout.is_empty());
+        let err = String::from_utf8(out.stderr).unwrap();
+        assert!(matches!(err.as_str(), "invite-rebind: invalid-source\n" |
+            "invite-rebind: rejected\n" | "invite-rebind: output-unavailable\n"));
+        assert!(!output.exists());
+        assert_eq!(rebind_counts(&db), (1, 1, 1));
+    }
+    std::fs::remove_file(srv.dir.join("carrier.pem")).unwrap();
+    let out = ctl_full(&srv, &["invite-rebind", "--file", source.to_str().unwrap(),
+        "--out-file", dest.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.stderr, b"invite-rebind: rejected\n");
+    assert_eq!(rebind_counts(&db), (1, 1, 1));
+    assert!(!dest.exists());
+    let key = "20".repeat(32);
+    for command in [format!("invite-rebind {key} garbage"),
+        format!("invite-rebind {key} 10 extra"), format!("invite-rebind {}", "é".repeat(32))] {
+        assert_eq!(raw(&srv, &command), "err\n");
+    }
+}
+
+#[test]
+fn rebind_post_commit_output_failure_retires_token_without_unblocking_old() {
+    let srv = start(17420);
+    let db = seed_rebind_account(&srv);
+    let source = write_file(&srv.dir, "public.hex", &"20".repeat(32));
+    let dest = srv.dir.join("rebind.txt");
+    // POSIX sh file-size limit = one 512-byte block; the full certificate URI
+    // exceeds this. Ignore SIGXFSZ so write_all observes EFBIG and cleanup runs.
+    let out = Command::new("sh")
+        .args(["-c", "trap '' XFSZ; ulimit -f 1; exec \"$@\"", "rebind-cli"])
+        .arg(env!("CARGO_BIN_EXE_msgd"))
+        .arg("msgctl")
+        .args(["invite-rebind", "--file"])
+        .arg(&source)
+        .arg("--out-file")
+        .arg(&dest)
+        .env("MSGCTL_SOCK", srv.dir.join("ctl.sock"))
+        .output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    assert_eq!(out.stderr, b"invite-rebind: output-failed\n");
+    assert!(!dest.exists(), "partial secret output must be removed");
+    assert_eq!(rebind_counts(&db), (2, 0, 0));
+    // The same public key can safely issue a new invitation after the failure.
+    let retry = srv.dir.join("retry.txt");
+    assert_eq!(ctl(&srv, &["invite-rebind", "--file", source.to_str().unwrap(),
+        "--out-file", retry.to_str().unwrap()]), "ok\n");
+    assert_eq!(rebind_counts(&db), (3, 1, 0));
+}
+
 #[test]
 fn empty_db_formats() {
     let srv = start(17411);

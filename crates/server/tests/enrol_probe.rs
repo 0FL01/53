@@ -211,6 +211,51 @@ fn write_hex(srv: &Server, name: &str, hex: &str) -> String {
 }
 
 #[tokio::test]
+async fn rebind_preserves_account_closes_old_and_replays_after_expiry() {
+    use x25519_dalek::{PublicKey, StaticSecret};
+    let mut srv = start(17207);
+    let old_private = [71u8; 32];
+    let new_private = [72u8; 32];
+    let old_public = PublicKey::from(&StaticSecret::from(old_private));
+    let old_hex: String = old_public.as_bytes().iter().map(|x| format!("{x:02x}")).collect();
+    let key_file = write_hex(&srv, "old-public.hex", &old_hex);
+    let old_token = issue_token(&srv, "3600");
+    let (mut old_t, mut old_s) = connect_auth_with(&srv, &old_private).await.unwrap();
+    let original = enrol(&mut old_t, &mut old_s, &old_token).await.unwrap();
+    assert_eq!(original.0, 5);
+    // Also close a pre-enrol stream for the old Noise key.
+    let (_, mut pre_s) = connect_auth_with(&srv, &old_private).await.unwrap();
+    let dest = srv.dir.join("rebind.txt");
+    assert_eq!(srv.msgctl(&["invite-rebind", "--file", &key_file,
+        "--out-file", dest.to_str().unwrap(), "3600"]), "ok\n");
+    let body = std::fs::read_to_string(&dest).unwrap();
+    let token = bootstrap::parse(body.trim()).unwrap().token;
+    for stream in [&mut old_s, &mut pre_s] {
+        let mut tmp = [0u8; 8];
+        let r = tokio::time::timeout(Duration::from_secs(3), stream.read(&mut tmp)).await;
+        assert!(matches!(r, Ok(Ok(0))) || matches!(r, Ok(Err(_))), "old stream must close");
+    }
+    let (mut t, mut s) = connect_auth_with(&srv, &old_private).await.unwrap();
+    assert_eq!(enrol(&mut t, &mut s, &old_token).await.unwrap(), (6, vec![3]));
+    assert_eq!(enrol(&mut t, &mut s, &token).await.unwrap(), (6, vec![4]));
+    let (mut t, mut s) = connect_auth_with(&srv, &new_private).await.unwrap();
+    assert_eq!(enrol(&mut t, &mut s, &token).await.unwrap(), original);
+    expire_token(&srv, &token);
+    drop((t, s));
+    srv.kill_restart();
+    let (mut t, mut s) = connect_auth_with(&srv, &new_private).await.unwrap();
+    assert_eq!(enrol(&mut t, &mut s, &token).await.unwrap(), original);
+    assert_eq!(srv.msgctl(&["device-unblock", "--file", &key_file]), "err\n");
+    let db = rusqlite::Connection::open(srv.dir.join("data/msgd.db")).unwrap();
+    let counts: (i64, i64, i64) = db.query_row(
+        "SELECT (SELECT COUNT(*) FROM users), (SELECT COUNT(*) FROM devices),
+                (SELECT COUNT(*) FROM devices WHERE revoked=0)", [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    ).unwrap();
+    assert_eq!(counts, (1, 2, 1));
+}
+
+#[tokio::test]
 async fn issue_enrol_replay() {
     let srv = start(17201);
     let token = issue_token(&srv, "3600");
