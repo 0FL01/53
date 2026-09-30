@@ -11,6 +11,67 @@ docker compose -f /opt/srv/53/deploy/compose.yml --env-file /opt/srv/53/.env ps
 
 Ожидается: `slipstream` Up с маппингом `${DNS_BIND_IP}:53->5353/udp`, `msgd` `healthy`.
 
+## DNS без UDP docker-proxy на внешнем hot path
+
+На этом хосте Docker работает без iptables. Published UDP port сам по себе
+обслуживается userspace proxy: каждый новый peer IP/port держит socket и большой
+buffer до timeout. Внешний DNS направляем через **точечный kernel DNAT**:
+
+```text
+resolver → public-IP:53 → nft DNAT → bridge static-IP:5353 → 127.0.0.1:7000
+host-local OUTPUT probe → retained published port / docker-proxy
+```
+
+### Адреса и установка
+
+- В host-local `.env` задать `DMSG_NETWORK_SUBNET`, `DMSG_NETWORK_DYNAMIC_RANGE`,
+  `DMSG_SLIPSTREAM_IPV4`. Сверить Docker networks и host/VPN routes: без overlap.
+- Static IP принадлежит subnet, **не dynamic pool**, не gateway/network/broadcast.
+  Выделенный project network нельзя использовать для посторонних static endpoints.
+- Сохранить прежние Compose/env/firewall и сделать `msgctl backup`. При добавлении
+  IPAM выполнить `compose down` и `up -d --no-build` **без `-v`**, оба сервиса вместе.
+  Использовать команды выше с абсолютными compose/env paths; ключи не менять.
+- Скопировать `deploy/dns-forward.nft.example` в `/etc/dmsg53-dns.nft`; подставить
+  public IP/port и static private IP/internal port из deployment env, вне Git.
+- Fragment рассчитан на существующие `inet firewall forward` и `ip nat` этого
+  хоста. Forward accept стоит до policy drop; invalid/established rules сохраняются.
+- Forward разрешён только в Docker bridge `br-*`: при удалении project network
+  новые DNAT flows не должны уйти через внешний default route.
+- В **конец** существующего `/etc/nftables.conf` добавить
+  `include "/etc/dmsg53-dns.nft"`. Существующий nftables service должен быть enabled.
+
+```sh
+nft -c -f /etc/nftables.conf       # полный persistent config, только syntax check
+nft -c -f /etc/dmsg53-dns.nft
+nft -f /etc/dmsg53-dns.nft         # первый runtime install, без flush ruleset
+nft list chain ip nat dmsg53_dns
+nft -a list chain inet firewall forward
+```
+
+Не применять fragment повторно к live ruleset: rules добавятся ещё раз.
+Для reload использовать существующий `systemctl reload nftables`, который
+загружает весь сохранённый config. Не менять Docker daemon, не добавлять blanket
+SNAT/forward allow: входной resolver source должен сохраниться, ответы — public IP:53.
+IP forwarding и существующий masquerade должны уже работать.
+
+### Приёмка и rollback
+
+- DNAT/forward counters растут на **новых flows**; established packets могут
+  пройти ранее существующий accept. Published port/proxy остаются — это не ошибка.
+- Проверить recursive Android↔native-peer Noise/E2E, dedup/cursor, joint recreate;
+  backend только loopback7000, прежние volumes, ro secrets и non-root UID.
+- Измерять **host** available RAM, proxy RSS/FD/sockets и conntrack: 5 min empty FGS,
+  5 min fixed message workload, ≥180 s quiescence, repeat workload. RAM >20%,
+  proxy working set bounded; container stats недостаточны. RSS не обязан сразу упасть.
+- Rollback: удалить include из persistent config; по `nft -a` удалить только
+  forward-rule с comment `dmsg53 DNS forward only`, затем flush/delete **только**
+  chain `ip nat dmsg53_dns`. Published port восстановит прежний внешний путь.
+- Старые UDP conntrack tuples переживают смену правил. Дождаться relevant timeouts
+  (на проверенном хосте UDP30/stream120 s), либо удалить только affected endpoint
+  entries. **Не flush conntrack глобально.** Proxy timeout90 s — другое ограничение.
+- Для возврата прежней IPAM: удалить endpoint rules, восстановить Compose/env,
+  совместно `down`/`up` без `-v`. Не восстанавливать DB поверх живого production.
+
 ## Проверки (что гонять, что = PASS)
 
 ```sh

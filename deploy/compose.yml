@@ -20,6 +20,9 @@ services:
       - --idle-timeout-seconds=30
     ports:
       - "${DNS_BIND_IP:?DNS_BIND_IP is required}:${DNS_PUBLIC_PORT:-53}:${DNS_INTERNAL_PORT:-5353}/udp"
+    networks:
+      default:
+        ipv4_address: "${DMSG_SLIPSTREAM_IPV4:?DMSG_SLIPSTREAM_IPV4 is required}"
     secrets:
       - source: carrier_cert.pem
         target: carrier_cert.pem
@@ -77,6 +80,15 @@ services:
 volumes:
   msgd-data:
   blobs-data:
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: "${DMSG_NETWORK_SUBNET:?DMSG_NETWORK_SUBNET is required}"
+          # Keep the static endpoint outside the dynamic pool: a stale DNAT
+          # must never send DNS to another automatically allocated container.
+          ip_range: "${DMSG_NETWORK_DYNAMIC_RANGE:?DMSG_NETWORK_DYNAMIC_RANGE is required}"
 
 secrets:
   carrier_cert.pem:

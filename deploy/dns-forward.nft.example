@@ -1,0 +1,12 @@
+# Copy outside Git, substitute deployment values, then include at the END of
+# the existing /etc/nftables.conf (after inet firewall and ip nat exist).
+# This fragment does not flush rules, change Docker, or open the backend.
+# These are EXAMPLE addresses; keep real addresses in the host-local copy.
+define DMSG_DNS_PUBLIC_IP = 203.0.113.10
+define DMSG_DNS_PUBLIC_PORT = 53
+define DMSG_DNS_PRIVATE_IP = 172.28.53.2
+define DMSG_DNS_PRIVATE_PORT = 5353
+
+add chain ip nat dmsg53_dns { type nat hook prerouting priority dstnat; policy accept; }
+add rule ip nat dmsg53_dns ip daddr $DMSG_DNS_PUBLIC_IP udp dport $DMSG_DNS_PUBLIC_PORT counter dnat to $DMSG_DNS_PRIVATE_IP:$DMSG_DNS_PRIVATE_PORT comment "dmsg53 DNS kernel path"
+add rule inet firewall forward ct status dnat ct original ip daddr $DMSG_DNS_PUBLIC_IP ct original proto-dst $DMSG_DNS_PUBLIC_PORT ip daddr $DMSG_DNS_PRIVATE_IP udp dport $DMSG_DNS_PRIVATE_PORT oifname "br-*" counter accept comment "dmsg53 DNS forward only"
