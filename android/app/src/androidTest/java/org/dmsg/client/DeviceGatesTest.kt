@@ -25,6 +25,113 @@ import uniffi.dmsg_core.DmsgClient
  * run manually with am instrument, never connected tests on the live package. */
 @RunWith(AndroidJUnit4::class)
 class DeviceGatesTest {
+    @Test fun configureAndProbeDnsOnlyOnExistingAccount() {
+        explicitGate()
+        val app = ApplicationProvider.getApplicationContext<Context>()
+        val input = File(app.filesDir, "gate-dns-profile.qr")
+        assumeTrue("explicit public server profile fixture required", input.exists())
+        var facade: DmsgFacade? = null
+        try {
+            val f = Core.facade(app)
+            facade = f
+            val before = f.account()
+            assertTrue("preserve the existing account", before.first)
+            f.configureDns(input.readText().trim(), DnsNetwork.resolvers(app))
+            DnsNetwork.mirrorProfile(app, f)
+            assertNotNull(f.dnsProfile())
+            assertTrue(f.reconnect("dns", Prefs.serverPub(app)!!, Prefs.domain(app)) > 0L)
+            assertEquals("ready", f.dnsStatus())
+            val first = f.fetch("dns", Prefs.serverPub(app)!!, Prefs.domain(app))
+            val second = f.fetch("dns", Prefs.serverPub(app)!!, Prefs.domain(app))
+            assertEquals(0, second.received.size)
+            assertTrue(second.cursor >= first.cursor)
+            assertEquals(before, f.account())
+        } finally {
+            try { facade?.stopDns() } finally { input.delete() }
+        }
+    }
+
+    @Test fun startDnsForegroundForGate() {
+        explicitGate()
+        val app = ApplicationProvider.getApplicationContext<Context>()
+        val f = Core.facade(app)
+        assertTrue(f.account().first)
+        assertNotNull(f.dnsProfile())
+        val before = f.account()
+        InstrumentationRegistry.getInstrumentation().startActivitySync(
+            Intent(app, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+        DmsgService.start(app)
+        val deadline = System.nanoTime() + 45_000_000_000L
+        while (f.dnsStatus() != "ready" && System.nanoTime() < deadline) Thread.sleep(250)
+        assertEquals("ready", f.dnsStatus())
+        assertTrue(DmsgService.running(app))
+        assertEquals(before, f.account())
+    }
+
+    @Test fun rejectLiveCarrierPinAndNoiseKeyBeforeEnrolForGate() {
+        explicitGate()
+        val app = ApplicationProvider.getApplicationContext<Context>()
+        val inputs = listOf("gate-wrong-pin.qr", "gate-wrong-noise.qr").map { File(app.filesDir, it) }
+        assumeTrue("explicit public negative profile fixtures required", inputs.all { it.exists() })
+        val main = Core.facade(app)
+        val before = main.account()
+        try {
+            for ((index, input) in inputs.withIndex()) {
+                val dir = File(app.cacheDir, "dns-negative-${System.nanoTime()}")
+                assertTrue(dir.mkdir())
+                assertTrue(dir.setReadable(false, false)); assertTrue(dir.setWritable(false, false))
+                assertTrue(dir.setExecutable(false, false))
+                assertTrue(dir.setReadable(true, true)); assertTrue(dir.setWritable(true, true))
+                assertTrue(dir.setExecutable(true, true))
+                val temporary = object : ContextWrapper(app) { override fun getFilesDir(): File = dir }
+                val key = SecureStore.key(temporary)
+                val client = uniffi.dmsg_core.DmsgClient.openEncrypted(File(dir, "core.db").absolutePath, key)
+                key.fill(0)
+                try {
+                    try {
+                        client.enrolDns(input.readText().trim(), DnsNetwork.resolvers(app))
+                        fail("untrusted carrier/server must not enrol")
+                    } catch (e: uniffi.dmsg_core.FfiException) {
+                        if (index == 0) assertTrue("carrier pin must have its own error", e is uniffi.dmsg_core.FfiException.PinMismatch)
+                        else assertTrue("wrong Noise key must fail before bearer authentication", e is uniffi.dmsg_core.FfiException.Transport)
+                    }
+                    assertFalse(client.accountInfo().enrolled)
+                    assertTrue(client.contactsPage(null, 100u).rows.isEmpty())
+                } finally {
+                    client.stopDns()
+                    client.close()
+                    dir.deleteRecursively()
+                }
+            }
+            assertEquals(before, main.account())
+        } finally { inputs.forEach { it.delete() } }
+    }
+
+    @Test fun restartDnsWithSameResolversPreservesIdentityForGate() {
+        explicitGate()
+        val app = ApplicationProvider.getApplicationContext<Context>()
+        val f = Core.facade(app)
+        val profile = f.dnsProfile()
+        assumeTrue("configure a DNS profile explicitly first", profile != null)
+        val before = f.account()
+        assertTrue(before.first)
+        val outbox = f.outbox(0, 100)
+        val inbox = f.inbox(0, 100)
+        try {
+            f.reconnect(Prefs.addr(app), Prefs.serverPub(app)!!, Prefs.domain(app))
+            assertEquals("ready", f.dnsStatus())
+            f.dnsNetworkChanged(DnsNetwork.resolvers(app))
+            assertEquals("stopped", f.dnsStatus())
+            assertTrue(f.reconnect(Prefs.addr(app), Prefs.serverPub(app)!!, Prefs.domain(app)) > 0)
+            assertEquals("ready", f.dnsStatus())
+            assertEquals(before, f.account())
+            assertEquals(profile!!.fingerprint, f.dnsProfile()!!.fingerprint)
+            assertTrue(profile.pub.contentEquals(f.dnsProfile()!!.pub))
+            assertEquals(outbox, f.outbox(0, 100))
+            assertEquals(inbox, f.inbox(0, 100))
+        } finally { f.stopDns() }
+    }
     @get:Rule val testName = TestName()
     private lateinit var dir: File
     private lateinit var context: Context
@@ -229,6 +336,33 @@ class DeviceGatesTest {
         }
     }
 
+    /** Fresh registration is destructive only to the deliberately separate gate package. */
+    @Test fun enrolPrivateDnsInviteOnlyInGatePackage() {
+        explicitGate()
+        val app = ApplicationProvider.getApplicationContext<Context>()
+        assertTrue("fresh device registration requires the isolated gate package", app.packageName.endsWith(".gate"))
+        val input = File(app.filesDir, "gate-invite.qr")
+        assumeTrue("private operator invitation is required", input.exists())
+        val f = Core.facade(app)
+        assertFalse("refusing to replace an existing identity", f.account().first)
+        try {
+            val uri = input.readText().trim()
+            val preview = f.preview(uri)
+            val id = f.enrolDns(uri, DnsNetwork.resolvers(app))
+            assertEquals(Pair(true, id), f.account())
+            assertEquals(preview.first, f.dnsProfile()!!.domain)
+            assertEquals(preview.second, f.dnsProfile()!!.fingerprint)
+            DnsNetwork.mirrorProfile(app, f)
+            f.stopDns()
+            assertTrue(f.reconnect(Prefs.addr(app), Prefs.serverPub(app)!!, Prefs.domain(app)) > 0)
+            val first = f.fetch(Prefs.addr(app), Prefs.serverPub(app)!!, Prefs.domain(app))
+            val second = f.fetch(Prefs.addr(app), Prefs.serverPub(app)!!, Prefs.domain(app))
+            assertTrue(first.received.isEmpty()); assertTrue(second.received.isEmpty())
+            assertTrue(second.cursor >= first.cursor)
+            assertEquals(Pair(true, id), Core.facade(app).account())
+        } finally { f.stopDns(); input.delete() }
+    }
+
     /** One-off paired-device gate: only the public contact QR leaves the app sandbox. */
     @Test fun exportMyContactQrForGate() {
         explicitGate()
@@ -259,6 +393,10 @@ class DeviceGatesTest {
             val after = f.contacts(null, 100).first.map { it.contactId }.toSet()
             val peer = (after - before).single()
             f.accept(peer)
+            val selection = File(app.filesDir, "gate-peer-contact-id")
+            selection.writeText(peer)
+            assertTrue(selection.setReadable(false, false)); assertTrue(selection.setWritable(false, false))
+            assertTrue(selection.setReadable(true, true)); assertTrue(selection.setWritable(true, true))
             f.reconnect(Prefs.addr(app), Prefs.serverPub(app)!!, Prefs.domain(app))
         } finally {
             input.delete()
@@ -306,12 +444,21 @@ class DeviceGatesTest {
     }
 
     /** Select manually only with a pre-provisioned paired contact. Establish an outgoing session. */
+    private fun gatePeer(app: Context, f: DmsgFacade): String {
+        val selection = File(app.filesDir, "gate-peer-contact-id")
+        val peer = if (selection.exists()) selection.readText().trim()
+            else f.contacts(null, 100).first.single().contactId
+        assertNotNull("explicit paired peer must exist", f.get(peer))
+        assertFalse("cannot send to a changed peer", f.get(peer)!!.identityMismatch)
+        return peer
+    }
+
     @Test fun sendSessionProbeForGate() {
         explicitGate()
         val app = ApplicationProvider.getApplicationContext<Context>()
         assumeTrue(File(app.filesDir, "gate-offline-request").exists())
         val f = Core.facade(app)
-        val peer = f.contacts(null, 100).first.single().contactId
+        val peer = gatePeer(app, f)
         f.send(Prefs.addr(app), Prefs.serverPub(app)!!, Prefs.domain(app), peer,
             "Paired transport session probe.")
     }
@@ -332,7 +479,7 @@ class DeviceGatesTest {
         val app = ApplicationProvider.getApplicationContext<Context>()
         assumeTrue(File(app.filesDir, "gate-offline-request").exists())
         val f = Core.facade(app)
-        val peer = f.contacts(null, 100).first.single().contactId
+        val peer = gatePeer(app, f)
         val addr = Prefs.addr(app)
         val pub = Prefs.serverPub(app)!!
         val domain = Prefs.domain(app)

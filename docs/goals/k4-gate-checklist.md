@@ -3,12 +3,14 @@
 R4 пока не закрыта. Ниже сохранены исходные ожидания и отдельно записаны
 измерения; сборка и instrumented doubles не подменяют аппаратные gates.
 
-## Кодовое evidence (эта среда, 2026-09-29)
+## Кодовое evidence (эта среда, 2026-09-30)
 
 - `cargo test --workspace`: core, protocol и server green. Core покрывает
   encrypted-open/migration, offline queue, повторный приём после reopening,
-   persistent Noise static и load_olm. Финальный прогон: 119 tests passed,
-   0 failed (core 40 unit + 8 integration; protocol 23; server 48).
+   persistent Noise static, load_olm и authenticated DNS profile/supervisor.
+   Текущий прогон: 129 tests passed, 0 failed (core45 unit+8 integration,
+   protocol23, server52, native lifecycle1). Native live loopback gate требует
+   отдельного запуска; штатные C protocol/path/pin/runtime gates green.
 - `DMSG_GEN_BINDINGS=1 cargo test -p dmsg-core --test gen_bindings`:
   `android/app/src/main/java/uniffi/dmsg_core/dmsg_core.kt`; additive
   `openEncrypted`, детерминированная нормализация whitespace при генерации.
@@ -33,13 +35,18 @@ R4 пока не закрыта. Ниже сохранены исходные о
 - Есть: Android SDK (platform android-37, build-tools 37.0.0, platform-tools),
   лицензия SDK принята, Gradle-дистрибутивы в кэше, Rust-таргет
   aarch64-linux-android + cargo-ndk.
-- Есть NDK r28c и USB moto g54 5G, Android 15 / API 35 / arm64.
+- Есть NDK r28c и moto g54 5G, Android 15 / API 35 / arm64; сейчас только Wi-Fi ADB, USB отключён пользователем.
   Native core, JNA и камера загружаются. Все четыре ELF библиотеки APK имеют
   LOAD alignment 0x4000. Это статическая 16 KB compatibility, не runtime
   испытание на 16 KB устройстве; Android 16/17 runtime ещё не проверены.
 - Moto содержит GMS; настоящего no-GMS аппарата в этой сессии нет.
-- Сеть аппарата: диагностический DirectTCP через adb reverse/SSH/netns relay.
-  Android C/DNS embedding отсутствует: эти результаты НЕ DNS-only acceptance.
+- Сеть аппарата: встроенный C Slipstream → numeric DNS из current LinkProperties
+  → настоящий recursive DNS → отдельный authoritative endpoint → Noise/msgd.
+  adb reverse/SSH/netns relay отсутствуют. Ниже исторические TCP результаты
+  не заменяются новым DNS claim; отдельный актуальный checkpoint записан далее.
+- SDK fixtures подготовлены: API36 AOSP default/x86_64 без Google APIs;
+  API37.0 Google APIs ps16k/x86_64 для отдельной 16KB/Android17 проверки.
+  Архивы проверены по official SHA1; metadata не считается runtime PASS.
 
 ## Контракт ручных gates
 
@@ -101,7 +108,43 @@ R4 пока не закрыта. Ниже сохранены исходные о
   НЕ удалён. На нём финальный test-signed release, enrolled=true, FGS выключен.
   Airplane=0, forced idle=false, standby=10, stay-on=15; camera/notifications
   granted восстановлены. Диагностический loopback profile остался, но без моста
-  offline; самостоятельный DNS-клиент этим не заявляется. Msgd healthy/pong.
+   offline; самостоятельный DNS-клиент этим не заявляется. Msgd healthy/pong.
+
+## Самостоятельный DNS checkpoint (2026-09-30)
+
+- APK/core now embed the pinned C client with immutable certificate/Noise pins
+  in authenticated local profile; bootstrap bearer is not copied into that profile.
+  Default-network numeric resolvers selected explicitly, no guessed public fallback.
+  Current unsigned arm64 release with the embedded carrier: 5 101 800 bytes
+  (~4.87 MiB); previous 2.78 MiB figures above belong to the earlier TCP build.
+- Реальный Android `.gate` enrol→native stop/restart→same identity reconnect,
+  refill и two fetch passed. Основной package не удалялся/не очищался.
+  Пропущенная попытка из-за отсутствовавшего fixture не считалась PASS;
+  повтор после передачи private fixture прошёл actual result code0.
+- Wrong full carrier certificate on live DNS→typed PinMismatch before enrol;
+  wrong Noise key with valid carrier→Transport before bearer authentication;
+  оба временных account остались unenrolled. Actual main identity unchanged.
+- Moto↔Linux native peer E2E messages through recursive DNS in both directions.
+  Это native-peer gate, не два Android аппарата. После пользовательского
+  отключения USB виден только Wi-Fi ADB, reverse mappings пусты.
+- Real no-network queue before Wi-Fi-only transition; затем SIGKILL настоящего
+  app PID и manual restart. Same encrypted ciphertext hash/account/inbox retained,
+  queued→accepted; DNS recipient received1 then0, all skipped counts0.
+  Airplane0/Wi-Fi1/mobile-data1/Bluetooth0 восстановлены/подтверждены.
+  Дальше Wi-Fi не отключать без safe control: он единственный ADB путь.
+- Empty fetch report erroneously returned cursor0 after a non-empty batch.
+  Host e2e RED reproduced; fix sends the existing zero-count ACK to observe
+  durable server cursor. Live Android repeat fetch + dedup now passes.
+- Explicit same-resolver native restart preserves account/pins/inbox/outbox.
+  Foreground UI commands also refresh selected DNS when FGS is disabled.
+- Concurrent first profile import: 32-caller regression originally accepted
+  both different pins. Compare-and-save now uses one BEGIN IMMEDIATE transaction;
+  one immutable profile wins, the other key is rejected; RED→GREEN.
+- Real API35 FGS accepted `specialUse` type0x40000000, repeated DNS polls passed;
+  correct subtype disclosure and stop/onTimeout handling present. This is not
+  six-hour endurance or Play-policy approval. >30-min DNS, Doze/Standby,
+  queries/battery/PSS, restricted egress, physical pair/mobile and optical gates
+  remain unverified until their own evidence.
 
 ## Запреты (проверено кодом, не аппаратом)
 

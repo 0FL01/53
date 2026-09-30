@@ -174,6 +174,7 @@ async fn two_cores_talk_e2e_through_live_msgd() {
     assert_eq!((stats.resent, stats.delivered), (1, 1));
     let r_empty = b.fetch_and_decrypt(&mut tb).await.expect("fetch-empty");
     assert!(r_empty.received.is_empty(), "server dedup: no duplicate event");
+    assert!(r_empty.cursor >= r1.cursor, "an empty fetch must retain the durable server cursor");
 
     // Обратное направление по установленным сессиям (normal-сообщение).
     let mid2 = b.send_text(&mut tb, &ea.contact_id, "hi alice").await.expect("send2");

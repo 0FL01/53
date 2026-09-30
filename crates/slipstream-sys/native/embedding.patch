@@ -6,7 +6,7 @@ diff --git a/src/slipstream_client_runtime.c b/src/slipstream_client_runtime.c
 +#ifdef DMSG_EMBEDDED
 +#include "embed.h"
 +#define picoquic_slipstream_client dmsg_embedded_client
-+int dmsg_pin_bytes(picoquic_quic_t *, const uint8_t *, size_t);
++int dmsg_pin_bytes(picoquic_quic_t *, const uint8_t *, size_t, dmsg_control *);
 +#else
  extern volatile sig_atomic_t should_shutdown;
  extern void client_sighandler(int);
@@ -65,7 +65,7 @@ diff --git a/src/slipstream_client_runtime.c b/src/slipstream_client_runtime.c
      if (!quic) goto done;
 +#ifdef DMSG_EMBEDDED
 +    ret = 4;
-+    if (dmsg_pin_bytes(quic, certificate, certificate_len)) goto cleanup;
++    if (dmsg_pin_bytes(quic, certificate, certificate_len, control)) goto cleanup;
 +#else
 +    ret = 2;
      if (ss_pin_certificate(quic, cert)) goto cleanup;
@@ -113,6 +113,29 @@ diff --git a/src/slipstream_client.c b/src/slipstream_client.c
 diff --git a/src/slipstream_pin.c b/src/slipstream_pin.c
 --- a/src/slipstream_pin.c
 +++ b/src/slipstream_pin.c
+@@ -6,1 +6,8 @@
+ #include <string.h>
++#ifdef DMSG_EMBEDDED
++#include "embed.h"
++#define PIN_CONTROL(c) , c
++#else
++#define PIN_CONTROL(c)
++#endif
++
+@@ -12,1 +19,4 @@
+     EVP_PKEY *key;
++#ifdef DMSG_EMBEDDED
++    dmsg_control *control;
++#endif
+@@ -66,2 +76,7 @@
+     if (!count || !certs || certs[0].len != v->der_len ||
+-        !certs[0].base || memcmp(certs[0].base, v->der, v->der_len)) return -1;
++        !certs[0].base || memcmp(certs[0].base, v->der, v->der_len)) {
++#ifdef DMSG_EMBEDDED
++        if (v->control) atomic_store_explicit(&v->control->pin_failed, true, memory_order_release);
++#endif
++        return -1;
++    }
 @@ -80,7 +80,2 @@
 -int ss_pin_certificate(picoquic_quic_t *quic, const char *path) {
 -    BIO *bio = BIO_new_file(path, "r");
@@ -121,9 +144,16 @@ diff --git a/src/slipstream_pin.c b/src/slipstream_pin.c
 -    X509 *extra = PEM_read_bio_X509(bio, NULL, NULL, NULL);
 -    BIO_free(bio);
 -    if (!cert || extra) { X509_free(cert); X509_free(extra); return -1; }
-+static int pin_x509(picoquic_quic_t *quic, X509 *cert) {
++static int pin_x509(picoquic_quic_t *quic, X509 *cert PIN_CONTROL(dmsg_control *control)) {
 +    if (!cert) return -1;
-@@ -98,1 +93,35 @@
+@@ -89,1 +96,4 @@
+     v->key = X509_get_pubkey(cert);
++#ifdef DMSG_EMBEDDED
++    v->control = control;
++#endif
+@@ -96,3 +122,37 @@
+     picoquic_set_verify_certificate_callback(quic, &v->super, verifier_free);
+     return 0;
  }
 +
 +int ss_pin_certificate(picoquic_quic_t *quic, const char *path) {
@@ -133,13 +163,13 @@ diff --git a/src/slipstream_pin.c b/src/slipstream_pin.c
 +    X509 *extra = PEM_read_bio_X509(bio, NULL, NULL, NULL);
 +    BIO_free(bio);
 +    if (!cert || extra) { X509_free(cert); X509_free(extra); return -1; }
-+    return pin_x509(quic, cert);
++    return pin_x509(quic, cert PIN_CONTROL(NULL));
 +}
 +
 +#ifdef DMSG_EMBEDDED
 +/* In-memory full leaf certificate; the existing DER/signature verifier is
 + * unchanged. No SPKI-only pin, trust-store lookup, file, env or argv. */
-+int dmsg_pin_bytes(picoquic_quic_t *quic, const uint8_t *bytes, size_t length) {
++int dmsg_pin_bytes(picoquic_quic_t *quic, const uint8_t *bytes, size_t length, dmsg_control *control) {
 +    if (!bytes || !length || length > 65536) return -1;
 +    X509 *cert = NULL;
 +    if (length >= 27 && !memcmp(bytes, "-----BEGIN CERTIFICATE-----", 27)) {
@@ -154,6 +184,6 @@ diff --git a/src/slipstream_pin.c b/src/slipstream_pin.c
 +        cert = d2i_X509(NULL, &cursor, (long)length);
 +        if (cursor != bytes + length) { X509_free(cert); return -1; }
 +    }
-+    return pin_x509(quic, cert);
++    return pin_x509(quic, cert, control);
 +}
 +#endif

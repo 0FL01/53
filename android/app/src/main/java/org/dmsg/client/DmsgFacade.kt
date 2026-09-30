@@ -4,6 +4,7 @@ package org.dmsg.client
 class DmsgError(msg: String) : Exception(msg)
 
 data class Dialog(val contactId: String, val state: String, val identityMismatch: Boolean = false)
+data class DnsProfile(val domain: String, val pub: ByteArray, val fingerprint: String, val resolvers: List<String>)
 data class Msg(val seq: Long, val contactId: String, val text: String)
 data class OutRow(val mid: String, val contactId: String, val status: String)
 data class FetchRes(val received: List<Msg>, val skipped: LongArray, val cursor: Long)
@@ -13,6 +14,12 @@ data class FetchRes(val received: List<Msg>, val skipped: LongArray, val cursor:
  * Lists are strictly paginated (cursor/limit); no raw DB cursors cross it.
  */
 interface DmsgFacade {
+    fun dnsProfile(): DnsProfile? = null
+    fun configureDns(qr: String, resolvers: List<String>) { throw DmsgError("DNS core unavailable") }
+    fun enrolDns(qr: String, resolvers: List<String>): String = throw DmsgError("DNS core unavailable")
+    fun dnsNetworkChanged(resolvers: List<String>) { throw DmsgError("DNS core unavailable") }
+    fun stopDns() {}
+    fun dnsStatus(): String = "not configured"
     fun isReady(): Boolean
     fun account(): Pair<Boolean, String?>
     fun preview(qr: String): Pair<String, String>

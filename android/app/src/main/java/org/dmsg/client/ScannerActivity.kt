@@ -129,15 +129,13 @@ class ScannerActivity : DmsgActivity() {
     }
 
     private fun enrol(uri: String, f: DmsgFacade) {
-        val addr = Prefs.addr(this)
-        if (addr.isEmpty()) {
-            result.text = "Укажите адрес транспорта в диагностике, затем сканируйте снова"
-            done = false
-            return
-        }
         result.text = "регистрация…"
         Thread {
-            val out = try { "enrolled: ${f.enrol(uri, addr, null)}" }
+            val out = try {
+                val id = f.enrolDns(uri, DnsNetwork.resolvers(this))
+                DnsNetwork.mirrorProfile(this, f)
+                "enrolled: $id (DNS)"
+            }
                 catch (e: Exception) { "ошибка регистрации: ${e.message}" }
             runOnUiThread { result.text = out }
         }.start()

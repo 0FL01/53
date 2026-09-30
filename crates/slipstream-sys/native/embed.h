@@ -8,6 +8,7 @@
  * owning Rust worker thread. Snapshot packs phase:8, port:16, error:32. */
 typedef struct {
     atomic_bool stop;
+    atomic_bool pin_failed;
     atomic_uint_fast64_t snapshot;
 } dmsg_control;
 enum { DMSG_STARTING, DMSG_LISTENING, DMSG_READY, DMSG_STOPPED, DMSG_FAILED };

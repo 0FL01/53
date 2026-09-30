@@ -18,7 +18,7 @@ object Core {
             // JNA reuses the already-loaded lib on first Native.load.
             System.loadLibrary("dmsg_core")
             val k = SecureStore.key(c)
-            try { UniFfiFacade(dbFile(c).absolutePath, k) }
+            try { UniFfiFacade(dbFile(c).absolutePath, k, c.applicationContext) }
             finally { k.fill(0) }
         } catch (e: UnsatisfiedLinkError) {
             Unready(e.message ?: "no native lib")

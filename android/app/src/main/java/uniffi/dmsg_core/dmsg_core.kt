@@ -758,6 +758,26 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is
 // rather `InterfaceTooLargeException`, caused by too many methods
@@ -783,6 +803,8 @@ fun uniffi_dmsg_core_checksum_method_dmsgclient_account_info(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_add_contact_qr(
 ): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_configure_dns(
+): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_contact_accept(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_contact_block(
@@ -795,11 +817,21 @@ fun uniffi_dmsg_core_checksum_method_dmsgclient_contact_request(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_contacts_page(
 ): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_dns_network_changed(
+): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_dns_profile_info(
+): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_dns_status(
+): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_enrol_dns(
+): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_enrol_from_qr(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_enrol_preview(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_fetch(
+): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_fetch_dns(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_inbox_page(
 ): Short
@@ -809,9 +841,17 @@ fun uniffi_dmsg_core_checksum_method_dmsgclient_outbox_page(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_reconnect(
 ): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_reconnect_dns(
+): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_retry_dns(
+): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_retry_queued(
 ): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_send_dns(
+): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_send_text(
+): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_stop_dns(
 ): Short
 fun uniffi_dmsg_core_checksum_constructor_dmsgclient_open(
 ): Short
@@ -878,6 +918,8 @@ fun uniffi_dmsg_core_fn_method_dmsgclient_account_info(`ptr`: Pointer,uniffi_out
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_add_contact_qr(`ptr`: Pointer,`uri`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
+fun uniffi_dmsg_core_fn_method_dmsgclient_configure_dns(`ptr`: Pointer,`qr`: RustBuffer.ByValue,`resolvers`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): Unit
 fun uniffi_dmsg_core_fn_method_dmsgclient_contact_accept(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): Unit
 fun uniffi_dmsg_core_fn_method_dmsgclient_contact_block(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
@@ -890,11 +932,21 @@ fun uniffi_dmsg_core_fn_method_dmsgclient_contact_request(`ptr`: Pointer,`contac
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_contacts_page(`ptr`: Pointer,`cursor`: RustBuffer.ByValue,`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
+fun uniffi_dmsg_core_fn_method_dmsgclient_dns_network_changed(`ptr`: Pointer,`resolvers`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): Unit
+fun uniffi_dmsg_core_fn_method_dmsgclient_dns_profile_info(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+fun uniffi_dmsg_core_fn_method_dmsgclient_dns_status(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+fun uniffi_dmsg_core_fn_method_dmsgclient_enrol_dns(`ptr`: Pointer,`qr`: RustBuffer.ByValue,`resolvers`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_enrol_from_qr(`ptr`: Pointer,`qr`: RustBuffer.ByValue,`addr`: RustBuffer.ByValue,`expectedPinDer`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_enrol_preview(`ptr`: Pointer,`qr`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_fetch(`ptr`: Pointer,`addr`: RustBuffer.ByValue,`serverPub`: RustBuffer.ByValue,`domain`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+fun uniffi_dmsg_core_fn_method_dmsgclient_fetch_dns(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_inbox_page(`ptr`: Pointer,`cursor`: Long,`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
@@ -904,10 +956,18 @@ fun uniffi_dmsg_core_fn_method_dmsgclient_outbox_page(`ptr`: Pointer,`cursor`: L
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_reconnect(`ptr`: Pointer,`addr`: RustBuffer.ByValue,`serverPub`: RustBuffer.ByValue,`domain`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): Int
+fun uniffi_dmsg_core_fn_method_dmsgclient_reconnect_dns(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
+): Int
+fun uniffi_dmsg_core_fn_method_dmsgclient_retry_dns(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_retry_queued(`ptr`: Pointer,`addr`: RustBuffer.ByValue,`serverPub`: RustBuffer.ByValue,`domain`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+fun uniffi_dmsg_core_fn_method_dmsgclient_send_dns(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,`text`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_send_text(`ptr`: Pointer,`addr`: RustBuffer.ByValue,`serverPub`: RustBuffer.ByValue,`domain`: RustBuffer.ByValue,`contactId`: RustBuffer.ByValue,`text`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
+fun uniffi_dmsg_core_fn_method_dmsgclient_stop_dns(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
+): Unit
 fun uniffi_dmsg_core_fn_func_page_limit(`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
 ): Int
 fun uniffi_dmsg_core_fn_func_qr_kind(`uri`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
@@ -1055,6 +1115,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_add_contact_qr() != 40071.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_configure_dns() != 45066.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_contact_accept() != 16693.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1073,6 +1136,18 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_contacts_page() != 10699.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_dns_network_changed() != 16849.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_dns_profile_info() != 15040.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_dns_status() != 21251.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_enrol_dns() != 2142.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_enrol_from_qr() != 50037.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1080,6 +1155,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_fetch() != 59105.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_fetch_dns() != 21412.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_inbox_page() != 13764.toShort()) {
@@ -1094,10 +1172,22 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_reconnect() != 582.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_reconnect_dns() != 35785.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_retry_dns() != 46819.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_retry_queued() != 42401.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_send_dns() != 10275.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_send_text() != 17569.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_stop_dns() != 16687.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dmsg_core_checksum_constructor_dmsgclient_open() != 28712.toShort()) {
@@ -1532,6 +1622,11 @@ public interface DmsgClientInterface {
     fun `addContactQr`(`uri`: kotlin.String): QrOutcome
 
     /**
+     * Offline import after QR preview confirmation. Saved pins are immutable.
+     */
+    fun `configureDns`(`qr`: kotlin.String, `resolvers`: List<kotlin.String>)
+
+    /**
      * Согласие на контакт.
      */
     fun `contactAccept`(`contactId`: kotlin.String)
@@ -1562,6 +1657,17 @@ public interface DmsgClientInterface {
     fun `contactsPage`(`cursor`: kotlin.String?, `limit`: kotlin.UInt): ContactsPage
 
     /**
+     * Network transitions invalidate sockets even if resolver IPs stayed equal.
+     */
+    fun `dnsNetworkChanged`(`resolvers`: List<kotlin.String>)
+
+    fun `dnsProfileInfo`(): DnsProfileInfo?
+
+    fun `dnsStatus`(): kotlin.String
+
+    fun `enrolDns`(`qr`: kotlin.String, `resolvers`: List<kotlin.String>): EnrolledInfo
+
+    /**
      * Полный enrol из QR (сеть). pin_der — ожидаемый DER для сверки
      * (None — доверие сканированному QR как корню, см. enrol.rs).
      */
@@ -1576,6 +1682,8 @@ public interface DmsgClientInterface {
      * Приём пачки: FETCH → decrypt → inbox → ACK (событие для FGS/нотификаций).
      */
     fun `fetch`(`addr`: kotlin.String, `serverPub`: kotlin.ByteArray, `domain`: kotlin.String): FetchReport
+
+    fun `fetchDns`(): FetchReport
 
     /**
      * Страница входящих (cursor — seq, 0 = сначала).
@@ -1597,16 +1705,27 @@ public interface DmsgClientInterface {
      */
     fun `reconnect`(`addr`: kotlin.String, `serverPub`: kotlin.ByteArray, `domain`: kotlin.String): kotlin.UInt
 
+    fun `reconnectDns`(): kotlin.UInt
+
+    fun `retryDns`(): RetryReport
+
     /**
      * Ретрай недоставленного тем же ciphertext (пачками, прогресс в DB).
      */
     fun `retryQueued`(`addr`: kotlin.String, `serverPub`: kotlin.ByteArray, `domain`: kotlin.String): RetryReport
+
+    fun `sendDns`(`contactId`: kotlin.String, `text`: kotlin.String): kotlin.String
 
     /**
      * Отправить текст (login + refill + claim + одна TX + SEND). Возвращает
      * message_id hex. Блокирующий вызов для FGS/композера.
      */
     fun `sendText`(`addr`: kotlin.String, `serverPub`: kotlin.ByteArray, `domain`: kotlin.String, `contactId`: kotlin.String, `text`: kotlin.String): kotlin.String
+
+    /**
+     * No SQLite access: cancellation can race a blocked connect/fetch.
+     */
+    fun `stopDns`()
 
     companion object
 }
@@ -1730,6 +1849,21 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
 
 
     /**
+     * Offline import after QR preview confirmation. Saved pins are immutable.
+     */
+    @Throws(FfiException::class)override fun `configureDns`(`qr`: kotlin.String, `resolvers`: List<kotlin.String>)
+        =
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_configure_dns(
+        it, FfiConverterString.lower(`qr`),FfiConverterSequenceString.lower(`resolvers`),_status)
+}
+    }
+
+
+
+
+    /**
      * Согласие на контакт.
      */
     @Throws(FfiException::class)override fun `contactAccept`(`contactId`: kotlin.String)
@@ -1823,6 +1957,60 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
 
 
     /**
+     * Network transitions invalidate sockets even if resolver IPs stayed equal.
+     */
+    @Throws(FfiException::class)override fun `dnsNetworkChanged`(`resolvers`: List<kotlin.String>)
+        =
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_dns_network_changed(
+        it, FfiConverterSequenceString.lower(`resolvers`),_status)
+}
+    }
+
+
+
+
+    @Throws(FfiException::class)override fun `dnsProfileInfo`(): DnsProfileInfo? {
+            return FfiConverterOptionalTypeDnsProfileInfo.lift(
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_dns_profile_info(
+        it, _status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(FfiException::class)override fun `dnsStatus`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_dns_status(
+        it, _status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(FfiException::class)override fun `enrolDns`(`qr`: kotlin.String, `resolvers`: List<kotlin.String>): EnrolledInfo {
+            return FfiConverterTypeEnrolledInfo.lift(
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_enrol_dns(
+        it, FfiConverterString.lower(`qr`),FfiConverterSequenceString.lower(`resolvers`),_status)
+}
+    }
+    )
+    }
+
+
+
+    /**
      * Полный enrol из QR (сеть). pin_der — ожидаемый DER для сверки
      * (None — доверие сканированному QR как корню, см. enrol.rs).
      */
@@ -1864,6 +2052,19 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
     uniffiRustCallWithError(FfiException) { _status ->
     UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_fetch(
         it, FfiConverterString.lower(`addr`),FfiConverterByteArray.lower(`serverPub`),FfiConverterString.lower(`domain`),_status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(FfiException::class)override fun `fetchDns`(): FetchReport {
+            return FfiConverterTypeFetchReport.lift(
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_fetch_dns(
+        it, _status)
 }
     }
     )
@@ -1935,6 +2136,32 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
 
 
 
+    @Throws(FfiException::class)override fun `reconnectDns`(): kotlin.UInt {
+            return FfiConverterUInt.lift(
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_reconnect_dns(
+        it, _status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(FfiException::class)override fun `retryDns`(): RetryReport {
+            return FfiConverterTypeRetryReport.lift(
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_retry_dns(
+        it, _status)
+}
+    }
+    )
+    }
+
+
+
     /**
      * Ретрай недоставленного тем же ciphertext (пачками, прогресс в DB).
      */
@@ -1944,6 +2171,19 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
     uniffiRustCallWithError(FfiException) { _status ->
     UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_retry_queued(
         it, FfiConverterString.lower(`addr`),FfiConverterByteArray.lower(`serverPub`),FfiConverterString.lower(`domain`),_status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(FfiException::class)override fun `sendDns`(`contactId`: kotlin.String, `text`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_send_dns(
+        it, FfiConverterString.lower(`contactId`),FfiConverterString.lower(`text`),_status)
 }
     }
     )
@@ -1965,6 +2205,21 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
     }
     )
     }
+
+
+
+    /**
+     * No SQLite access: cancellation can race a blocked connect/fetch.
+     */
+    @Throws(FfiException::class)override fun `stopDns`()
+        =
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_stop_dns(
+        it, _status)
+}
+    }
+
 
 
 
@@ -2180,6 +2435,49 @@ public object FfiConverterTypeContactsPage: FfiConverterRustBuffer<ContactsPage>
     override fun write(value: ContactsPage, buf: ByteBuffer) {
             FfiConverterSequenceTypeContactRow.write(value.`rows`, buf)
             FfiConverterOptionalString.write(value.`nextCursor`, buf)
+    }
+}
+
+
+
+/**
+ * Public metadata only: neither the bearer nor full profile leaves the store.
+ */
+data class DnsProfileInfo (
+    var `domain`: kotlin.String,
+    var `noisePubkey`: kotlin.ByteArray,
+    var `pinFingerprintHex`: kotlin.String,
+    var `resolvers`: List<kotlin.String>
+) {
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDnsProfileInfo: FfiConverterRustBuffer<DnsProfileInfo> {
+    override fun read(buf: ByteBuffer): DnsProfileInfo {
+        return DnsProfileInfo(
+            FfiConverterString.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterSequenceString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: DnsProfileInfo) = (
+            FfiConverterString.allocationSize(value.`domain`) +
+            FfiConverterByteArray.allocationSize(value.`noisePubkey`) +
+            FfiConverterString.allocationSize(value.`pinFingerprintHex`) +
+            FfiConverterSequenceString.allocationSize(value.`resolvers`)
+    )
+
+    override fun write(value: DnsProfileInfo, buf: ByteBuffer) {
+            FfiConverterString.write(value.`domain`, buf)
+            FfiConverterByteArray.write(value.`noisePubkey`, buf)
+            FfiConverterString.write(value.`pinFingerprintHex`, buf)
+            FfiConverterSequenceString.write(value.`resolvers`, buf)
     }
 }
 
@@ -3173,6 +3471,66 @@ public object FfiConverterOptionalByteArray: FfiConverterRustBuffer<kotlin.ByteA
         } else {
             buf.put(1)
             FfiConverterByteArray.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeDnsProfileInfo: FfiConverterRustBuffer<DnsProfileInfo?> {
+    override fun read(buf: ByteBuffer): DnsProfileInfo? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeDnsProfileInfo.read(buf)
+    }
+
+    override fun allocationSize(value: DnsProfileInfo?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeDnsProfileInfo.allocationSize(value)
+        }
+    }
+
+    override fun write(value: DnsProfileInfo?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeDnsProfileInfo.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.String>> {
+    override fun read(buf: ByteBuffer): List<kotlin.String> {
+        val len = buf.getInt()
+        return List<kotlin.String>(len) {
+            FfiConverterString.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<kotlin.String>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterString.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<kotlin.String>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterString.write(it, buf)
         }
     }
 }

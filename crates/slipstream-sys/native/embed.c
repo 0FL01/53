@@ -13,6 +13,7 @@ dmsg_control *dmsg_control_new(void) {
     dmsg_control *c = malloc(sizeof(*c));
     if (c) {
         atomic_init(&c->stop, false);
+        atomic_init(&c->pin_failed, false);
         atomic_init(&c->snapshot, DMSG_STARTING);
     }
     return c;
@@ -64,6 +65,7 @@ int dmsg_native_run(dmsg_control *c, const dmsg_config *config) {
         "127.0.0.1", NULL, false, c, config->certificate, config->certificate_len);
     /* Failure wins over a concurrent late stop. Stop is successful only if the
      * owning runtime observed cancellation before deciding to fail. */
+    if (ret && atomic_load_explicit(&c->pin_failed, memory_order_acquire)) ret = 7;
     dmsg_publish(c, ret == 0 ? DMSG_STOPPED : DMSG_FAILED, 0, ret);
     return ret;
 }

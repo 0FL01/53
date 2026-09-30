@@ -47,6 +47,15 @@ pub struct Preview {
     pub pin_fingerprint_hex: String,
 }
 
+/// Public metadata only: neither the bearer nor full profile leaves the store.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct DnsProfileInfo {
+    pub domain: String,
+    pub noise_pubkey: Vec<u8>,
+    pub pin_fingerprint_hex: String,
+    pub resolvers: Vec<String>,
+}
+
 /// Тип QR: enrol-приглашение или контакт. Оба формата обязан понимать сканер.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum QrKind {
@@ -381,6 +390,17 @@ fn info_of(c: &Contact) -> ContactInfo {
     }
 }
 
+fn dns_failure(state: crate::dns::State) -> FfiError {
+    if state == crate::dns::State::Failed(7) { return FfiError::PinMismatch; }
+    FfiError::Transport(match state {
+        crate::dns::State::Connecting => "DNS connect deadline".into(),
+        crate::dns::State::Backoff(_) => "DNS unavailable; reconnect backoff".into(),
+        crate::dns::State::Stopped => "DNS stopped".into(),
+        crate::dns::State::Failed(c) => format!("DNS native failure {c}"),
+        crate::dns::State::Ready(_) => "DNS stream unavailable".into(),
+    })
+}
+
 fn parse_transport_args(
     server_pub: Vec<u8>,
     domain: String,
@@ -396,6 +416,16 @@ fn parse_transport_args(
 }
 
 impl DmsgClient {
+    fn dns_profile(&self) -> Result<crate::dns::Profile, FfiError> {
+        crate::dns::load(&self.conn()?).map_err(FfiError::Store)?
+            .ok_or_else(|| FfiError::BadArgs("DNS profile is not configured".into()))
+    }
+
+    fn dns_endpoint(&self, profile: &crate::dns::Profile) -> Result<String, FfiError> {
+        crate::dns::endpoint(&self.db_path, profile).map(|a| a.to_string())
+            .map_err(dns_failure)
+    }
+
     fn conn(&self) -> Result<rusqlite::Connection, FfiError> {
         match &self.key {
             Some(k) => crate::store::open_encrypted(Path::new(&self.db_path), k),
@@ -429,6 +459,94 @@ impl DmsgClient {
 
 #[uniffi::export]
 impl DmsgClient {
+    /// Offline import after QR preview confirmation. Saved pins are immutable.
+    pub fn configure_dns(&self, qr: String, resolvers: Vec<String>) -> Result<(), FfiError> {
+        let profile = crate::dns::Profile::from_qr(&qr, resolvers)
+            .map_err(|e| FfiError::BadQr(e.into()))?;
+        let mut conn = self.conn()?;
+        // Serialize the first import's compare-and-save across all FFI callers,
+        // not only Android's facade lock. Two different pins must not both win.
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|_| FfiError::Store("dns import transaction".into()))?;
+        if let Some(old) = crate::dns::load(&tx).map_err(FfiError::Store)? {
+            if old.domain != profile.domain || old.certificate != profile.certificate
+                || old.noise_pubkey != profile.noise_pubkey {
+                return Err(FfiError::BadArgs("saved DNS identity/pin cannot be replaced".into()));
+            }
+        }
+        crate::dns::save(&tx, &profile).map_err(FfiError::Store)?;
+        tx.commit().map_err(|_| FfiError::Store("dns import commit".into()))
+    }
+
+    pub fn dns_profile_info(&self) -> Result<Option<DnsProfileInfo>, FfiError> {
+        use sha2::Digest;
+        Ok(crate::dns::load(&self.conn()?).map_err(FfiError::Store)?.map(|p| DnsProfileInfo {
+            domain: p.domain,
+            noise_pubkey: p.noise_pubkey.to_vec(),
+            pin_fingerprint_hex: hex(&sha2::Sha256::digest(&p.certificate)),
+            resolvers: p.resolvers.into_iter().map(|a| a.to_string()).collect(),
+        }))
+    }
+
+    /// Network transitions invalidate sockets even if resolver IPs stayed equal.
+    pub fn dns_network_changed(&self, resolvers: Vec<String>) -> Result<(), FfiError> {
+        let mut profile = self.dns_profile()?;
+        profile.resolvers = crate::dns::parse_resolvers(resolvers)
+            .map_err(|e| FfiError::BadArgs(e.into()))?;
+        crate::dns::save(&self.conn()?, &profile).map_err(FfiError::Store)?;
+        self.stop_dns()
+    }
+
+    /// No SQLite access: cancellation can race a blocked connect/fetch.
+    pub fn stop_dns(&self) -> Result<(), FfiError> {
+        crate::dns::stop(&self.db_path).map_err(|e| FfiError::Transport(e.into()))
+    }
+
+    pub fn dns_status(&self) -> Result<String, FfiError> {
+        crate::dns::status(&self.db_path).map(|s| match s {
+            crate::dns::State::Connecting => "connecting".into(),
+            crate::dns::State::Ready(_) => "ready".into(),
+            crate::dns::State::Backoff(seconds) => format!("backoff {seconds}s"),
+            crate::dns::State::Failed(7) => "carrier pin mismatch".into(),
+            crate::dns::State::Failed(code) => format!("failed {code}"),
+            crate::dns::State::Stopped => "stopped".into(),
+        }).map_err(|e| FfiError::Transport(e.into()))
+    }
+
+    pub fn enrol_dns(&self, qr: String, resolvers: Vec<String>) -> Result<EnrolledInfo, FfiError> {
+        self.configure_dns(qr.clone(), resolvers)?;
+        let profile = self.dns_profile()?;
+        let addr = self.dns_endpoint(&profile)?;
+        self.enrol_from_qr(qr, addr, Some(profile.certificate))
+    }
+
+    pub fn reconnect_dns(&self) -> Result<u32, FfiError> {
+        let p = self.dns_profile()?;
+        self.reconnect(self.dns_endpoint(&p)?, p.noise_pubkey.to_vec(), p.domain)
+    }
+    pub fn fetch_dns(&self) -> Result<FetchReport, FfiError> {
+        let p = self.dns_profile()?;
+        self.fetch(self.dns_endpoint(&p)?, p.noise_pubkey.to_vec(), p.domain)
+    }
+    pub fn retry_dns(&self) -> Result<RetryReport, FfiError> {
+        let p = self.dns_profile()?;
+        self.retry_queued(self.dns_endpoint(&p)?, p.noise_pubkey.to_vec(), p.domain)
+    }
+    pub fn send_dns(&self, contact_id: String, text: String) -> Result<String, FfiError> {
+        if text.is_empty() || text.len() > dmsg_protocol::TEXT_MAX { return Err(FfiError::BadText); }
+        let p = self.dns_profile()?;
+        let mut core = self.core()?;
+        core.preflight_text(&contact_id, &text).map_err(map_olm)?;
+        match crate::dns::endpoint(&self.db_path, &p) {
+            Ok(a) => self.send_text(a.to_string(), p.noise_pubkey.to_vec(), p.domain, contact_id, text),
+            Err(s @ (crate::dns::State::Connecting | crate::dns::State::Backoff(_) | crate::dns::State::Stopped)) => {
+                core.queue_text_existing_session(&contact_id, &text).map_err(map_olm)?
+                    .map(|mid| hex(&mid)).ok_or_else(|| dns_failure(s))
+            }
+            Err(s) => Err(dns_failure(s)),
+        }
+    }
+
     /// Открыть фасад над app-private файлом DB (файл создаётся лениво store).
     #[uniffi::constructor]
     pub fn open(db_path: String) -> Arc<Self> {
@@ -732,6 +850,37 @@ impl DmsgClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn simultaneous_dns_import_cannot_replace_the_winning_pin() {
+        let (client, dir) = tmp_client("dns-import-race");
+        drop(client.conn().unwrap());
+        let client = std::sync::Arc::new(client);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(32));
+        let threads: Vec<_> = (0..32).map(|i| {
+            let client = client.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let key = 8 + (i % 2) as u8;
+                let qr = dmsg_protocol::bootstrap::build(b"fixture.invalid", &[0x30, 0], &[key; 32], &[91; 32]).unwrap();
+                barrier.wait();
+                (key, client.configure_dns(qr, vec!["127.0.0.1:53".into()]))
+            })
+        }).collect();
+        let mut accepted = std::collections::HashSet::new();
+        for thread in threads {
+            let (key, result) = thread.join().unwrap();
+            match result {
+                Ok(()) => { accepted.insert(key); }
+                Err(FfiError::BadArgs(_)) => (),
+                Err(_) => panic!("unexpected DNS import failure"),
+            }
+        }
+        assert_eq!(accepted.len(), 1, "only one immutable profile may win");
+        assert!(accepted.contains(&client.dns_profile_info().unwrap().unwrap().noise_pubkey[0]));
+        drop(client);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     fn enrolled_client(name: &str) -> (DmsgClient, std::path::PathBuf) {
         let (c, dir) = tmp_client(name);

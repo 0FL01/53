@@ -88,7 +88,8 @@ pub enum Status {
     Ready(SocketAddrV4),
     Stopped,
     /// Native code: 1 loss/bootstrap exhausted, 2 invalid arguments,
-    /// 3 QUIC allocation/configuration, 4 invalid pin, 5 listener, 6 connect;
+    /// 3 QUIC allocation/configuration, 4 invalid pin, 5 listener, 6 connect,
+    /// 7 presented full certificate mismatch;
     /// other values are propagated packet-loop errors.
     Failed(i32),
 }

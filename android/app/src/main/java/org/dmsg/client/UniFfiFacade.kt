@@ -1,5 +1,6 @@
 package org.dmsg.client
 
+import android.content.Context
 import uniffi.dmsg_core.DmsgClient
 import uniffi.dmsg_core.FfiException
 import uniffi.dmsg_core.QrKind
@@ -11,7 +12,7 @@ import uniffi.dmsg_core.storagePlan
 import java.io.File
 
 /** Real facade over generated UniFFI bindings (commands/events only). */
-class UniFfiFacade(private val dbPath: String, key: ByteArray) : DmsgFacade {
+class UniFfiFacade(private val dbPath: String, key: ByteArray, private val context: Context? = null) : DmsgFacade {
     private val core: DmsgClient = try { DmsgClient.openEncrypted(dbPath, key) }
         catch (e: FfiException) { throw DmsgError(ffiErrorMessage(e)) }
 
@@ -30,6 +31,17 @@ class UniFfiFacade(private val dbPath: String, key: ByteArray) : DmsgFacade {
     }
 
     override fun isReady() = true
+    override fun dnsProfile(): DnsProfile? = wrap {
+        core.dnsProfileInfo()?.let { DnsProfile(it.domain, it.noisePubkey, it.pinFingerprintHex, it.resolvers) }
+    }
+    override fun configureDns(qr: String, resolvers: List<String>) = wrap { core.configureDns(qr, resolvers) }
+    override fun enrolDns(qr: String, resolvers: List<String>): String = wrap { core.enrolDns(qr, resolvers).contactId }
+    override fun dnsNetworkChanged(resolvers: List<String>) = wrap { core.dnsNetworkChanged(resolvers) }
+    // Cancellation has no DB access and must not wait for a blocked store call.
+    override fun stopDns() {
+        try { core.stopDns() } catch (e: FfiException) { throw DmsgError(ffiErrorMessage(e)) }
+    }
+    override fun dnsStatus(): String = wrap { core.dnsStatus() }
 
     override fun account(): Pair<Boolean, String?> = wrap {
         val a = core.accountInfo()
@@ -85,16 +97,30 @@ class UniFfiFacade(private val dbPath: String, key: ByteArray) : DmsgFacade {
         Pair(p.rows.map { OutRow(it.messageIdHex, it.contactId, it.status) }, p.nextCursor)
     }
 
+    /** Foreground commands also refresh DNS when the background service is disabled. */
+    private fun usesDns(): Boolean {
+        val profile = core.dnsProfileInfo() ?: return false
+        val app = context ?: return true
+        val resolvers = try { DnsNetwork.resolvers(app) } catch (_: DmsgError) {
+            // Do not reuse a stale Ready carrier after radio/network loss. The Rust
+            // supervisor decides whether an established session can queue offline.
+            core.stopDns()
+            return true
+        }
+        if (resolvers != profile.resolvers) core.dnsNetworkChanged(resolvers)
+        return true
+    }
+
     override fun send(addr: String, pub: ByteArray, domain: String, id: String, text: String): String =
-        wrap { core.sendText(addr, pub, domain, id, text) }
+        wrap { if (usesDns()) core.sendDns(id, text) else core.sendText(addr, pub, domain, id, text) }
 
     override fun retry(addr: String, pub: ByteArray, domain: String): LongArray = wrap {
-        val r = core.retryQueued(addr, pub, domain)
+        val r = if (usesDns()) core.retryDns() else core.retryQueued(addr, pub, domain)
         longArrayOf(r.resent.toLong(), r.accepted.toLong(), r.delivered.toLong(), r.skipped.toLong())
     }
 
     override fun fetch(addr: String, pub: ByteArray, domain: String): FetchRes = wrap {
-        val r = core.fetch(addr, pub, domain)
+        val r = if (usesDns()) core.fetchDns() else core.fetch(addr, pub, domain)
         FetchRes(
             r.received.map { Msg(it.seq.toLong(), it.contactId, it.text) },
             longArrayOf(
@@ -106,7 +132,7 @@ class UniFfiFacade(private val dbPath: String, key: ByteArray) : DmsgFacade {
     }
 
     override fun reconnect(addr: String, pub: ByteArray, domain: String): Long =
-        wrap { core.reconnect(addr, pub, domain).toLong() }
+        wrap { (if (usesDns()) core.reconnectDns() else core.reconnect(addr, pub, domain)).toLong() }
 
     override fun qrKind(uri: String): String = wrap {
         when (uniffi.dmsg_core.qrKind(uri)) {

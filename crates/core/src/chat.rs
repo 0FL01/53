@@ -386,9 +386,8 @@ impl Core {
     /// DELIVERY_ACK seqs. Возвращает cursor сервера (u64, 8 байт — факт
     /// `ack_reply`; НЕ формат `parse_delivery_ack`).
     pub async fn ack(&mut self, t: &mut impl Transport, seqs: &[u64]) -> Result<u64, OlmError> {
-        if seqs.is_empty() {
-            return Ok(0);
-        }
+        // A zero-count ACK is an existing, idempotent protocol request: it
+        // observes the durable server cursor without acknowledging any event.
         let mut payload = Vec::with_capacity(2 + 8 * seqs.len());
         payload.extend_from_slice(&(seqs.len() as u16).to_be_bytes());
         for s in seqs {
@@ -436,9 +435,7 @@ impl Core {
                 Err(Fail::Err(e)) => return Err(e),
             }
         }
-        if !seqs.is_empty() {
-            res.cursor = self.ack(t, &seqs).await?;
-        }
+        res.cursor = self.ack(t, &seqs).await?;
         Ok(res)
     }
 

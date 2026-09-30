@@ -19,6 +19,9 @@ conditional on `DMSG_EMBEDDED`, so normal CLI/server behavior is preserved.
   are asynchronous `Status::Failed(code)`.
 - `status(&self) -> Status`: `Starting`, `Listening(SocketAddrV4)`,
   `Ready(SocketAddrV4)`, `Stopped`, or `Failed(i32)`.
+  Failure 7 records a presented full-certificate mismatch, separately from
+  unreachable DNS/bootstrap (1) or an invalid local pin (4). It cannot be
+  mistaken for ordinary offline availability by core's send queue.
 - `endpoint(&self) -> Option<SocketAddrV4>` exposes the bound address while
   listening/ready. `Listening` **does not imply a QUIC handshake**.
 - `request_stop(&self)` is a thread-safe, nonblocking cancellation request.

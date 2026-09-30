@@ -24,6 +24,7 @@ pub mod chat;
 pub mod contacts;
 pub mod enrol;
 pub mod ffi;
+pub mod dns;
 pub mod olm;
 mod secure;
 pub mod store;

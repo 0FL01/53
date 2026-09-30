@@ -2,7 +2,7 @@
 
 Status: active
 Source: пользовательская инструкция + исправленный план аудита клиентского трека, ARCHITECTURE.md §3/§5/§7, WORK_PLAN.md M1–M4
-Last updated: 2026-09-29
+Last updated: 2026-09-30
 
 ## Objective
 Живой клиентский трек: Rust core (транспорт, enrol, Olm, outbox, контакты) + Kotlin shell (UI, FGS, Keystore), проверенный против production-msgd на n-de2, без переписывания за счёт швов сейчас.
@@ -53,26 +53,26 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Source: утверждённый план, шаг 2; ARCH §3/§6/§7
   - Acceptance: сохранённые domain/full DER/Noise pub/resolver; live carrier pinning до enrol; один transport, Rust reconnect/backoff; expired invite не запрещает вход уже зарегистрированного ключа, revoked запрещает
   - Primary evidence: pin/TTL/reconnect regression tests и реальный Android enrol/reopen через recursive DNS
-  - Status: pending
-  - Evidence:
+  - Status: verified
+  - Evidence: authenticated encrypted `core_dns_profile` (schema v4), immutable domain/full DER/Noise pub, numeric current-network resolvers; Rust single-owner supervisor/backoff/cancel. Android APK independently reached recursive DNS. Fresh `.gate` enrol/reopen/refill/fetch passed on moto via Wi-Fi ADB (actual result code 0, not a skipped fixture); основной account сохранён. Live wrong carrier certificate→typed PinMismatch, wrong Noise key→Transport before enrol, no account created. Explicit same-resolver restart preserved identity/pins/inbox/outbox. Concurrent32-caller initial import RED accepted two different pins→GREEN one winner after BEGIN IMMEDIATE compare/save. TTL fix `93fe771` deployed after backup `snap-1790713278`, healthy/pong and DNS Noise smoke PASS 8.1 s. Workspace129 tests green; JVM13/builds green; generated bindings regenerated from host cdylib.
 - R8: самостоятельная DNS-only доставка
   - Source: утверждённый план, шаг 3; WORK_PLAN «Первая контрольная точка» / M1–M3
   - Acceptance: moto + второй DNS native peer, затем два Android аппарата; E2E текст без USB/SSH, только разрешённый DNS-path; Wi-Fi/mobile, offline queued и byte-identical retry, process/server restart, без дублей
   - Primary evidence: paired live DNS gate с ограниченным egress; аппаратные результаты отдельно от Linux/emulator
-  - Status: pending
-  - Evidence:
+  - Status: in_progress
+  - Evidence: moto↔Rust native peer through actual recursive DNS, not adb reverse/SSH. After user disconnected USB (only Wi-Fi ADB listed), SIGKILL/manual retry preserved exact ciphertext, queued→accepted; DNS peer received1 then0, all skip counters0. Native-client saved cursor bug reproduced in live gate and host e2e, fixed by existing zero-count ACK querying the durable server cursor; repeat fetch cursor no longer resets0. Two physical Android devices, restricted-egress gate and Wi-Fi/mobile still pending; Wi-Fi ADB is control only and must not be disrupted blindly.
 - R9: фоновая DNS-связь в рамках Android
   - Source: утверждённый план, шаг 4; ARCH §5 / WORK_PLAN M4
   - Acceptance: screen-off >30 мин, Doze/Standby, смена сети/DNS, оба режима; корректный FGS type/timeout/stop; реальные status, PSS, DNS queries и battery measurements
   - Primary evidence: runtime DNS background gates и ускоренный системный timeout тест
-  - Status: pending
-  - Evidence:
+  - Status: in_progress
+  - Evidence: production service now declares justified `specialUse` subtype for user-enabled continuous DNS/QUIC link (not finite data transfer); moto API35 accepted real foreground type0x40000000 and repeated successful DNS polls. Stop/timeout cancels native transport without waiting for the SQLite lock. No Play review or long-duration DNS/Doze/timeout/metrics PASS claimed yet.
 - R10: дополнительная runtime-матрица и оптические QR
   - Source: утверждённый план, шаг 5; WORK_PLAN M4 / minimal matrix
   - Acceptance: 16KB runtime, доступные Android16/17 images, AOSP no-GMS emulator; отдельно физический no-GMS аппарат и camera malformed/contact/changed-identity fixtures. Emulator не заменяет modem/OEM/battery evidence
   - Primary evidence: native loading/functional emulator tests и отдельные physical gate records
-  - Status: pending
-  - Evidence:
+  - Status: in_progress
+  - Evidence: official SDK images installed and complete archive SHA1 verified: API36 `default;x86_64` AOSP/no Google APIs, API37.0 `google_apis_ps16k;x86_64` separate 16KB/GMS compatibility fixture; emulator37.1.11 and tools23 installed. Image metadata is not runtime proof; API37 default/no-GMS image not available in current catalogue. KVM usable. Physical no-GMS/second handset/optical gates remain distinct.
 - R11: честная политика потери identity и пилотный APK
   - Source: утверждённый план, шаг 6 и порядок выполнения; ARCH §6/§10
   - Acceptance: same-install backup restore только с исходным Keystore; Clear data/uninstall→явная loss, no replacement silently; rebind revokes old device/new E2E/peer warning/no old history. Итоговая arm64 pilot сборка подписана постоянным защищённым release key; все intended правки закоммичены
@@ -99,17 +99,17 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 - Forbidden: правки msgd без блокера; Matrix SDK; WebRTC-стек; копипаста diag-main вместо библиотечной функции
 
 ## Current Checkpoint
-- Closes: R7
-- Smallest next action: commit проверенный R6 и TTL regression; backup/deploy server TTL fix; сохранённый DNS profile + единый Rust manager + FFI/Android integration
-- Expected evidence: TTL tests и remote health/DNS smoke; profile/pin/reconnect tests + real Android native DNS connection
-- Replan if: конкретный cross-build/runtime сбой; диагностировать зависимость, не переписывать транспорт и не стирать identity
+- Closes: R8/R9; compatibility preparation R10 independent
+- Smallest next action: commit verified R7 integration; measure DNS screen-off/Doze and both modes; prepare native x86_64 test APK for installed AOSP/API37-16KB images
+- Expected evidence: real recursive DNS delivery/cursor/dedup with foreground service, controlled query/battery/PSS measurements, actual emulator page size/native operations
+- Replan if: Wi-Fi ADB would be disconnected by a test; use an isolated fixture instead, not blind radio toggles. Do not clear/uninstall основной package or claim an emulator is a second physical phone
 
 ## Current State
-- Resolved: R1–R3 и R5; доступные аппаратные/UniFFI/UI проверки перечислены в checklist
-- Last relevant evidence: 32:21 OFF с живым FGS и новым message без дублей; финальные Rust/JVM/routine device проверки green. Финальный test-signed release установлен без reset, enrolled=true; bridges/fixtures/test packages удалены, FGS выключен
-- External state not yet obtained: GMS moto не доказывает physical G5; API36–37/16KB emulator runtime ещё не подготовлены. Исправленная G8 policy утверждена: потеря Keystore честно означает потерю identity, без key export
-- Remaining software gap: самостоятельный Android DNS transport ещё не реализован; текущий checkpoint принимал только явно оговорённый diagnostic DirectTCP seam
-- Next: реализовать утверждённый план; доступные software/эмуляторные действия выполнять до доказанных аппаратных blockers. Не стирать основной package
+- Resolved: R1–R3, R5–R7; результаты прежних diagnostic TCP gates сохранены отдельно
+- Last relevant evidence: standalone Android native recursive DNS works; moto↔native peer E2E in both directions, offline queue after real process death byte-identical and no duplicates. No USB/SSH bridge. Actual new enrol isolated `.gate` succeeded; основной identity unchanged. Rust129/JVM13/builds green
+- External state not yet obtained: второй physical Android и no-GMS handset; optical positioning not proved. API36/37-16KB official images now installed, runtime tests still pending. G8 loss policy approved, no key export
+- Remaining software/check gap: background DNS metrics and timeout gates, restricted-egress and compatibility runtime, admin loss/rebind workflow and permanent pilot signing. Do not call these complete from a successful DNS fetch
+- Next: continue approved steps and commit verified increments; Wi-Fi ADB is the only phone control channel, preserve it. `53-opendesign/` is unrelated untracked user work, do not modify/stage it
 
 ## Material Decisions
 - 2026-09-29: пользователь «Делай копию плана в цель и итеративное реализовать и коммит всех правок» утвердил приведённый ниже план целиком, включая исправление ожидания G8: same-install restore с ключом, явная потеря после Clear data/uninstall; без key export/cloud/history transfer. Это supersedes прежнее ошибочное sealed-only обещание, не результат восстановления старой identity.
@@ -117,6 +117,7 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 - 2026-09-29: trait Transport в K1 (direct-TCP за ним); UniFFI только в K4; пагинация — требование сейчас; always-on FGS; contact-QR тем же конвертом; подмена = стоп+confirm; Olm строго K3; identity 0600+шов; ARCH > Hazel-Signal при конфликте
 
 ## Checkpoint History
+- 2026-09-30: R7 integrated and actual moto fresh `.gate` DNS enrol/reopen passed. Main account not reset; carrier pin and Noise key live negative cases distinct. First paired fetch exposed empty-report cursor0; host e2e RED→GREEN, zero-count existing ACK obtains durable server cursor without new protocol/schema. After USB removal, Wi-Fi-ADB-controlled process death + exact-ciphertext retry delivered1 then0 to native DNS peer. R8 physical pair/background/restricted-egress remain pending; SDK archives recovered with verified bounded ranges instead of treating download EOF as final blocker.
 - 2026-09-29: утверждённый план frozen `b784328`. R6 native boundary host/Android linked и реально выполнен на moto: 64 lifecycle cycles stable resources/max cancel54.11мс; full-cert pin/raw streams/loss gate green. R7 TTL RED Expired→GREEN same bound device after deadline; revoked invite/device remain rejected; 6 live enrol probes и 10 enrol unit green. Native builds не заменяют Android recursive-DNS acceptance.
 - 2026-09-29: GOAL создан, next: K1 @general
 - 2026-09-29: аппаратный enrol обнаружил отсутствие CameraX camera2 и INTERNET; исправлено. После enrol FGS выявил неверный индекс SQLite в load_olm и новый static key в каждом FFI-коннекте. Регрессионные тесты воспроизвели оба отказа; исправления зелёные, FGS действительно опрашивает живой msgd. Сервер не менялся; backend наружу не открыт.

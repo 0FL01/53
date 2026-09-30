@@ -1,4 +1,4 @@
-//! Throwaway direct-TCP peer for the R4 G2/G3/G11 device gates.
+//! Throwaway direct-TCP or embedded DNS peer for device gates.
 //! All bearer and message inputs are file paths; never print FFI errors or DTOs.
 
 use std::ffi::OsString;
@@ -12,6 +12,113 @@ use dmsg_core::ffi::{DmsgClient, QrKind, QrOutcome};
 use dmsg_protocol::bootstrap;
 
 type GateResult<T> = Result<T, &'static str>;
+
+struct DnsGuard(std::sync::Arc<DmsgClient>);
+impl Drop for DnsGuard {
+    fn drop(&mut self) {
+        let _ = self.0.stop_dns();
+    }
+}
+
+fn dns_negative_profiles(
+    invite: &Path,
+    wrong_cert: &Path,
+    wrong_pin: &Path,
+    wrong_noise: &Path,
+) -> GateResult<()> {
+    let b = bootstrap::parse(&invite_file(invite)?).map_err(|_| "invalid invite")?;
+    let wrong_cert = fs::read(wrong_cert).map_err(|_| "read public certificate fixture")?;
+    for (output, cert, pubkey) in [
+        (wrong_pin, wrong_cert.as_slice(), b.noise_pubkey),
+        (wrong_noise, b.cert_der.as_slice(), [9u8; 32]),
+    ] {
+        let qr = bootstrap::build(&b.domain, cert, &pubkey, &[0u8; 32])
+            .map_err(|_| "build public profile")?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(local_path(output)?)
+            .map_err(|_| "create public profile")?;
+        file.write_all(qr.as_bytes())
+            .and_then(|_| file.sync_all())
+            .map_err(|_| "write public profile")?;
+    }
+    println!("public negative profiles ready (no bearer copied)");
+    Ok(())
+}
+
+fn dns_provision(
+    db: &Path,
+    invite: &Path,
+    resolvers: &Path,
+    phone: &Path,
+    output: &Path,
+) -> GateResult<()> {
+    let invite = invite_file(invite)?;
+    let resolvers: Vec<String> = fs::read_to_string(resolvers)
+        .map_err(|_| "read resolvers")?
+        .lines()
+        .map(str::to_string)
+        .collect();
+    dmsg_core::dns::parse_resolvers(resolvers.clone()).map_err(|_| "invalid resolvers")?;
+    let phone = qr_file(phone)?;
+    contacts::parse_qr(&phone).map_err(|_| "invalid phone contact qr")?;
+    let output = local_path(output)?;
+    if output.exists() || local_path(db)? == output {
+        return Err("contact output exists/conflicts");
+    }
+    let db = db_file(db, true)?;
+    let peer = client(&db)?;
+    let _guard = DnsGuard(peer.clone());
+    if peer.account_info().map_err(|_| "account")?.enrolled {
+        return Err("peer already enrolled");
+    }
+    peer.enrol_dns(invite, resolvers)
+        .map_err(|_| "DNS enrol failed")?;
+    phone_contact(&peer, phone)?;
+    let prekeys = peer.reconnect_dns().map_err(|_| "DNS reconnect failed")?;
+    let qr = peer.my_contact_qr().map_err(|_| "contact qr")?;
+    let mut out = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(output)
+        .map_err(|_| "write contact qr")?;
+    out.write_all(qr.as_bytes())
+        .and_then(|_| out.sync_all())
+        .map_err(|_| "write contact qr")?;
+    println!("dns provision ok prekeys={prekeys}");
+    Ok(())
+}
+
+fn dns_send(db: &Path, phone: &Path, message: &Path) -> GateResult<()> {
+    let db = db_file(db, false)?;
+    let peer = client(&db)?;
+    let _guard = DnsGuard(peer.clone());
+    let contact = phone_contact(&peer, qr_file(phone)?)?;
+    let text = fs::read_to_string(message).map_err(|_| "read message")?;
+    peer.send_dns(contact, text)
+        .map_err(|_| "DNS send failed")?;
+    println!("dns send ok");
+    Ok(())
+}
+
+fn dns_fetch(db: &Path) -> GateResult<()> {
+    let db = db_file(db, false)?;
+    let peer = client(&db)?;
+    let _guard = DnsGuard(peer.clone());
+    let r = peer.fetch_dns().map_err(|_| "DNS fetch failed")?;
+    println!(
+        "dns fetch received={} unknown={} blocked={} undecryptable={} mismatch={}",
+        r.received.len(),
+        r.skipped_unknown,
+        r.skipped_blocked,
+        r.skipped_undecryptable,
+        r.skipped_mismatch
+    );
+    Ok(())
+}
 
 struct Profile {
     addr: String,
@@ -254,6 +361,25 @@ fn fetch(db: &Path, transport: &Path) -> GateResult<()> {
 fn main() {
     let args: Vec<OsString> = std::env::args_os().collect();
     let result = match args.get(1).and_then(|s| s.to_str()) {
+        Some("dns-negative-profiles") if args.len() == 6 => dns_negative_profiles(
+            Path::new(&args[2]),
+            Path::new(&args[3]),
+            Path::new(&args[4]),
+            Path::new(&args[5]),
+        ),
+        Some("dns-provision") if args.len() == 7 => dns_provision(
+            Path::new(&args[2]),
+            Path::new(&args[3]),
+            Path::new(&args[4]),
+            Path::new(&args[5]),
+            Path::new(&args[6]),
+        ),
+        Some("dns-send") if args.len() == 5 => dns_send(
+            Path::new(&args[2]),
+            Path::new(&args[3]),
+            Path::new(&args[4]),
+        ),
+        Some("dns-fetch") if args.len() == 3 => dns_fetch(Path::new(&args[2])),
         Some("provision") if args.len() == 7 => provision(
             Path::new(&args[2]),
             Path::new(&args[3]),
@@ -270,6 +396,7 @@ fn main() {
         Some("fetch") if args.len() == 4 => fetch(Path::new(&args[2]), Path::new(&args[3])),
         _ => {
             eprintln!("usage: gate_peer provision <peer-db-path> <invite-path> <transport-profile-path> <phone-public-contact-qr-path> <peer-public-contact-qr-output-path> | send <peer-db-path> <profile-path> <phone-public-contact-qr-path> <message-file-path> | fetch <peer-db-path> <profile-path>");
+            eprintln!("DNS: dns-provision <db> <invite> <numeric-resolvers-file> <phone-contact-qr> <peer-contact-output> | dns-send <db> <phone-contact-qr> <message-file> | dns-fetch <db>");
             std::process::exit(2);
         }
     };

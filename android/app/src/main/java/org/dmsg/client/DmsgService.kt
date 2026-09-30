@@ -8,6 +8,9 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.os.IBinder
+import android.net.ConnectivityManager
+import android.net.LinkProperties
+import android.net.Network
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -19,6 +22,18 @@ import androidx.core.app.ServiceCompat
  * Doze/force-stop limits are disclosed, not masked (gate checklist).
  */
 class DmsgService : Service() {
+    private val networkEvents = java.util.concurrent.Executors.newSingleThreadExecutor()
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        private fun changed() {
+            if (!networkEvents.isShutdown) {
+                try { networkEvents.execute { Worker.networkChanged(applicationContext) } }
+                catch (_: java.util.concurrent.RejectedExecutionException) { /* destroying */ }
+            }
+        }
+        override fun onAvailable(network: Network) = changed()
+        override fun onLost(network: Network) = changed()
+        override fun onLinkPropertiesChanged(network: Network, properties: LinkProperties) = changed()
+    }
 
     companion object {
         const val CH = "dmsg-link"
@@ -51,6 +66,7 @@ class DmsgService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(networkCallback)
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(
             NotificationChannel(CH, getString(R.string.notif_channel), NotificationManager.IMPORTANCE_LOW)
@@ -65,16 +81,23 @@ class DmsgService : Service() {
         val notif = buildNotif(0)
         ServiceCompat.startForeground(
             this, ID, notif,
-            if (android.os.Build.VERSION.SDK_INT >= 29)
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC else 0
+            if (android.os.Build.VERSION.SDK_INT >= 34)
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0
         )
         Worker.start(this)
         return START_STICKY
     }
 
     override fun onDestroy() {
+        getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(networkCallback)
+        networkEvents.shutdownNow()
         Worker.stop()
         super.onDestroy()
+    }
+
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        // Never rely on a service category to override an OS stop requirement.
+        stopSelf()
     }
 
     private fun buildNotif(newCount: Int): Notification {
@@ -95,6 +118,7 @@ class DmsgService : Service() {
     /** Poll loop: reconnect (refill) -> fetch -> retry. Backoff on failure. */
     private object Worker {
         private var app: Context? = null
+        @Volatile private var facade: DmsgFacade? = null
         private val worker = SingleWorker { loop(requireNotNull(app)) }
         val running: Boolean get() = worker.running
 
@@ -135,10 +159,21 @@ class DmsgService : Service() {
 
         fun stop() {
             worker.stop()
+            try { facade?.stopDns() } catch (_: Exception) { /* no secret diagnostics */ }
+        }
+
+        fun networkChanged(app: Context) {
+            val f = facade ?: return
+            try {
+                f.stopDns() // cancellation does not wait for the store lock
+                if (f.dnsProfile() != null) f.dnsNetworkChanged(DnsNetwork.resolvers(app))
+            } catch (e: Exception) {
+                Log.d(TAG, "network transition: ${e.javaClass.simpleName}")
+            }
         }
 
         private fun pollOnce(app: Context): Int {
-            val f = Core.facade(app)
+            val f = facade ?: Core.facade(app).also { facade = it }
             if (!f.isReady()) throw DmsgError("core is not ready")
             val addr = Prefs.addr(app)
             val pub = Prefs.serverPub(app)

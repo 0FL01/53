@@ -112,9 +112,9 @@ fn ready_full_cert_pin_streams_and_terminal_transport_loss() {
     .unwrap();
     assert_eq!(
         wait(&client, |s| matches!(s, Status::Failed(_)), 5),
-        Status::Failed(1)
+        Status::Failed(7)
     );
-    assert_eq!(client.stop().unwrap(), Status::Failed(1));
+    assert_eq!(client.stop().unwrap(), Status::Failed(7));
 
     // Both supported encodings install the exact upstream full-leaf verifier.
     let mut client = NativeClient::start(Config::new(

@@ -49,12 +49,15 @@ class DiagnosticsActivity : DmsgActivity() {
         Thread {
             var a = ""
             var s = ""
+            var dns: DnsProfile? = null
             try {
                 val f = Core.facade(this)
+                dns = f.dnsProfile()
                 val (enrolled, id) = f.account()
                 a = "enrolled=$enrolled id=$id"
                 val (rows, _) = f.outbox(0, 100)
                 s = "outbox pending=${rows.size} economy=${Prefs.economy(this)}"
+                dns?.let { s += "\nDNS ${f.dnsStatus()}\npin ${it.fingerprint}\nresolvers ${it.resolvers.joinToString()}" }
             } catch (e: Exception) {
                 a = "error: ${e.message}"
             }
@@ -62,6 +65,11 @@ class DiagnosticsActivity : DmsgActivity() {
                 account.text = a
                 fgs.text = DmsgService.pollStatus() + " (Doze/force-stop limits apply)"
                 stats.text = s
+                val editable = dns == null
+                addr.isEnabled = editable
+                domain.isEnabled = editable
+                pub.isEnabled = editable
+                findViewById<Button>(R.id.btn_save_profile).isEnabled = editable
             }
         }.start()
     }
@@ -73,7 +81,11 @@ class DiagnosticsActivity : DmsgActivity() {
                 val p = Prefs.serverPub(this)
                 val d = Prefs.domain(this)
                 if (a.isEmpty() || p == null || d.isEmpty()) "заполните addr/domain/server_pub"
-                else "prekeys=${Core.facade(this).reconnect(a, p, d)}"
+                else {
+                    val f = Core.facade(this)
+                    if (f.dnsProfile() != null) f.dnsNetworkChanged(DnsNetwork.resolvers(this))
+                    "prekeys=${f.reconnect(a, p, d)}"
+                }
             } catch (e: Exception) {
                 "error: ${e.message}"
             }

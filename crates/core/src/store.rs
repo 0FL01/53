@@ -5,7 +5,7 @@
 //! Секреты — только через этот файл (0600), никогда в логи/argv/Git.
 
 /// Версия схемы ядра. Миграции — только вперёд, по одной на версию.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Открыть (создать) файл БД ядра: parent-dirs, WAL, файл 0600, миграции.
 ///
@@ -16,6 +16,7 @@ pub const SCHEMA_VERSION: i64 = 3;
 /// сессий 1-на-1), `core_contacts` (пины identity, состояния),
 /// `core_outbox` (сохранённый ciphertext + статусы), `core_inbox`
 /// (дедуп по sender+message_id). Таблиц сервера здесь нет и не будет.
+/// v4: core_dns_profile, authenticated stored carrier/Noise pins and resolvers.
 /// Прямой API сохраняет legacy plaintext для серверного тестового harness.
 pub fn open(path: &std::path::Path) -> Result<rusqlite::Connection, String> {
     open_mode(path, None)
@@ -109,12 +110,16 @@ fn open_mode(path: &std::path::Path, key: Option<[u8; 32]>) -> Result<rusqlite::
          -- K3: bearer-token invite (32 байта) для ENROL-replay на каждом
          -- новом коннекте: сервер держит enrolled-флаг per-connection и
          -- требует ENROL даже от известного ключа (replay идемпотентен).
-         CREATE TABLE IF NOT EXISTS core_token(
-           id INTEGER PRIMARY KEY CHECK(id=1),
-           token BLOB NOT NULL
-         );",
+          CREATE TABLE IF NOT EXISTS core_token(
+            id INTEGER PRIMARY KEY CHECK(id=1),
+            token BLOB NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS core_dns_profile(
+            id INTEGER PRIMARY KEY CHECK(id=1),
+            profile TEXT NOT NULL
+          );",
     )
-    .map_err(|e| format!("migrate v3: {e}"))?;
+    .map_err(|e| format!("migrate v4: {e}"))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -130,7 +135,8 @@ fn open_mode(path: &std::path::Path, key: Option<[u8; 32]>) -> Result<rusqlite::
                      OR EXISTS(SELECT 1 FROM core_token WHERE substr(token,1,7)=?1)
                      OR EXISTS(SELECT 1 FROM core_olm WHERE substr(pickle,1,7)=?1)
                      OR EXISTS(SELECT 1 FROM core_sessions WHERE substr(pickle,1,7)=?1)
-                     OR EXISTS(SELECT 1 FROM core_inbox WHERE substr(text,1,7)=?1)",
+                      OR EXISTS(SELECT 1 FROM core_inbox WHERE substr(text,1,7)=?1)
+                      OR EXISTS(SELECT 1 FROM core_dns_profile WHERE substr(profile,1,7)=?1)",
                 [b"DMSG-S1".as_slice()], |r| r.get(0),
             ).map_err(|_| "storage format detection failed")?;
             if already_sealed { return Err("storage marker missing for encrypted values".into()); }
@@ -146,6 +152,7 @@ fn open_mode(path: &std::path::Path, key: Option<[u8; 32]>) -> Result<rusqlite::
                     ("core_olm", "pickle", "olm_pickle"),
                     ("core_sessions", "pickle", "session_pickle"),
                     ("core_inbox", "text", "inbox_text"),
+                    ("core_dns_profile", "profile", "dns_profile"),
                 ] {
                     conn.execute(&format!("UPDATE {table} SET {column}=dmsg_seal('{field}', {column})"), [])
                         .map_err(|_| "storage migration field failed")?;
@@ -157,6 +164,7 @@ fn open_mode(path: &std::path::Path, key: Option<[u8; 32]>) -> Result<rusqlite::
                     ("core_identity", "device_priv"), ("core_token", "token"),
                     ("core_olm", "pickle"), ("core_sessions", "pickle"),
                     ("core_inbox", "text"),
+                    ("core_dns_profile", "profile"),
                 ] {
                     for action in ["INSERT", "UPDATE"] {
                         conn.execute_batch(&format!(
@@ -190,6 +198,16 @@ fn open_mode(path: &std::path::Path, key: Option<[u8; 32]>) -> Result<rusqlite::
             checkpoint(&conn)?;
             conn.execute("UPDATE core_storage SET cleanup_pending=0 WHERE id=1", [])
                 .map_err(|_| "storage cleanup marker failed")?;
+        }
+        // Add the v4 profile guard to already-encrypted v3 installations too.
+        for action in ["INSERT", "UPDATE"] {
+            conn.execute_batch(&format!(
+                "CREATE TRIGGER IF NOT EXISTS core_dns_profile_sealed_{action}
+                 BEFORE {action} ON core_dns_profile
+                 WHEN typeof(NEW.profile) != 'blob' OR
+                      substr(NEW.profile,1,7) != x'444d53472d5331'
+                 BEGIN SELECT RAISE(ABORT,'unencrypted storage write'); END;"
+            )).map_err(|_| "dns profile guard failed")?;
         }
     }
     Ok(conn)
