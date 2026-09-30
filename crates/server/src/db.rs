@@ -1,129 +1,116 @@
-//! SQLite: открытие (WAL + synchronous=FULL), миграции схемы v1→v4.
-//! v2: cursors (закладка получателя). v3: device_identities (binding prekeys).
-//! v4: account rebind invites, one active device per account.
-
-use rusqlite::Connection;
+//! Fresh schema 5 only. Compatibility is checked before writable open/WAL.
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::path::Path;
 
-/// Текущая версия схемы.
-pub const SCHEMA_VERSION: i64 = 4;
-
-const MIGRATION_V1: &str = "
-CREATE TABLE IF NOT EXISTS meta(
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS users(
-  user_id BLOB PRIMARY KEY,
-  contact_id TEXT UNIQUE,
+pub const SCHEMA_VERSION: i64 = 5;
+const SCHEMA: &str = "
+CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+INSERT INTO meta VALUES('schema_version','5'),('registration_mode','invite_only');
+CREATE TABLE users(
+  user_id BLOB PRIMARY KEY NOT NULL CHECK(length(user_id)=16),
+  contact_id TEXT UNIQUE NOT NULL CHECK(length(contact_id)=12),
+  login TEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL CHECK(password_hash LIKE '$argon2id$%'),
   created_at INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS devices(
-  device_key BLOB PRIMARY KEY,
-  user_id BLOB,
+CREATE TABLE devices(
+  device_key BLOB PRIMARY KEY NOT NULL CHECK(length(device_key)=32),
+  user_id BLOB NOT NULL REFERENCES users(user_id),
   created_at INTEGER NOT NULL,
-  revoked INTEGER NOT NULL DEFAULT 0
+  revoked INTEGER NOT NULL DEFAULT 0 CHECK(revoked IN (0,1)),
+  blocked INTEGER NOT NULL DEFAULT 0 CHECK(blocked IN (0,1))
 );
-CREATE TABLE IF NOT EXISTS invites(
-  token BLOB PRIMARY KEY,
-  created_at INTEGER NOT NULL,
-  expires_at INTEGER NOT NULL,
-  bound_device_key BLOB,
-  revoked INTEGER NOT NULL DEFAULT 0
+CREATE UNIQUE INDEX one_active_device_per_user ON devices(user_id) WHERE revoked=0;
+CREATE TABLE invites(
+  token BLOB PRIMARY KEY NOT NULL CHECK(length(token)=32),
+  created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+  revoked INTEGER NOT NULL DEFAULT 0 CHECK(revoked IN (0,1)),
+  used_at INTEGER
 );
-CREATE TABLE IF NOT EXISTS contact_permissions(
-  user_id BLOB NOT NULL,
-  peer_user_id BLOB NOT NULL,
-  state TEXT NOT NULL,
-  PRIMARY KEY(user_id, peer_user_id)
+CREATE TABLE contact_permissions(
+  user_id BLOB NOT NULL, peer_user_id BLOB NOT NULL, state TEXT NOT NULL,
+  PRIMARY KEY(user_id,peer_user_id)
 );
-CREATE TABLE IF NOT EXISTS prekeys(
-  device_key BLOB NOT NULL,
-  key_id INTEGER NOT NULL,
-  pubkey BLOB NOT NULL,
-  signature BLOB NOT NULL,
-  one_time INTEGER NOT NULL,
-  consumed INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY(device_key, key_id)
+CREATE TABLE prekeys(
+  device_key BLOB NOT NULL, key_id INTEGER NOT NULL, pubkey BLOB NOT NULL,
+  signature BLOB NOT NULL, one_time INTEGER NOT NULL,
+  consumed INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(device_key,key_id)
 );
-CREATE TABLE IF NOT EXISTS mailbox_events(
-  seq INTEGER PRIMARY KEY AUTOINCREMENT,
-  recipient_user_id BLOB NOT NULL,
-  sender_device BLOB NOT NULL,
-  message_id BLOB NOT NULL,
-  ciphertext BLOB NOT NULL,
-  created_at INTEGER NOT NULL,
-  delivered INTEGER NOT NULL DEFAULT 0,
-  UNIQUE(sender_device, message_id)
+CREATE TABLE mailbox_events(
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, recipient_user_id BLOB NOT NULL,
+  sender_device BLOB NOT NULL, message_id BLOB NOT NULL, ciphertext BLOB NOT NULL,
+  created_at INTEGER NOT NULL, delivered INTEGER NOT NULL DEFAULT 0,
+  UNIQUE(sender_device,message_id)
 );
-CREATE TABLE IF NOT EXISTS blob_meta(
-  blob_id BLOB PRIMARY KEY,
-  owner_user_id BLOB NOT NULL,
-  size INTEGER NOT NULL,
-  created_at INTEGER NOT NULL,
-  expires_at INTEGER NOT NULL,
-  state TEXT NOT NULL
+CREATE TABLE blob_meta(
+  blob_id BLOB PRIMARY KEY, owner_user_id BLOB NOT NULL, size INTEGER NOT NULL,
+  created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, state TEXT NOT NULL
+);
+CREATE TABLE cursors(
+  recipient_user_id BLOB NOT NULL, device_key BLOB NOT NULL,
+  last_seq INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(recipient_user_id,device_key)
+);
+CREATE TABLE device_identities(
+  device_key BLOB PRIMARY KEY, user_id BLOB NOT NULL,
+  identity_pubkey BLOB NOT NULL CHECK(length(identity_pubkey)=32),
+  curve_pubkey BLOB NOT NULL CHECK(length(curve_pubkey)=32)
 );
 ";
 
-const MIGRATION_V2: &str = "
-CREATE TABLE IF NOT EXISTS cursors(
-  recipient_user_id BLOB NOT NULL,
-  device_key BLOB NOT NULL,
-  last_seq INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY(recipient_user_id, device_key)
-);
-";
+fn version(conn: &Connection) -> rusqlite::Result<i64> {
+    let objects: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
+        [],
+        |r| r.get(0),
+    )?;
+    if objects == 0 {
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        return if v == 0 {
+            Ok(0)
+        } else {
+            Err(rusqlite::Error::InvalidQuery)
+        };
+    }
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key='schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if value.as_deref() != Some("5") {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let mode: String = conn.query_row(
+        "SELECT value FROM meta WHERE key='registration_mode'",
+        [],
+        |r| r.get(0),
+    )?;
+    if !matches!(mode.as_str(), "open" | "invite_only") {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(SCHEMA_VERSION)
+}
 
-const MIGRATION_V3: &str = "
-CREATE TABLE IF NOT EXISTS device_identities(
-  device_key BLOB PRIMARY KEY,
-  user_id BLOB NOT NULL,
-  identity_pubkey BLOB NOT NULL
-);
-";
-
-const MIGRATION_V4: &str = "
-ALTER TABLE invites ADD COLUMN rebind_user_id BLOB;
-CREATE UNIQUE INDEX one_active_device_per_user ON devices(user_id)
-  WHERE revoked=0 AND user_id IS NOT NULL;
-";
-
-/// Открыть БД с режимом msgd: WAL + FULL. Возвращает соединение (миграции — migrate()).
 pub fn connect<P: AsRef<Path>>(path: P) -> rusqlite::Result<Connection> {
+    if path.as_ref().exists() {
+        let probe = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        version(&probe)?;
+    }
     let conn = Connection::open(path)?;
+    version(&conn)?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
     Ok(conn)
 }
 
-/// Применить миграции к уже открытому соединению (для тестов на :memory: тоже).
+/// Historical name used by fixtures; creates fresh schema, never migrates old data.
 pub fn migrate(conn: &Connection) -> rusqlite::Result<i64> {
-    migrate_inner(conn)
-}
-
-fn migrate_inner(conn: &Connection) -> rusqlite::Result<i64> {
+    if version(conn)? == SCHEMA_VERSION {
+        return Ok(SCHEMA_VERSION);
+    }
     let tx = conn.unchecked_transaction()?;
-    tx.execute_batch(MIGRATION_V1)?;
-    tx.execute_batch(MIGRATION_V2)?;
-    tx.execute_batch(MIGRATION_V3)?;
-    let version: i64 = tx.query_row(
-        "SELECT value FROM meta WHERE key='schema_version'",
-        [],
-        |r| r.get::<_, String>(0).map(|v| v.parse().unwrap_or(0)),
-    ).unwrap_or(0);
-    if version > SCHEMA_VERSION {
-        return Err(rusqlite::Error::InvalidQuery);
-    }
-    if version < 4 {
-        // Duplicate active devices fail closed; never silently pick a winner.
-        tx.execute_batch(MIGRATION_V4)?;
-    }
-    if version < SCHEMA_VERSION {
-        tx.execute(
-            "INSERT INTO meta(key, value) VALUES('schema_version', ?1)
-             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            [SCHEMA_VERSION.to_string()],
-        )?;
+    if version(&tx)? == 0 {
+        tx.execute_batch(SCHEMA)?;
     }
     tx.commit()?;
     Ok(SCHEMA_VERSION)
@@ -134,69 +121,105 @@ mod tests {
     use super::*;
 
     #[test]
-    fn migrate_fresh_and_reopen() {
-        let dir = std::env::temp_dir().join(format!("msgd-test-{}", std::process::id()));
+    fn fresh_reopen_full_and_unique_active() {
+        let dir = std::env::temp_dir().join(format!("msgd-schema-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let db = dir.join("t.db");
-        assert_eq!(migrate(&connect(&db).unwrap()).unwrap(), SCHEMA_VERSION);
-        // Повторное открытие идемпотентно, версия та же.
-        assert_eq!(migrate(&connect(&db).unwrap()).unwrap(), SCHEMA_VERSION);
-        let conn = Connection::open(&db).unwrap();
-        let mode: String = conn
-            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+        let path = dir.join("fresh.db");
+        let conn = connect(&path).unwrap();
+        assert_eq!(migrate(&conn).unwrap(), 5);
+        assert_eq!(migrate(&conn).unwrap(), 5);
+        assert_eq!(
+            conn.query_row("PRAGMA synchronous", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            conn.query_row("PRAGMA journal_mode", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "wal"
+        );
+        conn.execute(
+            "INSERT INTO users VALUES(?1,'0123456789AB','alice','$argon2id$test',1)",
+            [[1u8; 16].as_slice()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO devices(device_key,user_id,created_at) VALUES(?1,?2,1)",
+            rusqlite::params![[2u8; 32].as_slice(), [1u8; 16].as_slice()],
+        )
+        .unwrap();
+        assert!(conn
+            .execute(
+                "INSERT INTO devices(device_key,user_id,created_at) VALUES(?1,?2,1)",
+                rusqlite::params![[3u8; 32].as_slice(), [1u8; 16].as_slice()]
+            )
+            .is_err());
+        drop(conn);
+        assert_eq!(migrate(&connect(&path).unwrap()).unwrap(), 5);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn incompatible_versions_rejected_before_wal_without_mutation() {
+        let dir = std::env::temp_dir().join(format!("msgd-legacy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for v in [0, 1, 2, 3, 4, 6, 99] {
+            let path = dir.join(format!("v{v}.db"));
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT); CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES('preserve');").unwrap();
+            conn.execute(
+                "INSERT INTO meta VALUES('schema_version',?1)",
+                [v.to_string()],
+            )
             .unwrap();
-        assert_eq!(mode.to_lowercase(), "wal");
-        let sync: i64 = conn.query_row("PRAGMA synchronous", [], |r| r.get(0)).unwrap();
-        assert_eq!(sync, 2); // FULL
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    fn v3() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(MIGRATION_V1).unwrap();
-        conn.execute_batch(MIGRATION_V2).unwrap();
-        conn.execute_batch(MIGRATION_V3).unwrap();
-        conn.execute("INSERT INTO meta VALUES('schema_version','3')", []).unwrap();
-        conn
-    }
-
-    #[test]
-    fn migrate_v3_preserves_invites_and_enforces_single_device() {
-        let conn = v3();
-        conn.execute("INSERT INTO invites(token,created_at,expires_at) VALUES(?1,1,2)",
-            [[1u8; 32].as_slice()],
-        ).unwrap();
-        assert_eq!(migrate(&conn).unwrap(), 4);
-        assert_eq!(migrate(&conn).unwrap(), 4);
-        let target: Option<Vec<u8>> = conn.query_row(
-            "SELECT rebind_user_id FROM invites", [], |r| r.get(0),
-        ).unwrap();
-        assert_eq!(target, None);
-        conn.execute("INSERT INTO devices VALUES(?1,?2,1,0)",
-            rusqlite::params![[2u8; 32].as_slice(), [3u8; 16].as_slice()],
-        ).unwrap();
-        assert!(conn.execute("INSERT INTO devices VALUES(?1,?2,1,0)",
-            rusqlite::params![[4u8; 32].as_slice(), [3u8; 16].as_slice()],
-        ).is_err());
-        conn.execute("INSERT INTO devices VALUES(?1,?2,1,1)",
-            rusqlite::params![[4u8; 32].as_slice(), [3u8; 16].as_slice()],
-        ).unwrap();
-        assert!(conn.execute("UPDATE devices SET revoked=0", []).is_err());
-    }
-
-    #[test]
-    fn migration_duplicate_active_devices_rolls_back_without_repair() {
-        let conn = v3();
-        for key in [[1u8; 32], [2u8; 32]] {
-            conn.execute("INSERT INTO devices VALUES(?1,?2,1,0)",
-                rusqlite::params![key.as_slice(), [3u8; 16].as_slice()],
-            ).unwrap();
+            drop(conn);
+            let before = std::fs::read(&path).unwrap();
+            assert!(connect(&path).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert!(!path.with_extension("db-wal").exists());
+            let conn = Connection::open(&path).unwrap();
+            assert!(migrate(&conn).is_err());
+            drop(conn);
+            assert_eq!(std::fs::read(&path).unwrap(), before);
         }
-        assert!(migrate(&conn).is_err());
-        let version: String = conn.query_row("SELECT value FROM meta", [], |r| r.get(0)).unwrap();
-        assert_eq!(version, "3");
-        assert!(conn.prepare("SELECT rebind_user_id FROM invites").is_err());
-        assert_eq!(conn.query_row("SELECT COUNT(*) FROM devices WHERE revoked=0", [],
-            |r| r.get::<_, i64>(0)).unwrap(), 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn existing_empty_zero_is_fresh_but_future_empty_and_live_legacy_wal_are_read_only() {
+        let dir = std::env::temp_dir().join(format!("msgd-preflight-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("empty.db");
+        drop(Connection::open(&path).unwrap());
+        let conn = connect(&path).unwrap();
+        assert_eq!(migrate(&conn).unwrap(), SCHEMA_VERSION);
+        drop(conn);
+
+        let path = dir.join("future-empty.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("PRAGMA user_version=6").unwrap();
+        drop(conn);
+        let before = std::fs::read(&path).unwrap();
+        assert!(connect(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(!path.with_extension("db-wal").exists());
+
+        let path = dir.join("legacy-live.db");
+        let writer = Connection::open(&path).unwrap();
+        writer.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT); INSERT INTO meta VALUES('schema_version','4'); CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES('retain uncheckpointed data');").unwrap();
+        let main_before = std::fs::read(&path).unwrap();
+        let wal = path.with_extension("db-wal");
+        let wal_before = std::fs::read(&wal).unwrap();
+        assert!(connect(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), main_before);
+        assert_eq!(std::fs::read(&wal).unwrap(), wal_before);
+        assert_eq!(
+            writer
+                .query_row("SELECT value FROM sentinel", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "retain uncheckpointed data"
+        );
+        drop(writer);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

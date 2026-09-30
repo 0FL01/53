@@ -4,8 +4,10 @@
 //! только по доставленному префиксу событий получателя; FETCH cursor не двигает.
 //! sender_device всегда из Noise-сессии (аргумент), никогда из тела.
 
+use dmsg_protocol::{
+    ERR_BAD, ERR_BUSY, ERR_QUOTA, FETCH_BATCH_MAX, MAILBOX_BYTES_MAX, MAILBOX_EVENTS_MAX,
+};
 use rusqlite::{Connection, OptionalExtension};
-use dmsg_protocol::{ERR_BAD, ERR_BUSY, ERR_QUOTA, FETCH_BATCH_MAX, MAILBOX_BYTES_MAX, MAILBOX_EVENTS_MAX};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum MboxError {
@@ -52,7 +54,7 @@ pub enum SendOutcome {
     Exists(i64, bool),
 }
 
-/// SEND: quota-в-TX → INSERT ON CONFLICT → commit. Возврат до коммита запрещён.
+/// SEND: dedup-в-TX → quota → INSERT ON CONFLICT → commit. Возврат до коммита запрещён.
 pub fn send(
     conn: &mut Connection,
     sender_device: &[u8],
@@ -63,7 +65,9 @@ pub fn send(
 ) -> Result<SendOutcome, MboxError> {
     // Получатель обязан существовать (иначе письма в никуда).
     let known: bool = conn
-        .query_row("SELECT 1 FROM users WHERE user_id=?1", [recipient], |_| Ok(()))
+        .query_row("SELECT 1 FROM users WHERE user_id=?1", [recipient], |_| {
+            Ok(())
+        })
         .optional()
         .map_err(|e| store("user", e))?
         .is_some();
@@ -71,6 +75,21 @@ pub fn send(
         return Err(MboxError::Bad);
     }
     let tx = conn.transaction().map_err(|e| store("begin", e))?;
+    // Existing accepts do not consume quota again, including when the mailbox
+    // filled after the first commit. The dedup key and original row win even
+    // if a retry supplies different ciphertext, as before.
+    let existing: Option<(i64, bool)> = tx
+        .query_row(
+            "SELECT seq,delivered FROM mailbox_events WHERE sender_device=?1 AND message_id=?2",
+            rusqlite::params![sender_device, message_id],
+            |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0)),
+        )
+        .optional()
+        .map_err(|e| store("dedup", e))?;
+    if let Some((seq, delivered)) = existing {
+        tx.commit().map_err(|e| store("commit", e))?;
+        return Ok(SendOutcome::Exists(seq, delivered));
+    }
     let (count, bytes): (i64, Option<i64>) = tx
         .query_row(
             "SELECT COUNT(*), COALESCE(SUM(LENGTH(ciphertext)),0) FROM mailbox_events WHERE recipient_user_id=?1",
@@ -120,6 +139,7 @@ pub fn send(
 pub struct Fetched {
     pub seq: i64,
     pub sender: Vec<u8>,
+    pub sender_user: Vec<u8>,
     pub message_id: Vec<u8>,
     pub ciphertext: Vec<u8>,
 }
@@ -140,8 +160,8 @@ pub fn fetch(
         .unwrap_or(0);
     let mut stmt = conn
         .prepare(
-            "SELECT seq,sender_device,message_id,ciphertext FROM mailbox_events
-             WHERE recipient_user_id=?1 AND seq>?2 ORDER BY seq LIMIT ?3",
+            "SELECT m.seq,m.sender_device,m.message_id,m.ciphertext,d.user_id FROM mailbox_events m JOIN devices d ON d.device_key=m.sender_device
+             WHERE m.recipient_user_id=?1 AND m.seq>?2 ORDER BY m.seq LIMIT ?3",
         )
         .map_err(|e| store("prepare", e))?;
     let rows = stmt
@@ -153,6 +173,7 @@ pub fn fetch(
                     sender: r.get(1)?,
                     message_id: r.get(2)?,
                     ciphertext: r.get(3)?,
+                    sender_user: r.get(4)?,
                 })
             },
         )
@@ -232,7 +253,7 @@ mod tests {
 
     fn user(conn: &Connection, id: &[u8; 16]) {
         conn.execute(
-            "INSERT INTO users(user_id,contact_id,created_at) VALUES(?1,'x',1)",
+            "INSERT INTO users(user_id,contact_id,login,password_hash,created_at) VALUES(?1,'0123456789AB','alice','$argon2id$test',1)",
             [id.as_slice()],
         )
         .unwrap();
@@ -244,6 +265,11 @@ mod tests {
         let u = [1u8; 16];
         user(&conn, &u);
         let s = [2u8; 32];
+        conn.execute(
+            "INSERT INTO devices(device_key,user_id,created_at) VALUES(?1,?2,1)",
+            rusqlite::params![s.as_slice(), u.as_slice()],
+        )
+        .unwrap();
         let m = [3u8; 16];
         let seq = match send(&mut conn, &s, &u, &m, b"hello", 10).unwrap() {
             SendOutcome::New(q) => q,
@@ -284,10 +310,18 @@ mod tests {
         user(&conn, &u);
         let dev = [6u8; 32];
         let s = [7u8; 32];
+        conn.execute(
+            "INSERT INTO devices(device_key,user_id,created_at) VALUES(?1,?2,1)",
+            rusqlite::params![s.as_slice(), u.as_slice()],
+        )
+        .unwrap();
         for i in 0..3u8 {
             let mut m = [0u8; 16];
             m[0] = i;
-            assert!(matches!(send(&mut conn, &s, &u, &m, b"d", 20), Ok(SendOutcome::New(_))));
+            assert!(matches!(
+                send(&mut conn, &s, &u, &m, b"d", 20),
+                Ok(SendOutcome::New(_))
+            ));
         }
         let got = fetch(&conn, &u, &dev).unwrap();
         assert_eq!(got.len(), 3);

@@ -27,20 +27,23 @@ pub fn load_private<P: AsRef<Path>>(path: P) -> Result<[u8; KEY_LEN], String> {
     let raw = std::fs::read(path.as_ref())
         .map_err(|e| format!("noise key {}: {e}", path.as_ref().display()))?;
     if raw.len() != KEY_LEN {
-        return Err(format!("noise key: want {KEY_LEN} bytes, got {}", raw.len()));
+        return Err(format!(
+            "noise key: want {KEY_LEN} bytes, got {}",
+            raw.len()
+        ));
     }
     let mut k = [0u8; KEY_LEN];
     k.copy_from_slice(&raw);
     Ok(k)
 }
 
-/// Public-ключ для private (сырые 32 байта) — сборка bootstrap, сверки.
+/// Public-ключ для private (сырые 32 байта) — сборка public profile, сверки.
 pub fn pubkey_of(privk: &[u8; KEY_LEN]) -> [u8; KEY_LEN] {
     let secret = x25519_dalek::StaticSecret::from(*privk);
     *x25519_dalek::PublicKey::from(&secret).as_bytes()
 }
 
-/// Вывести public-ключ для private из файла (hex) — нужен bootstrap в P3.
+/// Вывести public-ключ для private из файла (hex) — нужен public profile.
 /// Деривация стандартным X25519 basepoint mult (тот же, что внутри snow).
 pub fn pubkey_hex<P: AsRef<Path>>(path: P) -> Result<String, String> {
     let privk = load_private(path)?;
@@ -58,7 +61,7 @@ fn hex_of(b: &[u8]) -> String {
 }
 
 /// keygen: создать файл с 32 случайными байтами (0600), отказ при существующем.
-/// Печатает public hex в stdout (для bootstrap P3 и сверки).
+/// Печатает public hex в stdout (для public profile и сверки).
 pub fn keygen<P: AsRef<Path>>(path: P) -> Result<(), String> {
     use std::os::unix::fs::OpenOptionsExt;
     if path.as_ref().exists() {

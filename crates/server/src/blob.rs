@@ -3,8 +3,11 @@
 //! reserve проверяет квоты, чтение — contact-разрешение (проверяется вызывателем
 //! по contact_permissions; здесь — владение), GC чистит старое детерминированно.
 
+use dmsg_protocol::{
+    BLOB_RESERVE_TTL_SECS, DATA_TTL_SECS, ERR_BAD, ERR_BUSY, ERR_QUOTA, MAILBOX_BYTES_MAX,
+    MAILBOX_EVENTS_MAX,
+};
 use rusqlite::{Connection, OptionalExtension};
-use dmsg_protocol::{BLOB_RESERVE_TTL_SECS, DATA_TTL_SECS, ERR_BAD, ERR_BUSY, ERR_QUOTA, MAILBOX_BYTES_MAX, MAILBOX_EVENTS_MAX};
 
 /// Максимум одного attachment (wire ciphertext), 512 KiB.
 pub const BLOB_SIZE_MAX: i64 = 512 * 1024;
@@ -86,7 +89,13 @@ pub fn reserve(
     tx.execute(
         "INSERT INTO blob_meta(blob_id,owner_user_id,size,created_at,expires_at,state)
          VALUES(?1,?2,?3,?4,?5,'reserved')",
-        rusqlite::params![blob_id, owner, size, now, now + BLOB_RESERVE_TTL_SECS as i64],
+        rusqlite::params![
+            blob_id,
+            owner,
+            size,
+            now,
+            now + BLOB_RESERVE_TTL_SECS as i64
+        ],
     )
     .map_err(|e| store("insert", e))?;
     tx.commit().map_err(|e| store("commit", e))?;
@@ -139,7 +148,10 @@ pub fn gc(conn: &mut Connection, now: i64) -> Result<(usize, usize), BlobError> 
         }
     }
     tx.commit().map_err(|e| store("commit", e))?;
-    eprintln!("msgd: gc blobs={b} events={e} lock_hold_ms={}", t0.elapsed().as_millis());
+    eprintln!(
+        "msgd: gc blobs={b} events={e} lock_hold_ms={}",
+        t0.elapsed().as_millis()
+    );
     Ok((b, e))
 }
 
@@ -159,19 +171,32 @@ mod tests {
         let mut conn = mem();
         let owner = [41u8; 16];
         // Битые аргументы.
-        assert_eq!(reserve(&mut conn, &owner, &[0u8; 15], 10, 100).unwrap_err(), BlobError::Bad);
-        assert_eq!(reserve(&mut conn, &owner, &[0u8; 16], 0, 100).unwrap_err(), BlobError::Bad);
-        assert_eq!(reserve(&mut conn, &owner, &[0u8; 16], BLOB_SIZE_MAX + 1, 100).unwrap_err(), BlobError::Bad);
+        assert_eq!(
+            reserve(&mut conn, &owner, &[0u8; 15], 10, 100).unwrap_err(),
+            BlobError::Bad
+        );
+        assert_eq!(
+            reserve(&mut conn, &owner, &[0u8; 16], 0, 100).unwrap_err(),
+            BlobError::Bad
+        );
+        assert_eq!(
+            reserve(&mut conn, &owner, &[0u8; 16], BLOB_SIZE_MAX + 1, 100).unwrap_err(),
+            BlobError::Bad
+        );
         // Резерв + идемпотентный повтор.
         reserve(&mut conn, &owner, &[1u8; 16], 1000, 100).unwrap();
         reserve(&mut conn, &owner, &[1u8; 16], 1000, 101).unwrap();
-        let n: i64 = conn.query_row("SELECT COUNT(*) FROM blob_meta", [], |r| r.get(0)).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM blob_meta", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, 1);
         // Sweep: reservation протухла (24ч), свежая живёт.
         reserve(&mut conn, &owner, &[2u8; 16], 10, 200).unwrap();
         let (b, _) = gc(&mut conn, 200 + BLOB_RESERVE_TTL_SECS as i64 + 1).unwrap();
         assert_eq!(b, 2);
-        let n: i64 = conn.query_row("SELECT COUNT(*) FROM blob_meta", [], |r| r.get(0)).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM blob_meta", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, 0);
     }
 
@@ -185,16 +210,26 @@ mod tests {
         // Тот же owner + тот же size → идемпотентный успех.
         reserve(&mut conn, &owner, &bid, 1000, 101).unwrap();
         // Чужой owner → ошибка.
-        assert_eq!(reserve(&mut conn, &other, &bid, 1000, 102).unwrap_err(), BlobError::Bad);
+        assert_eq!(
+            reserve(&mut conn, &other, &bid, 1000, 102).unwrap_err(),
+            BlobError::Bad
+        );
         // Тот же owner, другой size → ошибка.
-        assert_eq!(reserve(&mut conn, &owner, &bid, 2000, 103).unwrap_err(), BlobError::Bad);
+        assert_eq!(
+            reserve(&mut conn, &owner, &bid, 2000, 103).unwrap_err(),
+            BlobError::Bad
+        );
         // Конфликтная строка одна, чужак ничего не перезаписал.
-        let n: i64 = conn.query_row("SELECT COUNT(*) FROM blob_meta", [], |r| r.get(0)).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM blob_meta", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, 1);
         let (kept_owner, kept_size): (Vec<u8>, i64) = conn
-            .query_row("SELECT owner_user_id, size FROM blob_meta WHERE blob_id=?1", [&bid[..]], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
+            .query_row(
+                "SELECT owner_user_id, size FROM blob_meta WHERE blob_id=?1",
+                [&bid[..]],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .unwrap();
         assert_eq!((kept_owner.as_slice(), kept_size), (owner.as_slice(), 1000));
     }
@@ -211,7 +246,7 @@ mod tests {
     fn gc_caps_evict_oldest_first() {
         let mut conn = mem();
         let u = [43u8; 16];
-        conn.execute("INSERT INTO users(user_id,contact_id,created_at) VALUES(?1,'z',1)", [&u[..]]).unwrap();
+        conn.execute("INSERT INTO users(user_id,contact_id,login,password_hash,created_at) VALUES(?1,'0123456789AB','alice','$argon2id$test',1)", [&u[..]]).unwrap();
         for i in 0..513i64 {
             conn.execute(
                 "INSERT INTO mailbox_events(recipient_user_id,sender_device,message_id,ciphertext,created_at)
@@ -222,7 +257,9 @@ mod tests {
         }
         let (_, e) = gc(&mut conn, 2000).unwrap();
         assert_eq!(e, 1);
-        let min: i64 = conn.query_row("SELECT MIN(seq) FROM mailbox_events", [], |r| r.get(0)).unwrap();
+        let min: i64 = conn
+            .query_row("SELECT MIN(seq) FROM mailbox_events", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(min, 2); // seq=1 (старейший) вытеснен
     }
 
@@ -230,7 +267,7 @@ mod tests {
     fn gc_ttl_expired_events() {
         let mut conn = mem();
         let u = [42u8; 16];
-        conn.execute("INSERT INTO users(user_id,contact_id,created_at) VALUES(?1,'y',1)", [&u[..]]).unwrap();
+        conn.execute("INSERT INTO users(user_id,contact_id,login,password_hash,created_at) VALUES(?1,'0123456789AB','alice','$argon2id$test',1)", [&u[..]]).unwrap();
         // Старое событие (TTL) + новые.
         for i in 0..4i64 {
             conn.execute(

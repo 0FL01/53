@@ -3,10 +3,7 @@
 //! corrupt-passthrough, oversize-close, TTL+gc, tmpfs disk-full (graceful skip),
 //! identity-change, unknown-version.
 
-use dmsg_protocol::{
-    decode_frame, encode_frame, OP_AUTH_DOMAIN, OP_DELIVERY_ACK, OP_ENROL, OP_ENROLLED, OP_ERROR,
-    OP_FETCH, OP_FETCH_RESP, OP_SEND, OP_SEND_ACK, OP_UPLOAD_PREKEYS, OP_WELCOME,
-};
+use dmsg_protocol::{auth, mailbox, *};
 use std::process::{Child, Command};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -27,10 +24,18 @@ fn start(port: u16, dir: std::path::PathBuf) -> Srv {
     let bin = env!("CARGO_BIN_EXE_msgd");
     let key = dir.join("noise_key");
     if !key.exists() {
-        let out = Command::new(bin).args(["keygen", "--out"]).arg(&key).output().unwrap();
+        let out = Command::new(bin)
+            .args(["keygen", "--out"])
+            .arg(&key)
+            .output()
+            .unwrap();
         assert!(out.status.success());
     }
-    let out = Command::new(bin).args(["pubkey", "--key"]).arg(&key).output().unwrap();
+    let out = Command::new(bin)
+        .args(["pubkey", "--key"])
+        .arg(&key)
+        .output()
+        .unwrap();
     let mut sp = [0u8; 32];
     let t = String::from_utf8(out.stdout).unwrap();
     for (i, c) in sp.iter_mut().enumerate() {
@@ -62,13 +67,23 @@ fn start(port: u16, dir: std::path::PathBuf) -> Srv {
         .unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
-        if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
+        if Command::new(bin)
+            .env("MSGCTL_SOCK", dir.join("ctl.sock"))
+            .args(["msgctl", "ping"])
+            .output()
+            .is_ok_and(|o| o.stdout == b"pong\n")
+        {
             break;
         }
         assert!(std::time::Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(50));
     }
-    Srv { child, port, dir, server_pub: sp }
+    Srv {
+        child,
+        port,
+        dir,
+        server_pub: sp,
+    }
 }
 
 impl Srv {
@@ -82,43 +97,26 @@ impl Srv {
         String::from_utf8(out.stdout).unwrap()
     }
     fn issue(&self) -> [u8; 32] {
-        let uri = self.msgctl(&["invite-issue"]);
-        let b64 = uri.trim().rsplit("/join/").next().unwrap().to_string();
-        let raw = base64_url_decode(&b64);
-        raw[raw.len() - 32..].try_into().unwrap()
+        let file = self.dir.join(format!("invite-{}.txt", rand_name()));
+        assert_eq!(
+            self.msgctl(&["invite-issue", "--out-file", file.to_str().unwrap()]),
+            "ok\n"
+        );
+        auth::parse_invitation(std::fs::read_to_string(file).unwrap().trim()).unwrap()
     }
 }
 
 impl Drop for Srv {
     fn drop(&mut self) {
         self.child.kill().ok();
+        self.child.wait().ok();
     }
 }
 
-fn base64_url_decode(s: &str) -> Vec<u8> {
-    fn val(c: u8) -> Option<u8> {
-        match c {
-            b'A'..=b'Z' => Some(c - b'A'),
-            b'a'..=b'z' => Some(c - b'a' + 26),
-            b'0'..=b'9' => Some(c - b'0' + 52),
-            b'-' => Some(62),
-            b'_' => Some(63),
-            _ => None,
-        }
-    }
-    let mut out = Vec::new();
-    let mut acc: u32 = 0;
-    let mut n = 0;
-    for &c in s.as_bytes() {
-        let v = val(c).unwrap() as u32;
-        acc = (acc << 6) | v;
-        n += 6;
-        if n >= 8 {
-            n -= 8;
-            out.push((acc >> n) as u8);
-        }
-    }
-    out
+fn rand_name() -> String {
+    let mut b = [0u8; 8];
+    getrandom::fill(&mut b).unwrap();
+    b.iter().map(|v| format!("{v:02x}")).collect()
 }
 
 /// Пара static-ключей устройства: private случайный, public деривирован (для reconnect).
@@ -138,7 +136,10 @@ struct Cli {
 async fn connect(srv: &Srv, pair: Option<([u8; 32], [u8; 32])>) -> (Cli, ([u8; 32], [u8; 32])) {
     let (privk, pubk) = pair.unwrap_or_else(device_pair);
     let params: snow::params::NoiseParams = PATTERN.parse().unwrap();
-    let kp = snow::Keypair { private: privk.to_vec(), public: pubk.to_vec() };
+    let kp = snow::Keypair {
+        private: privk.to_vec(),
+        public: pubk.to_vec(),
+    };
     let mut hs = snow::Builder::new(params)
         .local_private_key(&kp.private)
         .unwrap()
@@ -147,12 +148,21 @@ async fn connect(srv: &Srv, pair: Option<([u8; 32], [u8; 32])>) -> (Cli, ([u8; 3
         .build_initiator()
         .unwrap();
     let mut buf = vec![0u8; 65535];
-    let mut s = TcpStream::connect(format!("127.0.0.1:{}", srv.port)).await.unwrap();
+    let mut s = TcpStream::connect(format!("127.0.0.1:{}", srv.port))
+        .await
+        .unwrap();
     let n = hs.write_message(&[], &mut buf).unwrap();
     wlen(&mut s, &buf[..n]).await;
     let m2 = rlen(&mut s).await.unwrap();
     hs.read_message(&m2, &mut buf).unwrap();
-    (Cli { t: hs.into_transport_mode().unwrap(), s, device: pubk }, (privk, pubk))
+    (
+        Cli {
+            t: hs.into_transport_mode().unwrap(),
+            s,
+            device: pubk,
+        },
+        (privk, pubk),
+    )
 }
 
 async fn wlen(s: &mut TcpStream, m: &[u8]) {
@@ -190,25 +200,25 @@ impl Cli {
         let (op, _) = self.xchg(OP_AUTH_DOMAIN, DOMAIN.as_bytes()).await.unwrap();
         assert_eq!(op, OP_WELCOME);
     }
-    async fn enrol(&mut self, token: &[u8; 32]) -> [u8; 16] {
-        let (op, p) = self.xchg(OP_ENROL, token).await.unwrap();
-        assert_eq!(op, OP_ENROLLED, "enrol failed op={op}");
+    async fn signup(&mut self, token: &[u8; 32]) -> [u8; 16] {
+        let login: String = token[..8].iter().map(|v| format!("{v:02x}")).collect();
+        let payload = auth::build_signup(&login, "mailbox-fixture-password", Some(token)).unwrap();
+        let (op, p) = self.xchg(OP_SIGNUP, &payload).await.unwrap();
+        assert_eq!(op, OP_AUTHENTICATED, "signup failed op={op}");
         p[..16].try_into().unwrap()
+    }
+    async fn resume(&mut self) {
+        assert_eq!(self.xchg(OP_RESUME, &[]).await.unwrap().0, OP_AUTHENTICATED);
     }
     /// Разобрать FETCH_RESP в (seq, ciphertext).
     async fn fetch_all(&mut self) -> Vec<(u64, Vec<u8>)> {
         let (op, fp) = self.xchg(OP_FETCH, &[]).await.unwrap();
         assert_eq!(op, OP_FETCH_RESP);
-        let n = u16::from_be_bytes([fp[0], fp[1]]) as usize;
-        let mut off = 2;
-        let mut out = vec![];
-        for _ in 0..n {
-            let s = u64::from_be_bytes(fp[off..off + 8].try_into().unwrap());
-            let ctlen = u16::from_be_bytes([fp[off + 56], fp[off + 57]]) as usize;
-            out.push((s, fp[off + 58..off + 58 + ctlen].to_vec()));
-            off += 58 + ctlen;
-        }
-        out
+        mailbox::parse_fetch_resp(&fp)
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.seq, e.ciphertext.to_vec()))
+            .collect()
     }
     async fn ack(&mut self, seqs: &[u64]) -> u64 {
         let mut p = vec![(seqs.len() >> 8) as u8, seqs.len() as u8];
@@ -239,13 +249,16 @@ async fn flow_split_ack() {
     let tok_b = srv.issue();
     let (mut b, _) = connect(&srv, None).await;
     b.auth().await;
-    let user_b = b.enrol(&tok_b).await;
+    let user_b = b.signup(&tok_b).await;
     let tok_a = srv.issue();
     let (mut a, _) = connect(&srv, None).await;
     a.auth().await;
-    a.enrol(&tok_a).await;
+    a.signup(&tok_a).await;
     let msgid = [1u8; 16];
-    let (op, rp) = a.xchg(OP_SEND, &send_frame(&user_b, &msgid, b"hello-b")).await.unwrap();
+    let (op, rp) = a
+        .xchg(OP_SEND, &send_frame(&user_b, &msgid, b"hello-b"))
+        .await
+        .unwrap();
     assert_eq!(op, OP_SEND_ACK);
     assert_eq!((&rp[..16], rp[16]), (&msgid[..], 1));
     // ACCEPTED ≠ DELIVERED: событие уже видно, но cursor не двинут.
@@ -255,7 +268,10 @@ async fn flow_split_ack() {
     assert_eq!(b.ack(&[ev[0].0]).await, ev[0].0);
     assert!(b.fetch_all().await.is_empty());
     // Повтор после доставки: тот же message_id → ST_DELIVERED, без нового события.
-    let (op, rp) = a.xchg(OP_SEND, &send_frame(&user_b, &msgid, b"hello-b")).await.unwrap();
+    let (op, rp) = a
+        .xchg(OP_SEND, &send_frame(&user_b, &msgid, b"hello-b"))
+        .await
+        .unwrap();
     assert_eq!(op, OP_SEND_ACK);
     assert_eq!((&rp[..16], rp[16]), (&msgid[..], 2));
     assert!(b.fetch_all().await.is_empty());
@@ -267,22 +283,28 @@ async fn replay_dedup_and_reorder() {
     let tok_b = srv.issue();
     let (mut b, _) = connect(&srv, None).await;
     b.auth().await;
-    let user_b = b.enrol(&tok_b).await;
+    let user_b = b.signup(&tok_b).await;
     let tok_a = srv.issue();
     let (mut a, _) = connect(&srv, None).await;
     a.auth().await;
-    a.enrol(&tok_a).await;
+    a.signup(&tok_a).await;
     for i in 0..3u8 {
-        let (op, _) = a.xchg(OP_SEND, &send_frame(&user_b, &[i; 16], b"d")).await.unwrap();
+        let (op, _) = a
+            .xchg(OP_SEND, &send_frame(&user_b, &[i; 16], b"d"))
+            .await
+            .unwrap();
         assert_eq!(op, OP_SEND_ACK);
     }
     // Повтор msgid=1 другим текстом — прежний accept, дубля нет.
-    let (op, _) = a.xchg(OP_SEND, &send_frame(&user_b, &[1u8; 16], b"other")).await.unwrap();
+    let (op, _) = a
+        .xchg(OP_SEND, &send_frame(&user_b, &[1u8; 16], b"other"))
+        .await
+        .unwrap();
     assert_eq!(op, OP_SEND_ACK);
     let ev = b.fetch_all().await;
     assert_eq!(ev.len(), 3);
     assert_eq!(ev[1].1, b"d"); // оригинал, не "other"
-    // ACK среднего: cursor стоит (гэп).
+                               // ACK среднего: cursor стоит (гэп).
     assert_eq!(b.ack(&[ev[1].0]).await, 0);
     // ACK первого: cursor прыгает по непрерывному (1,2).
     assert_eq!(b.ack(&[ev[0].0]).await, ev[1].0);
@@ -301,8 +323,8 @@ async fn interleaved_recipient_ack_crosses_global_and_ttl_gaps_only() {
     let (mut b, _) = connect(&srv, None).await;
     a.auth().await;
     b.auth().await;
-    let user_a = a.enrol(&tok_a).await;
-    let user_b = b.enrol(&tok_b).await;
+    let user_a = a.signup(&tok_a).await;
+    let user_b = b.signup(&tok_b).await;
 
     // GC removes a global sequence before either recipient's first live event.
     let db = rusqlite::Connection::open(srv.dir.join("data/msgd.db")).unwrap();
@@ -358,27 +380,29 @@ async fn interleaved_recipient_ack_crosses_global_and_ttl_gaps_only() {
 #[tokio::test]
 async fn kill_restart_durable() {
     let dir = tmpdir("restart", 17213);
-    let (pair_b, tok_b, msgid) = {
+    let (pair_b, msgid) = {
         let srv = start(17213, dir.clone());
         let tok_b = srv.issue();
         let (mut b, pair_b) = connect(&srv, None).await;
         b.auth().await;
-        let user_b = b.enrol(&tok_b).await;
+        let user_b = b.signup(&tok_b).await;
         let tok_a = srv.issue();
         let (mut a, _) = connect(&srv, None).await;
         a.auth().await;
-        a.enrol(&tok_a).await;
+        a.signup(&tok_a).await;
         let msgid = [9u8; 16];
-        let (op, _) = a.xchg(OP_SEND, &send_frame(&user_b, &msgid, b"durable")).await.unwrap();
+        let (op, _) = a
+            .xchg(OP_SEND, &send_frame(&user_b, &msgid, b"durable"))
+            .await
+            .unwrap();
         assert_eq!(op, OP_SEND_ACK);
-        (pair_b, tok_b, msgid) // srv kill здесь (Drop): kill до FETCH
+        (pair_b, msgid) // srv kill здесь (Drop): kill до FETCH
     };
-    // Рестарт: то же устройство B (тот же static) replay'ит СВОЙ token → ENROLLED,
-    // забирает событие с cursor. Так работает и настоящий reconnect.
+    // Restart: RESUME by the same Noise static restores the durable cursor.
     let srv = start(17214, dir);
     let (mut b, _) = connect(&srv, Some(pair_b)).await;
     b.auth().await;
-    b.enrol(&tok_b).await; // replay: прежний ответ, не BoundOther
+    b.resume().await;
     let ev = b.fetch_all().await;
     assert_eq!(ev.len(), 1);
     assert_eq!(ev[0].1, b"durable");
@@ -393,11 +417,11 @@ async fn corrupt_passthrough_and_unknown_version() {
     let tok_b = srv.issue();
     let (mut b, _) = connect(&srv, None).await;
     b.auth().await;
-    let user_b = b.enrol(&tok_b).await;
+    let user_b = b.signup(&tok_b).await;
     let tok_a = srv.issue();
     let (mut a, _) = connect(&srv, None).await;
     a.auth().await;
-    a.enrol(&tok_a).await;
+    a.signup(&tok_a).await;
     // Сервер opaque: мусорный ciphertext принимается как есть.
     let (op, _) = a
         .xchg(OP_SEND, &send_frame(&user_b, &[2u8; 16], &[0xFFu8; 64]))
@@ -407,11 +431,16 @@ async fn corrupt_passthrough_and_unknown_version() {
     let ev = b.fetch_all().await;
     assert_eq!(ev[0].1, vec![0xFFu8; 64]);
     // Неизвестная версия wire → close без ответа.
-    let mut raw = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", srv.port)).await.unwrap();
+    let mut raw = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", srv.port))
+        .await
+        .unwrap();
     wlen(&mut raw, &[9u8, OP_SEND, 0, 1, 0xFF]).await;
     let mut tmp = [0u8; 8];
     let r = tokio::time::timeout(Duration::from_secs(12), raw.read(&mut tmp)).await;
-    assert!(matches!(r, Ok(Ok(0))) || matches!(r, Ok(Err(_))), "must close, got {r:?}");
+    assert!(
+        matches!(r, Ok(Ok(0))) || matches!(r, Ok(Err(_))),
+        "must close, got {r:?}"
+    );
 }
 
 #[tokio::test]
@@ -422,7 +451,7 @@ async fn oversize_close() {
         let tok = srv.issue();
         let (mut c, _) = connect(&srv, None).await;
         c.auth().await;
-        c.enrol(&tok).await;
+        c.signup(&tok).await;
         {
             use tokio::io::AsyncWriteExt;
             c.s.write_all(&16401u16.to_be_bytes()).await.unwrap();
@@ -430,17 +459,20 @@ async fn oversize_close() {
         }
         let mut tmp = [0u8; 8];
         let r = tokio::time::timeout(Duration::from_secs(12), c.s.read(&mut tmp)).await;
-        assert!(matches!(r, Ok(Ok(0))) || matches!(r, Ok(Err(_))), "must close, got {r:?}");
+        assert!(
+            matches!(r, Ok(Ok(0))) || matches!(r, Ok(Err(_))),
+            "must close, got {r:?}"
+        );
     }
     // 2) Кадр больше MAX_FRAME целиком → close. Строим вручную (encode_frame отказал бы).
     //    Plaintext-кадр 16388 → шифртекст 16404 > bound 16400: close уже на transport-read.
     let tok = srv.issue();
     let (mut c, _) = connect(&srv, None).await;
     c.auth().await;
-    c.enrol(&tok).await;
+    c.signup(&tok).await;
     // Кадр больше MAX_FRAME целиком → close. Строим вручную (encode_frame отказал бы).
     let big = vec![0xAAu8; dmsg_protocol::MAX_FRAME];
-    let mut raw_frame = vec![1u8, OP_SEND];
+    let mut raw_frame = vec![VERSION, OP_SEND];
     raw_frame.extend_from_slice(&(big.len() as u16).to_be_bytes());
     raw_frame.extend_from_slice(&big);
     // u16 не вмещает >65535, но MAX_FRAME=16384 — шлём ровно лимит+1 через Noise.
@@ -454,7 +486,10 @@ async fn oversize_close() {
     }
     let mut tmp = [0u8; 8];
     let r = tokio::time::timeout(Duration::from_secs(12), c.s.read(&mut tmp)).await;
-    assert!(matches!(r, Ok(Ok(0))) || matches!(r, Ok(Err(_))), "must close, got {r:?}");
+    assert!(
+        matches!(r, Ok(Ok(0))) || matches!(r, Ok(Err(_))),
+        "must close, got {r:?}"
+    );
 }
 
 #[tokio::test]
@@ -465,7 +500,7 @@ async fn ttl_gc_cleans() {
     let tok_b = srv.issue();
     let (mut b, _) = connect(&srv, None).await;
     b.auth().await;
-    let user_b = b.enrol(&tok_b).await;
+    let user_b = b.signup(&tok_b).await;
     // Crafted-expired событие напрямую в SQL (без sleep-флаков).
     let db = Connection::open(dir.join("data").join("msgd.db")).unwrap();
     db.execute(
@@ -500,11 +535,11 @@ async fn disk_full_tmpfs() {
         let tok_b = srv.issue();
         let (mut b, _) = connect(&srv, None).await;
         b.auth().await;
-        let user_b = b.enrol(&tok_b).await;
+        let user_b = b.signup(&tok_b).await;
         let tok_a = srv.issue();
         let (mut a, _) = connect(&srv, None).await;
         a.auth().await;
-        a.enrol(&tok_a).await;
+        a.signup(&tok_a).await;
         // Забиваем крошечный диск событиями, пока не получим ERROR/quota или close.
         let mut got_err = false;
         for i in 0..200u8 {
@@ -534,7 +569,7 @@ async fn identity_change_refused() {
     let tok = srv.issue();
     let (mut c, _) = connect(&srv, None).await;
     c.auth().await;
-    c.enrol(&tok).await;
+    let user = c.signup(&tok).await;
     let dev = c.device_static();
     let id1 = ed25519_dalek::SigningKey::from_bytes(&[51u8; 32]);
     let id2 = ed25519_dalek::SigningKey::from_bytes(&[52u8; 32]);
@@ -548,6 +583,7 @@ async fn identity_change_refused() {
         let sig = idkey.sign(&msg);
         let mut p = Vec::new();
         p.extend_from_slice(&ident);
+        p.extend_from_slice(&[0x66; 32]);
         p.extend_from_slice(&[0u8, 1]);
         p.extend_from_slice(&id.to_be_bytes());
         p.push(1);
@@ -558,7 +594,20 @@ async fn identity_change_refused() {
     // Первая загрузка фиксирует identity.
     let (op, _) = c.xchg(OP_UPLOAD_PREKEYS, &mk(&id1, 1)).await.unwrap();
     assert_eq!(op, 25); // COUNT_RESP
-    // Другая identity → ERROR BAD.
+                        // Другая identity → ERROR BAD.
     let (op, _) = c.xchg(OP_UPLOAD_PREKEYS, &mk(&id2, 2)).await.unwrap();
     assert_eq!(op, OP_ERROR);
+    let (_, p) = c.xchg(OP_DEVICE_BINDING, &user).await.unwrap();
+    let binding = auth::parse_binding(&p).unwrap();
+    assert_eq!(binding.user_id, user);
+    assert_eq!(binding.device_key, dev);
+    assert_eq!(binding.ed25519, id1.verifying_key().to_bytes());
+    assert_eq!(binding.curve25519, [0x66; 32]);
+    let mut changed_curve = mk(&id1, 3);
+    changed_curve[32..64].fill(0x67);
+    assert_eq!(
+        c.xchg(OP_UPLOAD_PREKEYS, &changed_curve).await.unwrap().0,
+        OP_ERROR
+    );
+    assert_eq!(c.xchg(OP_DEVICE_BINDING, &user).await.unwrap().1, p);
 }

@@ -1,22 +1,33 @@
-//! Diag-прогон mailbox через DNS-путь: A enrol → B enrol → A SEND → B FETCH →
+//! Diag-прогон mailbox через DNS-путь: A signup → B signup → A SEND → B FETCH →
 //! B DELIVERY_ACK → A видит delivered. Точка входа — TCP-порт локального
-//! slipstream-client (как noise_diag/enrol_diag).
-//! Env: DIAG_PORT, DIAG_DOMAIN, DIAG_SERVER_PUB (hex), DIAG_TOKEN_A/B (hex 64).
+//! slipstream-client (как noise_diag/auth_diag).
+//! Env: DIAG_PORT, DIAG_DOMAIN, DIAG_SERVER_PUB (public hex),
+//! DIAG_SIGNUP_A/B_FILE (binary canonical signup payloads, 0600).
 //! Печатает `RESULT PASS` или `RESULT FAIL`.
 
-use dmsg_protocol::{
-    decode_frame, encode_frame, OP_AUTH_DOMAIN, OP_DELIVERY_ACK, OP_ENROL, OP_ENROLLED,
-    OP_FETCH, OP_FETCH_RESP, OP_SEND, OP_SEND_ACK, OP_WELCOME, ST_ACCEPTED, ST_DELIVERED,
-};
+use dmsg_protocol::{auth, mailbox, *};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-fn read_token_file(path: &str) -> Option<[u8; 32]> {
-    let s = std::fs::read_to_string(path).ok()?;
-    hex_to32(s.trim())
+fn read_signup_file(path: &str) -> Option<Vec<u8>> {
+    use std::{io::Read, os::unix::fs::PermissionsExt};
+    let file = std::fs::File::open(path).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file()
+        || meta.permissions().mode() & 0o077 != 0
+        || meta.len() > auth::AUTH_PAYLOAD_MAX as u64
+    {
+        return None;
+    }
+    let mut v = vec![];
+    file.take(auth::AUTH_PAYLOAD_MAX as u64 + 1)
+        .read_to_end(&mut v)
+        .ok()?;
+    auth::parse_signup(&v).ok()?;
+    Some(v)
 }
 
 fn hex_to32(s: &str) -> Option<[u8; 32]> {
-    if s.len() != 64 {
+    if s.len() != 64 || !s.is_ascii() {
         return None;
     }
     let mut b = [0u8; 32];
@@ -60,7 +71,12 @@ async fn xchg(sess: &mut Sess, op: u8, payload: &[u8]) -> Option<(u8, Vec<u8>)> 
     Some((rop, p.to_vec()))
 }
 
-async fn session(port: u16, domain: &str, server_pub: &[u8; 32], token: &[u8; 32]) -> Option<(Sess, [u8; 16])> {
+async fn session(
+    port: u16,
+    domain: &str,
+    server_pub: &[u8; 32],
+    signup: &[u8],
+) -> Option<(Sess, [u8; 16])> {
     let params: snow::params::NoiseParams = "Noise_IK_25519_ChaChaPoly_BLAKE2s".parse().ok()?;
     let kp = snow::Builder::new(params.clone()).generate_keypair().ok()?;
     let mut hs = snow::Builder::new(params)
@@ -71,7 +87,9 @@ async fn session(port: u16, domain: &str, server_pub: &[u8; 32], token: &[u8; 32
         .build_initiator()
         .ok()?;
     let mut buf = vec![0u8; 65535];
-    let mut s = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await.ok()?;
+    let mut s = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .ok()?;
     let n = hs.write_message(&[], &mut buf).ok()?;
     wlen(&mut s, &buf[..n]).await?;
     let m2 = rlen(&mut s).await?;
@@ -83,9 +101,8 @@ async fn session(port: u16, domain: &str, server_pub: &[u8; 32], token: &[u8; 32
     if op != OP_WELCOME {
         return None;
     }
-    // ENROL
-    let (op, p) = xchg(&mut sess, OP_ENROL, token).await?;
-    if op != OP_ENROLLED || p.len() != 28 {
+    let (op, p) = xchg(&mut sess, OP_SIGNUP, signup).await?;
+    if op != OP_AUTHENTICATED || auth::parse_authenticated(&p).is_err() {
         return None;
     }
     let mut uid = [0u8; 16];
@@ -95,20 +112,26 @@ async fn session(port: u16, domain: &str, server_pub: &[u8; 32], token: &[u8; 32
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    let port: u16 = std::env::var("DIAG_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let port: u16 = std::env::var("DIAG_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     let domain = std::env::var("DIAG_DOMAIN").unwrap_or_default();
     let pubhex = std::env::var("DIAG_SERVER_PUB").unwrap_or_default();
     // Токены — только из файлов 600 (C2: не в env/логи/argv).
-    let ta = read_token_file(&std::env::var("DIAG_TOKEN_A_FILE").unwrap_or_default());
-    let tb = read_token_file(&std::env::var("DIAG_TOKEN_B_FILE").unwrap_or_default());
-    let (pubk, toka, tokb) = match (hex_to32(&pubhex), ta, tb) {
+    let ta = read_signup_file(&std::env::var("DIAG_SIGNUP_A_FILE").unwrap_or_default());
+    let tb = read_signup_file(&std::env::var("DIAG_SIGNUP_B_FILE").unwrap_or_default());
+    let (pubk, mut toka, mut tokb) = match (hex_to32(&pubhex), ta, tb) {
         (Some(p), Some(a), Some(b)) if port != 0 && !domain.is_empty() => (p, a, b),
         _ => {
-            eprintln!("usage: DIAG_PORT=p DIAG_DOMAIN=d DIAG_SERVER_PUB=hex DIAG_TOKEN_A/B_FILE=path mbox_dns");
+            eprintln!("usage: DIAG_PORT=p DIAG_DOMAIN=d DIAG_SERVER_PUB=hex DIAG_SIGNUP_A/B_FILE=path mbox_dns");
             return std::process::ExitCode::from(2);
         }
     };
-    match run(port, &domain, &pubk, &toka, &tokb).await {
+    let result = run(port, &domain, &pubk, &toka, &tokb).await;
+    toka.fill(0);
+    tokb.fill(0);
+    match result {
         true => {
             println!("RESULT PASS");
             std::process::ExitCode::SUCCESS
@@ -120,8 +143,8 @@ async fn main() -> std::process::ExitCode {
     }
 }
 
-async fn run(port: u16, domain: &str, pubk: &[u8; 32], toka: &[u8; 32], tokb: &[u8; 32]) -> bool {
-    let (mut a, _auid) = match session(port, domain, pubk, toka).await {
+async fn run(port: u16, domain: &str, pubk: &[u8; 32], toka: &[u8], tokb: &[u8]) -> bool {
+    let (mut a, auid) = match session(port, domain, pubk, toka).await {
         Some(v) => v,
         None => return false,
     };
@@ -152,22 +175,16 @@ async fn run(port: u16, domain: &str, pubk: &[u8; 32], toka: &[u8; 32], tokb: &[
     if op != OP_FETCH_RESP || p.len() < 2 {
         return false;
     }
-    let count = u16::from_be_bytes([p[0], p[1]]) as usize;
-    if count != 1 {
+    let Some(events) = mailbox::parse_fetch_resp(&p) else {
+        return false;
+    };
+    if events.len() != 1
+        || events[0].sender_user != auid
+        || events[0].ciphertext != b"hello-dns-mbox"
+    {
         return false;
     }
-    // запись: seq8 + sender32 + msgid16 + ctlen2 + ct
-    if p.len() < 2 + 8 + 32 + 16 + 2 {
-        return false;
-    }
-    let seq = u64::from_be_bytes(p[2..10].try_into().unwrap());
-    let ctlen = u16::from_be_bytes(p[58..60].try_into().unwrap()) as usize;
-    if p.len() != 60 + ctlen {
-        return false;
-    }
-    if &p[60..] != b"hello-dns-mbox" {
-        return false;
-    }
+    let seq = events[0].seq;
     // B DELIVERY_ACK(count u16 + seq) → ответ OP_DELIVERY_ACK
     let mut ackp = vec![0u8, 1];
     ackp.extend_from_slice(&seq.to_be_bytes());

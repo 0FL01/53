@@ -17,13 +17,18 @@ fn spawn(port: u16, dir: &std::path::Path, key: &std::path::Path) -> Child {
     let cert = dir.parent().expect("base").join("carrier.pem");
     if !cert.exists() {
         let csr = Command::new("openssl")
-            .args(["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
-                   "-subj", "/CN=x", "-keyout"])
+            .args([
+                "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2", "-subj", "/CN=x",
+                "-keyout",
+            ])
             .arg(dir.parent().expect("base").join("k.pem"))
             .arg("-out")
             .arg(&cert)
             .output();
-        assert!(csr.map(|o| o.status.success()).unwrap_or(false), "openssl req");
+        assert!(
+            csr.map(|o| o.status.success()).unwrap_or(false),
+            "openssl req"
+        );
     }
     let child = Command::new(bin)
         .env("DMSG_DOMAIN", "bak.test")
@@ -84,7 +89,33 @@ fn backup_restore_start() {
         child: spawn(p0, &data, &key),
         port: p0,
     };
-    let _uri = ctl(&data, &["invite-issue"]);
+    let invite = base.join("invite.txt");
+    assert_eq!(
+        ctl(
+            &data,
+            &["invite-issue", "--out-file", invite.to_str().unwrap()]
+        ),
+        "ok\n"
+    );
+    assert_eq!(ctl(&data, &["registration-mode", "open"]), "open\n");
+    let conn = rusqlite::Connection::open(data.join("msgd.db")).unwrap();
+    use argon2::{password_hash::SaltString, Argon2, PasswordHasher};
+    let salt = SaltString::encode_b64(&[19; 16]).unwrap();
+    let hash = Argon2::default()
+        .hash_password(b"backup-test-password", &salt)
+        .unwrap()
+        .to_string();
+    conn.execute(
+        "INSERT INTO users VALUES(?1,'0123456789AB','backup',?2,1)",
+        rusqlite::params![[19u8; 16].as_slice(), hash],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO devices(device_key,user_id,created_at) VALUES(?1,?2,1)",
+        rusqlite::params![[20u8; 32].as_slice(), [19u8; 16].as_slice()],
+    )
+    .unwrap();
+    drop(conn);
     let before = ctl(&data, &["invite-list"]);
     let rep = ctl(&data, &["backup"]);
     assert!(rep.starts_with("backup path="), "bad reply: {rep}");
@@ -99,7 +130,11 @@ fn backup_restore_start() {
     // Рестор на отдельную копию: подмена db (+ удалить wal/shm, если есть).
     let rest = base.join("restored");
     std::fs::create_dir_all(&rest).unwrap();
-    std::fs::copy(std::path::Path::new(snap).join("msgd.db"), rest.join("msgd.db")).unwrap();
+    std::fs::copy(
+        std::path::Path::new(snap).join("msgd.db"),
+        rest.join("msgd.db"),
+    )
+    .unwrap();
     for suf in ["-wal", "-shm", "-journal"] {
         let _ = std::fs::remove_file(rest.join(format!("msgd.db{suf}")));
     }
@@ -107,8 +142,26 @@ fn backup_restore_start() {
         child: spawn(p0 + 1, &rest, &key),
         port: p0 + 1,
     };
-    assert_eq!(ctl(&rest, &["dbversion"]), "4\n");
+    assert_eq!(ctl(&rest, &["dbversion"]), "5\n");
     assert_eq!(ctl(&rest, &["invite-list"]), before);
+    assert_eq!(ctl(&rest, &["registration-mode"]), "open\n");
+    let conn = rusqlite::Connection::open(rest.join("msgd.db")).unwrap();
+    let restored_hash: String = conn
+        .query_row(
+            "SELECT password_hash FROM users WHERE login='backup'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(restored_hash, hash);
+    use argon2::{password_hash::PasswordHash, PasswordVerifier};
+    assert!(Argon2::default()
+        .verify_password(
+            b"backup-test-password",
+            &PasswordHash::new(&restored_hash).unwrap()
+        )
+        .is_ok());
+    drop(conn);
     srv2.child.kill().ok();
     std::fs::remove_dir_all(&base).ok();
     let _ = srv.port;

@@ -19,7 +19,10 @@ fn hex_to32(s: &str) -> Option<[u8; 32]> {
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    let port: u16 = std::env::var("DIAG_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let port: u16 = std::env::var("DIAG_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     let domain = std::env::var("DIAG_DOMAIN").unwrap_or_default();
     let pubhex = std::env::var("DIAG_SERVER_PUB").unwrap_or_default();
     let server_pub = match hex_to32(&pubhex) {
@@ -52,7 +55,9 @@ async fn run(port: u16, domain: &str, server_pub: &[u8; 32]) -> Option<bool> {
         .build_initiator()
         .ok()?;
     let mut buf = vec![0u8; 65535];
-    let mut s = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await.ok()?;
+    let mut s = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .ok()?;
     let n = hs.write_message(&[], &mut buf).ok()?;
     wlen(&mut s, &buf[..n]).await?;
     let m2 = rlen(&mut s).await?;
