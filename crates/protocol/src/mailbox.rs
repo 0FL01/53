@@ -29,7 +29,11 @@ pub fn parse_send(p: &[u8]) -> Option<Send<'_>> {
     if p.len() <= 32 || p.len() - 32 > CIPHERTEXT_MAX {
         return None;
     }
-    Some(Send { recipient: &p[..16], message_id: &p[16..32], ciphertext: &p[32..] })
+    Some(Send {
+        recipient: &p[..16],
+        message_id: &p[16..32],
+        ciphertext: &p[32..],
+    })
 }
 
 /// SEND_ACK: message_id 16 + status u8.
@@ -45,33 +49,41 @@ pub fn parse_send_ack(p: &[u8]) -> Option<(&[u8], u8)> {
 pub struct Event<'a> {
     pub seq: u64,
     pub sender: &'a [u8],
+    pub sender_user: &'a [u8],
     pub message_id: &'a [u8],
     pub ciphertext: &'a [u8],
 }
 
-/// FETCH_RESP: count u16 + записи (seq8 + sender32 + msgid16 + ctlen2 + ct).
+/// FETCH_RESP: count u16 + записи (seq8 + sender32 + sender_user16 + msgid16 + ctlen2 + ct).
 /// Аллокация — min(n, FETCH_BATCH_MAX): заявленный count не раздувает Vec.
 pub fn parse_fetch_resp(p: &[u8]) -> Option<Vec<Event<'_>>> {
-    if p.len() < 2 {
+    if p.len() < 2 || p.len() > MAX_PAYLOAD {
         return None;
     }
     let n = usize::try_from(u16::from_be_bytes([p[0], p[1]])).ok()?;
     let mut out = Vec::with_capacity(n.min(FETCH_BATCH_MAX));
     let mut cur = &p[2..];
     for _ in 0..n {
-        if cur.len() < 8 + 32 + 16 + 2 {
+        if cur.len() < 8 + 32 + 16 + 16 + 2 {
             return None;
         }
         let seq = u64::from_be_bytes(cur[..8].try_into().ok()?);
         let sender = &cur[8..40];
-        let message_id = &cur[40..56];
-        let ctlen = usize::try_from(u16::from_be_bytes(cur[56..58].try_into().ok()?)).ok()?;
-        cur = &cur[58..];
+        let sender_user = &cur[40..56];
+        let message_id = &cur[56..72];
+        let ctlen = usize::try_from(u16::from_be_bytes(cur[72..74].try_into().ok()?)).ok()?;
+        cur = &cur[74..];
         if cur.len() < ctlen {
             return None;
         }
         let (ct, rest) = cur.split_at(ctlen);
-        out.push(Event { seq, sender, message_id, ciphertext: ct });
+        out.push(Event {
+            seq,
+            sender,
+            sender_user,
+            message_id,
+            ciphertext: ct,
+        });
         cur = rest;
     }
     if !cur.is_empty() {
@@ -93,7 +105,9 @@ pub fn parse_delivery_ack(p: &[u8]) -> Option<Vec<u64>> {
     }
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
-        out.push(u64::from_be_bytes(p[2 + 8 * i..10 + 8 * i].try_into().ok()?));
+        out.push(u64::from_be_bytes(
+            p[2 + 8 * i..10 + 8 * i].try_into().ok()?,
+        ));
     }
     Some(out)
 }
@@ -101,20 +115,20 @@ pub fn parse_delivery_ack(p: &[u8]) -> Option<Vec<u64>> {
 /// Одна prekey-запись: key_id + one_time + pubkey 32 + sig 64 = 101 байт.
 pub const PREKEY_ENTRY_LEN: usize = 4 + 1 + 32 + 64;
 
-/// UPLOAD_PREKEYS: identity 32 + count u16 + записи.
-/// Точное равенство 34+n*ENTRY_LEN==len проверяется ДО аллокации.
+/// UPLOAD_PREKEYS: Ed25519 identity 32 + Curve25519 identity 32 + count u16 + записи.
+/// Точное равенство 66+n*ENTRY_LEN==len проверяется ДО аллокации.
 /// one_time байт и дубли key_id сохраняются как есть (см. контракты модуля).
-pub fn parse_upload(p: &[u8]) -> Option<(&[u8], Vec<(u32, u8, &[u8], &[u8])>)> {
-    if p.len() < 34 {
+pub fn parse_upload(p: &[u8]) -> Option<(&[u8], &[u8], Vec<(u32, u8, &[u8], &[u8])>)> {
+    if p.len() < 66 || p.len() > MAX_PAYLOAD {
         return None;
     }
-    let n = usize::try_from(u16::from_be_bytes([p[32], p[33]])).ok()?;
-    if 34 + n * PREKEY_ENTRY_LEN != p.len() {
+    let n = usize::try_from(u16::from_be_bytes([p[64], p[65]])).ok()?;
+    if 66 + n * PREKEY_ENTRY_LEN != p.len() {
         return None;
     }
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
-        let e = &p[34 + i * PREKEY_ENTRY_LEN..34 + (i + 1) * PREKEY_ENTRY_LEN];
+        let e = &p[66 + i * PREKEY_ENTRY_LEN..66 + (i + 1) * PREKEY_ENTRY_LEN];
         out.push((
             u32::from_be_bytes(e[..4].try_into().ok()?),
             e[4],
@@ -122,7 +136,7 @@ pub fn parse_upload(p: &[u8]) -> Option<(&[u8], Vec<(u32, u8, &[u8], &[u8])>)> {
             &e[37..101],
         ));
     }
-    Some((&p[..32], out))
+    Some((&p[..32], &p[32..64], out))
 }
 
 /// CLAIM / COUNT: device_key 32.
@@ -169,7 +183,10 @@ mod tests {
         p[..16].fill(0xAA);
         p[16..32].fill(0xBB);
         let s = parse_send(&p).unwrap();
-        assert_eq!((s.recipient[0], s.message_id[0], s.ciphertext.len()), (0xAA, 0xBB, 10));
+        assert_eq!(
+            (s.recipient[0], s.message_id[0], s.ciphertext.len()),
+            (0xAA, 0xBB, 10)
+        );
         assert!(parse_send(&p[..31]).is_none());
         assert!(parse_send(&vec![0u8; 33 + CIPHERTEXT_MAX]).is_none());
     }
@@ -193,7 +210,10 @@ mod tests {
         assert!(parse_reserve(&payload(BLOB_SIZE_MAX + 1)).is_none());
         assert!(parse_reserve(&payload(u32::MAX)).is_none());
         assert_eq!(parse_reserve(&payload(1)).unwrap().1, 1);
-        assert_eq!(parse_reserve(&payload(BLOB_SIZE_MAX)).unwrap().1, BLOB_SIZE_MAX);
+        assert_eq!(
+            parse_reserve(&payload(BLOB_SIZE_MAX)).unwrap().1,
+            BLOB_SIZE_MAX
+        );
         assert!(parse_reserve(&vec![0u8; 19]).is_none());
     }
 
@@ -206,6 +226,7 @@ mod tests {
         for i in 0..n {
             p.extend_from_slice(&(i as u64).to_be_bytes());
             p.extend_from_slice(&[0x11u8; 32]);
+            p.extend_from_slice(&[0x33u8; 16]);
             p.extend_from_slice(&[0x22u8; 16]);
             p.extend_from_slice(&[0u8, 0]);
         }
@@ -218,6 +239,7 @@ mod tests {
     fn upload_raw_one_time_and_dup_key_id() {
         // Контракт: one_time сохраняется как есть, дубли key_id — порядком.
         let mut p = vec![0xCCu8; 32];
+        p.extend_from_slice(&[0xAA; 32]);
         p.extend_from_slice(&[0u8, 2]);
         for (kid, ot) in [(7u32, 7u8), (7u32, 1u8)] {
             p.extend_from_slice(&kid.to_be_bytes());
@@ -225,7 +247,7 @@ mod tests {
             p.extend_from_slice(&[0xDDu8; 32]);
             p.extend_from_slice(&[0xEEu8; 64]);
         }
-        let (_, entries) = parse_upload(&p).unwrap();
+        let (_, _, entries) = parse_upload(&p).unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!((entries[0].0, entries[0].1), (7, 7));
         assert_eq!((entries[1].0, entries[1].1), (7, 1));
@@ -257,15 +279,19 @@ mod tests {
 
     #[test]
     fn fetch_resp_roundtrip_and_strict() {
-        // count=1, seq=7, sender=0x11, msgid=0x22, ctlen=3, ct=abc
+        // count=1, seq=7, sender=0x11, sender_user=0x33, msgid=0x22, ctlen=3, ct=abc
         let mut p = vec![0u8, 1];
         p.extend_from_slice(&7u64.to_be_bytes());
         p.extend_from_slice(&[0x11u8; 32]);
+        p.extend_from_slice(&[0x33u8; 16]);
         p.extend_from_slice(&[0x22u8; 16]);
         p.extend_from_slice(&[0u8, 3]);
         p.extend_from_slice(b"abc");
         let ev = parse_fetch_resp(&p).unwrap();
         assert_eq!(ev.len(), 1);
+        assert_eq!(ev[0].sender, &[0x11; 32]);
+        assert_eq!(ev[0].sender_user, &[0x33; 16]);
+        assert_eq!(ev[0].message_id, &[0x22; 16]);
         assert_eq!((ev[0].seq, ev[0].ciphertext), (7, b"abc".as_slice()));
         let mut bad = p.clone();
         bad.push(0);
@@ -285,13 +311,18 @@ mod tests {
     #[test]
     fn upload_and_reserve_shapes() {
         let mut p = vec![0xCCu8; 32];
+        p.extend_from_slice(&[0xAA; 32]);
         p.extend_from_slice(&[0u8, 1]);
         p.extend_from_slice(&1u32.to_be_bytes());
         p.push(1);
         p.extend_from_slice(&[0xDDu8; 32]);
         p.extend_from_slice(&[0xEEu8; 64]);
-        let (id, entries) = parse_upload(&p).unwrap();
-        assert_eq!((id[0], entries.len(), entries[0].0, entries[0].1), (0xCC, 1, 1, 1));
+        let (id, curve, entries) = parse_upload(&p).unwrap();
+        assert_eq!(curve, &[0xAA; 32]);
+        assert_eq!(
+            (id[0], entries.len(), entries[0].0, entries[0].1),
+            (0xCC, 1, 1, 1)
+        );
         assert!(parse_upload(&p[..40]).is_none());
         let mut r = vec![0x11u8; 16];
         r.extend_from_slice(&512u32.to_be_bytes());
@@ -302,11 +333,122 @@ mod tests {
     }
 
     #[test]
+    fn fetch_and_upload_truncations_and_declared_lengths() {
+        let mut fetch = vec![0, 1];
+        fetch.extend_from_slice(&7u64.to_be_bytes());
+        fetch.extend_from_slice(&[0x11; 32]);
+        fetch.extend_from_slice(&[0x33; 16]);
+        fetch.extend_from_slice(&[0x22; 16]);
+        fetch.extend_from_slice(&3u16.to_be_bytes());
+        fetch.extend_from_slice(b"abc");
+        for end in 0..fetch.len() {
+            assert!(
+                parse_fetch_resp(&fetch[..end]).is_none(),
+                "fetch prefix {end}"
+            );
+        }
+        let mut huge_count = fetch.clone();
+        huge_count[..2].copy_from_slice(&u16::MAX.to_be_bytes());
+        assert!(parse_fetch_resp(&huge_count).is_none());
+        let mut huge_ctlen = fetch;
+        huge_ctlen[74..76].copy_from_slice(&u16::MAX.to_be_bytes());
+        assert!(parse_fetch_resp(&huge_ctlen).is_none());
+
+        let mut upload = vec![0xCC; 32];
+        upload.extend_from_slice(&[0xAA; 32]);
+        upload.extend_from_slice(&1u16.to_be_bytes());
+        upload.extend_from_slice(&1u32.to_be_bytes());
+        upload.push(1);
+        upload.extend_from_slice(&[0xDD; 32]);
+        upload.extend_from_slice(&[0xEE; 64]);
+        for end in 0..upload.len() {
+            assert!(
+                parse_upload(&upload[..end]).is_none(),
+                "upload prefix {end}"
+            );
+        }
+        upload[64..66].copy_from_slice(&u16::MAX.to_be_bytes());
+        assert!(parse_upload(&upload).is_none());
+    }
+
+    #[test]
+    fn fetch_and_upload_frame_bounds_and_empty_vectors() {
+        assert_eq!(parse_fetch_resp(&[0, 0]), Some(vec![]));
+        assert!(parse_fetch_resp(&[0, 0, 0]).is_none());
+        let mut fetch = vec![0, 1];
+        fetch.extend_from_slice(&[0; 8 + 32 + 16 + 16]);
+        let ciphertext_len = MAX_PAYLOAD - 2 - 74;
+        fetch.extend_from_slice(&u16::try_from(ciphertext_len).unwrap().to_be_bytes());
+        fetch.resize(MAX_PAYLOAD, 0xAB);
+        assert_eq!(
+            parse_fetch_resp(&fetch).unwrap()[0].ciphertext.len(),
+            ciphertext_len
+        );
+        fetch.push(0);
+        assert!(parse_fetch_resp(&fetch).is_none());
+
+        let mut empty_upload = vec![0xCC; 32];
+        empty_upload.extend_from_slice(&[0xAA; 32]);
+        empty_upload.extend_from_slice(&[0, 0]);
+        let (ed, curve, entries) = parse_upload(&empty_upload).unwrap();
+        assert_eq!(ed, &[0xCC; 32]);
+        assert_eq!(curve, &[0xAA; 32]);
+        assert!(entries.is_empty());
+        let max_count = (MAX_PAYLOAD - 66) / PREKEY_ENTRY_LEN;
+        let mut upload = empty_upload;
+        upload[64..66].copy_from_slice(&u16::try_from(max_count).unwrap().to_be_bytes());
+        upload.resize(66 + max_count * PREKEY_ENTRY_LEN, 0);
+        assert_eq!(parse_upload(&upload).unwrap().2.len(), max_count);
+        upload[64..66].copy_from_slice(&u16::try_from(max_count + 1).unwrap().to_be_bytes());
+        upload.resize(66 + (max_count + 1) * PREKEY_ENTRY_LEN, 0);
+        assert!(parse_upload(&upload).is_none());
+    }
+
+    #[test]
+    fn old_fetch_and_upload_shapes_rejected() {
+        let mut old_fetch = vec![0, 1];
+        old_fetch.extend_from_slice(&7u64.to_be_bytes());
+        old_fetch.extend_from_slice(&[0x11; 32]);
+        old_fetch.extend_from_slice(&[0x22; 16]);
+        old_fetch.extend_from_slice(&3u16.to_be_bytes());
+        old_fetch.extend_from_slice(b"abc");
+        assert!(parse_fetch_resp(&old_fetch).is_none());
+        let mut old_upload = vec![0xCC; 32];
+        old_upload.extend_from_slice(&1u16.to_be_bytes());
+        old_upload.extend_from_slice(&[0; PREKEY_ENTRY_LEN]);
+        assert!(parse_upload(&old_upload).is_none());
+    }
+
+    #[test]
+    fn arbitrary_bounded_payloads_do_not_panic() {
+        for byte in 0..=u8::MAX {
+            for len in [0, 1, 2, 17, 32, 34, 36, 58, 66, 74, 167] {
+                let payload = vec![byte; len];
+                let _ = parse_send(&payload);
+                let _ = parse_send_ack(&payload);
+                let _ = parse_fetch_resp(&payload);
+                let _ = parse_delivery_ack(&payload);
+                let _ = parse_upload(&payload);
+                let _ = parse_device(&payload);
+                let _ = parse_prekey(&payload);
+                let _ = parse_reserve(&payload);
+            }
+        }
+    }
+
+    #[test]
     fn err_busy_code_vector() {
         // Payload-код ERR_BUSY=7 (ERROR=6 — opcode кадра, другое пространство имён).
         assert_eq!(ERR_BUSY, 7);
         assert_ne!(ERR_BUSY, OP_ERROR);
-        for c in [ERR_BAD, ERR_EXPIRED, ERR_REVOKED, ERR_BOUND_OTHER, ERR_NO_PREKEY, ERR_QUOTA] {
+        for c in [
+            ERR_BAD,
+            ERR_EXPIRED,
+            ERR_REVOKED,
+            ERR_BOUND_OTHER,
+            ERR_NO_PREKEY,
+            ERR_QUOTA,
+        ] {
             assert_ne!(c, ERR_BUSY);
         }
     }

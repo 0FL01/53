@@ -1,29 +1,34 @@
-//! dmsg wire v1: `[version:u8][opcode:u8][len:u16 BE][payload..len]`.
+//! dmsg wire v2: `[version:u8][opcode:u8][len:u16 BE][payload..len]`.
 //! Лимит — на ПОЛНЫЙ кадр (header + payload), не только payload.
 //! Внутренние структуры не являются wire-контрактом: совместимость — тест-векторами ниже.
 
-pub mod bootstrap;
+pub mod auth;
 pub mod mailbox;
+pub mod profile;
 
 /// Wire-версия протокола. Неизвестная версия → close.
-pub const VERSION: u8 = 1;
-/// HELLO: payload — ожидаемый клиентом домен.
-pub const OP_HELLO: u8 = 1;
+pub const VERSION: u8 = 2;
 /// WELCOME: payload — домен сервера.
 pub const OP_WELCOME: u8 = 2;
-/// AUTH_DOMAIN: первое transport-сообщение после Noise-handshake (P2),
-/// payload — ожидаемый клиентом домен. Plaintext-HELLO удалён: сверка домена
-/// только внутри шифрованного канала.
+/// AUTH_DOMAIN: первое transport-сообщение после Noise-handshake,
+/// payload — ожидаемый клиентом домен. Сверка домена только в шифрованном канале.
 pub const OP_AUTH_DOMAIN: u8 = 3;
-/// Резерв диапазонов: 1–15 auth/enrol, 16+ mailbox и дальше (P4).
-/// ENROL: payload — token 32 байта (device_key берётся из IK-сессии, не из тела).
-pub const OP_ENROL: u8 = 4;
-/// ENROLLED: payload — user_id 16 + contact_id 12 (без дефисов).
-pub const OP_ENROLLED: u8 = 5;
-/// ERROR: payload — код u8: 1 bad/unknown, 2 expired, 3 revoked, 4 bound-to-other,
-/// 5 no-prekey, 6 quota, 7 busy. ERROR=6 — это opcode кадра, не путать с payload-кодом 6.
-/// Коды различимы специально (токен 256 бит не перебрать — оракла нет).
+/// ERROR: payload — код u8 (ERR_*). Opcode и код ошибки — разные пространства.
 pub const OP_ERROR: u8 = 6;
+/// POLICY: пустой payload; доступен после AUTH_DOMAIN, до account-auth.
+pub const OP_POLICY: u8 = 7;
+/// POLICY_RESP: mode u8 (InviteOnly=0, Open=1).
+pub const OP_POLICY_RESP: u8 = 8;
+/// SIGNUP: credentials + optional invitation (см. auth).
+pub const OP_SIGNUP: u8 = 9;
+/// LOGIN: credentials + optional expected-old-device (см. auth).
+pub const OP_LOGIN: u8 = 10;
+/// RESUME: пустой payload; device_key берётся из завершённой Noise IK-сессии.
+pub const OP_RESUME: u8 = 11;
+/// AUTHENTICATED: user_id 16 + contact_id 12 (Crockford, без дефисов).
+pub const OP_AUTHENTICATED: u8 = 12;
+/// REPLACE_REQUIRED: старое активное device_key 32; замена требует нового LOGIN.
+pub const OP_REPLACE_REQUIRED: u8 = 14;
 /// Коды ERROR.
 pub const ERR_BAD: u8 = 1;
 /// Коды ERROR.
@@ -37,9 +42,19 @@ pub const ERR_NO_PREKEY: u8 = 5;
 /// Коды ERROR.
 pub const ERR_QUOTA: u8 = 6;
 /// Коды ERROR: SQLITE_BUSY — повторить позже (retryable).
-/// Правило для клиентов: любой неизвестный payload-код считать retryable (C4),
-/// старые клиенты уже так себя ведут, новые коды их не ломают.
 pub const ERR_BUSY: u8 = 7;
+/// Неверный логин или пароль.
+pub const ERR_CREDENTIALS: u8 = 8;
+/// Конфликт логина или ожидаемой привязки устройства.
+pub const ERR_CONFLICT: u8 = 9;
+/// Для регистрации требуется приглашение.
+pub const ERR_INVITE_REQUIRED: u8 = 10;
+/// Неверный account-auth payload.
+pub const ERR_INVALID_INPUT: u8 = 11;
+/// Ограничение частоты попыток account-auth.
+pub const ERR_THROTTLED: u8 = 12;
+/// Одноразовое приглашение уже использовано.
+pub const ERR_INVITE_USED: u8 = 13;
 /// Диапазон 16+ — mailbox и дальше (P4).
 /// SEND: recipient 16 + message_id 16 + ciphertext (rest, ≤ CIPHERTEXT_MAX).
 pub const OP_SEND: u8 = 16;
@@ -47,11 +62,13 @@ pub const OP_SEND: u8 = 16;
 pub const OP_SEND_ACK: u8 = 17;
 /// FETCH: пустой payload — сервер отдаёт пачку после cursor (свой user/device из сессии).
 pub const OP_FETCH: u8 = 18;
-/// FETCH_RESP: count u16 + записи (seq u64 + sender 32 + msgid 16 + ctlen u16 + ct).
+/// FETCH_RESP: count u16 + записи
+/// (seq u64 + sender 32 + sender_user 16 + msgid 16 + ctlen u16 + ct).
 pub const OP_FETCH_RESP: u8 = 19;
 /// DELIVERY_ACK: count u16 + seq u64*. Cursor двигается по непрерывному.
 pub const OP_DELIVERY_ACK: u8 = 20;
-/// UPLOAD_PREKEYS: identity 32 + count u16 + записи (key_id u32 + one_time u8 + pubkey 32 + sig 64).
+/// UPLOAD_PREKEYS: Ed25519 identity 32 + Curve25519 identity 32 + count u16
+/// + записи (key_id u32 + one_time u8 + pubkey 32 + sig 64).
 /// Подпись: Ed25519 identity-ключом по (device_key || key_id BE || pubkey).
 pub const OP_UPLOAD_PREKEYS: u8 = 21;
 /// CLAIM: запросить один unconsumed one-time key: device_key 32.
@@ -66,6 +83,10 @@ pub const OP_COUNT_RESP: u8 = 25;
 pub const OP_BLOB_RESERVE: u8 = 26;
 /// BLOB_RESERVED: ответ: blob_id 16.
 pub const OP_BLOB_RESERVED: u8 = 27;
+/// DEVICE_BINDING: user_id 16; только после авторизации, без каталога логинов.
+pub const OP_DEVICE_BINDING: u8 = 28;
+/// DEVICE_BINDING_RESP: user_id 16 + device_key 32 + Ed25519 32 + Curve25519 32.
+pub const OP_DEVICE_BINDING_RESP: u8 = 29;
 /// Статусы доставки (без «прочитано» — read receipts отложены).
 pub const ST_ACCEPTED: u8 = 1;
 /// Статусы доставки (без «прочитано» — read receipts отложены).
@@ -92,7 +113,7 @@ pub const DATA_TTL_SECS: u64 = 7 * 24 * 3600;
 /// Sweep незавершённых blob-reservation, секунд (24 часа).
 pub const BLOB_RESERVE_TTL_SECS: u64 = 24 * 3600;
 /// Максимум ciphertext в SEND: кадр минус recipient+msgid.
-pub const CIPHERTEXT_MAX: usize = MAX_PAYLOAD - 32;
+pub const CIPHERTEXT_MAX: usize = MAX_PAYLOAD - 2 - (8 + 32 + 16 + 16 + 2);
 /// Максимум wire-ciphertext одного attachment, 512 KiB.
 /// Зеркало blob::BLOB_SIZE_MAX: парсер parse_reserve режет раньше БД.
 pub const BLOB_SIZE_MAX: u32 = 512 * 1024;
@@ -162,36 +183,77 @@ mod tests {
     use super::*;
 
     #[test]
-    fn roundtrip_hello() {
-        let f = encode_frame(OP_HELLO, b"msg.example.com").unwrap();
+    fn roundtrip_auth_domain() {
+        let f = encode_frame(OP_AUTH_DOMAIN, b"msg.example.com").unwrap();
         let (v, op, p, total) = decode_frame(&f).unwrap();
-        assert_eq!((v, op, total), (1, OP_HELLO, f.len()));
+        assert_eq!((v, op, total), (2, OP_AUTH_DOMAIN, f.len()));
         assert_eq!(p, b"msg.example.com");
     }
 
     #[test]
     fn max_payload_ok_oversize_err() {
-        let ok = encode_frame(OP_HELLO, &vec![0xAB; MAX_PAYLOAD]).unwrap();
+        let ok = encode_frame(OP_AUTH_DOMAIN, &vec![0xAB; MAX_PAYLOAD]).unwrap();
         assert_eq!(ok.len(), MAX_FRAME);
         let (_, _, _, total) = decode_frame(&ok).unwrap();
         assert_eq!(total, MAX_FRAME);
         assert_eq!(
-            encode_frame(OP_HELLO, &vec![0xAB; MAX_PAYLOAD + 1]),
+            encode_frame(OP_AUTH_DOMAIN, &vec![0xAB; MAX_PAYLOAD + 1]),
             Err(FrameError::Oversize(MAX_FRAME + 1))
         );
     }
 
     #[test]
     fn unknown_version_rejected() {
-        let mut f = encode_frame(OP_HELLO, b"x").unwrap();
-        f[0] = 9;
-        assert_eq!(decode_frame(&f), Err(FrameError::UnknownVersion(9)));
+        let mut f = encode_frame(OP_AUTH_DOMAIN, b"x").unwrap();
+        for version in [0, 1, 9] {
+            f[0] = version;
+            assert_eq!(decode_frame(&f), Err(FrameError::UnknownVersion(version)));
+        }
     }
 
     #[test]
     fn truncated_rejected() {
-        assert_eq!(decode_frame(&[1, 1]), Err(FrameError::Truncated));
-        let f = encode_frame(OP_HELLO, b"abcdef").unwrap();
+        assert_eq!(decode_frame(&[2, 3]), Err(FrameError::Truncated));
+        let f = encode_frame(OP_AUTH_DOMAIN, b"abcdef").unwrap();
         assert_eq!(decode_frame(&f[..5]), Err(FrameError::Truncated));
+    }
+
+    #[test]
+    fn unified_auth_opcode_and_error_vectors() {
+        assert_eq!(
+            [
+                OP_WELCOME,
+                OP_AUTH_DOMAIN,
+                OP_ERROR,
+                OP_POLICY,
+                OP_POLICY_RESP,
+                OP_SIGNUP,
+                OP_LOGIN,
+                OP_RESUME,
+                OP_AUTHENTICATED,
+                OP_REPLACE_REQUIRED,
+                OP_DEVICE_BINDING,
+                OP_DEVICE_BINDING_RESP
+            ],
+            [2, 3, 6, 7, 8, 9, 10, 11, 12, 14, 28, 29]
+        );
+        assert_eq!(
+            [
+                ERR_BAD,
+                ERR_EXPIRED,
+                ERR_REVOKED,
+                ERR_BOUND_OTHER,
+                ERR_NO_PREKEY,
+                ERR_QUOTA,
+                ERR_BUSY,
+                ERR_CREDENTIALS,
+                ERR_CONFLICT,
+                ERR_INVITE_REQUIRED,
+                ERR_INVALID_INPUT,
+                ERR_THROTTLED,
+                ERR_INVITE_USED
+            ],
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+        );
     }
 }
