@@ -52,7 +52,15 @@ class DmsgService : Service() {
         }
 
         fun start(c: Context) {
-            c.startForegroundService(Intent(c, DmsgService::class.java))
+            val app = c.applicationContext
+            Core.dispatch {
+                try {
+                    val f = Core.facade(app)
+                    if (f.account().authenticated && f.dnsProfile() != null)
+                        app.startForegroundService(Intent(app, DmsgService::class.java))
+                    else lastPollError = "Сначала войдите в аккаунт"
+                } catch (e: Exception) { lastPollError = humanError(e) }
+            }
         }
 
         fun stop(c: Context) {
@@ -142,9 +150,8 @@ class DmsgService : Service() {
                     Log.d(TAG, "poll ok n=$n total=$total")
                 } catch (e: Exception) {
                     // Fatal VM/Linkage errors are not transient network errors.
-                    Log.w(TAG, "poll fail: ${e.javaClass.simpleName}: ${e.message}")
-                    lastPollError = if (e is DmsgError) "ошибка: ${e.message}"
-                        else "ошибка ${e.javaClass.simpleName}"
+                    Log.w(TAG, "poll fail: ${e.javaClass.simpleName}")
+                    lastPollError = humanError(e)
                     backoff = minOf(backoff * 2, 120_000L)
                 }
                 val interval = if (Prefs.economy(app)) POLL_ECONOMY_MS else POLL_NORMAL_MS
@@ -159,13 +166,13 @@ class DmsgService : Service() {
 
         fun stop() {
             worker.stop()
-            try { facade?.stopDns() } catch (_: Exception) { /* no secret diagnostics */ }
+            try { facade?.dnsStop() } catch (_: Exception) { /* no secret diagnostics */ }
         }
 
         fun networkChanged(app: Context) {
             val f = facade ?: return
             try {
-                f.stopDns() // cancellation does not wait for the store lock
+                f.dnsStop() // cancellation does not wait for the store lock
                 if (f.dnsProfile() != null) f.dnsNetworkChanged(DnsNetwork.resolvers(app))
             } catch (e: Exception) {
                 Log.d(TAG, "network transition: ${e.javaClass.simpleName}")
@@ -175,15 +182,11 @@ class DmsgService : Service() {
         private fun pollOnce(app: Context): Int {
             val f = facade ?: Core.facade(app).also { facade = it }
             if (!f.isReady()) throw DmsgError("core is not ready")
-            val addr = Prefs.addr(app)
-            val pub = Prefs.serverPub(app)
-            val domain = Prefs.domain(app)
-            if (addr.isEmpty() || pub == null || domain.isEmpty()) {
-                throw DmsgError("transport is not configured")
-            }
-            f.reconnect(addr, pub, domain)
-            val rep = f.fetch(addr, pub, domain)
-            f.retry(addr, pub, domain)
+            if (!f.account().authenticated) throw DmsgError("Сначала войдите в аккаунт")
+            if (f.dnsProfile() == null) throw DmsgError("Сначала добавьте сервер")
+            f.reconnect()
+            val rep = f.fetch()
+            f.retry()
             return rep.received.size
         }
 

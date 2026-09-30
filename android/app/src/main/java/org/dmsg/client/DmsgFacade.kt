@@ -1,7 +1,14 @@
 package org.dmsg.client
 
+import uniffi.dmsg_core.AccountInfo
+import uniffi.dmsg_core.LoginOutcome
+import uniffi.dmsg_core.QrKind
+import uniffi.dmsg_core.RegistrationPolicy
+
 /** UI-level error: only static reasons, never key material / plaintext. */
-class DmsgError(msg: String) : Exception(msg)
+class DmsgError(msg: String, val kind: ErrorKind = ErrorKind.Other) : Exception(msg)
+enum class ErrorKind { Other, InvalidCredentials, LoginTaken, InviteRequired, InviteExpired, InviteRevoked,
+    InviteUsed, AuthRateLimited, InvalidInput, Transport, PinMismatch, IdentityMismatch, NotAuthenticated }
 
 data class Dialog(val contactId: String, val state: String, val identityMismatch: Boolean = false)
 data class DnsProfile(val domain: String, val pub: ByteArray, val fingerprint: String, val resolvers: List<String>)
@@ -14,16 +21,17 @@ data class FetchRes(val received: List<Msg>, val skipped: LongArray, val cursor:
  * Lists are strictly paginated (cursor/limit); no raw DB cursors cross it.
  */
 interface DmsgFacade {
-    fun dnsProfile(): DnsProfile? = null
-    fun configureDns(qr: String, resolvers: List<String>) { throw DmsgError("DNS core unavailable") }
-    fun enrolDns(qr: String, resolvers: List<String>): String = throw DmsgError("DNS core unavailable")
-    fun dnsNetworkChanged(resolvers: List<String>) { throw DmsgError("DNS core unavailable") }
-    fun stopDns() {}
-    fun dnsStatus(): String = "not configured"
+    fun dnsProfile(): DnsProfile?
+    fun configureDns(code: String, resolvers: List<String>)
+    fun registrationPolicyDns(): RegistrationPolicy
+    fun signupDns(login: String, password: String, invitation: String?): AccountInfo
+    fun loginDns(login: String, password: String, expectedDevice: String?): LoginOutcome
+    fun dnsNetworkChanged(resolvers: List<String>)
+    fun dnsStop()
+    fun dnsStatus(): String
     fun isReady(): Boolean
-    fun account(): Pair<Boolean, String?>
-    fun preview(qr: String): Pair<String, String>
-    fun enrol(qr: String, addr: String, pinDer: ByteArray?): String
+    fun account(): AccountInfo
+    fun profilePreview(code: String): Pair<String, String>
     fun myQr(): String
     fun addQr(uri: String): String
     fun request(id: String): String
@@ -34,10 +42,10 @@ interface DmsgFacade {
     fun contacts(cursor: String?, limit: Int): Pair<List<Dialog>, String?>
     fun inbox(cursor: Long, limit: Int): Pair<List<Msg>, Long?>
     fun outbox(cursor: Long, limit: Int): Pair<List<OutRow>, Long?>
-    fun send(addr: String, pub: ByteArray, domain: String, id: String, text: String): String
-    fun retry(addr: String, pub: ByteArray, domain: String): LongArray
-    fun fetch(addr: String, pub: ByteArray, domain: String): FetchRes
-    fun reconnect(addr: String, pub: ByteArray, domain: String): Long
-    fun qrKind(uri: String): String
+    fun send(id: String, text: String): String
+    fun retry(): LongArray
+    fun fetch(): FetchRes
+    fun reconnect(): Long
+    fun qrKind(uri: String): QrKind
     fun storagePlan(hasLegacy: Boolean, hasWrapped: Boolean): String
 }

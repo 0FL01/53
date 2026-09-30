@@ -45,34 +45,34 @@ class ProfileActivity : DmsgActivity() {
     private fun peer() = peerId.text.toString().trim()
 
     private fun act(block: DmsgFacade.() -> String) {
-        Thread {
+        Core.dispatch {
             val out = try {
                 "ok: ${block(Core.facade(this))}"
             } catch (e: Exception) {
-                "error: ${e.message}"
+                humanError(e)
             }
             runOnUiThread { info.text = out }
-        }.start()
+        }
     }
 
     private fun showMine() {
-        Thread {
+        Core.dispatch {
             var uri: String? = null
             var label = ""
             try {
                 val f = Core.facade(this)
-                val (enrolled, id) = f.account()
-                label = "me=$id enrolled=$enrolled"
-                if (enrolled) uri = f.myQr()
+                val a = f.account()
+                label = "Мой ID: ${a.contactId} (вход: ${a.authenticated})"
+                if (a.authenticated) uri = f.myQr()
             } catch (e: Exception) {
-                label = "error: ${e.message}"
+                label = humanError(e)
             }
             val bmp = uri?.let { renderQr(it) }
             runOnUiThread {
                 myId.text = label
                 if (bmp != null) qr.setImageBitmap(bmp)
             }
-        }.start()
+        }
     }
 
     private fun renderQr(uri: String): Bitmap? {

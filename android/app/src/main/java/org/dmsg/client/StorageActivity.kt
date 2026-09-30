@@ -26,49 +26,49 @@ class StorageActivity : DmsgActivity() {
     }
 
     private fun showPlan() {
-        Thread {
+        Core.dispatch {
             val p = try {
                 SecureStore.plan(this)
             } catch (e: Exception) {
-                "error: ${e.message}"
+                humanError(e)
             }
             runOnUiThread { plan.text = "plan=$p" }
-        }.start()
+        }
     }
 
     private fun migrate() {
-        Thread {
+        Core.dispatch {
             val out = try {
                 SecureStore.seal(this)
                 "encrypted migration + same-install sealed snapshot ready"
             } catch (e: Exception) {
-                "error: ${e.message}"
+                humanError(e)
             }
             runOnUiThread { info.text = out; showPlan() }
-        }.start()
+        }
     }
 
     private fun restore() {
-        Thread {
+        Core.dispatch {
             val out = try {
                 SecureStore.unseal(this)
                 "restored: identity verified"
             } catch (e: Exception) {
-                "error: ${e.message}"
+                humanError(e)
             }
             runOnUiThread { info.text = out; showPlan() }
-        }.start()
+        }
     }
 
     private fun wipeCache() {
-        Thread {
+        Core.dispatch {
             val out = try {
                 cacheDir.deleteRecursively()
                 "cache wiped (identity kept)"
             } catch (e: Exception) {
-                "error: ${e.message}"
+                humanError(e)
             }
             runOnUiThread { info.text = out }
-        }.start()
+        }
     }
 }

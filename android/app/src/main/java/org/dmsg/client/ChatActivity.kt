@@ -57,14 +57,6 @@ class ChatActivity : DmsgActivity() {
         super.onPause()
     }
 
-    private fun transport(): Triple<String, ByteArray, String>? {
-        val a = Prefs.addr(this)
-        val p = Prefs.serverPub(this)
-        val d = Prefs.domain(this)
-        if (a.isEmpty() || p == null || d.isEmpty()) return null
-        return Triple(a, p, d)
-    }
-
     private fun load(id: String) {
         paging.reset()
         rows.clear()
@@ -77,7 +69,7 @@ class ChatActivity : DmsgActivity() {
     private fun loadNext(id: String) {
         if (isFinishing || isDestroyed) return
         val request = paging.begin() ?: return
-        Thread {
+        Core.dispatch {
             val result: Result<Pair<List<String>, Long?>> = try {
                 val f = Core.facade(applicationContext)
                 val (page, next) = f.inbox(request.cursor, 50)
@@ -102,12 +94,12 @@ class ChatActivity : DmsgActivity() {
                     },
                     onFailure = {
                         // Suspend automatic paging until the next reload, rather than spin on an error.
-                        loadInfo = "error: ${it.message}"
+                        loadInfo = humanError(it)
                         updateInfo()
                     }
                 )
             }
-        }.start()
+        }
     }
 
     private fun updateInfo() {
@@ -118,27 +110,23 @@ class ChatActivity : DmsgActivity() {
 
     private fun send(id: String) {
         val text = composer.text.toString()
-        val t = transport()
         val token = uiToken
-        Thread {
+        Core.dispatch {
             var sent = false
             val out = try {
                 val f = Core.facade(applicationContext)
-                if (t == null) "заполните addr/domain/server_pub в диагностике"
-                else {
-                    val mid = f.send(t.first, t.second, t.third, id, text)
-                    sent = true
-                    var after = 0L
-                    var state: String? = null
-                    do {
-                        val (page, next) = f.outbox(after, 50)
-                        state = page.firstOrNull { it.mid == mid }?.status
-                        after = next ?: break
-                    } while (state == null)
-                    "${state ?: "delivered"} $mid"
-                }
+                val mid = f.send(id, text)
+                sent = true
+                var after = 0L
+                var state: String? = null
+                do {
+                    val (page, next) = f.outbox(after, 50)
+                    state = page.firstOrNull { it.mid == mid }?.status
+                    after = next ?: break
+                } while (state == null)
+                "${state ?: "delivered"} $mid"
             } catch (e: Exception) {
-                "error: ${e.message}"
+                humanError(e)
             }
             runOnUiThread {
                 if (token != uiToken || isFinishing || isDestroyed) return@runOnUiThread
@@ -147,28 +135,25 @@ class ChatActivity : DmsgActivity() {
                 updateInfo()
                 if (sent) load(id)
             }
-        }.start()
+        }
     }
 
     private fun retry() {
-        val t = transport()
         val token = uiToken
-        Thread {
+        Core.dispatch {
             val out = try {
                 val f = Core.facade(applicationContext)
-                if (t == null) "нет транспорта" else {
-                    val r = f.retry(t.first, t.second, t.third)
-                    "retry sent=${r[0]} accepted=${r[1]} delivered=${r[2]} skipped=${r[3]}"
-                }
+                val r = f.retry()
+                "retry sent=${r[0]} accepted=${r[1]} delivered=${r[2]} skipped=${r[3]}"
             } catch (e: Exception) {
-                "error: ${e.message}"
+                humanError(e)
             }
             runOnUiThread {
                 if (token != uiToken || isFinishing || isDestroyed) return@runOnUiThread
                 actionInfo = out
                 updateInfo()
             }
-        }.start()
+        }
     }
 }
 

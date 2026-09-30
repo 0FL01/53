@@ -1,22 +1,30 @@
 package org.dmsg.client
 
-/**
- * Pure pre-check routing for scanned QR (mirror of Rust qr_kind caps).
- * Unit-tested without the native lib. The core re-validates everything;
- * this only decides which screen/error to show first.
- */
+import uniffi.dmsg_core.QrKind
+
+/** Shared paste/scan input; full bounded/versioned parsing belongs to Rust. */
 object QrGate {
     const val URI_MAX = 8192
-    const val JOIN_PREFIX = "dmsg://join/"
-    const val CONTACT_PREFIX = "dmsg://contact/"
-
-    /** "join" | "contact" | error string ("bad prefix" | "oversized"). */
-    fun route(uri: String): Result<String> {
-        if (uri.length > URI_MAX) return Result.failure(DmsgError("oversized"))
-        return when {
-            uri.startsWith(JOIN_PREFIX) -> Result.success("join")
-            uri.startsWith(CONTACT_PREFIX) -> Result.success("contact")
-            else -> Result.failure(DmsgError("bad prefix"))
+    const val SERVER_MAX = 13 + (4096 * 4 + 2) / 3 // Rust's 4 KiB raw profile + prefix.
+    fun normalize(input: String): String {
+        if (input.toByteArray(Charsets.UTF_8).size > URI_MAX) throw DmsgError("Код слишком большой")
+        return input.filterNot { it == ' ' || it == '\t' || it == '\r' || it == '\n' }
+    }
+    fun route(input: String): Result<QrKind> = runCatching {
+        val uri = normalize(input)
+        when {
+            uri.startsWith("dmsg://server/") && uri.length <= SERVER_MAX -> QrKind.SERVER
+            uri.startsWith("dmsg://contact/") -> QrKind.CONTACT
+            else -> throw DmsgError("Неверный тип или размер кода")
         }
     }
+    fun serverPreview(f: DmsgFacade, input: String): ServerPreview {
+        val code = normalize(input)
+        if (route(code).getOrThrow() != QrKind.SERVER || f.qrKind(code) != QrKind.SERVER)
+            throw DmsgError("Нужен публичный код сервера, а не QR контакта")
+        val (domain, fingerprint) = f.profilePreview(code)
+        return ServerPreview(code, domain, fingerprint)
+    }
 }
+
+data class ServerPreview(val code: String, val domain: String, val fingerprint: String)

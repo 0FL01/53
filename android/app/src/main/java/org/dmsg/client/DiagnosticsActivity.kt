@@ -2,94 +2,44 @@ package org.dmsg.client
 
 import android.os.Bundle
 import android.widget.Button
-import android.widget.EditText
 import android.widget.TextView
-import androidx.appcompat.app.AppCompatActivity
 
-/** Diagnostics: account, FGS state, economy flag, outbox stats, refill. */
+/** Read-only trusted DNS profile and background availability. */
 class DiagnosticsActivity : DmsgActivity() {
     private lateinit var account: TextView
     private lateinit var fgs: TextView
     private lateinit var stats: TextView
-    private lateinit var addr: EditText
-    private lateinit var domain: EditText
-    private lateinit var pub: EditText
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_diagnostics)
         account = findViewById(R.id.account)
         fgs = findViewById(R.id.fgs)
         stats = findViewById(R.id.stats)
-        addr = findViewById(R.id.profile_addr)
-        domain = findViewById(R.id.profile_domain)
-        pub = findViewById(R.id.profile_pub)
-        addr.setText(Prefs.addr(this))
-        domain.setText(Prefs.domain(this))
-        pub.setText(Prefs.serverPub(this)?.let { Prefs.bytesToHex(it) } ?: "")
-        findViewById<Button>(R.id.btn_save_profile).setOnClickListener {
-            stats.text = try {
-                Prefs.setTransport(this, addr.text.toString(), domain.text.toString(), pub.text.toString())
-                "профиль сохранён (проверка Noise только при подключении)"
-            } catch (e: DmsgError) { "error: ${e.message}" }
-        }
         findViewById<Button>(R.id.btn_economy).setOnClickListener {
-            Prefs.setEconomy(this, !Prefs.economy(this))
-            show()
+            Prefs.setEconomy(this, !Prefs.economy(this)); show()
         }
-        findViewById<Button>(R.id.btn_reconnect).setOnClickListener { reconnect() }
+        findViewById<Button>(R.id.btn_reconnect).setOnClickListener {
+            Core.dispatch {
+                val out = try { "Ключей загружено: ${Core.facade(this).reconnect()}" } catch (e: Exception) { humanError(e) }
+                runOnUiThread { if (!isDestroyed) stats.text = out }
+            }
+        }
     }
-
-    override fun onResume() {
-        super.onResume()
-        show()
-    }
-
+    override fun onResume() { super.onResume(); show() }
     private fun show() {
-        Thread {
-            var a = ""
-            var s = ""
-            var dns: DnsProfile? = null
-            try {
+        Core.dispatch {
+            val result = runCatching {
                 val f = Core.facade(this)
-                dns = f.dnsProfile()
-                val (enrolled, id) = f.account()
-                a = "enrolled=$enrolled id=$id"
-                val (rows, _) = f.outbox(0, 100)
-                s = "outbox pending=${rows.size} economy=${Prefs.economy(this)}"
-                dns?.let { s += "\nDNS ${f.dnsStatus()}\npin ${it.fingerprint}\nresolvers ${it.resolvers.joinToString()}" }
-            } catch (e: Exception) {
-                a = "error: ${e.message}"
+                val a = f.account()
+                val p = f.dnsProfile()
+                Pair("Вход: ${a.authenticated}; ID: ${a.contactId}",
+                    "Экономия: ${Prefs.economy(this)}\nОчередь (страница): ${f.outbox(0, 100).first.size}\n" +
+                        (p?.let { "Домен: ${it.domain}\nОтпечаток сертификата: ${it.fingerprint}\nNoise key: ${Prefs.bytesToHex(it.pub)}\nDNS: ${f.dnsStatus()}\nРезолверы сети: ${it.resolvers.joinToString()}" } ?: "Сервер ещё не добавлен"))
             }
-            runOnUiThread {
-                account.text = a
-                fgs.text = DmsgService.pollStatus() + " (Doze/force-stop limits apply)"
-                stats.text = s
-                val editable = dns == null
-                addr.isEnabled = editable
-                domain.isEnabled = editable
-                pub.isEnabled = editable
-                findViewById<Button>(R.id.btn_save_profile).isEnabled = editable
-            }
-        }.start()
-    }
-
-    private fun reconnect() {
-        Thread {
-            val out = try {
-                val a = Prefs.addr(this)
-                val p = Prefs.serverPub(this)
-                val d = Prefs.domain(this)
-                if (a.isEmpty() || p == null || d.isEmpty()) "заполните addr/domain/server_pub"
-                else {
-                    val f = Core.facade(this)
-                    if (f.dnsProfile() != null) f.dnsNetworkChanged(DnsNetwork.resolvers(this))
-                    "prekeys=${f.reconnect(a, p, d)}"
-                }
-            } catch (e: Exception) {
-                "error: ${e.message}"
-            }
-            runOnUiThread { stats.text = out }
-        }.start()
+            runOnUiThread { if (!isDestroyed) {
+                result.fold({ (a, s) -> account.text = a; stats.text = s }, { stats.text = humanError(it) })
+                fgs.text = DmsgService.pollStatus() + " (Doze/force-stop могут прервать связь)"
+            } }
+        }
     }
 }

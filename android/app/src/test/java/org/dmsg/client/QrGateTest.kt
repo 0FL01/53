@@ -2,23 +2,31 @@ package org.dmsg.client
 
 import org.junit.Assert.*
 import org.junit.Test
+import uniffi.dmsg_core.QrKind
 
-/** QrGate routing without the native lib (oversized/bad prefix explicit). */
 class QrGateTest {
-    @Test fun routesBothFormats() {
-        assertEquals("join", QrGate.route("dmsg://join/AAAA").getOrThrow())
-        assertEquals("contact", QrGate.route("dmsg://contact/AAAA").getOrThrow())
+    @Test fun routesPublicServerAndContact() {
+        assertEquals(QrKind.SERVER, QrGate.route("dmsg://server/AAAA").getOrThrow())
+        assertEquals(QrKind.CONTACT, QrGate.route("dmsg://contact/AAAA").getOrThrow())
+        assertTrue(QrGate.route("dmsg://join/AAAA").isFailure)
+        assertTrue(QrGate.route("A".repeat(43)).isFailure) // invitation is never a profile
     }
-
-    @Test fun badPrefixIsExplicit() {
-        val e = QrGate.route("https://x/").exceptionOrNull()
-        assertEquals("bad prefix", e?.message)
+    @Test fun oversizedAndBadPrefixesFailBeforeCorePreview() {
+        val f = FakeFacade()
+        for (input in listOf("https://x/", "dmsg://server/" + "A".repeat(QrGate.SERVER_MAX),
+                "dmsg://contact/" + "A".repeat(QrGate.URI_MAX))) {
+            assertTrue(runCatching { QrGate.serverPreview(f, input) }.isFailure)
+        }
+        assertEquals(0, f.previewCalls)
     }
-
-    @Test fun oversizedIsExplicit() {
-        val bigJoin = "dmsg://join/" + "A".repeat(QrGate.URI_MAX)
-        assertEquals("oversized", QrGate.route(bigJoin).exceptionOrNull()?.message)
-        val bigContact = "dmsg://contact/" + "A".repeat(QrGate.URI_MAX)
-        assertEquals("oversized", QrGate.route(bigContact).exceptionOrNull()?.message)
+    @Test fun pasteAndScannerUseSameOfflineParserAndContactIsRejectedForConnection() {
+        val f = FakeFacade()
+        assertEquals(QrGate.serverPreview(f, "dmsg://server/AAAA"),
+            QrGate.serverPreview(f, " \ndmsg://server/AA\nAA\r\n"))
+        assertTrue(runCatching { QrGate.serverPreview(f, "dmsg://contact/AAAA") }.isFailure)
+        assertEquals(2, f.previewCalls)
+        assertFalse(f.authenticated)
+        assertNull(f.profile)
+        assertEquals(0, f.signupCalls)
     }
 }

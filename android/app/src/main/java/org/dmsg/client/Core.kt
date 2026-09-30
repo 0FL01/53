@@ -2,6 +2,11 @@ package org.dmsg.client
 
 import android.content.Context
 import java.io.File
+import java.util.concurrent.Executors
+import uniffi.dmsg_core.AccountInfo
+import uniffi.dmsg_core.LoginOutcome
+import uniffi.dmsg_core.QrKind
+import uniffi.dmsg_core.RegistrationPolicy
 
 /**
  * Owns the app-private DB path and the facade instance.
@@ -10,6 +15,8 @@ import java.io.File
  */
 object Core {
     internal val storeLock = Any()
+    private val commands = Executors.newSingleThreadExecutor { r -> Thread(r, "dmsg-ui-core").also { it.isDaemon = true } }
+    fun dispatch(work: () -> Unit) { commands.execute(work) }
     fun dbFile(c: Context): File = File(c.filesDir, "core.db")
 
     fun facade(c: Context): DmsgFacade = synchronized(storeLock) {
@@ -20,19 +27,24 @@ object Core {
             val k = SecureStore.key(c)
             try { UniFfiFacade(dbFile(c).absolutePath, k, c.applicationContext) }
             finally { k.fill(0) }
-        } catch (e: UnsatisfiedLinkError) {
-            Unready(e.message ?: "no native lib")
-        } catch (e: ExceptionInInitializerError) {
-            Unready(e.message ?: "core init failed")
+        } catch (e: LinkageError) {
+            Unready()
         }
     }
 
-    private class Unready(val why: String) : DmsgFacade {
-        private fun fail(): Nothing = throw DmsgError("core missing: $why")
+    private class Unready : DmsgFacade {
+        private fun fail(): Nothing = throw DmsgError("Ядро приложения недоступно")
         override fun isReady() = false
-        override fun account(): Pair<Boolean, String?> = fail()
-        override fun preview(qr: String): Pair<String, String> = fail()
-        override fun enrol(qr: String, addr: String, pinDer: ByteArray?): String = fail()
+        override fun dnsProfile(): DnsProfile? = fail()
+        override fun configureDns(code: String, resolvers: List<String>) = fail()
+        override fun registrationPolicyDns(): RegistrationPolicy = fail()
+        override fun signupDns(login: String, password: String, invitation: String?): AccountInfo = fail()
+        override fun loginDns(login: String, password: String, expectedDevice: String?): LoginOutcome = fail()
+        override fun dnsNetworkChanged(resolvers: List<String>) = fail()
+        override fun dnsStop() {}
+        override fun dnsStatus(): String = fail()
+        override fun account(): AccountInfo = fail()
+        override fun profilePreview(code: String): Pair<String, String> = fail()
         override fun myQr(): String = fail()
         override fun addQr(uri: String): String = fail()
         override fun request(id: String): String = fail()
@@ -43,14 +55,11 @@ object Core {
         override fun contacts(cursor: String?, limit: Int): Pair<List<Dialog>, String?> = fail()
         override fun inbox(cursor: Long, limit: Int): Pair<List<Msg>, Long?> = fail()
         override fun outbox(cursor: Long, limit: Int): Pair<List<OutRow>, Long?> = fail()
-        override fun send(addr: String, pub: ByteArray, domain: String, id: String, text: String): String = fail()
-        override fun retry(addr: String, pub: ByteArray, domain: String): LongArray = fail()
-        override fun fetch(addr: String, pub: ByteArray, domain: String): FetchRes = fail()
-        override fun reconnect(addr: String, pub: ByteArray, domain: String): Long = fail()
-        override fun qrKind(uri: String): String {
-            // Pure routing works without the lib (mirror of qr_kind prefix step).
-            return QrGate.route(uri).getOrThrow()
-        }
+        override fun send(id: String, text: String): String = fail()
+        override fun retry(): LongArray = fail()
+        override fun fetch(): FetchRes = fail()
+        override fun reconnect(): Long = fail()
+        override fun qrKind(uri: String): QrKind = fail()
         override fun storagePlan(hasLegacy: Boolean, hasWrapped: Boolean): String =
             if (hasWrapped) "ready" else if (hasLegacy) "migrate" else "fresh"
     }

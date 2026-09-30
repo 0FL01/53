@@ -6,6 +6,7 @@ import android.content.Intent
 import android.database.Cursor.FIELD_TYPE_BLOB
 import android.database.sqlite.SQLiteDatabase
 import androidx.test.core.app.ApplicationProvider
+import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import java.io.File
@@ -20,6 +21,9 @@ import org.junit.rules.TestName
 import org.junit.Assume.assumeTrue
 import org.junit.runner.RunWith
 import uniffi.dmsg_core.DmsgClient
+import uniffi.dmsg_core.AccountInfo
+import uniffi.dmsg_core.LoginOutcome
+import uniffi.dmsg_core.RegistrationPolicy
 
 /** Routine tests use throwaway DBs. Named one-off gates require private fixtures;
  * run manually with am instrument, never connected tests on the live package. */
@@ -35,19 +39,19 @@ class DeviceGatesTest {
             val f = Core.facade(app)
             facade = f
             val before = f.account()
-            assertTrue("preserve the existing account", before.first)
+            assertTrue("preserve the existing account", before.authenticated)
             f.configureDns(input.readText().trim(), DnsNetwork.resolvers(app))
             DnsNetwork.mirrorProfile(app, f)
             assertNotNull(f.dnsProfile())
-            assertTrue(f.reconnect("dns", Prefs.serverPub(app)!!, Prefs.domain(app)) > 0L)
+            assertTrue(f.reconnect() > 0L)
             assertEquals("ready", f.dnsStatus())
-            val first = f.fetch("dns", Prefs.serverPub(app)!!, Prefs.domain(app))
-            val second = f.fetch("dns", Prefs.serverPub(app)!!, Prefs.domain(app))
+            val first = f.fetch()
+            val second = f.fetch()
             assertEquals(0, second.received.size)
             assertTrue(second.cursor >= first.cursor)
             assertEquals(before, f.account())
         } finally {
-            try { facade?.stopDns() } finally { input.delete() }
+            try { facade?.dnsStop() } finally { input.delete() }
         }
     }
 
@@ -55,7 +59,7 @@ class DeviceGatesTest {
         explicitGate()
         val app = ApplicationProvider.getApplicationContext<Context>()
         val f = Core.facade(app)
-        assertTrue(f.account().first)
+        assertTrue(f.account().authenticated)
         assertNotNull(f.dnsProfile())
         val before = f.account()
         InstrumentationRegistry.getInstrumentation().startActivitySync(
@@ -69,13 +73,15 @@ class DeviceGatesTest {
         assertEquals(before, f.account())
     }
 
-    @Test fun rejectLiveCarrierPinAndNoiseKeyBeforeEnrolForGate() {
+    @Test fun rejectLiveCarrierPinAndNoiseKeyBeforeCredentialsForGate() {
         explicitGate()
         val app = ApplicationProvider.getApplicationContext<Context>()
         val inputs = listOf("gate-wrong-pin.qr", "gate-wrong-noise.qr").map { File(app.filesDir, it) }
         assumeTrue("explicit public negative profile fixtures required", inputs.all { it.exists() })
         val main = Core.facade(app)
         val before = main.account()
+        val local = File(app.filesDir, "gate-carrier.json")
+        val resolvers = if (local.exists()) fixtureResolvers(app, privateFixture(local)) else DnsNetwork.resolvers(app)
         try {
             for ((index, input) in inputs.withIndex()) {
                 val dir = File(app.cacheDir, "dns-negative-${System.nanoTime()}")
@@ -90,22 +96,23 @@ class DeviceGatesTest {
                 key.fill(0)
                 try {
                     try {
-                        client.enrolDns(input.readText().trim(), DnsNetwork.resolvers(app))
-                        fail("untrusted carrier/server must not enrol")
+                        client.configureDns(QrGate.normalize(input.readText()), resolvers)
+                        client.registrationPolicyDns()
+                        fail("untrusted carrier/server must fail before credentials")
                     } catch (e: uniffi.dmsg_core.FfiException) {
                         if (index == 0) assertTrue("carrier pin must have its own error", e is uniffi.dmsg_core.FfiException.PinMismatch)
-                        else assertTrue("wrong Noise key must fail before bearer authentication", e is uniffi.dmsg_core.FfiException.Transport)
+                        else assertTrue("wrong Noise key must fail before account authentication", e is uniffi.dmsg_core.FfiException.Transport)
                     }
-                    assertFalse(client.accountInfo().enrolled)
+                    assertFalse(client.accountInfo().authenticated)
                     assertTrue(client.contactsPage(null, 100u).rows.isEmpty())
                 } finally {
-                    client.stopDns()
+                    client.dnsStop()
                     client.close()
                     dir.deleteRecursively()
                 }
             }
             assertEquals(before, main.account())
-        } finally { inputs.forEach { it.delete() } }
+        } finally { inputs.forEach { it.delete() }; local.delete() }
     }
 
     @Test fun restartDnsWithSameResolversPreservesIdentityForGate() {
@@ -115,22 +122,22 @@ class DeviceGatesTest {
         val profile = f.dnsProfile()
         assumeTrue("configure a DNS profile explicitly first", profile != null)
         val before = f.account()
-        assertTrue(before.first)
+        assertTrue(before.authenticated)
         val outbox = f.outbox(0, 100)
         val inbox = f.inbox(0, 100)
         try {
-            f.reconnect(Prefs.addr(app), Prefs.serverPub(app)!!, Prefs.domain(app))
+            f.reconnect()
             assertEquals("ready", f.dnsStatus())
             f.dnsNetworkChanged(DnsNetwork.resolvers(app))
             assertEquals("stopped", f.dnsStatus())
-            assertTrue(f.reconnect(Prefs.addr(app), Prefs.serverPub(app)!!, Prefs.domain(app)) > 0)
+            assertTrue(f.reconnect() > 0)
             assertEquals("ready", f.dnsStatus())
             assertEquals(before, f.account())
             assertEquals(profile!!.fingerprint, f.dnsProfile()!!.fingerprint)
             assertTrue(profile.pub.contentEquals(f.dnsProfile()!!.pub))
             assertEquals(outbox, f.outbox(0, 100))
             assertEquals(inbox, f.inbox(0, 100))
-        } finally { f.stopDns() }
+        } finally { f.dnsStop() }
     }
     @get:Rule val testName = TestName()
     private lateinit var dir: File
@@ -150,13 +157,52 @@ class DeviceGatesTest {
 
     /** Stateful operator gates are never run by a whole-class/routine suite. */
     private fun explicitGate() {
+        assertTrue("operator gates require the isolated package", ApplicationProvider.getApplicationContext<Context>().packageName.endsWith(".gate"))
         val selected = InstrumentationRegistry.getArguments().getString("class").orEmpty().split(',')
         assumeTrue("select this gate method explicitly", "${javaClass.name}#${testName.methodName}" in selected)
     }
 
-    private fun seedLegacyDb(name: String = "core.db", deviceByte: Byte = 7): File {
+    /** Local authoritative fixtures only: no hostname lookup or production resolver override. */
+    private fun fixtureResolvers(app: Context, fixture: JSONObject): List<String> {
+        if (!fixture.has("resolvers")) return DnsNetwork.resolvers(app)
+        assertTrue("local carrier fixtures require the isolated package", app.packageName.endsWith(".gate"))
+        val values = fixture.getJSONArray("resolvers")
+        assertTrue("bounded local resolver list", values.length() in 1..8)
+        return (0 until values.length()).map { index ->
+            val value = values.getString(index)
+            assertTrue("bounded numeric local IPv4 endpoint", value.length <= 21)
+            val match = Regex("([0-9]{1,3})\\.([0-9]{1,3})\\.([0-9]{1,3})\\.([0-9]{1,3}):([0-9]{1,5})").matchEntire(value)
+                ?: throw AssertionError("local resolver must be numeric IPv4 with an explicit high UDP port")
+            val parts = (1..4).map { match.groupValues[it].toInt() }
+            assertTrue("canonical IPv4", parts.all { it in 0..255 } && parts.joinToString(".") == value.substringBefore(':'))
+            assertTrue("local carrier only", parts[0] == 10 || parts[0] == 127 ||
+                (parts[0] == 192 && parts[1] == 168) || (parts[0] == 172 && parts[1] in 16..31))
+            assertTrue("unprivileged local UDP port", match.groupValues[5].toInt() in 1024..65535)
+            value
+        }.distinct()
+    }
+
+    private fun privateFixture(input: File): JSONObject {
+        assertTrue("private file-based fixture required", input.isFile)
+        assertTrue("bounded private fixture", input.length() in 1..16_384)
+        return JSONObject(input.readText())
+    }
+
+    /** The real facade/native core, without active-network refresh for explicit local fixtures. */
+    private fun fixtureFacade(app: Context, fixture: JSONObject): DmsgFacade {
+        if (!fixture.has("resolvers")) return Core.facade(app)
+        fixtureResolvers(app, fixture)
+        System.loadLibrary("dmsg_core")
+        val key = SecureStore.key(app)
+        return try { UniFfiFacade(Core.dbFile(app).absolutePath, key) } finally { key.fill(0) }
+    }
+
+    private fun seedFixtureDb(name: String = "core.db", deviceByte: Byte = 7): File {
         val file = File(dir, name)
-        DmsgClient.open(file.absolutePath).accountInfo() // create the legacy schema
+        DmsgClient.open(file.absolutePath).use { client ->
+            client.accountInfo() // Current schema, plaintext only in this throwaway fixture.
+            client.configureDns(syntheticServerCode(), listOf("127.0.0.1:1"))
+        }
         SQLiteDatabase.openDatabase(file.absolutePath, null, SQLiteDatabase.OPEN_READWRITE).use { db ->
             db.execSQL("INSERT INTO core_identity(id,device_priv) VALUES(1,?)", arrayOf(ByteArray(32) { deviceByte }))
             db.execSQL("INSERT INTO core_account(id,user_id,contact_id) VALUES(1,?,?)", arrayOf(ByteArray(16) { 1 }, id))
@@ -166,10 +212,17 @@ class DeviceGatesTest {
         return file
     }
 
+    /** Public binary-format fixture only; never a usable server or credential. */
+    private fun syntheticServerCode(): String {
+        val domain = "test.invalid".toByteArray()
+        val raw = byteArrayOf(1, domain.size.toByte()) + domain + byteArrayOf(0, 64) + ByteArray(64) { 0x30 } + ByteArray(32)
+        return "dmsg://server/" + android.util.Base64.encodeToString(raw, android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING)
+    }
+
     @Test fun migrateEncryptedReopenAndRestoreOnlyWithOriginalKey() {
-        val db = seedLegacyDb()
+        val db = seedFixtureDb()
         val f = Core.facade(context)
-        assertEquals(Pair(true, id), f.account())
+        assertEquals(AccountInfo(true, id), f.account())
         assertEquals("fixture private text", f.inbox(0, 10).first.single().text)
         SQLiteDatabase.openDatabase(db.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { sql ->
             sql.rawQuery("SELECT device_priv FROM core_identity", null).use {
@@ -184,7 +237,7 @@ class DeviceGatesTest {
         assertEquals("ready", SecureStore.plan(context))
         SecureStore.wipe(db) // only the test fixture; the live app's DB is never deleted
         SecureStore.unseal(context)
-        assertEquals(Pair(true, id), Core.facade(context).account())
+        assertEquals(AccountInfo(true, id), Core.facade(context).account())
         assertEquals("fixture private text", Core.facade(context).inbox(0, 10).first.single().text)
         assertFailsWithMessage("live db already exists") { SecureStore.unseal(context) }
         // A wiped wrapping key cannot be silently recreated even with a sealed backup present.
@@ -193,10 +246,10 @@ class DeviceGatesTest {
     }
 
     @Test fun invalidQrIsRejectedWithoutAddingContact() {
-        seedLegacyDb()
+        seedFixtureDb()
         val f = Core.facade(context)
         val before = f.contacts(null, 50).first.size
-        for (qr in listOf("garbage", "dmsg://contact/", "dmsg://contact/broken", "dmsg://join/broken", "dmsg://join/" + "x".repeat(9000))) {
+        for (qr in listOf("garbage", "dmsg://contact/", "dmsg://contact/broken", "dmsg://server/broken", "dmsg://server/" + "x".repeat(9000))) {
             assertFailsWithMessage("") { f.qrKind(qr) }
             assertFailsWithMessage("") { f.addQr(qr) }
         }
@@ -204,9 +257,9 @@ class DeviceGatesTest {
     }
 
     @Test fun changedIdentityStopsSendUntilExplicitConfirm() {
-        seedLegacyDb()
+        seedFixtureDb()
         val f = Core.facade(context)
-        val otherDb = seedLegacyDb("other.db", 9)
+        val otherDb = seedFixtureDb("other.db", 9)
         val key = ByteArray(32) { 4 } // test fixture only, never used for installed identity
         val other = UniFfiFacade(otherDb.absolutePath, key)
         val originalQr = f.myQr()
@@ -215,15 +268,13 @@ class DeviceGatesTest {
         f.accept(id)
         assertEquals("identity_changed", f.addQr(changedQr))
         assertEquals(true, f.get(id)?.identityMismatch)
-        assertFailsWithMessage("identity changed") {
-            f.send("127.0.0.1:1", ByteArray(32), "test.invalid", id, "fixture")
+        assertFailsWithKind(ErrorKind.IdentityMismatch) {
+            f.send(id, "fixture")
         }
         assertEquals(0, f.outbox(0, 50).first.size)
         f.confirm(id)
         assertEquals(false, f.get(id)?.identityMismatch)
-        assertFailsWithMessage("connect") {
-            f.send("127.0.0.1:1", ByteArray(32), "test.invalid", id, "fixture")
-        }
+        try { assertFailsWithKind(ErrorKind.Transport) { f.send(id, "fixture") } } finally { f.dnsStop() }
     }
 
     /** Dedicated .gate installation only; fixture is not the installed user's account. */
@@ -233,7 +284,7 @@ class DeviceGatesTest {
         assumeTrue(app.packageName.endsWith(".gate"))
         val dbFile = File(app.filesDir, "core.db")
         assertFalse("fixture package must be fresh", dbFile.exists())
-        DmsgClient.open(dbFile.absolutePath).accountInfo()
+        DmsgClient.open(dbFile.absolutePath).use { it.accountInfo(); it.configureDns(syntheticServerCode(), listOf("127.0.0.1:1")) }
         val peer = "PEER1234ABCD"
         SQLiteDatabase.openDatabase(dbFile.absolutePath, null, SQLiteDatabase.OPEN_READWRITE).use { db ->
             db.beginTransaction()
@@ -251,7 +302,7 @@ class DeviceGatesTest {
                 db.setTransactionSuccessful()
             } finally { db.endTransaction() }
         }
-        assertEquals(Pair(true, id), Core.facade(app).account())
+        assertEquals(AccountInfo(true, id), Core.facade(app).account())
         assertEquals(50, Core.facade(app).inbox(0, 50).first.size)
     }
 
@@ -259,7 +310,7 @@ class DeviceGatesTest {
         explicitGate()
         val app = ApplicationProvider.getApplicationContext<Context>()
         assumeTrue(app.packageName.endsWith(".gate"))
-        assertEquals(Pair(true, id), Core.facade(app).account())
+        assertEquals(AccountInfo(true, id), Core.facade(app).account())
         SecureStore.seal(app)
         assertTrue(SecureStore.sealedDb(app).exists())
     }
@@ -270,7 +321,7 @@ class DeviceGatesTest {
         assumeTrue(app.packageName.endsWith(".gate"))
         assertFalse(Core.dbFile(app).exists())
         assertFalse(SecureStore.sealedDb(app).exists())
-        assertFalse(Core.facade(app).account().first)
+        assertFalse(Core.facade(app).account().authenticated)
         assertTrue(app.getString(R.string.reinstall_loss).contains("Keystore"))
     }
 
@@ -313,54 +364,295 @@ class DeviceGatesTest {
     }
 
     /** Explicitly selected on-device gate, not part of the routine test suite. */
-    @Test fun enrolPrivateInviteOnce() {
+    @Test fun signupPrivateInviteOnce() {
         explicitGate()
         val app = ApplicationProvider.getApplicationContext<Context>()
-        val invite = File(app.filesDir, "gate-invite.qr")
-        val transport = File(app.filesDir, "gate-transport.txt")
-        assumeTrue("explicit private invite fixture is required", invite.exists() && transport.exists())
+        val input = File(app.filesDir, "gate-auth.json")
+        assumeTrue("private file-based signup fixture required", input.exists())
+        val f = Core.facade(app)
         try {
-            val values = transport.readLines()
-            assertEquals(3, values.size)
-            val (addr, domain, pub) = values
-            val f = Core.facade(app)
-            assertFalse("never overwrite an existing account", f.account().first)
-            val qr = invite.readText().trim()
-            assertEquals(domain, f.preview(qr).first)
-            val enrolled = f.enrol(qr, addr, null)
-            assertEquals(enrolled, f.account().second)
-            Prefs.setTransport(app, addr, domain, pub)
+            val auth = JSONObject(input.readText())
+            assertFalse("never overwrite an existing account", f.account().authenticated)
+            val preview = QrGate.serverPreview(f, auth.getString("serverCode"))
+            f.configureDns(preview.code, DnsNetwork.resolvers(app))
+            val flow = AuthFlow(f)
+            val policy = flow.policy()
+            assertEquals(RegistrationPolicy.INVITE_ONLY, policy)
+            val secret = AuthSecrets(auth.getString("password").toCharArray(), auth.getString("invitation").toCharArray())
+            assertTrue(flow.submit(AuthAction.Signup, policy, auth.getString("login"), secret) is LoginOutcome.Authenticated)
+            assertTrue(f.account().authenticated)
+            DnsNetwork.mirrorProfile(app, f)
         } finally {
-            SecureStore.wipe(invite)
-            SecureStore.wipe(transport)
+            f.dnsStop()
+            SecureStore.wipe(input)
         }
     }
 
     /** Fresh registration is destructive only to the deliberately separate gate package. */
-    @Test fun enrolPrivateDnsInviteOnlyInGatePackage() {
+    @Test fun signupPrivateDnsAccountOnlyInGatePackage() {
         explicitGate()
         val app = ApplicationProvider.getApplicationContext<Context>()
         assertTrue("fresh device registration requires the isolated gate package", app.packageName.endsWith(".gate"))
-        val input = File(app.filesDir, "gate-invite.qr")
-        assumeTrue("private operator invitation is required", input.exists())
-        val f = Core.facade(app)
-        assertFalse("refusing to replace an existing identity", f.account().first)
+        val input = File(app.filesDir, "gate-auth.json")
+        val auth = privateFixture(input)
+        val f = fixtureFacade(app, auth)
+        assertFalse("refusing to replace an existing identity", f.account().authenticated)
         try {
-            val uri = input.readText().trim()
-            val preview = f.preview(uri)
-            val id = f.enrolDns(uri, DnsNetwork.resolvers(app))
-            assertEquals(Pair(true, id), f.account())
-            assertEquals(preview.first, f.dnsProfile()!!.domain)
-            assertEquals(preview.second, f.dnsProfile()!!.fingerprint)
+            val preview = QrGate.serverPreview(f, auth.getString("serverCode"))
+            f.configureDns(preview.code, fixtureResolvers(app, auth))
+            assertFalse("profile import does not create an account", f.account().authenticated)
+            val flow = AuthFlow(f)
+            val policy = flow.policy()
+            assertEquals(auth.getString("expectedPolicy"), if (policy == RegistrationPolicy.OPEN) "open" else "invite_only")
+            val invitation = if (policy == RegistrationPolicy.INVITE_ONLY) auth.getString("invitation") else ""
+            val out = flow.submit(AuthAction.Signup, policy, auth.getString("login"), AuthSecrets(auth.getString("password").toCharArray(), invitation.toCharArray()))
+            assertTrue(out is LoginOutcome.Authenticated)
+            val id = (out as LoginOutcome.Authenticated).contactId
+            assertEquals(AccountInfo(true, id), f.account())
+            assertEquals(preview.domain, f.dnsProfile()!!.domain)
+            assertEquals(preview.fingerprint, f.dnsProfile()!!.fingerprint)
             DnsNetwork.mirrorProfile(app, f)
-            f.stopDns()
-            assertTrue(f.reconnect(Prefs.addr(app), Prefs.serverPub(app)!!, Prefs.domain(app)) > 0)
-            val first = f.fetch(Prefs.addr(app), Prefs.serverPub(app)!!, Prefs.domain(app))
-            val second = f.fetch(Prefs.addr(app), Prefs.serverPub(app)!!, Prefs.domain(app))
+            f.dnsStop()
+            assertTrue(f.reconnect() > 0)
+            val first = f.fetch()
+            val second = f.fetch()
             assertTrue(first.received.isEmpty()); assertTrue(second.received.isEmpty())
             assertTrue(second.cursor >= first.cursor)
-            assertEquals(Pair(true, id), Core.facade(app).account())
-        } finally { f.stopDns(); input.delete() }
+            assertEquals(AccountInfo(true, id), Core.facade(app).account())
+            SQLiteDatabase.openDatabase(Core.dbFile(app).absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { sql ->
+                sql.rawQuery("PRAGMA user_version", null).use { row -> assertTrue(row.moveToFirst()); assertEquals(5, row.getInt(0)) }
+            }
+            val output = File(app.filesDir, "gate-account.json")
+            assertFalse("finish previous gate first", output.exists())
+            output.writeText(JSONObject().put("contactId", id).toString())
+            assertTrue(output.setReadable(false, false)); assertTrue(output.setWritable(false, false))
+            assertTrue(output.setReadable(true, true)); assertTrue(output.setWritable(true, true))
+        } finally { f.dnsStop(); SecureStore.wipe(input) }
+    }
+
+    /** Run in a second instrumentation process after signup; no password/invitation fixture. */
+    @Test fun reopenPrivateDnsAccountOnlyInGatePackage() {
+        explicitGate()
+        val app = ApplicationProvider.getApplicationContext<Context>()
+        val input = File(app.filesDir, "gate-reopen.json")
+        val saved = File(app.filesDir, "gate-account.json")
+        val fixture = privateFixture(input)
+        val expected = privateFixture(saved).getString("contactId")
+        assertFalse("key-only fixture", fixture.has("password") || fixture.has("invitation"))
+        val f = fixtureFacade(app, fixture)
+        try {
+            assertTrue("native facade loaded", f.isReady())
+            assertEquals(AccountInfo(true, expected), f.account())
+            val before = f.dnsProfile()!!
+            f.configureDns(QrGate.serverPreview(f, fixture.getString("serverCode")).code, fixtureResolvers(app, fixture))
+            assertEquals(before.fingerprint, f.dnsProfile()!!.fingerprint)
+            assertTrue(f.reconnect() > 0)
+            assertEquals("ready", f.dnsStatus())
+            val first = f.fetch(); val second = f.fetch()
+            assertTrue(first.received.isEmpty()); assertTrue(second.received.isEmpty())
+            assertTrue(second.cursor >= first.cursor)
+            assertEquals(AccountInfo(true, expected), Core.facade(app).account())
+        } finally { f.dnsStop(); SecureStore.wipe(input); saved.delete() }
+    }
+
+    /** No replacement without an explicit private operator fixture and exact CAS key. */
+    @Test fun loginPrivateAccountReplacementOnlyInGatePackage() {
+        explicitGate()
+        val app = ApplicationProvider.getApplicationContext<Context>()
+        val input = File(app.filesDir, "gate-login.json")
+        val auth = privateFixture(input)
+        val f = fixtureFacade(app, auth)
+        val flow = AuthFlow(f)
+        try {
+            assertFalse("replacement gate needs a fresh disposable identity", f.account().authenticated)
+            val preview = QrGate.serverPreview(f, auth.getString("serverCode"))
+            f.configureDns(preview.code, fixtureResolvers(app, auth))
+            flow.policy() // Close pre-auth transport before credential input.
+            val out = flow.submit(AuthAction.Login, null, auth.getString("login"), AuthSecrets(auth.getString("password").toCharArray()))
+            assertTrue("this fixture must name an account bound to another device", out is LoginOutcome.ReplacementRequired)
+            assertFalse("first login must not bind the new device", f.account().authenticated)
+            assertEquals("stopped", f.dnsStatus())
+            assertEquals(auth.getString("expectedDevice"), (out as LoginOutcome.ReplacementRequired).expectedDevice)
+            if (auth.getBoolean("confirmReplacement")) {
+                val accepted = flow.confirm()
+                assertTrue("a new CAS challenge requires new operator confirmation", accepted is LoginOutcome.Authenticated)
+                assertEquals(auth.getString("contactId"), (accepted as LoginOutcome.Authenticated).contactId)
+                assertEquals(AccountInfo(true, accepted.contactId), f.account())
+                assertTrue("replacement does not import old history", f.inbox(0, 100).first.isEmpty())
+                DnsNetwork.mirrorProfile(app, f)
+                assertTrue(f.reconnect() > 0)
+                assertEquals(AccountInfo(true, accepted.contactId), Core.facade(app).account())
+            } else {
+                flow.cancel()
+                assertFalse(flow.awaitingConfirmation)
+                assertFalse(f.account().authenticated)
+            }
+        } finally { flow.cancel(); f.dnsStop(); SecureStore.wipe(input) }
+    }
+
+    /** Typed negative auth errors; fresh fixture prevents mutation of a working account. */
+    @Test fun rejectPrivateCredentialsOnlyInGatePackage() {
+        explicitGate()
+        val app = ApplicationProvider.getApplicationContext<Context>()
+        val input = File(app.filesDir, "gate-auth-error.json")
+        val auth = privateFixture(input)
+        val f = fixtureFacade(app, auth)
+        val flow = AuthFlow(f)
+        try {
+            assertFalse(f.account().authenticated)
+            f.configureDns(QrGate.serverPreview(f, auth.getString("serverCode")).code, fixtureResolvers(app, auth))
+            val policy = flow.policy()
+            val action = when (auth.getString("action")) {
+                "login" -> AuthAction.Login
+                "signup" -> AuthAction.Signup
+                else -> throw AssertionError("fixture action must be login/signup")
+            }
+            val expected = ErrorKind.valueOf(auth.getString("expectedError"))
+            assertFailsWithKind(expected) {
+                flow.submit(action, policy, auth.getString("login"),
+                    AuthSecrets(auth.getString("password").toCharArray(), auth.optString("invitation", "").toCharArray()))
+            }
+            assertFalse(f.account().authenticated)
+            assertTrue(f.contacts(null, 100).first.isEmpty())
+            assertFalse(flow.awaitingConfirmation)
+            assertEquals("stopped", f.dnsStatus())
+        } finally { flow.cancel(); f.dnsStop(); SecureStore.wipe(input) }
+    }
+
+    /** Real UI + native facade; the only injected boundary is the private local resolver list. */
+    @Test fun unifiedAuthUiOnlyInGatePackage() {
+        explicitGate()
+        val app = ApplicationProvider.getApplicationContext<Context>()
+        val input = File(app.filesDir, "gate-ui.json")
+        val fixture = privateFixture(input)
+        assertTrue("UI carrier fixture must explicitly be local", fixture.has("resolvers"))
+        val localResolvers = fixtureResolvers(app, fixture)
+        val real = fixtureFacade(app, fixture)
+        assertFalse(real.account().authenticated)
+        assertNull("fresh disposable UI profile", real.dnsProfile())
+        val local = object : DmsgFacade by real {
+            override fun configureDns(code: String, resolvers: List<String>) = real.configureDns(code, localResolvers)
+        }
+        fun field(activity: MainActivity, name: String): Any? = MainActivity::class.java.getDeclaredField(name)
+            .also { it.isAccessible = true }.get(activity)
+        fun setField(activity: MainActivity, name: String, value: Any) = MainActivity::class.java.getDeclaredField(name)
+            .also { it.isAccessible = true }.set(activity, value)
+        fun await(scenario: ActivityScenario<MainActivity>, message: String, predicate: (MainActivity) -> Boolean) {
+            val deadline = System.nanoTime() + 45_000_000_000L
+            while (System.nanoTime() < deadline) {
+                var ready = false
+                scenario.onActivity { ready = predicate(it) }
+                if (ready) return
+                Thread.sleep(50)
+            }
+            fail(message)
+        }
+        fun dialog(activity: MainActivity) = field(activity, "prompt") as? androidx.appcompat.app.AlertDialog
+        try {
+            ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+                await(scenario, "connection UI ready and focused") {
+                    field(it, "state") == LaunchState.Connection && field(it, "busy") == false && it.hasWindowFocus()
+                }
+                scenario.onActivity {
+                    setField(it, "facade", local); setField(it, "flow", AuthFlow(local))
+                    assertEquals(android.view.View.GONE, it.findViewById<android.view.View>(R.id.dialogs_panel).visibility)
+                    assertFalse(DmsgService.running(app))
+                }
+                val preview = QrGate.serverPreview(real, fixture.getString("serverCode"))
+                fun previewUi() {
+                    scenario.onActivity {
+                        val code = fixture.getString("serverCode")
+                        val editor = it.findViewById<android.widget.EditText>(R.id.connection_code)
+                        val clipboard = it.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                        val previous = clipboard.primaryClip
+                        val clip = android.content.ClipData.newPlainText("disposable gate fixture", code.chunked(72).joinToString("\n"))
+                        if (android.os.Build.VERSION.SDK_INT >= 24) clip.description.extras = android.os.PersistableBundle().apply {
+                            putBoolean("android.content.extra.IS_SENSITIVE", true)
+                        }
+                        try {
+                            clipboard.setPrimaryClip(clip)
+                            assertTrue("foreground app can read its pasted fixture", clipboard.primaryClip?.getItemAt(0)?.text?.toString() == clip.getItemAt(0).text.toString())
+                            editor.setText(""); editor.requestFocus()
+                            assertTrue("actual multiline clipboard paste", editor.onTextContextMenuItem(android.R.id.paste))
+                            assertTrue("clipboard pasted the complete public profile", QrGate.normalize(editor.text.toString()) == code)
+                        } finally {
+                            if (previous != null) clipboard.setPrimaryClip(previous)
+                            else if (android.os.Build.VERSION.SDK_INT >= 28) clipboard.clearPrimaryClip()
+                            else clipboard.setPrimaryClip(android.content.ClipData.newPlainText("", ""))
+                        }
+                        assertTrue("preview enabled before click", field(it, "busy") == false)
+                        it.findViewById<android.widget.Button>(R.id.btn_preview).performClick()
+                    }
+                    await(scenario, "offline profile confirmation") { dialog(it)?.isShowing == true && field(it, "busy") == false }
+                    scenario.onActivity {
+                        val message = dialog(it)!!.findViewById<android.widget.TextView>(android.R.id.message)!!.text.toString()
+                        assertTrue("preview domain", message.contains(preview.domain))
+                        assertTrue("preview certificate fingerprint", message.contains(preview.fingerprint))
+                    }
+                    assertNull("preview must remain offline and unimported", real.dnsProfile())
+                    assertFalse(real.account().authenticated)
+                    assertEquals("stopped", real.dnsStatus())
+                }
+                previewUi()
+                scenario.onActivity { dialog(it)!!.getButton(android.content.DialogInterface.BUTTON_NEGATIVE).performClick() }
+                assertNull(real.dnsProfile())
+                previewUi()
+                scenario.onActivity { dialog(it)!!.getButton(android.content.DialogInterface.BUTTON_POSITIVE).performClick() }
+                await(scenario, "DNS policy closes before typing") { field(it, "state") == LaunchState.Authentication && field(it, "policy") == RegistrationPolicy.INVITE_ONLY && field(it, "busy") == false }
+                assertFalse(real.account().authenticated)
+                assertEquals("stopped", real.dnsStatus())
+                scenario.onActivity {
+                    assertEquals(android.view.View.GONE, it.findViewById<android.view.View>(R.id.invitation_group).visibility)
+                    it.findViewById<android.widget.Button>(R.id.btn_signup).performClick()
+                    assertEquals(android.view.View.VISIBLE, it.findViewById<android.view.View>(R.id.invitation_group).visibility)
+                    it.findViewById<android.widget.EditText>(R.id.auth_password).setText("disposable draft")
+                    it.findViewById<android.widget.EditText>(R.id.auth_invitation).setText("disposable draft")
+                    it.findViewById<android.widget.Button>(R.id.btn_login).performClick()
+                    assertTrue(it.findViewById<android.widget.EditText>(R.id.auth_password).text.isEmpty())
+                    assertTrue(it.findViewById<android.widget.EditText>(R.id.auth_invitation).text.isEmpty())
+                    assertEquals(android.view.View.GONE, it.findViewById<android.view.View>(R.id.invitation_group).visibility)
+                }
+                fun loginUi() {
+                    scenario.onActivity {
+                        it.findViewById<android.widget.EditText>(R.id.auth_login).setText(fixture.getString("login"))
+                        it.findViewById<android.widget.EditText>(R.id.auth_password).setText(fixture.getString("password"))
+                        it.findViewById<android.widget.Button>(R.id.btn_auth_submit).performClick()
+                    }
+                    await(scenario, "replacement warning after DNS login") { dialog(it)?.isShowing == true && (field(it, "flow") as AuthFlow).awaitingConfirmation }
+                    assertFalse(real.account().authenticated)
+                    assertEquals("stopped", real.dnsStatus())
+                    scenario.onActivity {
+                        val message = dialog(it)!!.findViewById<android.widget.TextView>(android.R.id.message)!!.text.toString()
+                        assertTrue(message.contains("потеряет доступ")); assertTrue(message.contains("история"))
+                        assertTrue(it.findViewById<android.widget.EditText>(R.id.auth_password).text.isEmpty())
+                        assertTrue(it.findViewById<android.widget.EditText>(R.id.auth_invitation).text.isEmpty())
+                    }
+                }
+                loginUi()
+                scenario.onActivity {
+                    dialog(it)!!.getButton(android.content.DialogInterface.BUTTON_NEGATIVE).performClick()
+                }
+                await(scenario, "replacement cancellation callback") {
+                    !(field(it, "flow") as AuthFlow).awaitingConfirmation && dialog(it)?.isShowing != true
+                }
+                assertFalse(real.account().authenticated)
+                loginUi()
+                scenario.onActivity { dialog(it)!!.getButton(android.content.DialogInterface.BUTTON_POSITIVE).performClick() }
+                await(scenario, "authenticated dialogs after explicit replacement") { field(it, "state") == LaunchState.Dialogs && field(it, "busy") == false }
+                assertEquals(AccountInfo(true, fixture.getString("contactId")), real.account())
+                assertTrue(real.inbox(0, 100).first.isEmpty())
+                scenario.onActivity {
+                    assertEquals(android.view.View.GONE, it.findViewById<android.view.View>(R.id.auth_panel).visibility)
+                    assertEquals(android.view.View.VISIBLE, it.findViewById<android.view.View>(R.id.dialogs_panel).visibility)
+                    assertFalse(DmsgService.running(app))
+                }
+                scenario.recreate()
+                await(scenario, "authenticated restart routes to dialogs") { field(it, "state") == LaunchState.Dialogs && field(it, "busy") == false }
+                assertEquals(AccountInfo(true, fixture.getString("contactId")), Core.facade(app).account())
+            }
+            assertTrue(real.reconnect() > 0)
+            assertTrue(real.fetch().received.isEmpty())
+        } finally { real.dnsStop(); SecureStore.wipe(input) }
     }
 
     /** One-off paired-device gate: only the public contact QR leaves the app sandbox. */
@@ -370,7 +662,7 @@ class DeviceGatesTest {
         val output = File(app.filesDir, "gate-my-contact.qr")
         assertFalse("refusing to overwrite contact fixture", output.exists())
         val f = Core.facade(app)
-        assertTrue("phone must already be enrolled", f.account().first)
+        assertTrue("phone must already be authenticated", f.account().authenticated)
         assertTrue(output.createNewFile())
         output.writeText(f.myQr())
         assertTrue(output.setReadable(false, false))
@@ -387,7 +679,7 @@ class DeviceGatesTest {
         assumeTrue("explicit peer contact fixture is required", input.exists())
         try {
             val f = Core.facade(app)
-            assertTrue("phone must already be enrolled", f.account().first)
+            assertTrue("phone must already be authenticated", f.account().authenticated)
             val before = f.contacts(null, 100).first.map { it.contactId }.toSet()
             assertEquals("added", f.addQr(input.readText().trim()))
             val after = f.contacts(null, 100).first.map { it.contactId }.toSet()
@@ -397,7 +689,7 @@ class DeviceGatesTest {
             selection.writeText(peer)
             assertTrue(selection.setReadable(false, false)); assertTrue(selection.setWritable(false, false))
             assertTrue(selection.setReadable(true, true)); assertTrue(selection.setWritable(true, true))
-            f.reconnect(Prefs.addr(app), Prefs.serverPub(app)!!, Prefs.domain(app))
+            f.reconnect()
         } finally {
             input.delete()
         }
@@ -408,7 +700,7 @@ class DeviceGatesTest {
         explicitGate()
         val app = ApplicationProvider.getApplicationContext<Context>()
         val f = Core.facade(app)
-        assertTrue(f.account().first)
+        assertTrue(f.account().authenticated)
         val baseline = File(app.filesDir, "gate-inbox-baseline")
         assertFalse("finish previous gate first", baseline.exists())
         baseline.writeText(f.inbox(0, 100).first.size.toString())
@@ -427,14 +719,11 @@ class DeviceGatesTest {
         try {
             val f = Core.facade(app)
             val previous = baseline.readText().toInt()
-            val addr = Prefs.addr(app)
-            val pub = Prefs.serverPub(app)!!
-            val domain = Prefs.domain(app)
-            val first = f.fetch(addr, pub, domain)
+            val first = f.fetch()
             val page = f.inbox(0, 100).first
             assertEquals("exactly one additional delivered message", previous + 1, page.size)
             assertEquals(page.size, page.map { it.seq }.toSet().size)
-            val second = f.fetch(addr, pub, domain)
+            val second = f.fetch()
             assertEquals(0, second.received.size)
             assertTrue(second.cursor >= first.cursor)
             assertEquals(page.size, f.inbox(0, 100).first.size)
@@ -459,7 +748,7 @@ class DeviceGatesTest {
         assumeTrue(File(app.filesDir, "gate-offline-request").exists())
         val f = Core.facade(app)
         val peer = gatePeer(app, f)
-        f.send(Prefs.addr(app), Prefs.serverPub(app)!!, Prefs.domain(app), peer,
+        f.send(peer,
             "Paired transport session probe.")
     }
 
@@ -480,16 +769,13 @@ class DeviceGatesTest {
         assumeTrue(File(app.filesDir, "gate-offline-request").exists())
         val f = Core.facade(app)
         val peer = gatePeer(app, f)
-        val addr = Prefs.addr(app)
-        val pub = Prefs.serverPub(app)!!
-        val domain = Prefs.domain(app)
-        assertFailsWithMessage("connect") { f.fetch(addr, pub, domain) }
-        assertFailsWithMessage("connect") { f.retry(addr, pub, domain) }
-        val mid = f.send(addr, pub, domain, peer, "Paired offline persisted probe.")
+        assertFailsWithKind(ErrorKind.Transport) { f.fetch() }
+        assertFailsWithKind(ErrorKind.Transport) { f.retry() }
+        val mid = f.send(peer, "Paired offline persisted probe.")
         assertEquals("queued", f.outbox(0, 100).first.single { it.mid == mid }.status)
         val record = JSONObject()
             .put("mid", mid).put("ciphertextHash", ciphertextHash(app, mid))
-            .put("account", f.account().second).put("inboxCount", f.inbox(0, 100).first.size)
+            .put("account", f.account().contactId).put("inboxCount", f.inbox(0, 100).first.size)
         val output = File(app.filesDir, "gate-queued-record")
         assertFalse(output.exists())
         output.writeText(record.toString())
@@ -497,7 +783,7 @@ class DeviceGatesTest {
         assertTrue(output.setReadable(true, true)); assertTrue(output.setWritable(true, true))
     }
 
-    /** Run after actual process death and restored bridge; do not print ciphertext or its hash. */
+    /** Run after actual process death and restored DNS network; do not print ciphertext or its hash. */
     @Test fun retryAndVerifyPreservedCiphertextForGate() {
         explicitGate()
         val app = ApplicationProvider.getApplicationContext<Context>()
@@ -506,11 +792,11 @@ class DeviceGatesTest {
         val record = JSONObject(input.readText())
         val f = Core.facade(app)
         val mid = record.getString("mid")
-        assertEquals(record.getString("account"), f.account().second)
+        assertEquals(record.getString("account"), f.account().contactId)
         assertEquals(record.getInt("inboxCount"), f.inbox(0, 100).first.size)
         assertEquals(record.getString("ciphertextHash"), ciphertextHash(app, mid))
         assertEquals("queued", f.outbox(0, 100).first.single { it.mid == mid }.status)
-        f.retry(Prefs.addr(app), Prefs.serverPub(app)!!, Prefs.domain(app))
+        f.retry()
         assertEquals(record.getString("ciphertextHash"), ciphertextHash(app, mid))
         assertEquals("accepted", f.outbox(0, 100).first.single { it.mid == mid }.status)
         input.delete()
@@ -544,13 +830,13 @@ class DeviceGatesTest {
         val app = ApplicationProvider.getApplicationContext<Context>()
         assumeTrue(app.packageName.endsWith(".gate"))
         val f = Core.facade(app)
-        assertEquals(Pair(true, id), f.account())
+        assertEquals(AccountInfo(true, id), f.account())
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         fun start(type: Class<out android.app.Activity>, peer: String? = null): android.app.Activity =
             instrumentation.startActivitySync(Intent(app, type)
                 .putExtra("peer", peer).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         fun waitLabel(activity: android.app.Activity, viewId: Int, expected: String): String {
-            val deadline = System.nanoTime() + 10_000_000_000L
+            val deadline = System.nanoTime() + 30_000_000_000L
             var label = ""
             while (System.nanoTime() < deadline) {
                 instrumentation.runOnMainSync {
@@ -573,16 +859,15 @@ class DeviceGatesTest {
             } finally { instrumentation.runOnMainSync { activity.finish() } }
         }
         val before = f.contacts(null, 100).first.size
-        for (bad in listOf("garbage", "dmsg://contact/", "dmsg://join/broken", "dmsg://join/" + "x".repeat(9000))) {
+        for (bad in listOf("garbage", "dmsg://contact/", "dmsg://server/broken", "dmsg://server/" + "x".repeat(9000))) {
             scan(bad, "битый QR:")
         }
         assertEquals(before, f.contacts(null, 100).first.size)
-        assertEquals(Pair(true, id), f.account())
+        assertEquals(AccountInfo(true, id), f.account())
         scan(f.myQr(), "контакт: added")
         f.accept(id)
-        val changed = UniFfiFacade(seedLegacyDb("changed-ui.db", 9).absolutePath, ByteArray(32) { 4 })
+        val changed = UniFfiFacade(seedFixtureDb("changed-ui.db", 9).absolutePath, ByteArray(32) { 4 })
         scan(changed.myQr(), "identity_changed")
-        Prefs.setTransport(app, "127.0.0.1:1", "test.invalid", "00".repeat(32))
         fun sendAndExpect(expected: String) {
             val activity = start(ChatActivity::class.java, id)
             try {
@@ -596,7 +881,7 @@ class DeviceGatesTest {
                 }
             } finally { instrumentation.runOnMainSync { activity.finish() } }
         }
-        sendAndExpect("identity changed")
+        sendAndExpect("СТОП")
         assertTrue(f.outbox(0, 100).first.isEmpty())
         val profile = start(ProfileActivity::class.java)
         try {
@@ -612,12 +897,15 @@ class DeviceGatesTest {
             val label = waitLabel(profile, R.id.info, "identity_changed=false")
             assertFalse(label.contains("СТОП"))
         } finally { instrumentation.runOnMainSync { profile.finish() } }
-        sendAndExpect("connect")
+        sendAndExpect("Нет связи")
         assertTrue(f.outbox(0, 100).first.isEmpty())
     }
 
     private fun assertFailsWithMessage(needle: String, action: () -> Unit) {
         try { action(); fail("must fail closed") }
         catch (e: DmsgError) { assertTrue("unexpected error ${e.message}", e.message.orEmpty().contains(needle)) }
+    }
+    private fun assertFailsWithKind(kind: ErrorKind, action: () -> Unit) {
+        try { action(); fail("must fail closed") } catch (e: DmsgError) { assertEquals(kind, e.kind) }
     }
 }

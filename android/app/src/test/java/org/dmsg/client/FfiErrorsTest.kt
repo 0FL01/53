@@ -1,33 +1,32 @@
 package org.dmsg.client
 
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
+import org.junit.Assert.*
 import org.junit.Test
 import uniffi.dmsg_core.FfiException
 
 class FfiErrorsTest {
-    @Test fun payloadFreeErrorsAreExplicit() {
+    @Test fun accountErrorsAreTypedAndHumanReadable() {
         val errors = listOf(
-            FfiException.PinMismatch(), FfiException.NotEnrolled(),
-            FfiException.UnknownContact(), FfiException.NotAccepted(),
-            FfiException.Blocked(), FfiException.IdentityMismatch(),
-            FfiException.NothingToConfirm(), FfiException.MissingKeys(),
-            FfiException.NoPeerPrekeys(), FfiException.UploadRejected(),
-            FfiException.Quota(), FfiException.Revoked(), FfiException.BadToken(),
-            FfiException.Expired(), FfiException.BoundOther(), FfiException.Busy(),
-            FfiException.BadText()
+            FfiException.InvalidCredentials() to ErrorKind.InvalidCredentials,
+            FfiException.LoginTaken() to ErrorKind.LoginTaken,
+            FfiException.InviteRequired() to ErrorKind.InviteRequired,
+            FfiException.InviteExpired() to ErrorKind.InviteExpired,
+            FfiException.InviteRevoked() to ErrorKind.InviteRevoked,
+            FfiException.InviteUsed() to ErrorKind.InviteUsed,
+            FfiException.AuthRateLimited() to ErrorKind.AuthRateLimited,
+            FfiException.InvalidInput() to ErrorKind.InvalidInput
         )
-        assertTrue(errors.all { it.message == "" })
-        assertTrue(errors.all { ffiErrorMessage(it).isNotBlank() })
-        assertEquals(errors.size, errors.map(::ffiErrorMessage).distinct().size)
-        assertEquals("identity changed, sending stopped until confirm",
-            ffiErrorMessage(FfiException.IdentityMismatch()))
-        assertEquals("invite expired", ffiErrorMessage(FfiException.Expired()))
+        errors.forEach { (error, kind) ->
+            assertEquals(kind, ffiError(error).kind)
+            assertTrue(ffiErrorMessage(error).isNotBlank())
+        }
+        assertEquals(errors.size, errors.map { ffiErrorMessage(it.first) }.distinct().size)
+        assertTrue(ffiErrorMessage(FfiException.IdentityMismatch()).contains("СТОП"))
     }
-
-    @Test fun payloadErrorsKeepCategoryAndReason() {
-        assertEquals("transport: closed", ffiErrorMessage(FfiException.Transport("closed")))
-        assertEquals("bad qr: truncated", ffiErrorMessage(FfiException.BadQr("truncated")))
-        assertEquals("store: load olm", ffiErrorMessage(FfiException.Store("load olm")))
+    @Test fun nativeAndUnexpectedPayloadsNeverReachUi() {
+        val secret = "example-password-invitation"
+        for (e in listOf(FfiException.Transport(secret), FfiException.BadQr(secret), FfiException.Store(secret),
+            FfiException.Protocol(secret), FfiException.Server(secret))) assertFalse(ffiErrorMessage(e).contains(secret))
+        assertFalse(humanError(IllegalStateException(secret)).contains(secret))
     }
 }

@@ -1,21 +1,54 @@
 package org.dmsg.client
 
+import uniffi.dmsg_core.AccountInfo
+import uniffi.dmsg_core.LoginOutcome
+import uniffi.dmsg_core.RegistrationPolicy
+
 /** In-memory fake for JVM unit tests and UI previews (no native lib). */
 class FakeFacade : DmsgFacade {
-    var enrolled = false
+    var authenticated = false
     var myId: String? = null
+    var profile: DnsProfile? = null
+    var policy = RegistrationPolicy.INVITE_ONLY
+    var policyFailure: DmsgError? = null
+    var authFailure: DmsgError? = null
+    var stopCalls = 0
+    var previewCalls = 0
+    var signupCalls = 0
+    val loginCalls = mutableListOf<Pair<String, String?>>()
+    val outcomes = ArrayDeque<LoginOutcome>()
+    var signupProbe: (String, String, String?) -> Unit = { _, _, _ -> }
+    var loginProbe: (String, String, String?) -> Unit = { _, _, _ -> }
     val dialogs = mutableListOf<Dialog>()
     val messages = mutableListOf<Msg>()
     var lastSent: String? = null
 
     override fun isReady() = true
-    override fun account(): Pair<Boolean, String?> = Pair(enrolled, myId)
-    override fun preview(qr: String) = Pair("test.example", "ab".repeat(32))
-    override fun enrol(qr: String, addr: String, pinDer: ByteArray?): String {
-        enrolled = true
-        myId = "MOCK1234MOCK"
-        return myId!!
+    override fun dnsProfile() = profile
+    override fun configureDns(code: String, resolvers: List<String>) {
+        profile = DnsProfile("test.example", ByteArray(32), "ab".repeat(32), resolvers)
     }
+    override fun registrationPolicyDns(): RegistrationPolicy { policyFailure?.let { throw it }; return policy }
+    override fun signupDns(login: String, password: String, invitation: String?): AccountInfo {
+        signupCalls++
+        authFailure?.let { throw it }
+        signupProbe(login, password, invitation)
+        authenticated = true; myId = "MOCK1234MOCK"
+        return account()
+    }
+    override fun loginDns(login: String, password: String, expectedDevice: String?): LoginOutcome {
+        loginCalls.add(Pair(login, expectedDevice))
+        authFailure?.let { throw it }
+        loginProbe(login, password, expectedDevice)
+        val out = if (outcomes.isEmpty()) LoginOutcome.Authenticated("MOCK1234MOCK") else outcomes.removeFirst()
+        if (out is LoginOutcome.Authenticated) { authenticated = true; myId = out.contactId }
+        return out
+    }
+    override fun dnsNetworkChanged(resolvers: List<String>) {}
+    override fun dnsStop() { stopCalls++ }
+    override fun dnsStatus() = "stopped"
+    override fun account() = AccountInfo(authenticated, myId)
+    override fun profilePreview(code: String): Pair<String, String> { previewCalls++; return Pair("test.example", "ab".repeat(32)) }
     override fun myQr() = "dmsg://contact/MOCK"
     override fun addQr(uri: String) = "added"
     override fun request(id: String): String {
@@ -47,14 +80,14 @@ class FakeFacade : DmsgFacade {
         return Pair(page, page.lastOrNull()?.seq)
     }
     override fun outbox(cursor: Long, limit: Int) = Pair(emptyList<OutRow>(), null)
-    override fun send(addr: String, pub: ByteArray, domain: String, id: String, text: String): String {
+    override fun send(id: String, text: String): String {
         lastSent = text
         return "00".repeat(16)
     }
-    override fun retry(addr: String, pub: ByteArray, domain: String) = longArrayOf(0, 0, 0, 0)
-    override fun fetch(addr: String, pub: ByteArray, domain: String) =
+    override fun retry() = longArrayOf(0, 0, 0, 0)
+    override fun fetch() =
         FetchRes(emptyList(), longArrayOf(0, 0, 0, 0), 0)
-    override fun reconnect(addr: String, pub: ByteArray, domain: String) = 16L
+    override fun reconnect() = 16L
     override fun qrKind(uri: String) = QrGate.route(uri).getOrThrow()
     override fun storagePlan(hasLegacy: Boolean, hasWrapped: Boolean) =
         if (hasWrapped) "ready" else if (hasLegacy) "migrate" else "fresh"

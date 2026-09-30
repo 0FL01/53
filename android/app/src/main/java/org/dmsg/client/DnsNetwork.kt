@@ -21,7 +21,6 @@ internal object DnsNetwork {
 
     fun mirrorProfile(c: Context, f: DmsgFacade) {
         val p = f.dnsProfile() ?: throw DmsgError("DNS профиль не сохранён")
-        val hex = p.pub.joinToString("") { "%02x".format(it.toInt() and 255) }
-        Prefs.setTransport(c, "dns", p.domain, hex)
+        Prefs.mirrorDns(c, p)
     }
 }
