@@ -19,8 +19,10 @@ fn main() {
     );
     let target = env::var("TARGET").unwrap();
     assert!(
-        target == "x86_64-unknown-linux-gnu" || target == "aarch64-linux-android",
-        "supported targets: Linux x86_64 and Android arm64 API26+"
+        target == "x86_64-unknown-linux-gnu"
+            || target == "aarch64-linux-android"
+            || target == "x86_64-linux-android",
+        "supported targets: Linux x86_64 and Android arm64/x86_64 API26+"
     );
     let ssl = openssl_src::Build::new().build();
     let mut build = cmake::Config::new(package.join("native"));
@@ -43,7 +45,14 @@ fn main() {
                 "CMAKE_TOOLCHAIN_FILE",
                 ndk.join("build/cmake/android.toolchain.cmake"),
             )
-            .define("ANDROID_ABI", "arm64-v8a")
+            .define(
+                "ANDROID_ABI",
+                if target == "aarch64-linux-android" {
+                    "arm64-v8a"
+                } else {
+                    "x86_64"
+                },
+            )
             .define("ANDROID_PLATFORM", "android-26");
     }
     let artifacts = build.build();
