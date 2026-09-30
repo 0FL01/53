@@ -3,12 +3,28 @@
 R4 пока не закрыта. Ниже сохранены исходные ожидания и отдельно записаны
 измерения; сборка и instrumented doubles не подменяют аппаратные gates.
 
+## Актуальный вход в приложение (план, 2026-09-30)
+
+Один публичный код/QR подключения → проверенный сервер → «Войти» / «Создать аккаунт» с логином/паролем → диалоги. Код не содержит bearer или пароль. Приглашение отдельно требуется только для signup в `invite_only` (default), второй режим `open`; существующие пользователи входят в обоих. Ручные crypto-поля не входят в обычный onboarding. Direct invite-enrol больше не является целевым UX.
+
+Новые account-auth операции/UI **не реализованы**. Проверки прежнего ENROL ниже — историческое wire/device-auth evidence, не PASS нового login/register. Полный контракт и coding-план находятся в `2026-09-29-client-track.md` R12–R16. Дополнительная приёмка:
+
+| Auth gate | Ожидание |
+|---|---|
+| Код/QR подключения | Paste/scan выбирают один и тот же публичный профиль; offline import не создаёт аккаунт, malformed/oversized/pin mismatch отклонены до передачи credentials |
+| Signup policy | Open: логин/пароль; invite_only: дополнительный valid invitation. Policy enforced server-side, нельзя обойти legacy endpoint; существующий login работает в обоих режимах |
+| Login / restart | Понятные ошибки password/conflict/invite/network; после входа сохранённый device key авторизует restart/reconnect без пароля |
+| Existing account | Добавление credentials не меняет account/contact IDs, device/E2E keys, inbox/outbox; exact queued ciphertext сохранён |
+| Новый аппарат | Верные credentials + явное подтверждение; cancel без изменений; один active device, старый доступ отозван, peer identity-change STOP/confirm. Удалённая история не возвращается |
+
+Все auth gates — **PENDING**, измерять отдельно от существующих G1–G11; destructive тесты только на disposable `.gate`, основной аккаунт не очищать/не отзывать.
+
 ## Кодовое evidence (эта среда, 2026-09-30)
 
 - `cargo test --workspace`: core, protocol и server green. Core покрывает
   encrypted-open/migration, offline queue, повторный приём после reopening,
    persistent Noise static, load_olm и authenticated DNS profile/supervisor.
-   Текущий прогон: 129 tests passed, 0 failed (core45 unit+8 integration,
+   Прогон R7: 129 tests passed, 0 failed (core45 unit+8 integration,
    protocol23, server52, native lifecycle1). Native live loopback gate требует
    отдельного запуска; штатные C protocol/path/pin/runtime gates green.
 - `DMSG_GEN_BINDINGS=1 cargo test -p dmsg-core --test gen_bindings`:

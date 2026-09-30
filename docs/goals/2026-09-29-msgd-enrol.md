@@ -1,14 +1,16 @@
-# Goal: msgd P3 — invites + enrol поверх Noise
+# Архив: msgd P3 — legacy enrol wire evidence
 
 Status: complete
-Source: пользовательская инструкция + исправленный план аудита P3, ARCHITECTURE.md §4/§6, WORK_PLAN.md M2
-Last updated: 2026-09-29
+Source: историческая инструкция P3 и редакция ARCHITECTURE.md §4/§6 / WORK_PLAN.md M2 на 2026-09-29
+Last updated: 2026-09-30 (архивная пометка; evidence исходной реализации сохранено)
+
+> Исторический закрытый checkpoint legacy wire, не инструкция текущего пользовательского входа. Сценарий direct invite-enrol superseded решением 2026-09-30: публичный код/QR сервера → логин/пароль, invitation только для signup при invite_only. Действующие требования — `ARCHITECTURE.md` §6 и `2026-09-29-client-track.md` R12–R16. Результаты ниже сохраняются как evidence совместимости, не подтверждают новый account-auth.
 
 ## Objective
-Телефон регистрируется по одноразовому invite поверх Noise: атомарный bind token→key, идемпотентный replay, revoke закрывает streams; evidence (unit + probe + DNS) зелёные, деплой на n-de2, коммит создан.
+Зафиксированный результат P3: атомарный bind token→device key поверх Noise, идемпотентный replay и закрытие streams после revoke; unit/probe/DNS evidence, deploy и commit сохранены. Это история реализации совместимого wire, не действующий план onboarding.
 
 ## Execution Directive
-Complete the frozen Required Outcomes using the listed Change Envelope and Primary Evidence. Work on the smallest unresolved outcome. Do not add requirements from reviews, tests, tools, speculative risks, or optional source text. Finish when every required outcome is resolved and affected constraints remain satisfied.
+Не возобновлять закрытый P3 или прежний пользовательский сценарий по этому архиву. Новый account-auth определяется активной целью `2026-09-29-client-track.md` R12–R16; исходные результаты ниже не переписываются под новую реализацию.
 
 ## Frozen Contract
 
@@ -48,16 +50,14 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 - Forbidden: смена Noise/транспорта; token в логи; ban-логика; миграции схемы (JOIN вместо новых колонок)
 
 ## Current Checkpoint
-- Closes: R1
-- Smallest next action: opcode + bootstrap в protocol crate + docs/protocol.md
-- Expected evidence: cargo test -p dmsg-protocol
-- Stop or replan if: bootstrap с DER не влезает в кап — пересмотреть CAP (сейчас расчёт ~1.1 KiB против 4 KiB)
+- Closes: нет активной работы, архивный P3 complete
+- Smallest next action: отсутствует; текущие задачи account-auth только в активной цели R12–R16
 
 ## Current State
-- Resolved: аудит P3 завершён, 11 решений приняты
-- Last relevant evidence: синтез аудита m0332
+- Resolved: R1–R3 verified, см. Completion
+- Last relevant evidence: сохранённые unit/probe/DNS результаты P3
 - Blocker: нет
-- Next: R1
+- Next: нет; legacy wire остаётся совместимостью, не текущим UX
 
 ## Material Decisions
 - 2026-09-29: коды 1/2/3/4 distinct; диапазоны 1–15/16+; replay через JOIN; busy_timeout 5s; device_key из сессии; mount cert в msgd; diag-токен файлом; второй token → 4
