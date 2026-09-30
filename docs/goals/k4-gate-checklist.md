@@ -14,7 +14,7 @@ R4 пока не закрыта. Ниже сохранены исходные о
 | Код/QR подключения | Paste/scan выбирают один и тот же публичный профиль; offline import не создаёт аккаунт, malformed/oversized/pin mismatch отклонены до передачи credentials |
 | Signup policy | Open: логин/пароль; invite_only: дополнительный valid invitation. Policy enforced server-side, нельзя обойти legacy endpoint; существующий login работает в обоих режимах |
 | Login / restart | Понятные ошибки password/conflict/invite/network; после входа сохранённый device key авторизует restart/reconnect без пароля |
-| Existing account | Добавление credentials не меняет account/contact IDs, device/E2E keys, inbox/outbox; exact queued ciphertext сохранён |
+| Unified auth | ENROL/token-replay/credential attach отсутствуют; старые schema/wire явно отклоняются без мутации. Remote wipe позже отдельным шагом |
 | Новый аппарат | Верные credentials + явное подтверждение; cancel без изменений; один active device, старый доступ отозван, peer identity-change STOP/confirm. Удалённая история не возвращается |
 
 Все auth gates — **PENDING**, измерять отдельно от существующих G1–G11; destructive тесты только на disposable `.gate`, основной аккаунт не очищать/не отзывать.

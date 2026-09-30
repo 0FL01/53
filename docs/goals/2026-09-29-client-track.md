@@ -5,7 +5,7 @@ Source: пользовательские инструкции по клиент�
 Last updated: 2026-09-30
 
 ## Objective
-Живой DNS-клиент: один публичный код/QR подключения к серверу → логин/пароль → диалоги; регистрация открытая либо по приглашению, один активный аппарат, автоматический reconnect сохранённым ключом. Сохранить работающие Rust core/Olm/outbox/Kotlin/Keystore и прежние аккаунты, проверить против msgd на n-de2. Новый account-auth пока не реализован: этот checkpoint фиксирует план и заменяет старый пользовательский сценарий в документации.
+Живой DNS-клиент: один публичный код/QR подключения к серверу → логин/пароль → диалоги; регистрация открытая либо по приглашению, один активный аппарат, автоматический reconnect сохранённым ключом. Единая новая auth-логика без ENROL/token-replay, совместимости старого wire и переноса старых аккаунтов. Сохранить Native/Noise/Olm/outbox/Keystore гарантии. Remote-БД пользователь вайпнет позже: сейчас не стирать, не развёртывать несовместимую schema поверх работающих данных; проверить новую логику на свежих изолированных БД.
 
 ## Execution Directive
 Complete the frozen Required Outcomes using the listed Change Envelope and Primary Evidence. Work on the smallest unresolved outcome. Do not add requirements from reviews, tests, tools, speculative risks, or optional source text. Finish when every required outcome is resolved and affected constraints remain satisfied. Subagents (@general) execute phases iteratively; orchestrator verifies, deploys, tests, commits.
@@ -21,7 +21,7 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Evidence: 7 unit + 2 интеграционных OK; release 0 warning; lock только +dmsg-core; отклонения: send_replace, предсобранный msgd для харнеса
 - R2: K2 legacy enrol — историческое evidence, не текущий UX
   - Source: прежний K2; новая инструкция 2026-09-30 заменяет прямой вход по invite требованиями R12–R16
-  - Acceptance: прежний пользовательский сценарий исключён из действующего плана; trust/pin/device-key регрессии сохраняются для совместимости и новых auth-тестов
+  - Acceptance: прежний сценарий и его runtime-реализация удаляются; trust/pin/device-key регрессии переводятся на новый auth, без compatibility aliases/fallback
   - Primary evidence: прежние 4 enrol-теста; новая приёмка — R12–R16
   - Status: superseded
   - Evidence: happy/reconnect, wrong-pin, expired/revoked, wrong-noise-key были проверены. Это не реализация логина/пароля; текущий legacy wire отдельно описан в `docs/protocol.md`
@@ -87,8 +87,8 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Evidence: выбран и документирован UX; нынешний `dmsg://join` содержит bearer и не является новым публичным кодом
 - R13: аккаунты и два серверных режима регистрации
   - Source: утверждённый план, шаг 2; ARCH §4/§6
-  - Acceptance: уникальный в пределах сервера логин, Argon2id hash без plaintext password, bounded auth/ограничение попыток; persisted `open` / `invite_only` (default) с msgctl. Invite нужен только для нового аккаунта в invite_only; существующие входят в обоих режимах. Сервер проверяет политику, legacy endpoints не дают обход; создание/привязка/consumption invite атомарны и replay-safe
-  - Primary evidence: backend login/register/policy/TTL/revocation/race tests, backup/migration и deploy smoke
+  - Acceptance: уникальный в пределах сервера логин, Argon2id hash без plaintext password, bounded auth/ограничение попыток; persisted `open` / `invite_only` (default) с msgctl. Invite нужен только для нового аккаунта в invite_only; созданные по новой схеме пользователи входят в обоих режимах. ENROL/token auth отсутствуют; создание/привязка/consumption invite атомарны и replay-safe
+  - Primary evidence: backend login/register/policy/TTL/revocation/race tests, fresh-schema backup/restore; несовместимый старый schema/wire явно отклоняется
   - Status: pending
   - Evidence: в текущем backend нет password credentials и переключателя регистрации; новые команды/opcodes пока не назначены
 - R14: простой Android вход и запомненное устройство
@@ -97,21 +97,21 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Primary evidence: core auth integration + Android form/error/permission/restart gates на реальном DNS
   - Status: pending
   - Evidence: работающий transport/device auth остаётся основой; существующий Scanner enrol-код не считается новым login UI
-- R15: credentials для существующих аккаунтов без потери данных
-  - Source: утверждённый план, шаг 4
-  - Acceptance: текущий авторизованный аппарат добавляет логин/пароль без повторной регистрации и смены user_id/contact ID/device/E2E keys/истории/outbox; отсутствие credentials не создаёт новую identity. Старые аккаунты/доставка сохраняются, отозванный аппарат не может присвоить credentials
-  - Primary evidence: migration/reopen tests с существующей encrypted БД, проверка прежних IDs/keys/inbox и byte-identical outbox после добавления credentials
-  - Status: pending
-  - Evidence: реальные рабочие данные не очищать; новые auth-операции и миграция ещё не реализованы
+- R15: перенос старых аккаунтов исключён пользователем
+  - Source: новая инструкция «Выкинуть ... легаси логики ... на обратную совместимость похуй ... бд вайпнем потом на remote»
+  - Acceptance: нет credential-attach/legacy migrations/auth fallback; новая server/core schema только для новой логики. Старые БД отклоняются без мутации, remote wipe не выполняется этим шагом
+  - Primary evidence: отсутствие старых auth API и fail-closed schema tests
+  - Status: superseded
+  - Evidence: пользователь явно отменил compatibility/migration требование; рабочие remote/основной Android данные пока не стирать
 - R16: подтверждённая замена устройства после password login
   - Source: утверждённый план, шаг 5; ARCH §6, R11 loss policy
-  - Acceptance: успешная проверка credentials и явное подтверждение замены предшествуют revocation старого доступа. Отмена не меняет аккаунт. Прежние user/contact IDs, один active device, свежие локальные Noise/Olm keys, peer identity-change STOP/confirm; пароль не восстанавливает удалённые ключи/историю. Admin rebind — служебная операция, не обычный пользовательский вход
+  - Acceptance: успешная проверка credentials и явное подтверждение замены предшествуют revocation старого доступа. Отмена не меняет аккаунт. Прежние user/contact IDs нового аккаунта, один active device, свежие локальные Noise/Olm keys, peer identity-change STOP/confirm; пароль не восстанавливает удалённые ключи/историю. CAS защищает от concurrent replace; нет admin invite-rebind обхода password-login
   - Primary evidence: disposable-account login/confirm/cancel/concurrent-replace/old-access/peer-warning gates; запрет main clear-data/revoke
   - Status: pending
   - Evidence: atomic server rebind уже есть, password-authorized UX и полный peer gate пока отсутствуют
 
 ### Constraints
-- C1: Серверный трек не ломать (protocol обратно совместим; msgd untouched, кроме крайней нужды)
+- C1: Обратная совместимость auth/wire/schema отменена пользователем. Рабочий remote и основной Android package не мутировать/не стирать; несовместимый rollout только отдельным шагом после remote wipe
 - C2: Секреты только файлами 0600, не в Git/логи/argv (прецеденты сервера)
 - C3: Швы сейчас, мясо позже: Transport trait, пагинация как требование, Экономия флагом, contact-QR тем же конвертом
 - C4: ARCH выше любых предложений: только DNS-relay, без WebRTC P2P; E2E только vodozemac
@@ -119,33 +119,34 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 
 ### Non-goals
 - Общий storage-крейт (до реального дубля); адресная книга; prefix-search; группы/typing/link-preview; cloud-backup; автозагрузка; второй FGS-режим; SQLCipher; звонки в K1–K3
-- В auth-плане не добавлять общий секрет сервера, публичный поиск по логину, веб-админку, внешнюю авторизацию или дополнительные обязательные поля регистрации. В текущем docs-only checkpoint не менять runtime, schema, deployment или рабочую identity
+- В auth-плане не добавлять общий секрет сервера, публичный поиск по логину, веб-админку, внешнюю авторизацию или дополнительные обязательные поля регистрации. Не добавлять legacy compatibility/credential attach; remote wipe/deploy и reset основной identity сейчас вне шага
 
 ## Change Envelope
 - Target: crates/core (+ android/ в K4), protocol-дополнения при нужде
 - Expected paths: `crates/core/`, `crates/protocol/`, `android/`, `docs/goals/`
 - Approved plan expansion: `crates/slipstream-sys/` для C FFI/native build boundary; узкий tracked embedding/platform patch поверх `vendor/slipstream` pinned Git revision (не копия `.local/slipstream` и не rewrite DNS/QUIC/scheduler). Android build scripts/UI/profile/FGS/emulator tests; server enrol/auth tests + deploy только после backup, без public TCP/topology changes. Постоянный signing key только gitignored private files, не env/argv/logs.
-- R11 server rebind expansion реализована (`e3e8aa6`): local msgctl сохраняет account/contact ID, отзывает old device и не переносит историю. Для R16 переиспользовать эту семантику после password verification/confirmation; не выполнять rebind рабочего аккаунта ради теста.
-- R12–R16 auth expansion: versioned public profile/credential DTOs и совместимость в `crates/protocol/`; server credentials/policy/auth/msgctl/forward migration/tests в `crates/server/`; core account-auth/profile/migration/UniFFI в `crates/core/`; Android forms/import/errors/tests в `android/`, bindings только генерацией. Стандартная Argon2id библиотека допустима, собственная crypto/auth framework не нужна. Серверные изменения только после backup и с DNS smoke. Текущая инструкция: сохранить план и синхронизировать только ARCHITECTURE/WORK_PLAN/актуальные docs, затем commit; реализация не объявляется выполненной этим diff
+- R11 historical rebind (`e3e8aa6`) больше не сохраняется как runtime API: R16 реализует ту же one-active/no-history гарантию через проверенный password login и подтверждение, без invite-rebind. Не выполнять replacement рабочего аккаунта ради теста.
+- R12–R16 auth expansion: новый versioned public profile/auth wire в `crates/protocol/`; fresh credentials/policy/auth/msgctl schema/tests в `crates/server/`; core account-auth/profile/fresh schema/UniFFI в `crates/core/`; Android forms/import/errors/tests в `android/`, bindings только генерацией. Стандартная Argon2id библиотека допустима. Bounded peer-binding по известному user ID и FETCH sender_user необходимы для R16 STOP/confirm без потери сообщения. Legacy tests переводятся на новый auth, а не отключаются. Инструкция разрешает реализацию и итеративные коммиты; remote wipe отложен
 - R4/G3/G11 minimal server expansion: paired physical-phone retry exposed a stuck mailbox cursor after another recipient's global seq. Correct `crates/server/src/mbox.rs::ack` to advance over that recipient's delivered events (never over an undelivered event); add interleaved-recipient and replay tests. No schema/wire/deployment topology change. Core must check durable inbox dedup before advancing an Olm ratchet again.
 - R4 storage correction: additive encrypted-open API + standard AEAD for sensitive SQLite values; Android supplies a random local key sealed by Keystore/EncryptedFile. Legacy Rust open remains supported. No SQLCipher, key export, cloud recovery or new service. This is necessary because the current live DB is plaintext and seal/wipe can silently replace the identity with an empty DB.
 - Allowed: rusqlite/tokio/snow reuse; vodozemac (K3); uniffi (K4)
-- Forbidden: правки msgd без блокера; Matrix SDK; WebRTC-стек; копипаста diag-main вместо библиотечной функции
+- Forbidden: remote wipe/несовместимый deploy сейчас; Matrix SDK; WebRTC-стек; копипаста diag-main вместо библиотечной функции; чтение/правки `53-opendesign/`
 
 ## Current Checkpoint
-- Closes: фиксация выбранного account-auth плана и замена старого UX в актуальной документации; R12–R16 implementation pending
-- Smallest next action: commit проверенного docs-only checkpoint и завершить эту инструкцию; последующая coding-итерация R12/R13 отдельна, реализацию/deploy сейчас не запускать
-- Expected evidence: единый сценарий в GOAL/ARCH/WORK_PLAN, implemented wire явно отделён от target, никакого bearer в публичном profile-коде и никаких ложных PASS
+- Closes: R12/R13 — новый public profile/wire, затем server; R15 superseded
+- Smallest next action: commit уточнённого плана, bounded profile/auth wire с test vectors; параллельно server и core consumers, затем Android и end-to-end gates
+- Expected evidence: target Rust tests, workspace green, generated bindings, native/JVM/APK builds; fresh isolated account auth/replace/peer STOP+confirm, старые версии отвергнуты без мутации
 - Replan if: Wi-Fi ADB would be disconnected by a test; use an isolated fixture instead, not blind radio toggles. Do not clear/uninstall основной package or claim an emulator is a second physical phone
 
 ## Current State
 - Resolved: R1/R3/R5–R7 verified; R2 пользовательский UX superseded R12–R16, исторические regression results сохранены отдельно
 - Last relevant evidence: standalone Android native recursive DNS works; moto↔native peer E2E in both directions, offline queue after real process death byte-identical and no duplicates. No USB/SSH bridge. Actual new enrol isolated `.gate` succeeded; основной identity unchanged. Current Rust146/server69 tests green; prior JVM13 evidence unchanged, release rebuild green. Schema4 deployed with backup and DNS smoke, same phone process resumed polls
 - External state not yet obtained: второй physical Android и no-GMS handset; optical positioning not proved. API36/37-16KB official images now installed, runtime tests still pending. G8 loss policy approved, no key export
-- Remaining software/check gap: новый публичный profile/login/register/policy/migration/replace UX (R12–R16); background DNS metrics/timeout, restricted-egress/compatibility runtime и permanent pilot signing остаются незакрыты. Server rebind не закрывает новый пользовательский вход
-- Next: после docs checkpoint следующая реализация — bounded public-profile/account-auth wire и backend (R12/R13), затем core/UI/migration/replace. Сейчас runtime не менять. Wi-Fi ADB — единственный control channel; `53-opendesign/` и чужие изменения не трогать. Уже выполненные DNS/deploy проверки не являются тестами логина/пароля
+- Remaining software/check gap: public profile/login/register/policy/confirmed replace (R12–R14/R16); перенос legacy аккаунтов отменён. Старые R8–R11 аппаратные gates не расширяют текущую auth-итерацию
+- Next: исполнить план ниже и коммитить проверенные фазы. Remote schema4 остаётся до отдельного wipe/rollout; основной Android не очищать. Wi-Fi ADB — единственный control channel, не отключать; прежние DNS/deploy проверки не являются новыми auth gates
 
 ## Material Decisions
+- 2026-09-30: пользователь потребовал копию RECON-плана и итеративную реализацию/коммиты, отменил legacy/обратную совместимость и перенос старых аккаунтов. Единая новая схема/wire; ENROL, token-replay и admin invite-rebind удаляются, R15 superseded. «БД вайпнем потом на remote» трактуется как запрет wipe/несовместимого deploy сейчас; свежие изолированные БД для тестов, основной package не трогать
 - 2026-09-30: пользователь «Берём этот вариант … один готовый код/QR … Делай копию плана в цель … прошлый способ авторизации … выкинуть … из документации … потом коммит». Публичный код подключения + логин/пароль принят; приглашение лишь условие signup при invite_only. Это supersedes direct invite-enrol как UX, не удаляет криптографические гарантии/историческое evidence и не выдаёт план за готовый auth-код. Текущий шаг — только документация и commit
 - 2026-09-30: пользователь «как заокнчиш текущий шаг, делай коммит и пауза, я хочу подумать» — finish current server rebind iteration, commit intended edits, pause without starting another stage. This is a user-requested pause, not full completion or an external blocker.
 - 2026-09-29: пользователь «Делай копию плана в цель и итеративное реализовать и коммит всех правок» утвердил DNS-план (`b784328`), включая исправление G8: same-install restore с ключом, явная потеря после Clear data/uninstall; без key export/cloud/history transfer. Новая авторизация supersedes только старый пользовательский вход; DNS/security/runtime требования и loss policy сохраняются.
@@ -189,28 +190,28 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 
 Приглашение — дополнительное разрешение на регистрацию, не основной код подключения и не единственный способ входа. Политика проверяется сервером; выключение открытой регистрации не блокирует уже существующие аккаунты. Публичный login directory не нужен, контактный ID остаётся прежним.
 
-### 1. Зафиксировать простой сценарий входа (R12)
+### 1. Публичный профиль и единый новый wire (R12)
 
-Один экран подключения, затем два понятных действия. Новый публичный profile format/version и bounded parser, offline preview и live carrier/Noise pinning. Paste и camera QR дают одинаковый результат; импорт не создаёт аккаунт. Старый `dmsg://join` с bearer не выдаётся за публичный server-код. Точный формат и opcode назначить при реализации с совместимыми test vectors, не придумывать работающие команды в документации заранее.
+Один экран подключения, затем два понятных действия. `dmsg://server/` profile v1: domain/full DER/Noise pub, bounded 4 KiB и offline preview. Wire v2: policy/signup/login/key-resume/authenticated/replace-required; wire v1 и `dmsg://join` отвергаются, никаких aliases/fallback. Credentials bounded, canonical ASCII login, пароль не нормализуется. Fresh schema отвергает старую версию без мутации. Paste/scan одного кода; импорт не создаёт аккаунт.
 
 ### 2. Добавить серверные аккаунты и режимы регистрации (R13)
 
-Уникальный логин внутри сервера, Argon2id hash, два сохраняемых режима и управление через существующий msgctl. Ограничить попытки входа/регистрации, валидировать bounded запросы. Registration/device bind и consumption invite атомарны, повтор после потери ответа не создаёт второй аккаунт. Неверный пароль, занятый логин, missing/expired/revoked/used invite и concurrent signup — целевые тесты. Все действия идут через DNS внутри проверенного Noise-канала; пароль не хранить plaintext и не использовать как E2E key.
+Fresh users с уникальным login/Argon2id hash, persisted open/invite_only default, msgctl public-code/policy/secret signup invite. Нет ENROL/token login/rebind invite. Argon вне DB mutex/Tokio executor, bounded slots и attempts. Signup+device bind+invite consumption атомарны; same-device retry после потери ответа возвращает тот же account. Wrong-password/conflict/TTL/revoked/used/races/backup-restore tests. Resume только активным Noise key, без пароля/токена.
 
-### 3. Подключить account-auth к Rust core и Android (R14)
+### 3. Rust core / UniFFI (R14)
 
-Формы «Войти»/«Создать аккаунт», условное поле приглашения и человеческие ошибки: «неверный логин или пароль», «логин занят», «нужно приглашение», «нет связи». После первого входа аппарат запоминается и открывает диалоги при restart; пароль на каждый reconnect не нужен. Сохраняем существующие Native/Noise/Olm/Keystore/outbox, не переписываем транспорт или шифрование ради новых форм.
+Стабильный pending Noise key сохранён до отправки signup/login; accepted account записывается атомарно, password не сохраняется. Policy/auth operations только после pinned handshake; resume key-only при restart/poll/send/fetch. Нет core token/enrol/profile fallback и credential attach. Typed safe errors, bindings сгенерировать host cdylib. Existing Olm/outbox transactions и pin validation сохранить; тесты fixture перевести на новый auth.
 
-### 4. Добавить credentials существующим аккаунтам (R15)
+### 4. Android onboarding (R12/R14; R15 исключён)
 
-С текущего авторизованного аппарата добавить логин/пароль без повторной регистрации. Проверить сохранность account/contact IDs, device/E2E keys, encrypted inbox и exact outbox ciphertext. Отсутствие credentials в старой БД не означает потерю identity; рабочие данные не стирать. Не дать revoked или чужому устройству назначить credentials.
+State: нет profile → вставка/scan; profile без account → login/signup с invite только в invite_only; account → диалоги. Policy получить коротким запросом, не держать pre-auth socket пока пользователь заполняет форму. Import и password поля не сохранять в Android saved state/logs; DNS-only facade/service без DirectTCP fallback. Формы/error/camera-denied/paste/restart проверить на disposable `.gate`, не переустанавливать основной package.
 
 ### 5. Проверить замену устройства после входа (R16)
 
-Логин/пароль подтверждают аккаунт, не восстанавливают удалённую историю. Перед заменой показать: «Заменить прежнее устройство? Оно потеряет доступ. Старая история на новом устройстве недоступна». При отмене ничего не менять; после подтверждения старый доступ отозван, новый device/E2E key свежий, account/contact IDs прежние, active device ровно один. Контакты видят смену identity и явно подтверждают её. Переиспользовать уже реализованную atomic rebind семантику; admin msgctl остаётся служебным путём.
+Login на новом key возвращает replace-required с текущим key после проверки credentials, без мутации. После UI confirm второй login с expected-old-key: atomic CAS, revoke/close old sessions, cursor skips старую историю, user/contact IDs прежние; concurrent loser требует нового подтверждения. Cancel не меняет server account. Fresh Noise/Olm, bounded binding по известному user ID; peers видят смену и STOP до confirm, pending сообщение до confirm не ACK/discard. После confirm доставка/ответ без дублей и exact-ciphertext retry. Нет admin password-bypass rebind.
 
 ### Проверки, коммиты и остальные ворота
 
-Каждая coding-итерация — отдельные целевые tests и commit; серверные изменения — backup, migration/deploy, DNS smoke. Не сохранять реальные passwords/invites/domains в Git/argv/logs; не менять основной package/identity ради destructive gates. Этот docs checkpoint не запускает реализацию автоматически.
+Каждая coding-итерация — целевые tests и commit; финально msgd build/workspace tests, generated bindings, clean native arm64, JVM/debug/release builds. Новые account/DNS gates на свежих disposable fixtures, не выдавать host/DirectTCP за физический recursive DNS. Remote wipe/rollout только позже отдельным шагом с backup и DNS smoke; до него не менять remote data/schema/services. Не сохранять реальные passwords/invites/domains в Git/argv/logs; не менять основной package/identity ради destructive gates.
 
 Проверенный самостоятельный DNS transport (R6/R7), encrypted store, E2E/очередь и реальный обмен phone↔native peer остаются основой. После auth-итераций остаются прежние незакрытые R8–R11: два физических Android, restricted DNS egress, mobile/Wi-Fi, >30 мин DNS screen-off/Doze/оба режима/query/battery/PSS, timeout, AOSP/no-GMS и API36/37-16KB runtime, physical optical QR и постоянный release signing. Исторический TCP 32:21 и image metadata не подменяют их. Политика same-install restore с исходным Keystore и явной loss после reset сохраняется; пароль не возвращает утраченную историю, key export/history transfer в v1 не добавляются. Voice notes/files/calls не ставить впереди text/auth path.
