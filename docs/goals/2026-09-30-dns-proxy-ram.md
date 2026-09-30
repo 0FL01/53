@@ -1,6 +1,6 @@
 # Goal: убрать UDP docker-proxy из внешнего DNS-пути dmsg53
 
-Status: active
+Status: complete
 Source: инструкция пользователя «Переходи к реализации плана, жду результат, потом коммит и пояснение»; исправленный план аудита RAM-инцидента.
 Last updated: 2026-09-30
 
@@ -33,8 +33,8 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Source: текущая инструкция пользователя.
   - Acceptance: intended deployment/docs diff проверен и закоммичен; итог содержит реально выполненные проверки.
   - Primary evidence: git diff/status/log и итоговый ответ.
-  - Status: in_progress
-  - Evidence:
+  - Status: verified
+  - Evidence: `426cd74 fix(deploy): bypass UDP docker-proxy for external DNS`; inspected intended diff/status/log и diff --check PASS. Только пять deployment/docs файлов; actual addresses/secrets и чужой `53-opendesign/` не включены. Результат и объяснение маршрута зафиксированы ниже и в docs/deploy.md.
 
 ## Constraints / non-goals
 - Bridge/shared namespace/non-root5353/backend127.0.0.1:7000 сохраняются. Секреты только ro-files, данные в прежних volumes.
@@ -49,9 +49,7 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 - Не менять runtime код приложения/сервера/transport и зависимости.
 
 ## Current Checkpoint
-- Closes: R4.
-- Next: commit проверенного intended diff и запись closure.
-- Replan if: failed recursive delivery или proxy sockets растут; использовать endpoint rollback, не расширять firewall.
+- Нет: frozen objective complete, дальнейшая реализация не требуется.
 
 ## Material Decisions
 - Proxy process/published port остаются для редких host-local OUTPUT probes; приёмка — внешний hot path без proxy.
@@ -68,4 +66,8 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 - 14:52:43–14:54:43+02: post-recreate background FGS verification PASS: proxy RSS6424 KiB/FD7/socket1, available73.60–74.72%, external Q/R16764/16764; bridge capture1680/1680 sources/replies. APK lastUpdateTime прежний; FGS работает в background.
 
 ## Completion
-- R1–R3 verified; осталось зафиксировать проверенный diff в Git и закрыть R4.
+- R1–R4 verified; closure сверяет evidence и change envelope, известных diff-created blockers нет.
+- Исправление: kernel DNAT устраняет per-peer userspace allocation на внешнем DNS-пути; proxy retained только для host-local OUTPUT. Нагрузка DNS не объявляется уменьшенной.
+- Проверки: `cargo build -p msgd && cargo test --workspace`; local/remote Compose config; nft syntax + persistent reload; selected manual Android gates + native recursive DNS peer; timed idle/load/quiet/repeat и post-recreate samples — PASS.
+- Ограничения соблюдены: runtime/APK/QUIC не менялись, identity/Keystore/volumes/keys сохранены, backend loopback и non-root/ro secrets прежние. Host reboot не выполнялся; moto↔Linux не выдаётся за gate двух Android.
+- Implementation commit: `426cd74`; финальное закрытие этого документа — отдельный docs commit. Final status: complete.
