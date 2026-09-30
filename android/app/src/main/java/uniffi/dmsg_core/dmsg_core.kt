@@ -774,10 +774,6 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
-
-
-
-
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is
 // rather `InterfaceTooLargeException`, caused by too many methods
@@ -823,33 +819,29 @@ fun uniffi_dmsg_core_checksum_method_dmsgclient_dns_profile_info(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_dns_status(
 ): Short
-fun uniffi_dmsg_core_checksum_method_dmsgclient_enrol_dns(
-): Short
-fun uniffi_dmsg_core_checksum_method_dmsgclient_enrol_from_qr(
-): Short
-fun uniffi_dmsg_core_checksum_method_dmsgclient_enrol_preview(
-): Short
-fun uniffi_dmsg_core_checksum_method_dmsgclient_fetch(
+fun uniffi_dmsg_core_checksum_method_dmsgclient_dns_stop(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_fetch_dns(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_inbox_page(
 ): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_login_dns(
+): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_my_contact_qr(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_outbox_page(
 ): Short
-fun uniffi_dmsg_core_checksum_method_dmsgclient_reconnect(
+fun uniffi_dmsg_core_checksum_method_dmsgclient_profile_preview(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_reconnect_dns(
 ): Short
-fun uniffi_dmsg_core_checksum_method_dmsgclient_retry_dns(
+fun uniffi_dmsg_core_checksum_method_dmsgclient_registration_policy_dns(
 ): Short
-fun uniffi_dmsg_core_checksum_method_dmsgclient_retry_queued(
+fun uniffi_dmsg_core_checksum_method_dmsgclient_retry_dns(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_send_dns(
 ): Short
-fun uniffi_dmsg_core_checksum_method_dmsgclient_send_text(
+fun uniffi_dmsg_core_checksum_method_dmsgclient_signup_dns(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_stop_dns(
 ): Short
@@ -938,33 +930,29 @@ fun uniffi_dmsg_core_fn_method_dmsgclient_dns_profile_info(`ptr`: Pointer,uniffi
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_dns_status(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
-fun uniffi_dmsg_core_fn_method_dmsgclient_enrol_dns(`ptr`: Pointer,`qr`: RustBuffer.ByValue,`resolvers`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
-): RustBuffer.ByValue
-fun uniffi_dmsg_core_fn_method_dmsgclient_enrol_from_qr(`ptr`: Pointer,`qr`: RustBuffer.ByValue,`addr`: RustBuffer.ByValue,`expectedPinDer`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
-): RustBuffer.ByValue
-fun uniffi_dmsg_core_fn_method_dmsgclient_enrol_preview(`ptr`: Pointer,`qr`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
-): RustBuffer.ByValue
-fun uniffi_dmsg_core_fn_method_dmsgclient_fetch(`ptr`: Pointer,`addr`: RustBuffer.ByValue,`serverPub`: RustBuffer.ByValue,`domain`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
-): RustBuffer.ByValue
+fun uniffi_dmsg_core_fn_method_dmsgclient_dns_stop(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
+): Unit
 fun uniffi_dmsg_core_fn_method_dmsgclient_fetch_dns(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_inbox_page(`ptr`: Pointer,`cursor`: Long,`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+fun uniffi_dmsg_core_fn_method_dmsgclient_login_dns(`ptr`: Pointer,`login`: RustBuffer.ByValue,`password`: RustBuffer.ByValue,`expectedDevice`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_my_contact_qr(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_outbox_page(`ptr`: Pointer,`cursor`: Long,`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
-fun uniffi_dmsg_core_fn_method_dmsgclient_reconnect(`ptr`: Pointer,`addr`: RustBuffer.ByValue,`serverPub`: RustBuffer.ByValue,`domain`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
-): Int
+fun uniffi_dmsg_core_fn_method_dmsgclient_profile_preview(`ptr`: Pointer,`qr`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_reconnect_dns(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
 ): Int
-fun uniffi_dmsg_core_fn_method_dmsgclient_retry_dns(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
+fun uniffi_dmsg_core_fn_method_dmsgclient_registration_policy_dns(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
-fun uniffi_dmsg_core_fn_method_dmsgclient_retry_queued(`ptr`: Pointer,`addr`: RustBuffer.ByValue,`serverPub`: RustBuffer.ByValue,`domain`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+fun uniffi_dmsg_core_fn_method_dmsgclient_retry_dns(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_send_dns(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,`text`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
-fun uniffi_dmsg_core_fn_method_dmsgclient_send_text(`ptr`: Pointer,`addr`: RustBuffer.ByValue,`serverPub`: RustBuffer.ByValue,`domain`: RustBuffer.ByValue,`contactId`: RustBuffer.ByValue,`text`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+fun uniffi_dmsg_core_fn_method_dmsgclient_signup_dns(`ptr`: Pointer,`login`: RustBuffer.ByValue,`password`: RustBuffer.ByValue,`invitation`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_stop_dns(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
 ): Unit
@@ -1106,10 +1094,10 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_dmsg_core_checksum_func_qr_kind() != 17251.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_dmsg_core_checksum_func_storage_plan() != 16317.toShort()) {
+    if (lib.uniffi_dmsg_core_checksum_func_storage_plan() != 1427.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_account_info() != 21506.toShort()) {
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_account_info() != 20705.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_add_contact_qr() != 40071.toShort()) {
@@ -1145,16 +1133,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_dns_status() != 21251.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_enrol_dns() != 2142.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_enrol_from_qr() != 50037.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_enrol_preview() != 40134.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_fetch() != 59105.toShort()) {
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_dns_stop() != 59695.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_fetch_dns() != 21412.toShort()) {
@@ -1163,28 +1142,31 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_inbox_page() != 13764.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_my_contact_qr() != 56100.toShort()) {
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_login_dns() != 16754.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_my_contact_qr() != 65076.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_outbox_page() != 58697.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_reconnect() != 582.toShort()) {
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_profile_preview() != 65288.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_reconnect_dns() != 35785.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_retry_dns() != 46819.toShort()) {
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_registration_policy_dns() != 63052.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_retry_queued() != 42401.toShort()) {
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_retry_dns() != 46819.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_send_dns() != 10275.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_send_text() != 17569.toShort()) {
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_signup_dns() != 8953.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_stop_dns() != 16687.toShort()) {
@@ -1612,7 +1594,7 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
 public interface DmsgClientInterface {
 
     /**
-     * Учётка: enrolled + свой contact_id (None — свежая установка).
+     * Authenticated account and own contact ID (None on fresh install).
      */
     fun `accountInfo`(): AccountInfo
 
@@ -1665,23 +1647,7 @@ public interface DmsgClientInterface {
 
     fun `dnsStatus`(): kotlin.String
 
-    fun `enrolDns`(`qr`: kotlin.String, `resolvers`: List<kotlin.String>): EnrolledInfo
-
-    /**
-     * Полный enrol из QR (сеть). pin_der — ожидаемый DER для сверки
-     * (None — доверие сканированному QR как корню, см. enrol.rs).
-     */
-    fun `enrolFromQr`(`qr`: kotlin.String, `addr`: kotlin.String, `expectedPinDer`: kotlin.ByteArray?): EnrolledInfo
-
-    /**
-     * Офлайн-предпросмотр invite: domain + pin-fingerprint, без сети.
-     */
-    fun `enrolPreview`(`qr`: kotlin.String): Preview
-
-    /**
-     * Приём пачки: FETCH → decrypt → inbox → ACK (событие для FGS/нотификаций).
-     */
-    fun `fetch`(`addr`: kotlin.String, `serverPub`: kotlin.ByteArray, `domain`: kotlin.String): FetchReport
+    fun `dnsStop`()
 
     fun `fetchDns`(): FetchReport
 
@@ -1690,8 +1656,10 @@ public interface DmsgClientInterface {
      */
     fun `inboxPage`(`cursor`: kotlin.Long, `limit`: kotlin.UInt): InboxPage
 
+    fun `loginDns`(`login`: kotlin.String, `password`: kotlin.String, `expectedDevice`: kotlin.String?): LoginOutcome
+
     /**
-     * Свой contact-QR для показа (требует enrol).
+     * Own contact QR, available only after authentication.
      */
     fun `myContactQr`(): kotlin.String
 
@@ -1701,26 +1669,19 @@ public interface DmsgClientInterface {
     fun `outboxPage`(`cursor`: kotlin.Long, `limit`: kotlin.UInt): OutboxPage
 
     /**
-     * Побудка после переподключения FGS: login + refill (возвращает запас).
+     * Offline public-profile preview: domain + pin fingerprint, without secrets/network.
      */
-    fun `reconnect`(`addr`: kotlin.String, `serverPub`: kotlin.ByteArray, `domain`: kotlin.String): kotlin.UInt
+    fun `profilePreview`(`qr`: kotlin.String): Preview
 
     fun `reconnectDns`(): kotlin.UInt
 
-    fun `retryDns`(): RetryReport
+    fun `registrationPolicyDns`(): RegistrationPolicy
 
-    /**
-     * Ретрай недоставленного тем же ciphertext (пачками, прогресс в DB).
-     */
-    fun `retryQueued`(`addr`: kotlin.String, `serverPub`: kotlin.ByteArray, `domain`: kotlin.String): RetryReport
+    fun `retryDns`(): RetryReport
 
     fun `sendDns`(`contactId`: kotlin.String, `text`: kotlin.String): kotlin.String
 
-    /**
-     * Отправить текст (login + refill + claim + одна TX + SEND). Возвращает
-     * message_id hex. Блокирующий вызов для FGS/композера.
-     */
-    fun `sendText`(`addr`: kotlin.String, `serverPub`: kotlin.ByteArray, `domain`: kotlin.String, `contactId`: kotlin.String, `text`: kotlin.String): kotlin.String
+    fun `signupDns`(`login`: kotlin.String, `password`: kotlin.String, `invitation`: kotlin.String?): AccountInfo
 
     /**
      * No SQLite access: cancellation can race a blocked connect/fetch.
@@ -1817,7 +1778,7 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
 
 
     /**
-     * Учётка: enrolled + свой contact_id (None — свежая установка).
+     * Authenticated account and own contact ID (None on fresh install).
      */
     @Throws(FfiException::class)override fun `accountInfo`(): AccountInfo {
             return FfiConverterTypeAccountInfo.lift(
@@ -1997,65 +1958,15 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
 
 
 
-    @Throws(FfiException::class)override fun `enrolDns`(`qr`: kotlin.String, `resolvers`: List<kotlin.String>): EnrolledInfo {
-            return FfiConverterTypeEnrolledInfo.lift(
+    @Throws(FfiException::class)override fun `dnsStop`()
+        =
     callWithPointer {
     uniffiRustCallWithError(FfiException) { _status ->
-    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_enrol_dns(
-        it, FfiConverterString.lower(`qr`),FfiConverterSequenceString.lower(`resolvers`),_status)
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_dns_stop(
+        it, _status)
 }
     }
-    )
-    }
 
-
-
-    /**
-     * Полный enrol из QR (сеть). pin_der — ожидаемый DER для сверки
-     * (None — доверие сканированному QR как корню, см. enrol.rs).
-     */
-    @Throws(FfiException::class)override fun `enrolFromQr`(`qr`: kotlin.String, `addr`: kotlin.String, `expectedPinDer`: kotlin.ByteArray?): EnrolledInfo {
-            return FfiConverterTypeEnrolledInfo.lift(
-    callWithPointer {
-    uniffiRustCallWithError(FfiException) { _status ->
-    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_enrol_from_qr(
-        it, FfiConverterString.lower(`qr`),FfiConverterString.lower(`addr`),FfiConverterOptionalByteArray.lower(`expectedPinDer`),_status)
-}
-    }
-    )
-    }
-
-
-
-    /**
-     * Офлайн-предпросмотр invite: domain + pin-fingerprint, без сети.
-     */
-    @Throws(FfiException::class)override fun `enrolPreview`(`qr`: kotlin.String): Preview {
-            return FfiConverterTypePreview.lift(
-    callWithPointer {
-    uniffiRustCallWithError(FfiException) { _status ->
-    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_enrol_preview(
-        it, FfiConverterString.lower(`qr`),_status)
-}
-    }
-    )
-    }
-
-
-
-    /**
-     * Приём пачки: FETCH → decrypt → inbox → ACK (событие для FGS/нотификаций).
-     */
-    @Throws(FfiException::class)override fun `fetch`(`addr`: kotlin.String, `serverPub`: kotlin.ByteArray, `domain`: kotlin.String): FetchReport {
-            return FfiConverterTypeFetchReport.lift(
-    callWithPointer {
-    uniffiRustCallWithError(FfiException) { _status ->
-    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_fetch(
-        it, FfiConverterString.lower(`addr`),FfiConverterByteArray.lower(`serverPub`),FfiConverterString.lower(`domain`),_status)
-}
-    }
-    )
-    }
 
 
 
@@ -2088,8 +1999,21 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
 
 
 
+    @Throws(FfiException::class)override fun `loginDns`(`login`: kotlin.String, `password`: kotlin.String, `expectedDevice`: kotlin.String?): LoginOutcome {
+            return FfiConverterTypeLoginOutcome.lift(
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_login_dns(
+        it, FfiConverterString.lower(`login`),FfiConverterString.lower(`password`),FfiConverterOptionalString.lower(`expectedDevice`),_status)
+}
+    }
+    )
+    }
+
+
+
     /**
-     * Свой contact-QR для показа (требует enrol).
+     * Own contact QR, available only after authentication.
      */
     @Throws(FfiException::class)override fun `myContactQr`(): kotlin.String {
             return FfiConverterString.lift(
@@ -2121,14 +2045,14 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
 
 
     /**
-     * Побудка после переподключения FGS: login + refill (возвращает запас).
+     * Offline public-profile preview: domain + pin fingerprint, without secrets/network.
      */
-    @Throws(FfiException::class)override fun `reconnect`(`addr`: kotlin.String, `serverPub`: kotlin.ByteArray, `domain`: kotlin.String): kotlin.UInt {
-            return FfiConverterUInt.lift(
+    @Throws(FfiException::class)override fun `profilePreview`(`qr`: kotlin.String): Preview {
+            return FfiConverterTypePreview.lift(
     callWithPointer {
     uniffiRustCallWithError(FfiException) { _status ->
-    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_reconnect(
-        it, FfiConverterString.lower(`addr`),FfiConverterByteArray.lower(`serverPub`),FfiConverterString.lower(`domain`),_status)
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_profile_preview(
+        it, FfiConverterString.lower(`qr`),_status)
 }
     }
     )
@@ -2141,6 +2065,19 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
     callWithPointer {
     uniffiRustCallWithError(FfiException) { _status ->
     UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_reconnect_dns(
+        it, _status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(FfiException::class)override fun `registrationPolicyDns`(): RegistrationPolicy {
+            return FfiConverterTypeRegistrationPolicy.lift(
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_registration_policy_dns(
         it, _status)
 }
     }
@@ -2162,22 +2099,6 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
 
 
 
-    /**
-     * Ретрай недоставленного тем же ciphertext (пачками, прогресс в DB).
-     */
-    @Throws(FfiException::class)override fun `retryQueued`(`addr`: kotlin.String, `serverPub`: kotlin.ByteArray, `domain`: kotlin.String): RetryReport {
-            return FfiConverterTypeRetryReport.lift(
-    callWithPointer {
-    uniffiRustCallWithError(FfiException) { _status ->
-    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_retry_queued(
-        it, FfiConverterString.lower(`addr`),FfiConverterByteArray.lower(`serverPub`),FfiConverterString.lower(`domain`),_status)
-}
-    }
-    )
-    }
-
-
-
     @Throws(FfiException::class)override fun `sendDns`(`contactId`: kotlin.String, `text`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
     callWithPointer {
@@ -2191,16 +2112,12 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
 
 
 
-    /**
-     * Отправить текст (login + refill + claim + одна TX + SEND). Возвращает
-     * message_id hex. Блокирующий вызов для FGS/композера.
-     */
-    @Throws(FfiException::class)override fun `sendText`(`addr`: kotlin.String, `serverPub`: kotlin.ByteArray, `domain`: kotlin.String, `contactId`: kotlin.String, `text`: kotlin.String): kotlin.String {
-            return FfiConverterString.lift(
+    @Throws(FfiException::class)override fun `signupDns`(`login`: kotlin.String, `password`: kotlin.String, `invitation`: kotlin.String?): AccountInfo {
+            return FfiConverterTypeAccountInfo.lift(
     callWithPointer {
     uniffiRustCallWithError(FfiException) { _status ->
-    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_send_text(
-        it, FfiConverterString.lower(`addr`),FfiConverterByteArray.lower(`serverPub`),FfiConverterString.lower(`domain`),FfiConverterString.lower(`contactId`),FfiConverterString.lower(`text`),_status)
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_signup_dns(
+        it, FfiConverterString.lower(`login`),FfiConverterString.lower(`password`),FfiConverterOptionalString.lower(`invitation`),_status)
 }
     }
     )
@@ -2293,7 +2210,7 @@ public object FfiConverterTypeDmsgClient: FfiConverter<DmsgClient, Pointer> {
  * Состояние учётки для UI.
  */
 data class AccountInfo (
-    var `enrolled`: kotlin.Boolean,
+    var `authenticated`: kotlin.Boolean,
     var `contactId`: kotlin.String?
 ) {
 
@@ -2312,12 +2229,12 @@ public object FfiConverterTypeAccountInfo: FfiConverterRustBuffer<AccountInfo> {
     }
 
     override fun allocationSize(value: AccountInfo) = (
-            FfiConverterBoolean.allocationSize(value.`enrolled`) +
+            FfiConverterBoolean.allocationSize(value.`authenticated`) +
             FfiConverterOptionalString.allocationSize(value.`contactId`)
     )
 
     override fun write(value: AccountInfo, buf: ByteBuffer) {
-            FfiConverterBoolean.write(value.`enrolled`, buf)
+            FfiConverterBoolean.write(value.`authenticated`, buf)
             FfiConverterOptionalString.write(value.`contactId`, buf)
     }
 }
@@ -2441,7 +2358,7 @@ public object FfiConverterTypeContactsPage: FfiConverterRustBuffer<ContactsPage>
 
 
 /**
- * Public metadata only: neither the bearer nor full profile leaves the store.
+ * Bounded public metadata for the configured immutable trust anchors.
  */
 data class DnsProfileInfo (
     var `domain`: kotlin.String,
@@ -2478,37 +2395,6 @@ public object FfiConverterTypeDnsProfileInfo: FfiConverterRustBuffer<DnsProfileI
             FfiConverterByteArray.write(value.`noisePubkey`, buf)
             FfiConverterString.write(value.`pinFingerprintHex`, buf)
             FfiConverterSequenceString.write(value.`resolvers`, buf)
-    }
-}
-
-
-
-/**
- * Итог enrolment (user_id через границу не отдаём — он в DB).
- */
-data class EnrolledInfo (
-    var `contactId`: kotlin.String
-) {
-
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeEnrolledInfo: FfiConverterRustBuffer<EnrolledInfo> {
-    override fun read(buf: ByteBuffer): EnrolledInfo {
-        return EnrolledInfo(
-            FfiConverterString.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: EnrolledInfo) = (
-            FfiConverterString.allocationSize(value.`contactId`)
-    )
-
-    override fun write(value: EnrolledInfo, buf: ByteBuffer) {
-            FfiConverterString.write(value.`contactId`, buf)
     }
 }
 
@@ -2714,7 +2600,7 @@ public object FfiConverterTypeOutboxRow: FfiConverterRustBuffer<OutboxRow> {
 
 
 /**
- * Офлайн-предпросмотр invite (domain + pin-fingerprint, без сети).
+ * Offline public server profile preview (domain + pin fingerprint).
  */
 data class Preview (
     var `domain`: kotlin.String,
@@ -2838,7 +2724,7 @@ public object FfiConverterTypeRetryReport: FfiConverterRustBuffer<RetryReport> {
 
 /**
  * Ошибка фасада. Строки — только статические причины/классы (секретов,
- * ключей, plaintext, token здесь нет по построению мапперов ниже).
+ * private keys, plaintext or credentials never appear in these safe errors).
  */
 sealed class FfiException: kotlin.Exception() {
 
@@ -2930,19 +2816,49 @@ sealed class FfiException: kotlin.Exception() {
             get() = ""
     }
 
-    class BadToken(
+    class InvalidCredentials(
         ) : FfiException() {
         override val message
             get() = ""
     }
 
-    class Expired(
+    class LoginTaken(
         ) : FfiException() {
         override val message
             get() = ""
     }
 
-    class BoundOther(
+    class InviteRequired(
+        ) : FfiException() {
+        override val message
+            get() = ""
+    }
+
+    class InviteExpired(
+        ) : FfiException() {
+        override val message
+            get() = ""
+    }
+
+    class InviteRevoked(
+        ) : FfiException() {
+        override val message
+            get() = ""
+    }
+
+    class InviteUsed(
+        ) : FfiException() {
+        override val message
+            get() = ""
+    }
+
+    class AuthRateLimited(
+        ) : FfiException() {
+        override val message
+            get() = ""
+    }
+
+    class InvalidInput(
         ) : FfiException() {
         override val message
             get() = ""
@@ -3034,24 +2950,29 @@ public object FfiConverterTypeFfiError : FfiConverterRustBuffer<FfiException> {
             12 -> FfiException.UploadRejected()
             13 -> FfiException.Quota()
             14 -> FfiException.Revoked()
-            15 -> FfiException.BadToken()
-            16 -> FfiException.Expired()
-            17 -> FfiException.BoundOther()
-            18 -> FfiException.Busy()
-            19 -> FfiException.BadText()
-            20 -> FfiException.Transport(
+            15 -> FfiException.InvalidCredentials()
+            16 -> FfiException.LoginTaken()
+            17 -> FfiException.InviteRequired()
+            18 -> FfiException.InviteExpired()
+            19 -> FfiException.InviteRevoked()
+            20 -> FfiException.InviteUsed()
+            21 -> FfiException.AuthRateLimited()
+            22 -> FfiException.InvalidInput()
+            23 -> FfiException.Busy()
+            24 -> FfiException.BadText()
+            25 -> FfiException.Transport(
                 FfiConverterString.read(buf),
                 )
-            21 -> FfiException.Store(
+            26 -> FfiException.Store(
                 FfiConverterString.read(buf),
                 )
-            22 -> FfiException.Crypto(
+            27 -> FfiException.Crypto(
                 FfiConverterString.read(buf),
                 )
-            23 -> FfiException.Protocol(
+            28 -> FfiException.Protocol(
                 FfiConverterString.read(buf),
                 )
-            24 -> FfiException.Server(
+            29 -> FfiException.Server(
                 FfiConverterString.read(buf),
                 )
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
@@ -3118,15 +3039,35 @@ public object FfiConverterTypeFfiError : FfiConverterRustBuffer<FfiException> {
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
             )
-            is FfiException.BadToken -> (
+            is FfiException.InvalidCredentials -> (
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
             )
-            is FfiException.Expired -> (
+            is FfiException.LoginTaken -> (
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
             )
-            is FfiException.BoundOther -> (
+            is FfiException.InviteRequired -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
+            is FfiException.InviteExpired -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
+            is FfiException.InviteRevoked -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
+            is FfiException.InviteUsed -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
+            is FfiException.AuthRateLimited -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
+            is FfiException.InvalidInput -> (
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
             )
@@ -3226,48 +3167,68 @@ public object FfiConverterTypeFfiError : FfiConverterRustBuffer<FfiException> {
                 buf.putInt(14)
                 Unit
             }
-            is FfiException.BadToken -> {
+            is FfiException.InvalidCredentials -> {
                 buf.putInt(15)
                 Unit
             }
-            is FfiException.Expired -> {
+            is FfiException.LoginTaken -> {
                 buf.putInt(16)
                 Unit
             }
-            is FfiException.BoundOther -> {
+            is FfiException.InviteRequired -> {
                 buf.putInt(17)
                 Unit
             }
-            is FfiException.Busy -> {
+            is FfiException.InviteExpired -> {
                 buf.putInt(18)
                 Unit
             }
-            is FfiException.BadText -> {
+            is FfiException.InviteRevoked -> {
                 buf.putInt(19)
                 Unit
             }
-            is FfiException.Transport -> {
+            is FfiException.InviteUsed -> {
                 buf.putInt(20)
+                Unit
+            }
+            is FfiException.AuthRateLimited -> {
+                buf.putInt(21)
+                Unit
+            }
+            is FfiException.InvalidInput -> {
+                buf.putInt(22)
+                Unit
+            }
+            is FfiException.Busy -> {
+                buf.putInt(23)
+                Unit
+            }
+            is FfiException.BadText -> {
+                buf.putInt(24)
+                Unit
+            }
+            is FfiException.Transport -> {
+                buf.putInt(25)
                 FfiConverterString.write(value.v1, buf)
                 Unit
             }
             is FfiException.Store -> {
-                buf.putInt(21)
+                buf.putInt(26)
                 FfiConverterString.write(value.v1, buf)
                 Unit
             }
             is FfiException.Crypto -> {
-                buf.putInt(22)
+                buf.putInt(27)
                 FfiConverterString.write(value.v1, buf)
                 Unit
             }
             is FfiException.Protocol -> {
-                buf.putInt(23)
+                buf.putInt(28)
                 FfiConverterString.write(value.v1, buf)
                 Unit
             }
             is FfiException.Server -> {
-                buf.putInt(24)
+                buf.putInt(29)
                 FfiConverterString.write(value.v1, buf)
                 Unit
             }
@@ -3278,13 +3239,83 @@ public object FfiConverterTypeFfiError : FfiConverterRustBuffer<FfiException> {
 
 
 
+sealed class LoginOutcome {
+
+    data class Authenticated(
+        val `contactId`: kotlin.String) : LoginOutcome() {
+        companion object
+    }
+
+    data class ReplacementRequired(
+        val `expectedDevice`: kotlin.String) : LoginOutcome() {
+        companion object
+    }
+
+
+
+    companion object
+}
+
 /**
- * Тип QR: enrol-приглашение или контакт. Оба формата обязан понимать сканер.
+ * @suppress
+ */
+public object FfiConverterTypeLoginOutcome : FfiConverterRustBuffer<LoginOutcome>{
+    override fun read(buf: ByteBuffer): LoginOutcome {
+        return when(buf.getInt()) {
+            1 -> LoginOutcome.Authenticated(
+                FfiConverterString.read(buf),
+                )
+            2 -> LoginOutcome.ReplacementRequired(
+                FfiConverterString.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: LoginOutcome) = when(value) {
+        is LoginOutcome.Authenticated -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`contactId`)
+            )
+        }
+        is LoginOutcome.ReplacementRequired -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`expectedDevice`)
+            )
+        }
+    }
+
+    override fun write(value: LoginOutcome, buf: ByteBuffer) {
+        when(value) {
+            is LoginOutcome.Authenticated -> {
+                buf.putInt(1)
+                FfiConverterString.write(value.`contactId`, buf)
+                Unit
+            }
+            is LoginOutcome.ReplacementRequired -> {
+                buf.putInt(2)
+                FfiConverterString.write(value.`expectedDevice`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+/**
+ * QR types understood by the scanner: public server profile or contact.
  */
 
 enum class QrKind {
 
-    JOIN,
+    SERVER,
     CONTACT;
     companion object
 }
@@ -3337,6 +3368,36 @@ public object FfiConverterTypeQrOutcome: FfiConverterRustBuffer<QrOutcome> {
     override fun allocationSize(value: QrOutcome) = 4UL
 
     override fun write(value: QrOutcome, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class RegistrationPolicy {
+
+    INVITE_ONLY,
+    OPEN;
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeRegistrationPolicy: FfiConverterRustBuffer<RegistrationPolicy> {
+    override fun read(buf: ByteBuffer) = try {
+        RegistrationPolicy.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: RegistrationPolicy) = 4UL
+
+    override fun write(value: RegistrationPolicy, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }
@@ -3439,38 +3500,6 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
         } else {
             buf.put(1)
             FfiConverterString.write(value, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterOptionalByteArray: FfiConverterRustBuffer<kotlin.ByteArray?> {
-    override fun read(buf: ByteBuffer): kotlin.ByteArray? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterByteArray.read(buf)
-    }
-
-    override fun allocationSize(value: kotlin.ByteArray?): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterByteArray.allocationSize(value)
-        }
-    }
-
-    override fun write(value: kotlin.ByteArray?, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterByteArray.write(value, buf)
         }
     }
 }
@@ -3675,6 +3704,7 @@ public object FfiConverterSequenceTypeReceivedMsg: FfiConverterRustBuffer<List<R
         /**
          * Решение хранилища при старте по наличию файлов (чистая функция —
          * покрытие unit-тестом здесь, зеркало в Kotlin вызывает фасад).
+         * MigrateLegacy means sealing a supported plain v5 store, not schema/auth compatibility.
          */ fun `storagePlan`(`hasLegacyDb`: kotlin.Boolean, `hasWrappedDb`: kotlin.Boolean): StoragePlan {
             return FfiConverterTypeStoragePlan.lift(
     uniffiRustCall() { _status ->

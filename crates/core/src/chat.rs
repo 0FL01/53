@@ -19,15 +19,13 @@
 //! reconnect — [`Core::on_reconnect`], ответ claim — внутри send-path
 //! (ensure идёт до claim, COUNT после — см. olm.rs).
 //!
-//! Сессия сервера — per-connection: после каждого WELCOME нужен ENROL
-//! (иначе mailbox закрывается). [`Core::login`] шлёт ENROL-replay
-//! сохранённым token (идемпотентен в пределах TTL invite) и сверяет
-//! ENROLLED с хранимым account; каждый сетевой метод логинится сам.
+//! Every connection resumes using its Noise device key after WELCOME. Account
+//! credentials/invitations are never needed for mailbox access. Each network
+//! method resumes and compares AUTHENTICATED with its immutable local account.
 
 use dmsg_protocol::{
-    decode_frame, mailbox as mp, OP_DELIVERY_ACK, OP_ENROL, OP_ENROLLED, OP_FETCH,
-    OP_FETCH_RESP, OP_SEND, OP_SEND_ACK, OP_ERROR, ST_ACCEPTED,
-    ST_DELIVERED, TEXT_MAX,
+    decode_frame, mailbox as mp, OP_AUTHENTICATED, OP_DELIVERY_ACK, OP_ERROR, OP_FETCH,
+    OP_FETCH_RESP, OP_RESUME, OP_SEND, OP_SEND_ACK, ST_ACCEPTED, ST_DELIVERED, TEXT_MAX,
 };
 
 use crate::contacts::{self, Contact};
@@ -38,6 +36,7 @@ use crate::transport::Transport;
 pub struct RawEvent {
     pub seq: u64,
     pub sender: [u8; 32],
+    pub sender_user: [u8; 16],
     pub message_id: [u8; 16],
     pub ciphertext: Vec<u8>,
 }
@@ -76,19 +75,18 @@ pub struct RetryStats {
     pub skipped: usize,
 }
 
-/// Ядро K3: соединение с БД + Olm Account + кэш сессий + ключи устройства.
+/// Core: SQLite connection, Olm account and stable device identity.
 /// Одно на процесс (как Supervisor); `Connection` не Sync — не шарить.
 pub struct Core {
     conn: rusqlite::Connection,
     account: vodozemac::olm::Account,
     next_key_id: u32,
     device_pub: [u8; 32],
-    sessions: std::collections::HashMap<String, vodozemac::olm::Session>,
 }
 
 impl Core {
     /// Открыть ядро: store + Account (создаётся при первом запуске) +
-    /// ключи устройства из enrol. Без enrol — NotEnrolled (явно).
+    /// durable device key and accepted account; absent account is NotEnrolled.
     pub fn open(db_path: &std::path::Path) -> Result<Self, OlmError> {
         let conn = crate::store::open(db_path).map_err(OlmError::Store)?;
         Self::from_conn(conn)
@@ -101,19 +99,31 @@ impl Core {
     }
 
     fn from_conn(conn: rusqlite::Connection) -> Result<Self, OlmError> {
-        let device_priv =
-            crate::store::load_identity(&conn).map_err(OlmError::Store)?.ok_or(OlmError::NotEnrolled)?;
+        crate::store::load_account(&conn)
+            .map_err(OlmError::Store)?
+            .ok_or(OlmError::NotEnrolled)?;
+        let device_priv = crate::store::load_identity(&conn)
+            .map_err(OlmError::Store)?
+            .ok_or(OlmError::NotEnrolled)?;
         let (account, next_key_id) = olm::load_or_create(&conn)?;
         let device_pub = olm::device_pubkey(&device_priv);
-        Ok(Self { conn, account, next_key_id, device_pub, sessions: Default::default() })
+        Ok(Self {
+            conn,
+            account,
+            next_key_id,
+            device_pub,
+        })
     }
 
     /// Свои Olm identity-ключи (ed, curve) — для contact-QR.
     pub fn identity_keys(&self) -> ([u8; 32], [u8; 32]) {
-        (olm::ed_identity(&self.account), olm::curve_identity(&self.account))
+        (
+            olm::ed_identity(&self.account),
+            olm::curve_identity(&self.account),
+        )
     }
 
-    /// Свой user_id/contact_id из ENROLLED (для QR и диагностики).
+    /// Свой user_id/contact_id из AUTHENTICATED (для QR и диагностики).
     pub fn my_account(&self) -> Result<([u8; 16], String), OlmError> {
         crate::store::load_account(&self.conn)
             .map_err(OlmError::Store)?
@@ -145,53 +155,49 @@ impl Core {
         contacts::block(&self.conn, contact_id)
     }
 
-    /// Явное подтверждение подмены: pin = seen, кэш сессии сброшен.
+    /// Explicit confirmation pins the seen binding and deletes the old session.
     pub fn confirm_contact(&mut self, contact_id: &str) -> Result<(), OlmError> {
         contacts::confirm_identity(&self.conn, contact_id)?;
-        self.sessions.remove(contact_id);
         Ok(())
     }
 
-    /// Reconnect-побудка refill: login (ENROL-replay) + COUNT + догрузка.
+    /// Reconnect refill: key-only RESUME + COUNT + upload when needed.
     /// Зовёт шелл после переподключения (планировщика нет).
     pub async fn on_reconnect(&mut self, t: &mut impl Transport) -> Result<u32, OlmError> {
         self.login(t).await?;
-        olm::ensure_prekeys(&self.conn, &mut self.account, t, &self.device_pub, &mut self.next_key_id)
-            .await
+        olm::ensure_prekeys(
+            &self.conn,
+            &mut self.account,
+            t,
+            &self.device_pub,
+            &mut self.next_key_id,
+        )
+        .await
     }
 
-    /// Login: ENROL-replay сохранённым token на этом коннекте.
-    /// Сервер держит enrolled-флаг per-connection: без ENROL после WELCOME
-    /// доступны только повторный ENROL, mailbox закрывается. Replay тем же
-    /// ключом идемпотентен (K2); ENROLLED сверяется с хранимым account
-    /// (fail-closed при расхождении). Каждый сетевой метод зовёт login
-    /// сам — переподключение супервизора прозрачно.
+    /// Resume this connection using the Noise identity, without credentials.
+    /// A foreign AUTHENTICATED reply is rejected, never attached or persisted.
     pub async fn login(&mut self, t: &mut impl Transport) -> Result<(), OlmError> {
-        let token =
-            crate::store::load_token(&self.conn).map_err(OlmError::Store)?.ok_or(OlmError::NotEnrolled)?;
-        t.send_frame(OP_ENROL, &token)
+        t.send_frame(OP_RESUME, &[])
             .await
             .map_err(|e| OlmError::Transport(e.to_string()))?;
-        let (op, p) =
-            t.recv_frame().await.map_err(|e| OlmError::Transport(e.to_string()))?;
-        if op == OP_ENROLLED {
-            if p.len() != 28 {
-                return Err(OlmError::Protocol("bad enrolled len"));
-            }
-            let mut user_id = [0u8; 16];
-            user_id.copy_from_slice(&p[..16]);
-            let contact_id =
-                std::str::from_utf8(&p[16..]).map_err(|_| OlmError::Protocol("bad contact"))?;
+        let (op, p) = t
+            .recv_frame()
+            .await
+            .map_err(|e| OlmError::Transport(e.to_string()))?;
+        if op == OP_AUTHENTICATED {
+            let accepted = dmsg_protocol::auth::parse_authenticated(&p)
+                .map_err(|_| OlmError::Protocol("bad authenticated response"))?;
             let (my_uid, my_cid) = self.my_account()?;
-            if user_id != my_uid || contact_id != my_cid {
-                return Err(OlmError::Protocol("enrolled mismatch"));
+            if accepted.user_id != my_uid || accepted.contact_id != my_cid {
+                return Err(OlmError::Protocol("authenticated account mismatch"));
             }
             return Ok(());
         }
         if op == OP_ERROR && p.len() == 1 {
-            return Err(map_enrol_error(p[0]));
+            return Err(OlmError::Auth(crate::auth::map_error(p[0], false)));
         }
-        Err(OlmError::Protocol("unexpected enrol reply"))
+        Err(OlmError::Protocol("unexpected resume response"))
     }
 
     /// Отправить текст контакту. Возвращает message_id (16).
@@ -207,10 +213,19 @@ impl Core {
         let c = contacts::get(&self.conn, contact_id)?.ok_or(OlmError::UnknownContact)?;
         let (_, device_key, peer_ed, peer_curve) = contact_keys(&c)?;
         self.login(t).await?;
-        olm::ensure_prekeys(&self.conn, &mut self.account, t, &self.device_pub, &mut self.next_key_id)
+        self.refresh_binding(t, &c).await?;
+        olm::ensure_prekeys(
+            &self.conn,
+            &mut self.account,
+            t,
+            &self.device_pub,
+            &mut self.next_key_id,
+        )
+        .await?;
+        self.session_for(&c, &peer_ed, &peer_curve, t, &device_key)
             .await?;
-        self.session_for(&c, &peer_ed, &peer_curve, t, &device_key).await?;
-        let (message_id, user_id, wire) = self.persist_text(contact_id, text)?
+        let (message_id, user_id, wire) = self
+            .persist_text(contact_id, text)?
             .ok_or(OlmError::Protocol("session disappeared"))?;
         self.send_stored(t, &user_id, &message_id, &wire).await?;
         Ok(message_id)
@@ -254,7 +269,9 @@ impl Core {
         contact_id: &str,
         text: &str,
     ) -> Result<Option<([u8; 16], [u8; 16], Vec<u8>)>, OlmError> {
-        let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| OlmError::Store(format!("tx: {e}")))?;
         let c = contacts::get(&tx, contact_id)?.ok_or(OlmError::UnknownContact)?;
         contacts::sendable(&c)?;
@@ -271,7 +288,9 @@ impl Core {
         let mut plain = Vec::with_capacity(32 + text.len());
         plain.extend_from_slice(&olm::ed_identity(&self.account));
         plain.extend_from_slice(text.as_bytes());
-        let msg = session.encrypt(&plain).map_err(|_| OlmError::Crypto("encrypt"))?;
+        let msg = session
+            .encrypt(&plain)
+            .map_err(|_| OlmError::Crypto("encrypt"))?;
         let wire = olm::encode_wire(&msg);
         if wire.len() > dmsg_protocol::CIPHERTEXT_MAX {
             return Err(OlmError::Protocol("ciphertext too long"));
@@ -291,8 +310,8 @@ impl Core {
             rusqlite::params![message_id.as_slice(), contact_id, wire.as_slice()],
         )
         .map_err(|e| OlmError::Store(format!("outbox: {e}")))?;
-        tx.commit().map_err(|e| OlmError::Store(format!("commit: {e}")))?;
-        self.sessions.remove(contact_id);
+        tx.commit()
+            .map_err(|e| OlmError::Store(format!("commit: {e}")))?;
         Ok(Some((message_id, user_id, wire)))
     }
 
@@ -316,6 +335,14 @@ impl Core {
                     continue;
                 }
                 let (user_id, _, _, _) = contact_keys(&c)?;
+                match self.refresh_binding(t, &c).await {
+                    Ok(()) => (),
+                    Err(OlmError::IdentityMismatch) => {
+                        stats.skipped += 1;
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                }
                 match self.send_stored(t, &user_id, mid, ct).await {
                     Ok(()) => {
                         stats.resent += 1;
@@ -359,7 +386,10 @@ impl Core {
         t.send_frame(OP_FETCH, &[])
             .await
             .map_err(|e| OlmError::Transport(e.to_string()))?;
-        let (op, p) = t.recv_frame().await.map_err(|e| OlmError::Transport(e.to_string()))?;
+        let (op, p) = t
+            .recv_frame()
+            .await
+            .map_err(|e| OlmError::Transport(e.to_string()))?;
         if op == OP_FETCH_RESP {
             let events = mp::parse_fetch_resp(&p).ok_or(OlmError::Protocol("bad fetch"))?;
             return events
@@ -367,7 +397,14 @@ impl Core {
                 .map(|e| {
                     Ok(RawEvent {
                         seq: e.seq,
-                        sender: e.sender.try_into().map_err(|_| OlmError::Protocol("bad sender"))?,
+                        sender: e
+                            .sender
+                            .try_into()
+                            .map_err(|_| OlmError::Protocol("bad sender"))?,
+                        sender_user: e
+                            .sender_user
+                            .try_into()
+                            .map_err(|_| OlmError::Protocol("bad sender user"))?,
                         message_id: e
                             .message_id
                             .try_into()
@@ -396,7 +433,10 @@ impl Core {
         t.send_frame(OP_DELIVERY_ACK, &payload)
             .await
             .map_err(|e| OlmError::Transport(e.to_string()))?;
-        let (op, p) = t.recv_frame().await.map_err(|e| OlmError::Transport(e.to_string()))?;
+        let (op, p) = t
+            .recv_frame()
+            .await
+            .map_err(|e| OlmError::Transport(e.to_string()))?;
         if op == OP_DELIVERY_ACK {
             return p
                 .as_slice()
@@ -418,18 +458,56 @@ impl Core {
         t: &mut impl Transport,
     ) -> Result<FetchResult, OlmError> {
         self.login(t).await?;
-        olm::ensure_prekeys(&self.conn, &mut self.account, t, &self.device_pub, &mut self.next_key_id)
-            .await?;
+        olm::ensure_prekeys(
+            &self.conn,
+            &mut self.account,
+            t,
+            &self.device_pub,
+            &mut self.next_key_id,
+        )
+        .await?;
         let events = self.fetch_raw(t).await?;
         let mut res = FetchResult::default();
         let mut seqs: Vec<u64> = Vec::with_capacity(events.len());
         for e in &events {
-            seqs.push(e.seq);
+            // Durable replay is safe to ACK before looking up a newer binding.
+            let durable: bool = self.conn.query_row("SELECT EXISTS(SELECT 1 FROM core_inbox WHERE sender_device=?1 AND message_id=?2)",rusqlite::params![e.sender.as_slice(),e.message_id.as_slice()],|r| r.get(0)).map_err(|_| OlmError::Store("inbox dedup".into()))?;
+            if durable {
+                seqs.push(e.seq);
+                continue;
+            }
+            if let Some(c) = contacts::get_by_user(&self.conn, &e.sender_user)? {
+                if c.state != contacts::state::BLOCKED {
+                    match self.refresh_binding(t, &c).await {
+                        Ok(()) => (),
+                        Err(OlmError::IdentityMismatch) => {
+                            res.skipped_mismatch += 1;
+                            continue;
+                        }
+                        Err(err) => return Err(err),
+                    }
+                    if c.device_key != Some(e.sender) {
+                        res.skipped_mismatch += 1;
+                        continue;
+                    }
+                }
+            }
             match self.decrypt_event(e).await {
-                Ok(Some(r)) => res.received.push(r),
-                Ok(None) => {}
-                Err(Fail::Skip(EventSkip::Unknown)) => res.skipped_unknown += 1,
-                Err(Fail::Skip(EventSkip::Blocked)) => res.skipped_blocked += 1,
+                Ok(Some(r)) => {
+                    res.received.push(r);
+                    seqs.push(e.seq);
+                }
+                Ok(None) => {
+                    seqs.push(e.seq);
+                }
+                Err(Fail::Skip(EventSkip::Unknown)) => {
+                    res.skipped_unknown += 1;
+                    seqs.push(e.seq);
+                }
+                Err(Fail::Skip(EventSkip::Blocked)) => {
+                    res.skipped_blocked += 1;
+                    seqs.push(e.seq);
+                }
                 Err(Fail::Skip(EventSkip::Undecryptable)) => res.skipped_undecryptable += 1,
                 Err(Fail::Skip(EventSkip::Mismatch)) => res.skipped_mismatch += 1,
                 Err(Fail::Err(e)) => return Err(e),
@@ -440,7 +518,7 @@ impl Core {
     }
 
     /// Расшифровать одно событие. Ok(None) — дедуп-повтор (уже лежит).
-    /// Skip — пропуск со счётчиком (cursor всё равно двинется через ack).
+    /// Unknown/blocked follow the drop policy; identity/integrity failures stay unacknowledged.
     /// Fail::Err — жёсткая ошибка (store), прерывает пачку.
     async fn decrypt_event(&mut self, e: &RawEvent) -> Result<Option<Received>, Fail> {
         // At-least-once replay cannot be decrypted twice by an Olm ratchet.
@@ -457,50 +535,77 @@ impl Core {
         if received {
             return Ok(None);
         }
-        let c = match contacts::get_by_device(&self.conn, &e.sender)? {
+        let c = match contacts::get_by_user(&self.conn, &e.sender_user)? {
             Some(c) => c,
             None => return Err(Fail::Skip(EventSkip::Unknown)),
         };
         if c.state == contacts::state::BLOCKED {
             return Err(Fail::Skip(EventSkip::Blocked));
         }
-        let peer_ed = c.ed_identity.ok_or(Fail::Skip(EventSkip::Undecryptable))?;
-        let peer_curve = c.curve_identity.ok_or(Fail::Skip(EventSkip::Undecryptable))?;
-        let msg = olm::decode_wire(&e.ciphertext).map_err(|_| Fail::Skip(EventSkip::Undecryptable))?;
-        // Сессия из кэша/БД; prekey без сессии — создать inbound.
-        if !self.sessions.contains_key(&c.contact_id) {
-            if let Some((pickle, row_ed, row_curve)) =
-                crate::store::load_session(&self.conn, &c.contact_id).map_err(OlmError::Store)?
-            {
-                if row_ed != peer_ed || row_curve != peer_curve {
-                    return Err(Fail::Skip(EventSkip::Mismatch));
-                }
-                let s = olm::unpickle_session(&pickle)?;
-                self.sessions.insert(c.contact_id.clone(), s);
-            }
+        if c.device_key != Some(e.sender)
+            || c.seen_ed.is_some()
+            || c.seen_curve.is_some()
+            || c.seen_device.is_some()
+        {
+            return Err(Fail::Skip(EventSkip::Mismatch));
         }
+        let peer_ed = c.ed_identity.ok_or(Fail::Skip(EventSkip::Undecryptable))?;
+        let peer_curve = c
+            .curve_identity
+            .ok_or(Fail::Skip(EventSkip::Undecryptable))?;
+        let msg =
+            olm::decode_wire(&e.ciphertext).map_err(|_| Fail::Skip(EventSkip::Undecryptable))?;
+        // Load after the write lock, and decrypt into disposable local copies.
+        // Failed integrity/identity checks never advance any ratchet or OTK.
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|_| OlmError::Store("receive transaction".into()))?;
+        let current = contacts::get(&tx, &c.contact_id)?.ok_or(OlmError::UnknownContact)?;
+        if current != c {
+            return Err(Fail::Skip(EventSkip::Mismatch));
+        }
+        let already: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM core_inbox WHERE sender_device=?1 AND message_id=?2)",
+                rusqlite::params![e.sender.as_slice(), e.message_id.as_slice()],
+                |r| r.get(0),
+            )
+            .map_err(|_| OlmError::Store("inbox dedup".into()))?;
+        if already {
+            return Ok(None);
+        }
+        let (mut account, next_key_id) = olm::load_or_create(&tx)?;
+        let mut session = if let Some((pickle, ed, curve)) =
+            crate::store::load_session(&tx, &c.contact_id).map_err(OlmError::Store)?
+        {
+            if ed != peer_ed || curve != peer_curve {
+                return Err(Fail::Skip(EventSkip::Mismatch));
+            }
+            Some(olm::unpickle_session(&pickle)?)
+        } else {
+            None
+        };
         let plaintext: Vec<u8> = match msg {
             vodozemac::olm::OlmMessage::PreKey(ref pre) => {
-                if self.sessions.contains_key(&c.contact_id) {
-                    let s = self.sessions.get_mut(&c.contact_id).expect("checked");
-                    s.decrypt(&msg).map_err(|_| Fail::Skip(EventSkip::Undecryptable))?
+                if let Some(s) = session.as_mut() {
+                    s.decrypt(&msg)
+                        .map_err(|_| Fail::Skip(EventSkip::Undecryptable))?
                 } else {
                     let presented = *pre.identity_key().as_bytes();
-                    match olm::inbound(&mut self.account, &peer_curve, pre) {
+                    match olm::inbound(&mut account, &peer_curve, pre) {
                         Ok((s, _, pt)) => {
-                            self.sessions.insert(c.contact_id.clone(), s);
+                            session = Some(s);
                             pt
                         }
                         Err(OlmError::IdentityMismatch) => {
                             // Подмена с receive-path: фиксируем presented
                             // (только если реально отличается от пина).
                             if presented != peer_curve {
-                                contacts::note_presented_curve(
-                                    &self.conn,
-                                    &c.contact_id,
-                                    &presented,
-                                )?;
+                                contacts::note_presented_curve(&tx, &c.contact_id, &presented)?;
                             }
+                            tx.commit()
+                                .map_err(|_| OlmError::Store("warning commit".into()))?;
                             return Err(Fail::Skip(EventSkip::Mismatch));
                         }
                         Err(e) => return Err(Fail::Err(e)),
@@ -508,11 +613,11 @@ impl Core {
                 }
             }
             vodozemac::olm::OlmMessage::Normal(_) => {
-                if !self.sessions.contains_key(&c.contact_id) {
-                    return Err(Fail::Skip(EventSkip::Undecryptable));
-                }
-                let s = self.sessions.get_mut(&c.contact_id).expect("checked");
-                s.decrypt(&msg).map_err(|_| Fail::Skip(EventSkip::Undecryptable))?
+                let s = session
+                    .as_mut()
+                    .ok_or(Fail::Skip(EventSkip::Undecryptable))?;
+                s.decrypt(&msg)
+                    .map_err(|_| Fail::Skip(EventSkip::Undecryptable))?
             }
         };
         if plaintext.len() < 33 {
@@ -521,21 +626,25 @@ impl Core {
         let mut sender_ed = [0u8; 32];
         sender_ed.copy_from_slice(&plaintext[..32]);
         if sender_ed != peer_ed {
-            contacts::note_presented_ed(&self.conn, &c.contact_id, &sender_ed)?;
+            contacts::note_presented_ed(&tx, &c.contact_id, &sender_ed)?;
+            tx.commit()
+                .map_err(|_| OlmError::Store("warning commit".into()))?;
             return Err(Fail::Skip(EventSkip::Mismatch));
         }
-        let text =
-            std::str::from_utf8(&plaintext[32..]).map_err(|_| Fail::Skip(EventSkip::Undecryptable))?;
+        let text = std::str::from_utf8(&plaintext[32..])
+            .map_err(|_| Fail::Skip(EventSkip::Undecryptable))?;
+        if text.is_empty() || text.len() > TEXT_MAX {
+            return Err(Fail::Skip(EventSkip::Undecryptable));
+        }
         // ОДНА TX: пикл account (one-time consumed) + пикл сессии + inbox.
-        let apickle =
-            serde_json::to_string(&self.account.pickle()).map_err(|_| OlmError::Store("pickle".into()))?;
-        let spickle = olm::pickle_session(self.sessions.get(&c.contact_id).expect("session"))?;
+        let apickle = serde_json::to_string(&account.pickle())
+            .map_err(|_| OlmError::Store("pickle".into()))?;
+        let spickle = olm::pickle_session(session.as_ref().expect("session"))?;
         let inserted = (|| -> Result<bool, OlmError> {
-            let tx = self.conn.transaction().map_err(|e| OlmError::Store(format!("tx: {e}")))?;
             tx.execute(
                 "INSERT INTO core_olm(id, pickle, next_key_id) VALUES(1,dmsg_seal('olm_pickle',?1),?2)
                  ON CONFLICT(id) DO UPDATE SET pickle=excluded.pickle",
-                rusqlite::params![apickle, self.next_key_id],
+                rusqlite::params![apickle, next_key_id],
             )
             .map_err(|e| OlmError::Store(format!("olm: {e}")))?;
             tx.execute(
@@ -560,16 +669,21 @@ impl Core {
                         e.message_id.as_slice(),
                         c.contact_id,
                         text,
-                        e.seq as i64
+                        i64::try_from(e.seq)
+                            .map_err(|_| OlmError::Protocol("sequence overflow"))?
                     ],
                 )
                 .map_err(|e| OlmError::Store(format!("inbox: {e}")))?;
-            tx.commit().map_err(|e| OlmError::Store(format!("commit: {e}")))?;
+            tx.commit()
+                .map_err(|e| OlmError::Store(format!("commit: {e}")))?;
             Ok(n == 1)
         })();
+        if inserted.is_ok() {
+            self.account = account;
+            self.next_key_id = next_key_id;
+        }
         match inserted {
             Err(e) => {
-                self.sessions.remove(&c.contact_id);
                 return Err(Fail::Err(e));
             }
             Ok(false) => Ok(None), // локальный дедуп: replay уже лежит
@@ -582,7 +696,28 @@ impl Core {
         }
     }
 
-    /// Сессия для отправки: БД (сверка с пином) → claim + outbound.
+    /// Query the bounded directory record without silently changing a trusted pin.
+    async fn refresh_binding(&self, t: &mut impl Transport, c: &Contact) -> Result<(), OlmError> {
+        let user = c.user_id.ok_or(OlmError::MissingKeys)?;
+        t.send_frame(dmsg_protocol::OP_DEVICE_BINDING, &user)
+            .await
+            .map_err(|e| OlmError::Transport(e.to_string()))?;
+        let (op, p) = t
+            .recv_frame()
+            .await
+            .map_err(|e| OlmError::Transport(e.to_string()))?;
+        if op == dmsg_protocol::OP_ERROR && p.len() == 1 {
+            return Err(map_error(p[0]));
+        }
+        if op != dmsg_protocol::OP_DEVICE_BINDING_RESP {
+            return Err(OlmError::Protocol("unexpected binding response"));
+        }
+        let binding = dmsg_protocol::auth::parse_binding(&p)
+            .map_err(|_| OlmError::Protocol("invalid binding"))?;
+        contacts::check_binding(&self.conn, &c.contact_id, &binding)
+    }
+
+    /// Persisted pinned session, or a verified claim followed by atomic insertion.
     async fn session_for(
         &mut self,
         c: &Contact,
@@ -607,12 +742,24 @@ impl Core {
             // Конкурирующий sender мог уже создать сессию, пока шёл CLAIM.
             // Не заменяем его ratchet; persist_text прочитает победивший пикл.
             let sp = olm::pickle_session(&s)?;
-            self.conn.execute(
+            let tx = self
+                .conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(|_| OlmError::Store("session transaction".into()))?;
+            let current = contacts::get(&tx, &c.contact_id)?.ok_or(OlmError::UnknownContact)?;
+            if current != *c {
+                return Err(OlmError::IdentityMismatch);
+            }
+            contacts::sendable(&current)?;
+            tx.execute(
                 "INSERT INTO core_sessions(contact_id, pickle, peer_ed, peer_curve)
                  VALUES(?1,dmsg_seal('session_pickle',?2),?3,?4)
                  ON CONFLICT(contact_id) DO NOTHING",
                 rusqlite::params![c.contact_id, sp, peer_ed.as_slice(), peer_curve.as_slice()],
-            ).map_err(|e| OlmError::Store(format!("session: {e}")))?;
+            )
+            .map_err(|e| OlmError::Store(format!("session: {e}")))?;
+            tx.commit()
+                .map_err(|_| OlmError::Store("session commit".into()))?;
         }
         Ok(())
     }
@@ -632,7 +779,10 @@ impl Core {
         t.send_frame(OP_SEND, &payload)
             .await
             .map_err(|e| OlmError::Transport(e.to_string()))?;
-        let (op, p) = t.recv_frame().await.map_err(|e| OlmError::Transport(e.to_string()))?;
+        let (op, p) = t
+            .recv_frame()
+            .await
+            .map_err(|e| OlmError::Transport(e.to_string()))?;
         if op == OP_SEND_ACK {
             let (mid, st) = mp::parse_send_ack(&p).ok_or(OlmError::Protocol("bad send_ack"))?;
             if mid != message_id {
@@ -707,20 +857,6 @@ fn map_error(code: u8) -> OlmError {
     }
 }
 
-/// Маппинг ERROR для ENROL-replay (те же коды, что K2 enrol_from_qr).
-fn map_enrol_error(code: u8) -> OlmError {
-    use crate::enrol::EnrolError;
-    use dmsg_protocol::{ERR_BAD, ERR_BOUND_OTHER, ERR_BUSY, ERR_EXPIRED, ERR_REVOKED};
-    match code {
-        c if c == ERR_BAD => OlmError::Enrol(EnrolError::Bad),
-        c if c == ERR_EXPIRED => OlmError::Enrol(EnrolError::Expired),
-        c if c == ERR_REVOKED => OlmError::Enrol(EnrolError::Revoked),
-        c if c == ERR_BOUND_OTHER => OlmError::Enrol(EnrolError::BoundOther),
-        c if c == ERR_BUSY => OlmError::Enrol(EnrolError::Busy),
-        other => OlmError::Enrol(EnrolError::Server(other)),
-    }
-}
-
 /// Декодировать один app-кадр из буфера с явным маппингом версии.
 /// (Транспортный путь маппит так же — см. `TransportError::Frame`.)
 pub fn decode_app_frame(buf: &[u8]) -> Result<(u8, Vec<u8>), OlmError> {
@@ -745,10 +881,18 @@ mod tests {
 
     impl Fake {
         fn new(replies: Vec<(u8, Vec<u8>)>) -> Self {
-            Self { replies: replies.into(), echo_send_ack: false, sent: Vec::new() }
+            Self {
+                replies: replies.into(),
+                echo_send_ack: false,
+                sent: Vec::new(),
+            }
         }
         fn with_echo() -> Self {
-            Self { replies: VecDeque::new(), echo_send_ack: true, sent: Vec::new() }
+            Self {
+                replies: VecDeque::new(),
+                echo_send_ack: true,
+                sent: Vec::new(),
+            }
         }
     }
 
@@ -786,13 +930,14 @@ mod tests {
         let privk = {
             let params: snow::params::NoiseParams =
                 crate::transport::PATTERN.parse().expect("pattern");
-            let kp = snow::Builder::new(params).generate_keypair().expect("keygen");
+            let kp = snow::Builder::new(params)
+                .generate_keypair()
+                .expect("keygen");
             let b: [u8; 32] = kp.private.as_slice().try_into().expect("len");
             b
         };
         crate::store::save_identity(&conn, &privk).expect("identity");
-        crate::store::save_account(&conn, &[9u8; 16], "TESTCONTACT1").expect("account");
-        crate::store::save_token(&conn, &[5u8; 32]).expect("token");
+        crate::store::save_account(&conn, &[9u8; 16], "TESTC0NTACT1").expect("account");
         drop(conn);
         (Core::open(&db).expect("core"), dir)
     }
@@ -803,10 +948,8 @@ mod tests {
         let (buid, _) = b.my_account().expect("b account");
         let (aed, acurve) = a.identity_keys();
         let (bed, bcurve) = b.identity_keys();
-        let aqr =
-            contacts::build_qr(aid, &auid, &a.device_pub(), &aed, &acurve).expect("aqr");
-        let bqr =
-            contacts::build_qr(bid, &buid, &b.device_pub(), &bed, &bcurve).expect("bqr");
+        let aqr = contacts::build_qr(aid, &auid, &a.device_pub(), &aed, &acurve).expect("aqr");
+        let bqr = contacts::build_qr(bid, &buid, &b.device_pub(), &bed, &bcurve).expect("bqr");
         // A знает B под bid, B знает A под aid.
         assert_eq!(
             contacts::add_from_qr(&a.conn, &bqr),
@@ -824,11 +967,19 @@ mod tests {
         (OP_COUNT_RESP, n.to_be_bytes().to_vec())
     }
 
-    /// ENROLLED-reply для login-replay: user [9u8;16] + TESTCONTACT1.
-    fn enrolled_resp() -> (u8, Vec<u8>) {
+    /// AUTHENTICATED reply for key resume.
+    fn authenticated_resp() -> (u8, Vec<u8>) {
         let mut p = vec![9u8; 16];
-        p.extend_from_slice(b"TESTCONTACT1");
-        (OP_ENROLLED, p)
+        p.extend_from_slice(b"TESTC0NTACT1");
+        (OP_AUTHENTICATED, p)
+    }
+    fn binding_resp(core: &Core) -> (u8, Vec<u8>) {
+        let (user, _) = core.my_account().unwrap();
+        let (ed, curve) = core.identity_keys();
+        (
+            dmsg_protocol::OP_DEVICE_BINDING_RESP,
+            dmsg_protocol::auth::build_binding(&user, &core.device_pub(), &ed, &curve),
+        )
     }
 
     #[tokio::test]
@@ -848,46 +999,89 @@ mod tests {
         if encrypted {
             drop(a);
             drop(b);
-            a = Core::open_encrypted(&da.join("core.db"), &[9;32]).expect("sealed a");
-            b = Core::open_encrypted(&db.join("core.db"), &[8;32]).expect("sealed b");
+            a = Core::open_encrypted(&da.join("core.db"), &[9; 32]).expect("sealed a");
+            b = Core::open_encrypted(&db.join("core.db"), &[8; 32]).expect("sealed b");
         }
         link(&mut a, &mut b, "ALICE0000001", "BOBB00000002");
         // Настоящий one-time Боба для CLAIM-ответа (подписан его identity).
         b.account.generate_one_time_keys(1);
-        let ot = *b.account.one_time_keys().values().next().expect("ot").as_bytes();
+        olm::persist(&b.conn, &b.account, b.next_key_id).unwrap();
+        let ot = *b
+            .account
+            .one_time_keys()
+            .values()
+            .next()
+            .expect("ot")
+            .as_bytes();
         let bdev = b.device_pub();
         let bsig = olm::sign_prekey(&b.account, &bdev, 5, &ot);
         let mut prekey = 5u32.to_be_bytes().to_vec();
         prekey.extend_from_slice(&ot);
         let _ = bsig; // подпись уже проверена сервером при upload; в CLAIM-ответе её нет
-        let mut fa = Fake::new(vec![enrolled_resp(), count_resp(16), (OP_PREKEY, prekey)]);
+        let mut fa = Fake::new(vec![
+            authenticated_resp(),
+            binding_resp(&b),
+            count_resp(16),
+            (OP_PREKEY, prekey),
+        ]);
         fa.echo_send_ack = true;
-        let mid = a.send_text(&mut fa, "BOBB00000002", "hello bob").await.expect("send");
+        let mid = a
+            .send_text(&mut fa, "BOBB00000002", "hello bob")
+            .await
+            .expect("send");
         // Outbox: ciphertext сохранён, статус accepted.
-        assert_eq!(status_of(&a.conn, &mid).expect("st"), crate::store::outbox_status::ACCEPTED);
+        assert_eq!(
+            status_of(&a.conn, &mid).expect("st"),
+            crate::store::outbox_status::ACCEPTED
+        );
         // Ретрай после accept: шлёт ТОТ ЖЕ ciphertext (сравниваем байты).
-        let sent_ct = fa.sent.iter().find(|(op, _)| *op == OP_SEND).expect("send").1[32..].to_vec();
+        let sent_ct = fa
+            .sent
+            .iter()
+            .find(|(op, _)| *op == OP_SEND)
+            .expect("send")
+            .1[32..]
+            .to_vec();
         if encrypted {
             drop(a);
-            a = Core::open_encrypted(&da.join("core.db"), &[9;32]).expect("reopen a ratchet");
+            a = Core::open_encrypted(&da.join("core.db"), &[9; 32]).expect("reopen a ratchet");
             assert_eq!(a.outbox_ciphertext(&mid).unwrap(), sent_ct);
-            assert!(crate::store::load_session(&a.conn, "BOBB00000002").unwrap().is_some());
+            assert!(crate::store::load_session(&a.conn, "BOBB00000002")
+                .unwrap()
+                .is_some());
         }
         let mut fa2 = Fake::with_echo();
-        fa2.replies.push_back(enrolled_resp());
+        fa2.replies.push_back(authenticated_resp());
+        fa2.replies.push_back(binding_resp(&b));
         let stats = a.retry_queued(&mut fa2).await.expect("retry");
         assert_eq!((stats.resent, stats.skipped), (1, 0));
-        let resent_ct = fa2.sent.iter().find(|(op, _)| *op == OP_SEND).expect("resend").1[32..].to_vec();
-        assert_eq!(sent_ct, resent_ct, "retry must reuse saved ciphertext, not re-encrypt");
+        let resent_ct = fa2
+            .sent
+            .iter()
+            .find(|(op, _)| *op == OP_SEND)
+            .expect("resend")
+            .1[32..]
+            .to_vec();
+        assert_eq!(
+            sent_ct, resent_ct,
+            "retry must reuse saved ciphertext, not re-encrypt"
+        );
         // Приём Бобом: FETCH_RESP с серверным событием + ack cursor.
         let a_dev = a.device_pub();
         let mut fe = vec![0u8, 1];
         fe.extend_from_slice(&1u64.to_be_bytes());
         fe.extend_from_slice(&a_dev);
+        fe.extend_from_slice(&a.my_account().unwrap().0);
         fe.extend_from_slice(&mid);
         fe.extend_from_slice(&(sent_ct.len() as u16).to_be_bytes());
         fe.extend_from_slice(&sent_ct);
-        let mut fb = Fake::new(vec![enrolled_resp(), count_resp(16), (OP_FETCH_RESP, fe), (OP_DELIVERY_ACK, 1u64.to_be_bytes().to_vec())]);
+        let mut fb = Fake::new(vec![
+            authenticated_resp(),
+            count_resp(16),
+            (OP_FETCH_RESP, fe),
+            binding_resp(&a),
+            (OP_DELIVERY_ACK, 1u64.to_be_bytes().to_vec()),
+        ]);
         let res = b.fetch_and_decrypt(&mut fb).await.expect("fetch");
         assert_eq!(res.received.len(), 1);
         assert_eq!(res.received[0].text, "hello bob");
@@ -903,15 +1097,21 @@ mod tests {
         };
         let session_before = crate::store::load_session(&b.conn, "ALICE0000001").unwrap();
         let account_before = serde_json::to_string(&b.account.pickle()).unwrap();
-        assert!(b.sessions.is_empty());
+        assert!(session_before.is_some());
         // Повтор той же пачки (reorder/replay): локальный дедуп — тишина.
         let mut fe2 = vec![0u8, 1];
         fe2.extend_from_slice(&1u64.to_be_bytes());
         fe2.extend_from_slice(&a_dev);
+        fe2.extend_from_slice(&a.my_account().unwrap().0);
         fe2.extend_from_slice(&mid);
         fe2.extend_from_slice(&(sent_ct.len() as u16).to_be_bytes());
         fe2.extend_from_slice(&sent_ct);
-        let mut fb2 = Fake::new(vec![enrolled_resp(), count_resp(16), (OP_FETCH_RESP, fe2), (OP_DELIVERY_ACK, 1u64.to_be_bytes().to_vec())]);
+        let mut fb2 = Fake::new(vec![
+            authenticated_resp(),
+            count_resp(16),
+            (OP_FETCH_RESP, fe2),
+            (OP_DELIVERY_ACK, 1u64.to_be_bytes().to_vec()),
+        ]);
         let res2 = b.fetch_and_decrypt(&mut fb2).await.expect("fetch2");
         assert_eq!(
             res2,
@@ -922,8 +1122,10 @@ mod tests {
             "durable replay must not be classified as a decryption failure"
         );
         assert!(
-            b.sessions.is_empty(),
-            "durable replay must not load a ratchet"
+            fb2.sent
+                .iter()
+                .all(|(op, _)| *op != dmsg_protocol::OP_DEVICE_BINDING),
+            "durable replay must be deduplicated before refreshing peer trust"
         );
         assert_eq!(
             crate::store::load_session(&b.conn, "ALICE0000001").unwrap(),
@@ -938,6 +1140,7 @@ mod tests {
         let mut event = RawEvent {
             seq: 2,
             sender: a_dev,
+            sender_user: a.my_account().unwrap().0,
             message_id: [42; 16],
             ciphertext: sent_ct,
         };
@@ -947,11 +1150,13 @@ mod tests {
         ));
         event.message_id = mid;
         event.sender = [42; 32];
+        event.sender_user = [42; 16];
         assert!(matches!(
             b.decrypt_event(&event).await,
             Err(Fail::Skip(EventSkip::Unknown))
         ));
         event.sender = a_dev;
+        event.sender_user = a.my_account().unwrap().0;
         event.message_id = [43; 16];
         let ciphertext = std::mem::replace(&mut event.ciphertext, vec![9, 1, 2, 3]);
         assert!(matches!(
@@ -974,11 +1179,12 @@ mod tests {
         let mut fe3 = vec![0, 1];
         fe3.extend_from_slice(&1u64.to_be_bytes());
         fe3.extend_from_slice(&a_dev);
+        fe3.extend_from_slice(&a.my_account().unwrap().0);
         fe3.extend_from_slice(&mid);
         fe3.extend_from_slice(&(ciphertext.len() as u16).to_be_bytes());
         fe3.extend_from_slice(&ciphertext);
         let mut fb3 = Fake::new(vec![
-            enrolled_resp(),
+            authenticated_resp(),
             count_resp(16),
             (OP_FETCH_RESP, fe3),
             (OP_DELIVERY_ACK, 1u64.to_be_bytes().to_vec()),
@@ -998,11 +1204,19 @@ mod tests {
         let (mut b, db) = tmp_core("empty-b");
         link(&mut a, &mut b, "ALICE0000001", "BOBB00000002");
         // COUNT высокий (свой запас есть), CLAIM — пустой запас пира.
-        let mut fa = Fake::new(vec![enrolled_resp(), count_resp(16), (OP_ERROR, vec![dmsg_protocol::ERR_NO_PREKEY])]);
+        let mut fa = Fake::new(vec![
+            authenticated_resp(),
+            binding_resp(&b),
+            count_resp(16),
+            (OP_ERROR, vec![dmsg_protocol::ERR_NO_PREKEY]),
+        ]);
         let r = a.send_text(&mut fa, "BOBB00000002", "hi").await;
         assert_eq!(r, Err(OlmError::NoPeerPrekeys));
         // Ничего не сохранено (шифровать было не для кого — нет сессии).
-        assert!(crate::store::outbox_queued(&a.conn, 0, 32).expect("q").0.is_empty());
+        assert!(crate::store::outbox_queued(&a.conn, 0, 32)
+            .expect("q")
+            .0
+            .is_empty());
         std::fs::remove_dir_all(&da).ok();
         std::fs::remove_dir_all(&db).ok();
     }
@@ -1013,11 +1227,24 @@ mod tests {
         let (mut b, db) = tmp_core("offline-concurrent-b");
         link(&mut a, &mut b, "ALICE0000001", "BOBB00000002");
         b.account.generate_one_time_keys(1);
-        let ot = *b.account.one_time_keys().values().next().expect("ot").as_bytes();
+        olm::persist(&b.conn, &b.account, b.next_key_id).unwrap();
+        let ot = *b
+            .account
+            .one_time_keys()
+            .values()
+            .next()
+            .expect("ot")
+            .as_bytes();
         let (peer_ed, peer_curve) = b.identity_keys();
         let session = olm::outbound(&a.account, &peer_curve, &ot).expect("session");
-        crate::store::save_session(&a.conn, "BOBB00000002", &olm::pickle_session(&session).expect("pickle"),
-            &peer_ed, &peer_curve).expect("session store");
+        crate::store::save_session(
+            &a.conn,
+            "BOBB00000002",
+            &olm::pickle_session(&session).expect("pickle"),
+            &peer_ed,
+            &peer_curve,
+        )
+        .expect("session store");
         drop(a);
 
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
@@ -1028,27 +1255,46 @@ mod tests {
             handles.push(std::thread::spawn(move || {
                 let mut core = Core::open(&path).expect("reopen");
                 barrier.wait();
-                core.queue_text_existing_session("BOBB00000002", text).expect("queued").expect("session")
+                core.queue_text_existing_session("BOBB00000002", text)
+                    .expect("queued")
+                    .expect("session")
             }));
         }
-        let mids: Vec<_> = handles.into_iter().map(|h| h.join().expect("thread")).collect();
+        let mids: Vec<_> = handles
+            .into_iter()
+            .map(|h| h.join().expect("thread"))
+            .collect();
         assert_ne!(mids[0], mids[1]);
         let a = Core::open(&da.join("core.db")).expect("reopen after queue");
-        let rows = crate::store::outbox_queued(&a.conn, 0, 32).expect("outbox").0;
+        let rows = crate::store::outbox_queued(&a.conn, 0, 32)
+            .expect("outbox")
+            .0;
         assert_eq!(rows.len(), 2);
-        assert!(rows.iter().all(|r| r.4 == crate::store::outbox_status::QUEUED));
+        assert!(rows
+            .iter()
+            .all(|r| r.4 == crate::store::outbox_status::QUEUED));
         let mut batch = vec![0, 2];
         for (seq, (_, mid, _, ct, _)) in rows.iter().enumerate() {
             assert_eq!(a.outbox_ciphertext(mid).expect("ciphertext"), *ct);
             batch.extend_from_slice(&((seq + 1) as u64).to_be_bytes());
             batch.extend_from_slice(&a.device_pub());
+            batch.extend_from_slice(&a.my_account().unwrap().0);
             batch.extend_from_slice(mid);
             batch.extend_from_slice(&(ct.len() as u16).to_be_bytes());
             batch.extend_from_slice(ct);
         }
-        let mut fake = Fake::new(vec![enrolled_resp(), count_resp(16), (OP_FETCH_RESP, batch),
-            (OP_DELIVERY_ACK, 2u64.to_be_bytes().to_vec())]);
-        let result = b.fetch_and_decrypt(&mut fake).await.expect("decrypt in ratchet order");
+        let mut fake = Fake::new(vec![
+            authenticated_resp(),
+            count_resp(16),
+            (OP_FETCH_RESP, batch),
+            binding_resp(&a),
+            binding_resp(&a),
+            (OP_DELIVERY_ACK, 2u64.to_be_bytes().to_vec()),
+        ]);
+        let result = b
+            .fetch_and_decrypt(&mut fake)
+            .await
+            .expect("decrypt in ratchet order");
         assert_eq!(result.received.len(), 2);
         assert_eq!(result.skipped_undecryptable, 0);
         let texts: Vec<_> = result.received.iter().map(|m| m.text.as_str()).collect();
@@ -1064,8 +1310,14 @@ mod tests {
         link(&mut a, &mut b, "ALICE0000001", "BOBB00000002");
         // Подмена: Боб «перевыпустил» QR с тем же ID.
         let (buid, _) = b.my_account().expect("b account");
-        let evil = contacts::build_qr("BOBB00000002", &buid, &b.device_pub(), &[9u8; 32], &[8u8; 32])
-            .expect("evil");
+        let evil = contacts::build_qr(
+            "BOBB00000002",
+            &buid,
+            &b.device_pub(),
+            &[9u8; 32],
+            &[8u8; 32],
+        )
+        .expect("evil");
         assert_eq!(
             contacts::add_from_qr(&a.conn, &evil),
             Ok(contacts::QrResult::IdentityChanged)
@@ -1092,15 +1344,29 @@ mod tests {
             a.send_text(&mut dead, "BOBB00000002", "hi").await,
             Err(OlmError::IdentityMismatch)
         );
-        // Явный confirm чинит отправку (дальше — ENROL + COUNT, скриптуем).
+        // Explicit confirm permits the RESUME + binding + COUNT path.
         contacts::confirm_identity(&a.conn, "BOBB00000002").expect("confirm");
-        let mut fa = Fake::new(vec![enrolled_resp(), count_resp(16)]);
+        let c = contacts::get(&a.conn, "BOBB00000002").unwrap().unwrap();
+        let binding = dmsg_protocol::auth::build_binding(
+            &c.user_id.unwrap(),
+            &c.device_key.unwrap(),
+            &c.ed_identity.unwrap(),
+            &c.curve_identity.unwrap(),
+        );
+        let mut fa = Fake::new(vec![
+            authenticated_resp(),
+            (dmsg_protocol::OP_DEVICE_BINDING_RESP, binding),
+            count_resp(16),
+        ]);
         // CLAIM вернёт реальный ключ НОВОГО боба? У тестового боба старые ключи —
         // подпись не сойдётся с новым пином... точнее: серверный путь здесь
         // пропущен (double), claim-ответ соберём от имени нового identity:
         // проще assert, что дело дошло до сети (COUNT съеден, дальше CLAIM).
         let r = a.send_text(&mut fa, "BOBB00000002", "hi").await;
-        assert!(matches!(r, Err(OlmError::Transport(_))), "must reach network after confirm, got {r:?}");
+        assert!(
+            matches!(r, Err(OlmError::Transport(_))),
+            "must reach network after confirm, got {r:?}"
+        );
         assert_eq!(fa.sent.iter().filter(|(op, _)| *op == OP_COUNT).count(), 1);
         std::fs::remove_dir_all(&da).ok();
         std::fs::remove_dir_all(&db).ok();
@@ -1117,20 +1383,168 @@ mod tests {
         let mut fe = vec![0u8, 1];
         fe.extend_from_slice(&3u64.to_be_bytes());
         fe.extend_from_slice(&a_dev);
+        fe.extend_from_slice(&a.my_account().unwrap().0);
         fe.extend_from_slice(&mid);
         let bad_ct = vec![9u8, 1, 2, 3];
         fe.extend_from_slice(&(bad_ct.len() as u16).to_be_bytes());
         fe.extend_from_slice(&bad_ct);
-        let mut fb = Fake::new(vec![enrolled_resp(), count_resp(16), (OP_FETCH_RESP, fe), (OP_DELIVERY_ACK, 3u64.to_be_bytes().to_vec())]);
+        let mut fb = Fake::new(vec![
+            authenticated_resp(),
+            count_resp(16),
+            (OP_FETCH_RESP, fe),
+            binding_resp(&a),
+            (OP_DELIVERY_ACK, 0u64.to_be_bytes().to_vec()),
+        ]);
         let res = b.fetch_and_decrypt(&mut fb).await.expect("fetch");
         assert!(res.received.is_empty());
         assert_eq!(res.skipped_undecryptable, 1);
-        assert_eq!(res.cursor, 3);
+        assert_eq!(res.cursor, 0);
+        assert_eq!(
+            fb.sent
+                .iter()
+                .find(|(op, _)| *op == OP_DELIVERY_ACK)
+                .unwrap()
+                .1,
+            vec![0, 0],
+            "invalid ciphertext must be retained"
+        );
         // Кадр с неизвестной wire-версией — явная ошибка.
         let mut f = dmsg_protocol::encode_frame(OP_FETCH_RESP, b"x").expect("frame");
         f[0] = 9;
         assert_eq!(decode_app_frame(&f), Err(OlmError::WireVersion(9)));
         std::fs::remove_dir_all(&da).ok();
         std::fs::remove_dir_all(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn noise_only_replacement_warns_and_stops_before_claim_or_send() {
+        let (mut a, da) = tmp_core("noise-change-a");
+        let (mut b, db) = tmp_core("noise-change-b");
+        link(&mut a, &mut b, "ALICE0000001", "BOBB00000002");
+        let (ed, curve) = b.identity_keys();
+        crate::store::save_session(&a.conn, "BOBB00000002", "old session sentinel", &ed, &curve)
+            .unwrap();
+        let changed =
+            dmsg_protocol::auth::build_binding(&b.my_account().unwrap().0, &[42; 32], &ed, &curve);
+        let mut t = Fake::new(vec![
+            authenticated_resp(),
+            (dmsg_protocol::OP_DEVICE_BINDING_RESP, changed),
+        ]);
+        assert_eq!(
+            a.send_text(&mut t, "BOBB00000002", "must stop").await,
+            Err(OlmError::IdentityMismatch)
+        );
+        assert_eq!(
+            t.sent.iter().map(|(op, _)| *op).collect::<Vec<_>>(),
+            vec![OP_RESUME, dmsg_protocol::OP_DEVICE_BINDING]
+        );
+        let c = contacts::get(&a.conn, "BOBB00000002").unwrap().unwrap();
+        assert_eq!(c.device_key, Some(b.device_pub()));
+        assert_eq!(c.seen_device, Some([42; 32]));
+        assert_eq!(c.ed_identity, Some(ed));
+        assert_eq!(c.curve_identity, Some(curve));
+        a.confirm_contact("BOBB00000002").unwrap();
+        let c = contacts::get(&a.conn, "BOBB00000002").unwrap().unwrap();
+        assert_eq!(c.device_key, Some([42; 32]));
+        assert!(c.seen_device.is_none());
+        assert!(crate::store::load_session(&a.conn, "BOBB00000002")
+            .unwrap()
+            .is_none());
+        std::fs::remove_dir_all(da).ok();
+        std::fs::remove_dir_all(db).ok();
+    }
+
+    #[tokio::test]
+    async fn failed_integrity_retains_event_without_advancing_account_or_session() {
+        let (mut a, da) = tmp_core("integrity-a");
+        let (mut b, db) = tmp_core("integrity-b");
+        link(&mut a, &mut b, "ALICE0000001", "BOBB00000002");
+        b.account.generate_one_time_keys(1);
+        olm::persist(&b.conn, &b.account, b.next_key_id).unwrap();
+        let ot = *b
+            .account
+            .one_time_keys()
+            .values()
+            .next()
+            .unwrap()
+            .as_bytes();
+        let mut outbound =
+            olm::outbound(&a.account, &olm::curve_identity(&b.account), &ot).unwrap();
+        let mut plaintext = olm::ed_identity(&a.account).to_vec();
+        plaintext.extend_from_slice(b"integrity message");
+        let first = RawEvent {
+            seq: 1,
+            sender: a.device_pub(),
+            sender_user: a.my_account().unwrap().0,
+            message_id: [1; 16],
+            ciphertext: olm::encode_wire(&outbound.encrypt(&plaintext).unwrap()),
+        };
+        assert!(b.decrypt_event(&first).await.unwrap().is_some());
+        let reverse = b.persist_text("ALICE0000001", "response").unwrap().unwrap();
+        let _ = outbound
+            .decrypt(&olm::decode_wire(&reverse.2).unwrap())
+            .unwrap();
+        let valid = olm::encode_wire(&outbound.encrypt(&plaintext).unwrap());
+        assert_eq!(valid[0], 1);
+        let mut broken = valid.clone();
+        *broken.last_mut().unwrap() ^= 1;
+        let session = crate::store::load_session(&b.conn, "ALICE0000001").unwrap();
+        let account = crate::store::load_olm(&b.conn).unwrap();
+        let batch = |ct: &[u8]| {
+            let mut p = vec![0, 1];
+            p.extend_from_slice(&2u64.to_be_bytes());
+            p.extend_from_slice(&a.device_pub());
+            p.extend_from_slice(&a.my_account().unwrap().0);
+            p.extend_from_slice(&[2; 16]);
+            p.extend_from_slice(&(ct.len() as u16).to_be_bytes());
+            p.extend_from_slice(ct);
+            p
+        };
+        let mut t = Fake::new(vec![
+            authenticated_resp(),
+            count_resp(16),
+            (OP_FETCH_RESP, batch(&broken)),
+            binding_resp(&a),
+            (OP_DELIVERY_ACK, 1u64.to_be_bytes().to_vec()),
+        ]);
+        let result = b.fetch_and_decrypt(&mut t).await.unwrap();
+        assert_eq!(result.skipped_undecryptable, 1);
+        assert!(result.received.is_empty());
+        assert_eq!(
+            t.sent
+                .iter()
+                .find(|(op, _)| *op == OP_DELIVERY_ACK)
+                .unwrap()
+                .1,
+            vec![0, 0]
+        );
+        assert_eq!(
+            session,
+            crate::store::load_session(&b.conn, "ALICE0000001").unwrap()
+        );
+        assert_eq!(account, crate::store::load_olm(&b.conn).unwrap());
+        let mut t = Fake::new(vec![
+            authenticated_resp(),
+            count_resp(16),
+            (OP_FETCH_RESP, batch(&valid)),
+            binding_resp(&a),
+            (OP_DELIVERY_ACK, 2u64.to_be_bytes().to_vec()),
+        ]);
+        assert_eq!(b.fetch_and_decrypt(&mut t).await.unwrap().received.len(), 1);
+        let mut t = Fake::new(vec![
+            authenticated_resp(),
+            count_resp(16),
+            (OP_FETCH_RESP, batch(&valid)),
+            (OP_DELIVERY_ACK, 2u64.to_be_bytes().to_vec()),
+        ]);
+        assert!(b
+            .fetch_and_decrypt(&mut t)
+            .await
+            .unwrap()
+            .received
+            .is_empty());
+        assert_eq!(crate::store::inbox_count(&b.conn).unwrap(), 2);
+        std::fs::remove_dir_all(da).ok();
+        std::fs::remove_dir_all(db).ok();
     }
 }

@@ -18,9 +18,11 @@ fn gen_kotlin_bindings() {
     // Host-cdylib: собран обычным cargo build (не cargo-ndk).
     let profile = std::env::var("DMSG_PROFILE").unwrap_or_else(|_| "debug".into());
     let lib = workspace.join(format!("target/{profile}/libdmsg_core.so"));
-    assert!(lib.exists(), "build host cdylib first: cargo build -p dmsg-core");
-    let out_dir: Utf8PathBuf =
-        workspace.join("android/app/src/main/java").to_owned();
+    assert!(
+        lib.exists(),
+        "build host cdylib first: cargo build -p dmsg-core"
+    );
+    let out_dir: Utf8PathBuf = workspace.join("android/app/src/main/java").to_owned();
     std::fs::create_dir_all(&out_dir).expect("out dir");
     let out: &Utf8Path = out_dir.as_path();
     uniffi_bindgen::library_mode::generate_bindings(
@@ -37,7 +39,12 @@ fn gen_kotlin_bindings() {
     // regenerated tracked bindings pass the repository's diff whitespace gate.
     let generated = out.join("uniffi/dmsg_core/dmsg_core.kt");
     let source = std::fs::read_to_string(&generated).expect("read generated bindings");
-    let normalized = source.lines().map(str::trim_end).collect::<Vec<_>>().join("\n") + "\n";
+    let normalized = source
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
     std::fs::write(&generated, normalized).expect("normalize generated bindings");
     assert!(
         out.join("uniffi/dmsg_core/dmsg_core.kt").exists(),

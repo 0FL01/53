@@ -15,15 +15,15 @@
 //!   COUNT после upload — refill-сигнал сервера.
 //!
 //! Пиклы Account/Session сериализуются через store; encrypted-open шифрует
-//! обе колонки перед SQLite, legacy Rust harness сохраняет прежний формат.
+//! both columns before SQLite; the internal plain harness uses the same v5 schema.
 
 use dmsg_protocol::{
     mailbox as mp, ERR_BAD, ERR_BUSY, ERR_NO_PREKEY, ERR_QUOTA, ERR_REVOKED, OP_CLAIM, OP_COUNT,
     OP_COUNT_RESP, OP_ERROR, OP_PREKEY, OP_UPLOAD_PREKEYS,
 };
 use vodozemac::{
-    Curve25519PublicKey,
     olm::{Account, OlmMessage, Session, SessionConfig},
+    Curve25519PublicKey,
 };
 
 use crate::transport::Transport;
@@ -50,7 +50,7 @@ pub enum OlmError {
     NothingToConfirm,
     /// Accept без ключей (контакт заведён только по ID, QR не сканирован).
     MissingKeys,
-    /// Ядро не enrol'нуто (нет device_priv в store).
+    /// No accepted account or persistent device identity in the store.
     NotEnrolled,
     /// У пира нет свободных one-time (пустой запас — явная ошибка;
     /// повтор после refill на его стороне).
@@ -84,9 +84,8 @@ pub enum OlmError {
     WireVersion(u8),
     /// Пустой текст или длиннее TEXT_MAX.
     BadText,
-    /// Ошибка ENROL-replay при login (протухший/отозванный invite,
-    /// чужой ключ — серверное состояние ушло; см. `Core::login`).
-    Enrol(crate::enrol::EnrolError),
+    /// Key-only resume failure, with safe typed account-auth errors.
+    Auth(crate::auth::AuthError),
 }
 
 impl std::fmt::Display for OlmError {
@@ -100,7 +99,7 @@ impl std::fmt::Display for OlmError {
             }
             Self::NothingToConfirm => write!(f, "nothing to confirm"),
             Self::MissingKeys => write!(f, "contact has no keys (scan QR first)"),
-            Self::NotEnrolled => write!(f, "not enrolled"),
+            Self::NotEnrolled => write!(f, "not authenticated"),
             Self::NoPeerPrekeys => write!(f, "peer has no one-time keys"),
             Self::UploadRejected => write!(f, "server rejected prekey upload"),
             Self::Quota => write!(f, "server quota"),
@@ -115,7 +114,7 @@ impl std::fmt::Display for OlmError {
             Self::WireType(t) => write!(f, "unknown olm wire type {t}"),
             Self::WireVersion(v) => write!(f, "unknown wire version {v}"),
             Self::BadText => write!(f, "bad text (empty or over limit)"),
-            Self::Enrol(e) => write!(f, "enrol replay: {e}"),
+            Self::Auth(e) => write!(f, "authentication: {e}"),
         }
     }
 }
@@ -156,7 +155,11 @@ pub fn load_or_create(conn: &rusqlite::Connection) -> Result<(Account, u32), Olm
 }
 
 /// Сохранить пикл Account + счётчик key_id (одна строка, upsert).
-pub fn persist(conn: &rusqlite::Connection, acc: &Account, next_key_id: u32) -> Result<(), OlmError> {
+pub fn persist(
+    conn: &rusqlite::Connection,
+    acc: &Account,
+    next_key_id: u32,
+) -> Result<(), OlmError> {
     let p = serde_json::to_string(&acc.pickle()).map_err(|_| OlmError::Store("pickle".into()))?;
     crate::store::save_olm(conn, &p, next_key_id).map_err(OlmError::Store)
 }
@@ -197,7 +200,9 @@ pub fn encode_wire(msg: &OlmMessage) -> Vec<u8> {
 /// Декодировать wire-bytes из FETCH. Неизвестный type — явная ошибка
 /// (не паника, не misparse).
 pub fn decode_wire(raw: &[u8]) -> Result<OlmMessage, OlmError> {
-    let (&t, body) = raw.split_first().ok_or(OlmError::Protocol("empty ciphertext"))?;
+    let (&t, body) = raw
+        .split_first()
+        .ok_or(OlmError::Protocol("empty ciphertext"))?;
     if t != 0 && t != 1 {
         return Err(OlmError::WireType(t));
     }
@@ -252,7 +257,8 @@ pub fn verify_prekey_sig(
     msg.extend_from_slice(&key_id.to_be_bytes());
     msg.extend_from_slice(pubkey);
     let sig = Signature::from_bytes(sig);
-    vk.verify_strict(&msg, &sig).map_err(|_| OlmError::IdentityMismatch)?;
+    vk.verify_strict(&msg, &sig)
+        .map_err(|_| OlmError::IdentityMismatch)?;
     Ok(())
 }
 
@@ -271,14 +277,14 @@ pub fn sign_prekey(
 }
 
 /// COUNT: число своих unconsumed one-time на сервере.
-pub async fn count(
-    t: &mut impl Transport,
-    device_key: &[u8; 32],
-) -> Result<u32, OlmError> {
+pub async fn count(t: &mut impl Transport, device_key: &[u8; 32]) -> Result<u32, OlmError> {
     t.send_frame(OP_COUNT, device_key)
         .await
         .map_err(|e| OlmError::Transport(e.to_string()))?;
-    let (op, p) = t.recv_frame().await.map_err(|e| OlmError::Transport(e.to_string()))?;
+    let (op, p) = t
+        .recv_frame()
+        .await
+        .map_err(|e| OlmError::Transport(e.to_string()))?;
     if op == OP_COUNT_RESP {
         return p
             .as_slice()
@@ -304,14 +310,20 @@ pub async fn upload_batch(
     next_key_id: &mut u32,
     n: u32,
 ) -> Result<u32, OlmError> {
-    let unpublished: Vec<[u8; 32]> =
-        acc.one_time_keys().values().map(|k| *k.as_bytes()).collect();
+    let unpublished: Vec<[u8; 32]> = acc
+        .one_time_keys()
+        .values()
+        .map(|k| *k.as_bytes())
+        .collect();
     let need = (n as usize).saturating_sub(unpublished.len());
     if need > 0 {
         acc.generate_one_time_keys(need);
     }
-    let mut pubs: Vec<[u8; 32]> =
-        acc.one_time_keys().values().map(|k| *k.as_bytes()).collect();
+    let mut pubs: Vec<[u8; 32]> = acc
+        .one_time_keys()
+        .values()
+        .map(|k| *k.as_bytes())
+        .collect();
     pubs.sort_unstable();
     pubs.truncate(n as usize);
     if pubs.is_empty() {
@@ -326,8 +338,9 @@ pub async fn upload_batch(
     }
     persist(conn, acc, *next_key_id)?;
     let identity = ed_identity(acc);
-    let mut payload = Vec::with_capacity(34 + entries.len() * 101);
+    let mut payload = Vec::with_capacity(66 + entries.len() * 101);
     payload.extend_from_slice(&identity);
+    payload.extend_from_slice(&curve_identity(acc));
     payload.extend_from_slice(&(entries.len() as u16).to_be_bytes());
     for (kid, pubkey, sig) in &entries {
         payload.extend_from_slice(&kid.to_be_bytes());
@@ -338,7 +351,10 @@ pub async fn upload_batch(
     t.send_frame(OP_UPLOAD_PREKEYS, &payload)
         .await
         .map_err(|e| OlmError::Transport(e.to_string()))?;
-    let (op, p) = t.recv_frame().await.map_err(|e| OlmError::Transport(e.to_string()))?;
+    let (op, p) = t
+        .recv_frame()
+        .await
+        .map_err(|e| OlmError::Transport(e.to_string()))?;
     if op == OP_COUNT_RESP {
         acc.mark_keys_as_published();
         persist(conn, acc, *next_key_id)?;
@@ -381,7 +397,10 @@ pub async fn claim_key(
     t.send_frame(OP_CLAIM, peer_device)
         .await
         .map_err(|e| OlmError::Transport(e.to_string()))?;
-    let (op, p) = t.recv_frame().await.map_err(|e| OlmError::Transport(e.to_string()))?;
+    let (op, p) = t
+        .recv_frame()
+        .await
+        .map_err(|e| OlmError::Transport(e.to_string()))?;
     if op == OP_PREKEY {
         let (kid, pubkey) = mp::parse_prekey(&p).ok_or(OlmError::Protocol("bad prekey"))?;
         return Ok((kid, pubkey));
@@ -434,9 +453,10 @@ mod tests {
     fn device_pubkey_matches_snow_derivation() {
         // Та же деривация, что сервер видит из IK (noise.rs::pubkey_of):
         // snow-пара и x25519-деривация из приватника совпадают.
-        let params: snow::params::NoiseParams =
-            crate::transport::PATTERN.parse().expect("pattern");
-        let kp = snow::Builder::new(params).generate_keypair().expect("keygen");
+        let params: snow::params::NoiseParams = crate::transport::PATTERN.parse().expect("pattern");
+        let kp = snow::Builder::new(params)
+            .generate_keypair()
+            .expect("keygen");
         let privb: [u8; 32] = kp.private.as_slice().try_into().expect("len");
         assert_eq!(device_pubkey(&privb), kp.public.as_slice());
     }
@@ -466,10 +486,16 @@ mod tests {
     #[test]
     fn error_mapping_and_retryable() {
         assert_eq!(map_error_code(ERR_NO_PREKEY), OlmError::NoPeerPrekeys);
-        assert!(!OlmError::NoPeerPrekeys.is_retryable(), "empty stock needs peer refill");
+        assert!(
+            !OlmError::NoPeerPrekeys.is_retryable(),
+            "empty stock needs peer refill"
+        );
         assert!(OlmError::Busy.is_retryable());
         assert!(OlmError::Server(9).is_retryable());
-        assert!(!OlmError::IdentityMismatch.is_retryable(), "substitution never auto-retries");
+        assert!(
+            !OlmError::IdentityMismatch.is_retryable(),
+            "substitution never auto-retries"
+        );
         assert!(!OlmError::Blocked.is_retryable());
         assert_eq!(map_upload_error(ERR_BAD), OlmError::UploadRejected);
         assert_eq!(

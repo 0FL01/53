@@ -1,11 +1,11 @@
 //! K3 контакты: ID, request-add, block, contact-QR, pin identity.
 //!
-//! Источники ID: собственный contact_id из ENROLLED (K2 store) и чужой —
+//! Источники ID: собственный contact_id из AUTHENTICATED и чужой —
 //! из contact-QR. Добавление по ID — ограниченный запрос (state `requested`,
 //! без ключей отправка невозможна); доверенный QR закрепляет ключи;
 //! согласие — [`accept`]; блок — [`block`] (терминален в v1).
 //!
-//! Contact-QR — ТЕМ ЖЕ bootstrap-конвертом (версированный бинарь +
+//! Contact-QR — bounded versioned binary envelope +
 //! base64url URI), но другой type (префикс `dmsg://contact/`) и своя
 //! независимая версия [`CONTACT_VERSION`]. Layout:
 //! `[version:u8][cid_len:u8=12][contact_id 12][user_id 16]`
@@ -23,13 +23,13 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 
 use crate::olm::OlmError;
 
-/// Префикс URI contact-приглашения (другой type, чем `dmsg://join/`).
+/// Contact QR prefix, distinct from the public server profile.
 pub const CONTACT_PREFIX: &str = "dmsg://contact/";
-/// Версия contact-формата (нумерация независима от bootstrap).
+/// Contact envelope version, independent of the public server profile.
 pub const CONTACT_VERSION: u8 = 1;
 /// Кап длины base64url-части ДО decode (raw ровно 126 байт → ~168 символов).
 const CONTACT_B64_MAX: usize = 256;
-/// Длина contact_id (как в ENROLLED).
+/// Contact ID length (as in AUTHENTICATED).
 pub const CONTACT_ID_LEN: usize = 12;
 
 /// Состояния контакта.
@@ -51,6 +51,8 @@ pub struct Contact {
     pub ed_identity: Option<[u8; 32]>,
     pub curve_identity: Option<[u8; 32]>,
     pub state: String,
+    pub seen_user: Option<[u8; 16]>,
+    pub seen_device: Option<[u8; 32]>,
     /// Presented-подмена (None — нет). Пока Some — отправка СТОП.
     pub seen_ed: Option<[u8; 32]>,
     pub seen_curve: Option<[u8; 32]>,
@@ -102,7 +104,7 @@ pub enum QrResult {
     IdentityChanged,
 }
 
-/// Собрать contact-QR из своих данных (user_id — из ENROLLED, device_key —
+/// Собрать contact-QR из своих данных (user_id — из AUTHENTICATED, device_key —
 /// свой Noise static-публичник, ed/curve — свой Olm identity).
 pub fn build_qr(
     contact_id: &str,
@@ -131,7 +133,9 @@ pub fn parse_qr(uri: &str) -> Result<ContactQr, QrError> {
     if b64.len() > CONTACT_B64_MAX {
         return Err(QrError::Truncated);
     }
-    let raw = URL_SAFE_NO_PAD.decode(b64).map_err(|_| QrError::BadEncoding)?;
+    let raw = URL_SAFE_NO_PAD
+        .decode(b64)
+        .map_err(|_| QrError::BadEncoding)?;
     // Layout: 1 ver + 1 cid_len + 12 cid + 16 user + 32 device + 32 ed + 32 curve = 126.
     if raw.len() != 126 {
         return Err(QrError::Truncated);
@@ -180,7 +184,9 @@ pub fn request_add(conn: &rusqlite::Connection, contact_id: &str) -> Result<Stri
         [contact_id],
     )
     .map_err(|e| OlmError::Store(format!("request: {e}")))?;
-    Ok(get(conn, contact_id)?.map(|c| c.state).unwrap_or_else(|| state::REQUESTED.into()))
+    Ok(get(conn, contact_id)?
+        .map(|c| c.state)
+        .unwrap_or_else(|| state::REQUESTED.into()))
 }
 
 /// Обработать сканированный contact-QR: новый — pin + requested; те же
@@ -215,7 +221,7 @@ pub fn add_from_qr(conn: &rusqlite::Connection, uri: &str) -> Result<QrResult, O
             // Подмена (или плановая ротация через новое устройство): pin цел,
             // presented — в seen_*. Отправка встанет через sendable.
             conn.execute(
-                "UPDATE core_contacts SET user_id=?1, device_key=?2,
+                "UPDATE core_contacts SET seen_user=?1, seen_device=?2,
                  seen_ed=?3, seen_curve=?4 WHERE contact_id=?5",
                 rusqlite::params![
                     q.user_id.as_slice(),
@@ -266,17 +272,34 @@ pub fn block(conn: &rusqlite::Connection, contact_id: &str) -> Result<(), OlmErr
 /// удаляется (следующая отправка строит свежую с новыми ключами).
 /// Без presented — NothingToConfirm (молчаливого approve нет).
 pub fn confirm_identity(conn: &rusqlite::Connection, contact_id: &str) -> Result<(), OlmError> {
-    let c = get(conn, contact_id)?.ok_or(OlmError::UnknownContact)?;
-    let (seen_ed, seen_curve) =
-        c.seen_ed.zip(c.seen_curve).ok_or(OlmError::NothingToConfirm)?;
-    conn.execute(
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(|_| OlmError::Store("confirm transaction".into()))?;
+    let c = get(&tx, contact_id)?.ok_or(OlmError::UnknownContact)?;
+    let (seen_ed, seen_curve) = c
+        .seen_ed
+        .zip(c.seen_curve)
+        .ok_or(OlmError::NothingToConfirm)?;
+    let user = c.seen_user.or(c.user_id).ok_or(OlmError::MissingKeys)?;
+    let device = c
+        .seen_device
+        .or(c.device_key)
+        .ok_or(OlmError::MissingKeys)?;
+    tx.execute(
         "UPDATE core_contacts SET ed_identity=?1, curve_identity=?2,
+         user_id=?4, device_key=?5, seen_user=NULL, seen_device=NULL,
          seen_ed=NULL, seen_curve=NULL WHERE contact_id=?3",
-        rusqlite::params![seen_ed.as_slice(), seen_curve.as_slice(), contact_id],
+        rusqlite::params![
+            seen_ed.as_slice(),
+            seen_curve.as_slice(),
+            contact_id,
+            user.as_slice(),
+            device.as_slice()
+        ],
     )
     .map_err(|e| OlmError::Store(format!("confirm: {e}")))?;
-    crate::store::delete_session(conn, contact_id).map_err(OlmError::Store)?;
-    Ok(())
+    crate::store::delete_session(&tx, contact_id).map_err(OlmError::Store)?;
+    tx.commit()
+        .map_err(|_| OlmError::Store("confirm commit".into()))
 }
 
 /// Зафиксировать presented curve с receive-path (prekey с чужим identity):
@@ -318,7 +341,11 @@ pub fn sendable(c: &Contact) -> Result<(), OlmError> {
     if c.state != state::ACCEPTED {
         return Err(OlmError::NotAccepted);
     }
-    if c.seen_ed.is_some() || c.seen_curve.is_some() {
+    if c.seen_ed.is_some()
+        || c.seen_curve.is_some()
+        || c.seen_device.is_some()
+        || c.seen_user.is_some()
+    {
         return Err(OlmError::IdentityMismatch);
     }
     if c.user_id.is_none() || c.device_key.is_none() || c.ed_identity.is_none() {
@@ -332,16 +359,38 @@ pub fn sendable(c: &Contact) -> Result<(), OlmError> {
 
 /// Загрузить контакт. None — неизвестен.
 pub fn get(conn: &rusqlite::Connection, contact_id: &str) -> Result<Option<Contact>, OlmError> {
-    let row: Option<(Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>, String, Option<Vec<u8>>, Option<Vec<u8>>)> =
-        conn.query_row(
+    let row: Option<(
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+        String,
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+    )> = conn
+        .query_row(
             "SELECT user_id, device_key, ed_identity, curve_identity, state, seen_ed, seen_curve
-             FROM core_contacts WHERE contact_id=?1",
+             , seen_user, seen_device FROM core_contacts WHERE contact_id=?1",
             [contact_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                ))
+            },
         )
         .optional()
         .map_err(|e| OlmError::Store(format!("contact: {e}")))?;
-    row.map(|(u, d, e, c, st, se, sc)| {
+    row.map(|(u, d, e, c, st, se, sc, su, sd)| {
         Ok(Contact {
             contact_id: contact_id.to_string(),
             user_id: bytes16(u)?,
@@ -349,6 +398,8 @@ pub fn get(conn: &rusqlite::Connection, contact_id: &str) -> Result<Option<Conta
             ed_identity: bytes32(e)?,
             curve_identity: bytes32(c)?,
             state: st,
+            seen_user: bytes16(su)?,
+            seen_device: bytes32(sd)?,
             seen_ed: bytes32(se)?,
             seen_curve: bytes32(sc)?,
         })
@@ -357,14 +408,60 @@ pub fn get(conn: &rusqlite::Connection, contact_id: &str) -> Result<Option<Conta
 }
 
 /// Найти контакт по Noise device_key пира (receive-path маппинг).
-pub fn get_by_device(conn: &rusqlite::Connection, device: &[u8]) -> Result<Option<Contact>, OlmError> {
+pub fn get_by_device(
+    conn: &rusqlite::Connection,
+    device: &[u8],
+) -> Result<Option<Contact>, OlmError> {
     let id: Option<String> = conn
-        .query_row("SELECT contact_id FROM core_contacts WHERE device_key=?1", [device], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT contact_id FROM core_contacts WHERE device_key=?1",
+            [device],
+            |r| r.get(0),
+        )
         .optional()
         .map_err(|e| OlmError::Store(format!("contact: {e}")))?;
     id.map(|i| get(conn, &i)).transpose().map(|o| o.flatten())
+}
+
+/// Stable user lookup still identifies a known peer after device replacement.
+pub fn get_by_user(conn: &rusqlite::Connection, user: &[u8]) -> Result<Option<Contact>, OlmError> {
+    let id: Option<String> = conn
+        .query_row(
+            "SELECT contact_id FROM core_contacts WHERE user_id=?1",
+            [user],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|_| OlmError::Store("contact user lookup".into()))?;
+    id.map(|id| get(conn, &id)).transpose().map(Option::flatten)
+}
+
+/// A pinned channel authenticates the directory, not a change of peer trust.
+/// Persist the complete candidate without changing any pinned routing keys.
+pub fn check_binding(
+    conn: &rusqlite::Connection,
+    contact_id: &str,
+    binding: &dmsg_protocol::auth::DeviceBinding,
+) -> Result<(), OlmError> {
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(|_| OlmError::Store("binding transaction".into()))?;
+    let c = get(&tx, contact_id)?.ok_or(OlmError::UnknownContact)?;
+    if c.user_id != Some(binding.user_id) {
+        return Err(OlmError::Protocol("foreign binding"));
+    }
+    if c.device_key == Some(binding.device_key)
+        && c.ed_identity == Some(binding.ed25519)
+        && c.curve_identity == Some(binding.curve25519)
+    {
+        if c.seen_ed.is_some() || c.seen_curve.is_some() || c.seen_device.is_some() {
+            return Err(OlmError::IdentityMismatch);
+        }
+        return Ok(());
+    }
+    tx.execute("UPDATE core_contacts SET seen_user=?2, seen_device=?3, seen_ed=?4, seen_curve=?5 WHERE contact_id=?1",rusqlite::params![contact_id,binding.user_id.as_slice(),binding.device_key.as_slice(),binding.ed25519.as_slice(),binding.curve25519.as_slice()]).map_err(|_| OlmError::Store("save peer warning".into()))?;
+    tx.commit()
+        .map_err(|_| OlmError::Store("peer warning commit".into()))?;
+    Err(OlmError::IdentityMismatch)
 }
 
 /// Список контактов с пагинацией по контракту FFI: cursor = contact_id
@@ -384,7 +481,9 @@ pub fn list(
         )
         .map_err(|e| OlmError::Store(format!("contacts: {e}")))?;
     let rows = stmt
-        .query_map(rusqlite::params![after, lim], |r| Ok((r.get(0)?, r.get(1)?)))
+        .query_map(rusqlite::params![after, lim], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
         .map_err(|e| OlmError::Store(format!("contacts: {e}")))?;
     let mut out: Vec<(String, String)> = Vec::new();
     for r in rows {
@@ -446,8 +545,14 @@ mod tests {
     }
 
     fn sample_qr() -> (String, ContactQr) {
-        let uri = build_qr("ABCD1234EFGH", &[1u8; 16], &[2u8; 32], &[3u8; 32], &[4u8; 32])
-            .expect("build");
+        let uri = build_qr(
+            "ABCD1234EFGH",
+            &[1u8; 16],
+            &[2u8; 32],
+            &[3u8; 32],
+            &[4u8; 32],
+        )
+        .expect("build");
         let q = parse_qr(&uri).expect("parse");
         (uri, q)
     }
@@ -457,9 +562,15 @@ mod tests {
         let (uri, q) = sample_qr();
         // Тот же конверт (base64url URI), другой type (префикс) и версия.
         assert!(uri.starts_with(CONTACT_PREFIX));
-        assert!(!uri.starts_with(dmsg_protocol::bootstrap::URI_PREFIX));
+        assert!(!uri.starts_with(dmsg_protocol::profile::URI_PREFIX));
         assert_eq!(
-            (q.contact_id.as_str(), q.user_id, q.device_key, q.ed_identity, q.curve_identity),
+            (
+                q.contact_id.as_str(),
+                q.user_id,
+                q.device_key,
+                q.ed_identity,
+                q.curve_identity
+            ),
             ("ABCD1234EFGH", [1u8; 16], [2u8; 32], [3u8; 32], [4u8; 32])
         );
     }
@@ -471,13 +582,18 @@ mod tests {
         let (uri, _) = sample_qr();
         assert_eq!(parse_qr(&uri[..uri.len() - 4]), Err(QrError::Truncated));
         // Чужой version-байт — явная ошибка (unknown version не молчит).
-        let mut raw = URL_SAFE_NO_PAD.decode(&uri[CONTACT_PREFIX.len()..]).expect("raw");
+        let mut raw = URL_SAFE_NO_PAD
+            .decode(&uri[CONTACT_PREFIX.len()..])
+            .expect("raw");
         raw[0] = 9;
         assert_eq!(
             parse_qr(&format!("{CONTACT_PREFIX}{}", URL_SAFE_NO_PAD.encode(&raw))),
             Err(QrError::BadVersion(9))
         );
-        assert_eq!(build_qr("short", &[1u8; 16], &[2u8; 32], &[3u8; 32], &[4u8; 32]), Err(QrError::BadContact));
+        assert_eq!(
+            build_qr("short", &[1u8; 16], &[2u8; 32], &[3u8; 32], &[4u8; 32]),
+            Err(QrError::BadContact)
+        );
     }
 
     #[test]
@@ -488,8 +604,14 @@ mod tests {
         accept(&conn, "ABCD1234EFGH").expect("accept");
         assert!(sendable(&get(&conn, "ABCD1234EFGH").expect("get").expect("row")).is_ok());
         // Тот же ID, другие ключи — подмена: pin цел, отправка СТОП.
-        let evil = build_qr("ABCD1234EFGH", &[1u8; 16], &[2u8; 32], &[9u8; 32], &[8u8; 32])
-            .expect("evil");
+        let evil = build_qr(
+            "ABCD1234EFGH",
+            &[1u8; 16],
+            &[2u8; 32],
+            &[9u8; 32],
+            &[8u8; 32],
+        )
+        .expect("evil");
         assert_eq!(add_from_qr(&conn, &evil), Ok(QrResult::IdentityChanged));
         let c = get(&conn, "ABCD1234EFGH").expect("get").expect("row");
         assert_eq!(c.ed_identity, Some([3u8; 32]), "pin must not move");
@@ -508,16 +630,25 @@ mod tests {
     fn request_block_flows() {
         let (conn, dir) = tmp_conn("flows");
         // Запрос по ID без ключей: accept невозможен (MissingKeys), отправка закрыта.
-        assert_eq!(request_add(&conn, "ZZZZ9999YYYY"), Ok(state::REQUESTED.into()));
+        assert_eq!(
+            request_add(&conn, "ZZZZ9999YYYY"),
+            Ok(state::REQUESTED.into())
+        );
         assert_eq!(accept(&conn, "ZZZZ9999YYYY"), Err(OlmError::MissingKeys));
         let c = get(&conn, "ZZZZ9999YYYY").expect("get").expect("row");
         assert_eq!(sendable(&c), Err(OlmError::NotAccepted));
         // Блок терминален: accept после блока — Blocked.
         block(&conn, "ZZZZ9999YYYY").expect("block");
         assert_eq!(accept(&conn, "ZZZZ9999YYYY"), Err(OlmError::Blocked));
-        assert_eq!(sendable(&get(&conn, "ZZZZ9999YYYY").expect("get").expect("row")), Err(OlmError::Blocked));
+        assert_eq!(
+            sendable(&get(&conn, "ZZZZ9999YYYY").expect("get").expect("row")),
+            Err(OlmError::Blocked)
+        );
         // Confirm без presented — явная ошибка, не молчаливый approve.
-        assert_eq!(confirm_identity(&conn, "ZZZZ9999YYYY"), Err(OlmError::NothingToConfirm));
+        assert_eq!(
+            confirm_identity(&conn, "ZZZZ9999YYYY"),
+            Err(OlmError::NothingToConfirm)
+        );
         assert!(get(&conn, "NONEXISTENT12").expect("get").is_none());
         // Пагинация: cursor/limit → страница + next.
         request_add(&conn, "AAAA0000BBBB").expect("r");

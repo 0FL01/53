@@ -2,7 +2,7 @@
 name = "dmsg-core"
 version = "0.1.0"
 edition = "2021"
-description = "dmsg client core K1-K3: transport seam, supervisor, local store, enrol, Olm E2E, contacts, outbox (direct Rust API, no FFI)"
+description = "dmsg client core: pinned DNS transport, unified auth, sealed local store, Olm E2E, contacts and durable outbox"
 
 [dependencies]
 tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "io-util", "time", "sync"] }

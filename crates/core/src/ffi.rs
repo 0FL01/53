@@ -7,18 +7,18 @@
 //!   Connection открывается и закрывается внутри каждого вызова;
 //! - ciphertext outbox через границу не отдаём (только message_id hex +
 //!   статус) — ретраем владеет Rust;
-//! - секреты (ключи, token, plaintext) в DTO и ошибки не попадают.
+//! - private keys, invitations and credentials never enter errors/diagnostics.
 //!
 //! Сетевые команды — синхронные блокирующие обёртки: внутри строится
-//! short-lived tokio-runtime + fresh `Core::open` + `DirectTcp::connect`.
+//! short-lived tokio-runtime + fresh core + pinned Noise over the managed DNS endpoint.
 //! Долгоживущего Core через FFI нет (Connection не Sync) — это осознанно:
 //! сессии/ratchet персистентны в DB, повторный open дёшев.
 
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::auth::AuthError;
 use crate::contacts::{self, Contact};
-use crate::enrol::EnrolError;
 use crate::olm::OlmError;
 use crate::transport::TransportError;
 
@@ -40,14 +40,14 @@ impl ConnectFailure {
 // DTO: команды возвращают записи, события — отчёты. Всё Clone для UniFFI.
 // ---------------------------------------------------------------------------
 
-/// Офлайн-предпросмотр invite (domain + pin-fingerprint, без сети).
+/// Offline public server profile preview (domain + pin fingerprint).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct Preview {
     pub domain: String,
     pub pin_fingerprint_hex: String,
 }
 
-/// Public metadata only: neither the bearer nor full profile leaves the store.
+/// Bounded public metadata for the configured immutable trust anchors.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct DnsProfileInfo {
     pub domain: String,
@@ -56,10 +56,10 @@ pub struct DnsProfileInfo {
     pub resolvers: Vec<String>,
 }
 
-/// Тип QR: enrol-приглашение или контакт. Оба формата обязан понимать сканер.
+/// QR types understood by the scanner: public server profile or contact.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum QrKind {
-    Join,
+    Server,
     Contact,
 }
 
@@ -128,14 +128,19 @@ pub struct OutboxPage {
 /// Состояние учётки для UI.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct AccountInfo {
-    pub enrolled: bool,
+    pub authenticated: bool,
     pub contact_id: Option<String>,
 }
 
-/// Итог enrolment (user_id через границу не отдаём — он в DB).
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
-pub struct EnrolledInfo {
-    pub contact_id: String,
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum RegistrationPolicy {
+    InviteOnly,
+    Open,
+}
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum LoginOutcome {
+    Authenticated { contact_id: String },
+    ReplacementRequired { expected_device: String },
 }
 
 /// Одно расшифрованное входящее (событие приёма).
@@ -178,7 +183,7 @@ pub enum StoragePlan {
 }
 
 /// Ошибка фасада. Строки — только статические причины/классы (секретов,
-/// ключей, plaintext, token здесь нет по построению мапперов ниже).
+/// private keys, plaintext or credentials never appear in these safe errors).
 #[derive(Debug, PartialEq, Eq, uniffi::Error)]
 pub enum FfiError {
     BadArgs(String),
@@ -195,9 +200,14 @@ pub enum FfiError {
     UploadRejected,
     Quota,
     Revoked,
-    BadToken,
-    Expired,
-    BoundOther,
+    InvalidCredentials,
+    LoginTaken,
+    InviteRequired,
+    InviteExpired,
+    InviteRevoked,
+    InviteUsed,
+    AuthRateLimited,
+    InvalidInput,
     Busy,
     BadText,
     Transport(String),
@@ -213,7 +223,7 @@ impl std::fmt::Display for FfiError {
             Self::BadArgs(e) => write!(f, "bad args: {e}"),
             Self::BadQr(e) => write!(f, "bad qr: {e}"),
             Self::PinMismatch => write!(f, "transport pin mismatch"),
-            Self::NotEnrolled => write!(f, "not enrolled"),
+            Self::NotEnrolled => write!(f, "not authenticated"),
             Self::UnknownContact => write!(f, "unknown contact"),
             Self::NotAccepted => write!(f, "contact not accepted"),
             Self::Blocked => write!(f, "contact blocked"),
@@ -226,9 +236,14 @@ impl std::fmt::Display for FfiError {
             Self::UploadRejected => write!(f, "server rejected prekey upload"),
             Self::Quota => write!(f, "server quota"),
             Self::Revoked => write!(f, "device revoked"),
-            Self::BadToken => write!(f, "bad token"),
-            Self::Expired => write!(f, "invite expired"),
-            Self::BoundOther => write!(f, "token bound to other key"),
+            Self::InvalidCredentials => write!(f, "invalid login or password"),
+            Self::LoginTaken => write!(f, "login taken"),
+            Self::InviteRequired => write!(f, "invitation required"),
+            Self::InviteExpired => write!(f, "invitation expired"),
+            Self::InviteRevoked => write!(f, "invitation revoked"),
+            Self::InviteUsed => write!(f, "invitation used"),
+            Self::AuthRateLimited => write!(f, "auth rate limited"),
+            Self::InvalidInput => write!(f, "invalid input"),
             Self::Busy => write!(f, "server busy, retry later"),
             Self::BadText => write!(f, "bad text (empty or over limit)"),
             Self::Transport(e) => write!(f, "transport: {e}"),
@@ -255,7 +270,7 @@ fn map_olm(e: OlmError) -> FfiError {
         OlmError::UploadRejected => FfiError::UploadRejected,
         OlmError::Quota => FfiError::Quota,
         OlmError::Revoked => FfiError::Revoked,
-        OlmError::Bad => FfiError::BadToken,
+        OlmError::Bad => FfiError::Protocol("bad request".into()),
         OlmError::Busy => FfiError::Busy,
         OlmError::Server(c) => FfiError::Server(format!("error {c}")),
         OlmError::Transport(e) => FfiError::Transport(e),
@@ -265,25 +280,29 @@ fn map_olm(e: OlmError) -> FfiError {
         OlmError::WireType(t) => FfiError::Protocol(format!("wire type {t}")),
         OlmError::WireVersion(v) => FfiError::Protocol(format!("wire version {v}")),
         OlmError::BadText => FfiError::BadText,
-        OlmError::Enrol(e) => map_enrol(e),
+        OlmError::Auth(e) => map_auth(e),
     }
 }
 
-fn map_enrol(e: EnrolError) -> FfiError {
+fn map_auth(e: AuthError) -> FfiError {
     match e {
-        EnrolError::BadQr(s) => FfiError::BadQr(s.into()),
-        EnrolError::PinMismatch => FfiError::PinMismatch,
-        EnrolError::KeyMismatch(d) => FfiError::Transport(format!("noise key: {d}")),
-        EnrolError::Auth(d) => FfiError::Transport(format!("auth: {d}")),
-        EnrolError::Bad => FfiError::BadToken,
-        EnrolError::Expired => FfiError::Expired,
-        EnrolError::Revoked => FfiError::Revoked,
-        EnrolError::BoundOther => FfiError::BoundOther,
-        EnrolError::Busy => FfiError::Busy,
-        EnrolError::Server(c) => FfiError::Server(format!("error {c}")),
-        EnrolError::Protocol(s) => FfiError::Protocol(s.into()),
-        EnrolError::Transport(s) => FfiError::Transport(s),
-        EnrolError::Store(s) => FfiError::Store(s),
+        AuthError::BadQr => FfiError::BadQr("invalid public profile".into()),
+        AuthError::PinMismatch => FfiError::PinMismatch,
+        AuthError::InvalidInput => FfiError::InvalidInput,
+        AuthError::InvalidCredentials => FfiError::InvalidCredentials,
+        AuthError::LoginTaken => FfiError::LoginTaken,
+        AuthError::InviteRequired => FfiError::InviteRequired,
+        AuthError::InviteExpired => FfiError::InviteExpired,
+        AuthError::InviteRevoked => FfiError::InviteRevoked,
+        AuthError::InviteUsed => FfiError::InviteUsed,
+        AuthError::AuthRateLimited => FfiError::AuthRateLimited,
+        AuthError::AlreadyAuthenticated => FfiError::InvalidInput,
+        AuthError::Revoked => FfiError::Revoked,
+        AuthError::Busy => FfiError::Busy,
+        AuthError::Server(_) => FfiError::Server("auth rejected".into()),
+        AuthError::Protocol(_) => FfiError::Protocol("invalid auth response".into()),
+        AuthError::Transport(_) => FfiError::Transport("auth transport failed".into()),
+        AuthError::Store(_) => FfiError::Store("auth storage failed".into()),
     }
 }
 
@@ -292,7 +311,7 @@ fn map_enrol(e: EnrolError) -> FfiError {
 // ---------------------------------------------------------------------------
 
 /// Кап длины URI ДО разбора: явно больше любого валидного QR обоих форматов
-/// (join ≤ ~5.5 KiB b64, contact ~170 символов). Сверх — явная ошибка
+/// (public server ≤ ~5.5 KiB b64, contact ~170 символов). Сверх — явная ошибка
 /// «oversized», а не молчаливый Truncated парсера.
 pub const QR_URI_MAX: usize = 8192;
 
@@ -303,40 +322,38 @@ pub fn qr_kind(uri: String) -> Result<QrKind, FfiError> {
     if uri.len() > QR_URI_MAX {
         return Err(FfiError::BadQr("oversized".into()));
     }
-    if uri.starts_with(dmsg_protocol::bootstrap::URI_PREFIX) {
-        return dmsg_protocol::bootstrap::parse(&uri)
-            .map(|_| QrKind::Join)
+    if uri.starts_with(dmsg_protocol::profile::URI_PREFIX) {
+        return dmsg_protocol::profile::parse(&uri)
+            .map(|_| QrKind::Server)
             .map_err(|e| {
                 FfiError::BadQr(
                     match e {
-                        dmsg_protocol::bootstrap::BootstrapError::BadPrefix => "bad prefix",
-                        dmsg_protocol::bootstrap::BootstrapError::BadEncoding => {
-                            "bad encoding"
-                        }
-                        dmsg_protocol::bootstrap::BootstrapError::Truncated => "truncated",
-                        dmsg_protocol::bootstrap::BootstrapError::BadVersion(_) => {
-                            "bad version"
-                        }
-                        dmsg_protocol::bootstrap::BootstrapError::BadDomain => "bad domain",
-                        dmsg_protocol::bootstrap::BootstrapError::BadCert => "bad cert",
+                        dmsg_protocol::profile::ProfileError::BadPrefix => "bad prefix",
+                        dmsg_protocol::profile::ProfileError::BadEncoding => "bad encoding",
+                        dmsg_protocol::profile::ProfileError::Truncated => "truncated",
+                        dmsg_protocol::profile::ProfileError::BadVersion(_) => "bad version",
+                        dmsg_protocol::profile::ProfileError::BadDomain => "bad domain",
+                        dmsg_protocol::profile::ProfileError::BadCert => "bad cert",
                     }
                     .into(),
                 )
             });
     }
     if uri.starts_with(contacts::CONTACT_PREFIX) {
-        return contacts::parse_qr(&uri).map(|_| QrKind::Contact).map_err(|e| {
-            FfiError::BadQr(
-                match e {
-                    contacts::QrError::BadPrefix => "bad prefix",
-                    contacts::QrError::BadEncoding => "bad encoding",
-                    contacts::QrError::Truncated => "truncated",
-                    contacts::QrError::BadVersion(_) => "bad version",
-                    contacts::QrError::BadContact => "bad contact id",
-                }
-                .into(),
-            )
-        });
+        return contacts::parse_qr(&uri)
+            .map(|_| QrKind::Contact)
+            .map_err(|e| {
+                FfiError::BadQr(
+                    match e {
+                        contacts::QrError::BadPrefix => "bad prefix",
+                        contacts::QrError::BadEncoding => "bad encoding",
+                        contacts::QrError::Truncated => "truncated",
+                        contacts::QrError::BadVersion(_) => "bad version",
+                        contacts::QrError::BadContact => "bad contact id",
+                    }
+                    .into(),
+                )
+            });
     }
     Err(FfiError::BadQr("bad prefix".into()))
 }
@@ -349,6 +366,7 @@ pub fn page_limit(limit: u32) -> u32 {
 
 /// Решение хранилища при старте по наличию файлов (чистая функция —
 /// покрытие unit-тестом здесь, зеркало в Kotlin вызывает фасад).
+/// MigrateLegacy means sealing a supported plain v5 store, not schema/auth compatibility.
 #[uniffi::export]
 pub fn storage_plan(has_legacy_db: bool, has_wrapped_db: bool) -> StoragePlan {
     if has_wrapped_db {
@@ -381,17 +399,46 @@ fn hex(b: &[u8]) -> String {
     s
 }
 
+fn runtime() -> Result<tokio::runtime::Runtime, FfiError> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| FfiError::Transport("runtime unavailable".into()))
+}
+fn parse_device_hex(value: &str) -> Result<[u8; 32], FfiError> {
+    if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(FfiError::InvalidInput);
+    }
+    let mut key = [0; 32];
+    for (dst, pair) in key.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
+        let digit = |b: u8| {
+            if b.is_ascii_digit() {
+                b - b'0'
+            } else {
+                b.to_ascii_lowercase() - b'a' + 10
+            }
+        };
+        *dst = (digit(pair[0]) << 4) | digit(pair[1]);
+    }
+    Ok(key)
+}
+
 fn info_of(c: &Contact) -> ContactInfo {
     ContactInfo {
         contact_id: c.contact_id.clone(),
         state: c.state.clone(),
         has_keys: c.ed_identity.is_some() && c.curve_identity.is_some(),
-        identity_mismatch: c.seen_ed.is_some() || c.seen_curve.is_some(),
+        identity_mismatch: c.seen_ed.is_some()
+            || c.seen_curve.is_some()
+            || c.seen_device.is_some()
+            || c.seen_user.is_some(),
     }
 }
 
 fn dns_failure(state: crate::dns::State) -> FfiError {
-    if state == crate::dns::State::Failed(7) { return FfiError::PinMismatch; }
+    if state == crate::dns::State::Failed(7) {
+        return FfiError::PinMismatch;
+    }
     FfiError::Transport(match state {
         crate::dns::State::Connecting => "DNS connect deadline".into(),
         crate::dns::State::Backoff(_) => "DNS unavailable; reconnect backoff".into(),
@@ -416,13 +463,37 @@ fn parse_transport_args(
 }
 
 impl DmsgClient {
+    fn auth_dns(&self, opcode: u8, payload: &[u8]) -> Result<crate::auth::LoginOutcome, FfiError> {
+        use crate::transport::Transport;
+        let p = self.dns_profile()?;
+        let mut conn = self.conn()?;
+        let key = crate::auth::pending_key(&mut conn).map_err(map_auth)?;
+        let addr = self.dns_endpoint(&p)?;
+        runtime()?.block_on(async {
+            let mut t = crate::transport::initiate_with_key(
+                &addr,
+                &p.noise_pubkey,
+                p.domain.as_bytes(),
+                &key,
+            )
+            .await
+            .map_err(|_| FfiError::Transport("pinned auth channel failed".into()))?;
+            let result = crate::auth::authenticate(&mut conn, &mut t, &key, opcode, payload)
+                .await
+                .map_err(map_auth);
+            t.close().await;
+            result
+        })
+    }
     fn dns_profile(&self) -> Result<crate::dns::Profile, FfiError> {
-        crate::dns::load(&self.conn()?).map_err(FfiError::Store)?
+        crate::dns::load(&self.conn()?)
+            .map_err(FfiError::Store)?
             .ok_or_else(|| FfiError::BadArgs("DNS profile is not configured".into()))
     }
 
     fn dns_endpoint(&self, profile: &crate::dns::Profile) -> Result<String, FfiError> {
-        crate::dns::endpoint(&self.db_path, profile).map(|a| a.to_string())
+        crate::dns::endpoint(&self.db_path, profile)
+            .map(|a| a.to_string())
             .map_err(dns_failure)
     }
 
@@ -430,17 +501,19 @@ impl DmsgClient {
         match &self.key {
             Some(k) => crate::store::open_encrypted(Path::new(&self.db_path), k),
             None => crate::store::open(Path::new(&self.db_path)),
-        }.map_err(FfiError::Store)
+        }
+        .map_err(FfiError::Store)
     }
 
     fn core(&self) -> Result<crate::chat::Core, FfiError> {
         match &self.key {
             Some(k) => crate::chat::Core::open_encrypted(Path::new(&self.db_path), k),
             None => crate::chat::Core::open(Path::new(&self.db_path)),
-        }.map_err(map_olm)
+        }
+        .map_err(map_olm)
     }
 
-    /// Enrolled commands must use the same Noise static as enrolment. The
+    /// Authenticated commands always use the same persisted Noise static. The
     /// ephemeral K1 constructor authenticates as a different device each time.
     async fn connect(
         &self,
@@ -461,38 +534,46 @@ impl DmsgClient {
 impl DmsgClient {
     /// Offline import after QR preview confirmation. Saved pins are immutable.
     pub fn configure_dns(&self, qr: String, resolvers: Vec<String>) -> Result<(), FfiError> {
-        let profile = crate::dns::Profile::from_qr(&qr, resolvers)
-            .map_err(|e| FfiError::BadQr(e.into()))?;
+        let profile =
+            crate::dns::Profile::from_qr(&qr, resolvers).map_err(|e| FfiError::BadQr(e.into()))?;
         let mut conn = self.conn()?;
         // Serialize the first import's compare-and-save across all FFI callers,
         // not only Android's facade lock. Two different pins must not both win.
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|_| FfiError::Store("dns import transaction".into()))?;
         if let Some(old) = crate::dns::load(&tx).map_err(FfiError::Store)? {
-            if old.domain != profile.domain || old.certificate != profile.certificate
-                || old.noise_pubkey != profile.noise_pubkey {
-                return Err(FfiError::BadArgs("saved DNS identity/pin cannot be replaced".into()));
+            if old.domain != profile.domain
+                || old.certificate != profile.certificate
+                || old.noise_pubkey != profile.noise_pubkey
+            {
+                return Err(FfiError::BadArgs(
+                    "saved DNS identity/pin cannot be replaced".into(),
+                ));
             }
         }
         crate::dns::save(&tx, &profile).map_err(FfiError::Store)?;
-        tx.commit().map_err(|_| FfiError::Store("dns import commit".into()))
+        tx.commit()
+            .map_err(|_| FfiError::Store("dns import commit".into()))
     }
 
     pub fn dns_profile_info(&self) -> Result<Option<DnsProfileInfo>, FfiError> {
         use sha2::Digest;
-        Ok(crate::dns::load(&self.conn()?).map_err(FfiError::Store)?.map(|p| DnsProfileInfo {
-            domain: p.domain,
-            noise_pubkey: p.noise_pubkey.to_vec(),
-            pin_fingerprint_hex: hex(&sha2::Sha256::digest(&p.certificate)),
-            resolvers: p.resolvers.into_iter().map(|a| a.to_string()).collect(),
-        }))
+        Ok(crate::dns::load(&self.conn()?)
+            .map_err(FfiError::Store)?
+            .map(|p| DnsProfileInfo {
+                domain: p.domain,
+                noise_pubkey: p.noise_pubkey.to_vec(),
+                pin_fingerprint_hex: hex(&sha2::Sha256::digest(&p.certificate)),
+                resolvers: p.resolvers.into_iter().map(|a| a.to_string()).collect(),
+            }))
     }
 
     /// Network transitions invalidate sockets even if resolver IPs stayed equal.
     pub fn dns_network_changed(&self, resolvers: Vec<String>) -> Result<(), FfiError> {
         let mut profile = self.dns_profile()?;
-        profile.resolvers = crate::dns::parse_resolvers(resolvers)
-            .map_err(|e| FfiError::BadArgs(e.into()))?;
+        profile.resolvers =
+            crate::dns::parse_resolvers(resolvers).map_err(|e| FfiError::BadArgs(e.into()))?;
         crate::dns::save(&self.conn()?, &profile).map_err(FfiError::Store)?;
         self.stop_dns()
     }
@@ -501,23 +582,94 @@ impl DmsgClient {
     pub fn stop_dns(&self) -> Result<(), FfiError> {
         crate::dns::stop(&self.db_path).map_err(|e| FfiError::Transport(e.into()))
     }
-
-    pub fn dns_status(&self) -> Result<String, FfiError> {
-        crate::dns::status(&self.db_path).map(|s| match s {
-            crate::dns::State::Connecting => "connecting".into(),
-            crate::dns::State::Ready(_) => "ready".into(),
-            crate::dns::State::Backoff(seconds) => format!("backoff {seconds}s"),
-            crate::dns::State::Failed(7) => "carrier pin mismatch".into(),
-            crate::dns::State::Failed(code) => format!("failed {code}"),
-            crate::dns::State::Stopped => "stopped".into(),
-        }).map_err(|e| FfiError::Transport(e.into()))
+    pub fn dns_stop(&self) -> Result<(), FfiError> {
+        self.stop_dns()
     }
 
-    pub fn enrol_dns(&self, qr: String, resolvers: Vec<String>) -> Result<EnrolledInfo, FfiError> {
-        self.configure_dns(qr.clone(), resolvers)?;
-        let profile = self.dns_profile()?;
-        let addr = self.dns_endpoint(&profile)?;
-        self.enrol_from_qr(qr, addr, Some(profile.certificate))
+    pub fn dns_status(&self) -> Result<String, FfiError> {
+        crate::dns::status(&self.db_path)
+            .map(|s| match s {
+                crate::dns::State::Connecting => "connecting".into(),
+                crate::dns::State::Ready(_) => "ready".into(),
+                crate::dns::State::Backoff(seconds) => format!("backoff {seconds}s"),
+                crate::dns::State::Failed(7) => "carrier pin mismatch".into(),
+                crate::dns::State::Failed(code) => format!("failed {code}"),
+                crate::dns::State::Stopped => "stopped".into(),
+            })
+            .map_err(|e| FfiError::Transport(e.into()))
+    }
+
+    pub fn registration_policy_dns(&self) -> Result<RegistrationPolicy, FfiError> {
+        use crate::transport::Transport;
+        let p = self.dns_profile()?;
+        let addr = self.dns_endpoint(&p)?;
+        let key = crate::auth::generate_key().map_err(map_auth)?;
+        let rt = runtime()?;
+        rt.block_on(async {
+            let mut t = crate::transport::initiate_with_key(
+                &addr,
+                &p.noise_pubkey,
+                p.domain.as_bytes(),
+                &key,
+            )
+            .await
+            .map_err(|_| FfiError::Transport("pinned auth channel failed".into()))?;
+            let policy = crate::auth::registration_policy(&mut t)
+                .await
+                .map_err(map_auth);
+            t.close().await;
+            policy.map(|mode| match mode {
+                dmsg_protocol::auth::RegistrationMode::InviteOnly => RegistrationPolicy::InviteOnly,
+                dmsg_protocol::auth::RegistrationMode::Open => RegistrationPolicy::Open,
+            })
+        })
+    }
+
+    pub fn signup_dns(
+        &self,
+        login: String,
+        password: String,
+        invitation: Option<String>,
+    ) -> Result<AccountInfo, FfiError> {
+        let invite = invitation
+            .as_deref()
+            .map(dmsg_protocol::auth::parse_invitation)
+            .transpose()
+            .map_err(|_| FfiError::InvalidInput)?;
+        let payload = dmsg_protocol::auth::build_signup(&login, &password, invite.as_ref())
+            .map_err(|_| FfiError::InvalidInput)?;
+        match self.auth_dns(dmsg_protocol::OP_SIGNUP, &payload)? {
+            crate::auth::LoginOutcome::Authenticated(a) => Ok(AccountInfo {
+                authenticated: true,
+                contact_id: Some(a.contact_id),
+            }),
+            _ => Err(FfiError::Protocol("unexpected replacement response".into())),
+        }
+    }
+
+    pub fn login_dns(
+        &self,
+        login: String,
+        password: String,
+        expected_device: Option<String>,
+    ) -> Result<LoginOutcome, FfiError> {
+        let expected = expected_device
+            .as_deref()
+            .map(parse_device_hex)
+            .transpose()?;
+        let payload = dmsg_protocol::auth::build_login(&login, &password, expected.as_ref())
+            .map_err(|_| FfiError::InvalidInput)?;
+        self.auth_dns(dmsg_protocol::OP_LOGIN, &payload)
+            .map(|outcome| match outcome {
+                crate::auth::LoginOutcome::Authenticated(a) => LoginOutcome::Authenticated {
+                    contact_id: a.contact_id,
+                },
+                crate::auth::LoginOutcome::ReplacementRequired(key) => {
+                    LoginOutcome::ReplacementRequired {
+                        expected_device: hex(&key),
+                    }
+                }
+            })
     }
 
     pub fn reconnect_dns(&self) -> Result<u32, FfiError> {
@@ -533,16 +685,29 @@ impl DmsgClient {
         self.retry_queued(self.dns_endpoint(&p)?, p.noise_pubkey.to_vec(), p.domain)
     }
     pub fn send_dns(&self, contact_id: String, text: String) -> Result<String, FfiError> {
-        if text.is_empty() || text.len() > dmsg_protocol::TEXT_MAX { return Err(FfiError::BadText); }
+        if text.is_empty() || text.len() > dmsg_protocol::TEXT_MAX {
+            return Err(FfiError::BadText);
+        }
         let p = self.dns_profile()?;
         let mut core = self.core()?;
         core.preflight_text(&contact_id, &text).map_err(map_olm)?;
         match crate::dns::endpoint(&self.db_path, &p) {
-            Ok(a) => self.send_text(a.to_string(), p.noise_pubkey.to_vec(), p.domain, contact_id, text),
-            Err(s @ (crate::dns::State::Connecting | crate::dns::State::Backoff(_) | crate::dns::State::Stopped)) => {
-                core.queue_text_existing_session(&contact_id, &text).map_err(map_olm)?
-                    .map(|mid| hex(&mid)).ok_or_else(|| dns_failure(s))
-            }
+            Ok(a) => self.send_text(
+                a.to_string(),
+                p.noise_pubkey.to_vec(),
+                p.domain,
+                contact_id,
+                text,
+            ),
+            Err(
+                s @ (crate::dns::State::Connecting
+                | crate::dns::State::Backoff(_)
+                | crate::dns::State::Stopped),
+            ) => core
+                .queue_text_existing_session(&contact_id, &text)
+                .map_err(map_olm)?
+                .map(|mid| hex(&mid))
+                .ok_or_else(|| dns_failure(s)),
             Err(s) => Err(dns_failure(s)),
         }
     }
@@ -557,56 +722,42 @@ impl DmsgClient {
     /// encrypted DBs are verified immediately; no wrong-key fresh install.
     #[uniffi::constructor]
     pub fn open_encrypted(db_path: String, key: Vec<u8>) -> Result<Arc<Self>, FfiError> {
-        let key: [u8; 32] = key.try_into()
+        let key: [u8; 32] = key
+            .try_into()
             .map_err(|_| FfiError::BadArgs("storage key must be 32 bytes".into()))?;
         crate::store::open_encrypted(Path::new(&db_path), &key).map_err(FfiError::Store)?;
-        Ok(Arc::new(Self { db_path, key: Some(key) }))
+        Ok(Arc::new(Self {
+            db_path,
+            key: Some(key),
+        }))
     }
 
-    /// Учётка: enrolled + свой contact_id (None — свежая установка).
+    /// Authenticated account and own contact ID (None on fresh install).
     pub fn account_info(&self) -> Result<AccountInfo, FfiError> {
         let conn = self.conn()?;
         match crate::store::load_account(&conn).map_err(FfiError::Store)? {
-            Some((_, cid)) => Ok(AccountInfo { enrolled: true, contact_id: Some(cid) }),
-            None => Ok(AccountInfo { enrolled: false, contact_id: None }),
+            Some((_, cid)) => Ok(AccountInfo {
+                authenticated: true,
+                contact_id: Some(cid),
+            }),
+            None => Ok(AccountInfo {
+                authenticated: false,
+                contact_id: None,
+            }),
         }
     }
 
-    /// Офлайн-предпросмотр invite: domain + pin-fingerprint, без сети.
-    pub fn enrol_preview(&self, qr: String) -> Result<Preview, FfiError> {
-        let p = crate::enrol::preview(&qr).map_err(map_enrol)?;
+    /// Offline public-profile preview: domain + pin fingerprint, without secrets/network.
+    pub fn profile_preview(&self, qr: String) -> Result<Preview, FfiError> {
+        let p = crate::auth::preview(&qr).map_err(map_auth)?;
         let hex_fp = p.pin_fingerprint_hex();
-        Ok(Preview { domain: p.domain, pin_fingerprint_hex: hex_fp })
+        Ok(Preview {
+            domain: p.domain,
+            pin_fingerprint_hex: hex_fp,
+        })
     }
 
-    /// Полный enrol из QR (сеть). pin_der — ожидаемый DER для сверки
-    /// (None — доверие сканированному QR как корню, см. enrol.rs).
-    pub fn enrol_from_qr(
-        &self,
-        qr: String,
-        addr: String,
-        expected_pin_der: Option<Vec<u8>>,
-    ) -> Result<EnrolledInfo, FfiError> {
-        if addr.is_empty() {
-            return Err(FfiError::BadArgs("empty addr".into()));
-        }
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| FfiError::Transport(format!("runtime: {e}")))?;
-        let db = Path::new(&self.db_path).to_path_buf();
-        let enrol = async {
-            match &self.key {
-                Some(k) => crate::enrol::enrol_from_qr_encrypted(&qr, &addr, &db, expected_pin_der.as_deref(), k).await,
-                None => crate::enrol::enrol_from_qr(&qr, &addr, &db, expected_pin_der.as_deref()).await,
-            }
-        };
-        rt.block_on(enrol)
-            .map(|e| EnrolledInfo { contact_id: e.contact_id })
-            .map_err(map_enrol)
-    }
-
-    /// Свой contact-QR для показа (требует enrol).
+    /// Own contact QR, available only after authentication.
     pub fn my_contact_qr(&self) -> Result<String, FfiError> {
         let core = self.core()?;
         let (uid, cid) = core.my_account().map_err(map_olm)?;
@@ -670,13 +821,15 @@ impl DmsgClient {
         limit: u32,
     ) -> Result<ContactsPage, FfiError> {
         let conn = self.conn()?;
-        let (rows, next) =
-            contacts::list(&conn, cursor.as_deref(), page_limit(limit) as usize)
-                .map_err(map_olm)?;
+        let (rows, next) = contacts::list(&conn, cursor.as_deref(), page_limit(limit) as usize)
+            .map_err(map_olm)?;
         Ok(ContactsPage {
             rows: rows
                 .into_iter()
-                .map(|(id, st)| ContactRow { contact_id: id, state: st })
+                .map(|(id, st)| ContactRow {
+                    contact_id: id,
+                    state: st,
+                })
                 .collect(),
             next_cursor: next,
         })
@@ -690,7 +843,11 @@ impl DmsgClient {
         Ok(InboxPage {
             rows: rows
                 .into_iter()
-                .map(|(seq, cid, text)| InboxRow { seq, contact_id: cid, text })
+                .map(|(seq, cid, text)| InboxRow {
+                    seq,
+                    contact_id: cid,
+                    text,
+                })
                 .collect(),
             next_cursor: next,
         })
@@ -699,9 +856,8 @@ impl DmsgClient {
     /// Страница outbox без ciphertext (cursor — внутренний rowid).
     pub fn outbox_page(&self, cursor: i64, limit: u32) -> Result<OutboxPage, FfiError> {
         let conn = self.conn()?;
-        let (rows, next) =
-            crate::store::outbox_queued(&conn, cursor, page_limit(limit) as usize)
-                .map_err(FfiError::Store)?;
+        let (rows, next) = crate::store::outbox_queued(&conn, cursor, page_limit(limit) as usize)
+            .map_err(FfiError::Store)?;
         Ok(OutboxPage {
             rows: rows
                 .into_iter()
@@ -714,7 +870,10 @@ impl DmsgClient {
             next_cursor: next,
         })
     }
+}
 
+// Direct network methods are Rust-only harness seams, never UniFFI endpoints.
+impl DmsgClient {
     /// Отправить текст (login + refill + claim + одна TX + SEND). Возвращает
     /// message_id hex. Блокирующий вызов для FGS/композера.
     pub fn send_text(
@@ -743,16 +902,23 @@ impl DmsgClient {
                 Ok(t) => t,
                 // Only a failed TCP connect is an offline send. A failed
                 // Noise/domain handshake or local auth/store error is not.
-                Err(ConnectFailure::Transport(TransportError::Io(e))) if e.starts_with("connect: ") => {
-                    return match core.queue_text_existing_session(&contact_id, &text).map_err(map_olm)? {
+                Err(ConnectFailure::Transport(TransportError::Io(e)))
+                    if e.starts_with("connect: ") =>
+                {
+                    return match core
+                        .queue_text_existing_session(&contact_id, &text)
+                        .map_err(map_olm)?
+                    {
                         Some(mid) => Ok(hex(&mid)),
                         None => Err(FfiError::Transport(format!("io: {e}"))),
                     };
                 }
                 Err(e) => return Err(e.into_ffi()),
             };
-            let mid =
-                core.send_text(&mut t, &contact_id, &text).await.map_err(map_olm)?;
+            let mid = core
+                .send_text(&mut t, &contact_id, &text)
+                .await
+                .map_err(map_olm)?;
             Ok(hex(&mid))
         })
     }
@@ -774,7 +940,10 @@ impl DmsgClient {
             .map_err(|e| FfiError::Transport(format!("runtime: {e}")))?;
         rt.block_on(async {
             let mut core = self.core()?;
-            let mut t = self.connect(&addr, &sp, &dom).await.map_err(ConnectFailure::into_ffi)?;
+            let mut t = self
+                .connect(&addr, &sp, &dom)
+                .await
+                .map_err(ConnectFailure::into_ffi)?;
             let s = core.retry_queued(&mut t).await.map_err(map_olm)?;
             Ok(RetryReport {
                 resent: s.resent as u64,
@@ -802,7 +971,10 @@ impl DmsgClient {
             .map_err(|e| FfiError::Transport(format!("runtime: {e}")))?;
         rt.block_on(async {
             let mut core = self.core()?;
-            let mut t = self.connect(&addr, &sp, &dom).await.map_err(ConnectFailure::into_ffi)?;
+            let mut t = self
+                .connect(&addr, &sp, &dom)
+                .await
+                .map_err(ConnectFailure::into_ffi)?;
             let r = core.fetch_and_decrypt(&mut t).await.map_err(map_olm)?;
             Ok(FetchReport {
                 received: r
@@ -841,7 +1013,10 @@ impl DmsgClient {
             .map_err(|e| FfiError::Transport(format!("runtime: {e}")))?;
         rt.block_on(async {
             let mut core = self.core()?;
-            let mut t = self.connect(&addr, &sp, &dom).await.map_err(ConnectFailure::into_ffi)?;
+            let mut t = self
+                .connect(&addr, &sp, &dom)
+                .await
+                .map_err(ConnectFailure::into_ffi)?;
             core.on_reconnect(&mut t).await.map_err(map_olm)
         })
     }
@@ -857,21 +1032,27 @@ mod tests {
         drop(client.conn().unwrap());
         let client = std::sync::Arc::new(client);
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(32));
-        let threads: Vec<_> = (0..32).map(|i| {
-            let client = client.clone();
-            let barrier = barrier.clone();
-            std::thread::spawn(move || {
-                let key = 8 + (i % 2) as u8;
-                let qr = dmsg_protocol::bootstrap::build(b"fixture.invalid", &[0x30, 0], &[key; 32], &[91; 32]).unwrap();
-                barrier.wait();
-                (key, client.configure_dns(qr, vec!["127.0.0.1:53".into()]))
+        let threads: Vec<_> = (0..32)
+            .map(|i| {
+                let client = client.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let key = 8 + (i % 2) as u8;
+                    let qr =
+                        dmsg_protocol::profile::build(b"fixture.invalid", &[0x30, 0], &[key; 32])
+                            .unwrap();
+                    barrier.wait();
+                    (key, client.configure_dns(qr, vec!["127.0.0.1:53".into()]))
+                })
             })
-        }).collect();
+            .collect();
         let mut accepted = std::collections::HashSet::new();
         for thread in threads {
             let (key, result) = thread.join().unwrap();
             match result {
-                Ok(()) => { accepted.insert(key); }
+                Ok(()) => {
+                    accepted.insert(key);
+                }
                 Err(FfiError::BadArgs(_)) => (),
                 Err(_) => panic!("unexpected DNS import failure"),
             }
@@ -882,12 +1063,11 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    fn enrolled_client(name: &str) -> (DmsgClient, std::path::PathBuf) {
+    fn authenticated_client(name: &str) -> (DmsgClient, std::path::PathBuf) {
         let (c, dir) = tmp_client(name);
         let conn = c.conn().expect("db");
         crate::store::save_identity(&conn, &[3; 32]).expect("identity");
-        crate::store::save_account(&conn, &[4; 16], "ALICE0000001").expect("account");
-        crate::store::save_token(&conn, &[5; 32]).expect("token");
+        crate::store::save_account(&conn, &[4; 16], "A11CE0000001").expect("account");
         drop(conn);
         (c, dir)
     }
@@ -895,8 +1075,14 @@ mod tests {
     fn peer_contact(c: &DmsgClient) -> (String, vodozemac::olm::Account) {
         let peer = vodozemac::olm::Account::new();
         let id = "BOBB00000002".to_string();
-        let qr = contacts::build_qr(&id, &[6; 16], &[7; 32],
-            peer.ed25519_key().as_bytes(), peer.curve25519_key().as_bytes()).expect("qr");
+        let qr = contacts::build_qr(
+            &id,
+            &[6; 16],
+            &[7; 32],
+            peer.ed25519_key().as_bytes(),
+            peer.curve25519_key().as_bytes(),
+        )
+        .expect("qr");
         assert_eq!(c.add_contact_qr(qr).expect("add"), QrOutcome::Added);
         c.contact_accept(id.clone()).expect("accept");
         (id, peer)
@@ -904,13 +1090,25 @@ mod tests {
 
     fn install_session(c: &DmsgClient, id: &str, peer: &mut vodozemac::olm::Account) {
         peer.generate_one_time_keys(1);
-        let ot = *peer.one_time_keys().values().next().expect("one-time").as_bytes();
+        let ot = *peer
+            .one_time_keys()
+            .values()
+            .next()
+            .expect("one-time")
+            .as_bytes();
         let core = c.core().expect("core");
-        let (account, _) = crate::olm::load_or_create(&c.conn().expect("db")).expect("account pickle");
-        let session = crate::olm::outbound(&account, &crate::olm::curve_identity(peer), &ot).expect("session");
-        crate::store::save_session(&c.conn().expect("db"), id,
+        let (account, _) =
+            crate::olm::load_or_create(&c.conn().expect("db")).expect("account pickle");
+        let session = crate::olm::outbound(&account, &crate::olm::curve_identity(peer), &ot)
+            .expect("session");
+        crate::store::save_session(
+            &c.conn().expect("db"),
+            id,
             &crate::olm::pickle_session(&session).expect("pickle"),
-            &crate::olm::ed_identity(peer), &crate::olm::curve_identity(peer)).expect("persist");
+            &crate::olm::ed_identity(peer),
+            &crate::olm::curve_identity(peer),
+        )
+        .expect("persist");
         drop(core);
     }
 
@@ -922,12 +1120,18 @@ mod tests {
     }
 
     fn offline_send(c: &DmsgClient, addr: &str, id: &str, text: &str) -> Result<String, FfiError> {
-        c.send_text(addr.into(), vec![1; 32], "offline.test".into(), id.into(), text.into())
+        c.send_text(
+            addr.into(),
+            vec![1; 32],
+            "offline.test".into(),
+            id.into(),
+            text.into(),
+        )
     }
 
     #[test]
     fn offline_send_existing_session_queues_ciphertext_via_ffi() {
-        let (c, dir) = enrolled_client("queued-existing");
+        let (c, dir) = authenticated_client("queued-existing");
         let (id, mut peer) = peer_contact(&c);
         install_session(&c, &id, &mut peer);
         let c = DmsgClient::open_encrypted(c.db_path.clone(), vec![19; 32]).expect("encrypted");
@@ -944,23 +1148,32 @@ mod tests {
 
     #[test]
     fn offline_send_changed_identity_stops_before_queue() {
-        let (c, dir) = enrolled_client("queued-mismatch");
+        let (c, dir) = authenticated_client("queued-mismatch");
         let (id, mut peer) = peer_contact(&c);
         install_session(&c, &id, &mut peer);
         let evil = contacts::build_qr(&id, &[6; 16], &[7; 32], &[9; 32], &[8; 32]).expect("evil");
-        assert_eq!(c.add_contact_qr(evil).expect("change"), QrOutcome::IdentityChanged);
-        assert_eq!(offline_send(&c, &offline_addr(), &id, "secret"), Err(FfiError::IdentityMismatch));
+        assert_eq!(
+            c.add_contact_qr(evil).expect("change"),
+            QrOutcome::IdentityChanged
+        );
+        assert_eq!(
+            offline_send(&c, &offline_addr(), &id, "secret"),
+            Err(FfiError::IdentityMismatch)
+        );
         assert!(c.outbox_page(0, 10).expect("outbox").rows.is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn offline_send_without_session_returns_transport_and_no_plaintext() {
-        let (c, dir) = enrolled_client("queued-no-session");
+        let (c, dir) = authenticated_client("queued-no-session");
         let (id, _) = peer_contact(&c);
         let c = DmsgClient::open_encrypted(c.db_path.clone(), vec![19; 32]).expect("encrypted");
         let text = "no-session-plaintext-sentinel";
-        assert!(matches!(offline_send(&c, &offline_addr(), &id, text), Err(FfiError::Transport(_))));
+        assert!(matches!(
+            offline_send(&c, &offline_addr(), &id, text),
+            Err(FfiError::Transport(_))
+        ));
         assert!(c.outbox_page(0, 10).expect("outbox").rows.is_empty());
         let raw = std::fs::read(&c.db_path).expect("db bytes");
         assert!(!raw.windows(text.len()).any(|w| w == text.as_bytes()));
@@ -968,32 +1181,42 @@ mod tests {
     }
 
     fn tmp_client(name: &str) -> (DmsgClient, std::path::PathBuf) {
-        let dir =
-            std::env::temp_dir().join(format!("dmsg-k4-{}-{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("dmsg-k4-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("tmpdir");
         let db = dir.join("core.db");
         let _ = std::fs::remove_file(&db);
-        (DmsgClient { db_path: db.to_string_lossy().into_owned(), key: None }, dir)
+        (
+            DmsgClient {
+                db_path: db.to_string_lossy().into_owned(),
+                key: None,
+            },
+            dir,
+        )
     }
 
-    fn sample_join() -> String {
-        dmsg_protocol::bootstrap::build(
+    fn sample_profile() -> String {
+        dmsg_protocol::profile::build(
             b"msg.example.com",
             &[0x30u8, 0x03, 0x01, 0x01, 0x00],
             &[9u8; 32],
-            &[7u8; 32],
         )
         .expect("build")
     }
 
     fn sample_contact() -> String {
-        contacts::build_qr("ABCD1234EFGH", &[1u8; 16], &[2u8; 32], &[3u8; 32], &[4u8; 32])
-            .expect("build")
+        contacts::build_qr(
+            "ABCD1234EFGH",
+            &[1u8; 16],
+            &[2u8; 32],
+            &[3u8; 32],
+            &[4u8; 32],
+        )
+        .expect("build")
     }
 
     #[test]
     fn qr_kinds_and_explicit_errors() {
-        assert_eq!(qr_kind(sample_join()).expect("join"), QrKind::Join);
+        assert_eq!(qr_kind(sample_profile()).expect("server"), QrKind::Server);
         assert_eq!(qr_kind(sample_contact()).expect("contact"), QrKind::Contact);
         // Чужой scheme — bad prefix.
         assert_eq!(
@@ -1011,7 +1234,7 @@ mod tests {
             Err(FfiError::BadQr("bad encoding".into()))
         );
         // Oversized — явная ошибка до парсера.
-        let big = format!("dmsg://join/{}", "A".repeat(QR_URI_MAX));
+        let big = format!("dmsg://server/{}", "A".repeat(QR_URI_MAX));
         assert_eq!(qr_kind(big), Err(FfiError::BadQr("oversized".into())));
         let big2 = format!("dmsg://contact/{}", "A".repeat(QR_URI_MAX));
         assert_eq!(
@@ -1021,8 +1244,53 @@ mod tests {
     }
 
     #[test]
+    fn auth_errors_and_replacement_input_are_typed_and_secret_free() {
+        for (code, expected) in [
+            (dmsg_protocol::ERR_CREDENTIALS, FfiError::InvalidCredentials),
+            (dmsg_protocol::ERR_CONFLICT, FfiError::LoginTaken),
+            (dmsg_protocol::ERR_INVITE_REQUIRED, FfiError::InviteRequired),
+            (dmsg_protocol::ERR_EXPIRED, FfiError::InviteExpired),
+            (dmsg_protocol::ERR_REVOKED, FfiError::InviteRevoked),
+            (dmsg_protocol::ERR_INVITE_USED, FfiError::InviteUsed),
+            (dmsg_protocol::ERR_THROTTLED, FfiError::AuthRateLimited),
+            (dmsg_protocol::ERR_INVALID_INPUT, FfiError::InvalidInput),
+        ] {
+            assert_eq!(map_auth(crate::auth::map_error(code, true)), expected);
+        }
+        for e in [
+            AuthError::Store("a secret password".into()),
+            AuthError::Transport("a secret password".into()),
+        ] {
+            let e = map_auth(e);
+            assert!(!format!("{e} {e:?}").contains("a secret password"));
+        }
+        assert_eq!(parse_device_hex(&"Af".repeat(32)).unwrap(), [0xaf; 32]);
+        for invalid in [
+            "".into(),
+            "0".repeat(63),
+            "g".repeat(64),
+            "0".repeat(65),
+            format!(" {}", "0".repeat(64)),
+        ] {
+            assert_eq!(parse_device_hex(&invalid), Err(FfiError::InvalidInput));
+        }
+        assert!(matches!(
+            qr_kind("dmsg://join/AAAA".into()),
+            Err(FfiError::BadQr(_))
+        ));
+    }
+
+    #[test]
     fn limits_and_storage_plan() {
-        assert_eq!((page_limit(0), page_limit(1), page_limit(50), page_limit(5000)), (1, 1, 50, 100));
+        assert_eq!(
+            (
+                page_limit(0),
+                page_limit(1),
+                page_limit(50),
+                page_limit(5000)
+            ),
+            (1, 1, 50, 100)
+        );
         assert_eq!(storage_plan(false, false), StoragePlan::FreshInstall);
         assert_eq!(storage_plan(true, false), StoragePlan::MigrateLegacy);
         assert_eq!(storage_plan(true, true), StoragePlan::ReadyWrapped);
@@ -1030,19 +1298,25 @@ mod tests {
     }
 
     #[test]
-    fn offline_commands_before_enrol() {
+    fn offline_commands_before_authentication() {
         let (c, dir) = tmp_client("offline");
         assert_eq!(
             c.account_info().expect("info"),
-            AccountInfo { enrolled: false, contact_id: None }
+            AccountInfo {
+                authenticated: false,
+                contact_id: None
+            }
         );
-        let pv = c.enrol_preview(sample_join()).expect("preview");
+        let pv = c.profile_preview(sample_profile()).expect("preview");
         assert_eq!(pv.domain, "msg.example.com");
         assert_eq!(pv.pin_fingerprint_hex.len(), 64);
-        // Свой QR до enrol — NotEnrolled, не паника.
+        // Own QR before authentication is explicitly unavailable.
         assert_eq!(c.my_contact_qr(), Err(FfiError::NotEnrolled));
-        // Контакты/inbox/outbox работают без enrol (чистый store).
-        assert_eq!(c.contact_request("ZZZZ9999YYYY".into()).expect("req"), "requested");
+        // Offline contacts/inbox/outbox need only a valid store.
+        assert_eq!(
+            c.contact_request("ZZZZ9999YYYY".into()).expect("req"),
+            "requested"
+        );
         assert_eq!(
             c.contact_get("ZZZZ9999YYYY".into()).expect("get").state,
             "requested"
@@ -1070,7 +1344,10 @@ mod tests {
     #[test]
     fn contact_qr_roundtrip_through_facade() {
         let (c, dir) = tmp_client("qr");
-        assert_eq!(c.add_contact_qr(sample_contact()).expect("add"), QrOutcome::Added);
+        assert_eq!(
+            c.add_contact_qr(sample_contact()).expect("add"),
+            QrOutcome::Added
+        );
         assert_eq!(
             c.add_contact_qr(sample_contact()).expect("re"),
             QrOutcome::Unchanged
@@ -1091,7 +1368,11 @@ mod tests {
         assert!(info.identity_mismatch);
         assert!(info.has_keys);
         c.contact_confirm("ABCD1234EFGH".into()).expect("confirm");
-        assert!(!c.contact_get("ABCD1234EFGH".into()).expect("get2").identity_mismatch);
+        assert!(
+            !c.contact_get("ABCD1234EFGH".into())
+                .expect("get2")
+                .identity_mismatch
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1106,7 +1387,10 @@ mod tests {
             "ABCD1234EFGH".into(),
             "hi".into(),
         );
-        assert_eq!(r, Err(FfiError::BadArgs("server_pub must be 32 bytes".into())));
+        assert_eq!(
+            r,
+            Err(FfiError::BadArgs("server_pub must be 32 bytes".into()))
+        );
         // Пустой текст — BadText без сети.
         let r2 = c.send_text(
             "127.0.0.1:1".into(),

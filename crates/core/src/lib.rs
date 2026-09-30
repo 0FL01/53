@@ -3,7 +3,7 @@
 //! Модули: [`transport`] (trait-шов + direct-TCP + библиотечный инициатор),
 //! [`supervisor`] (один инстанс, reconnect с backoff — владеет Rust),
 //! [`store`] (свой SQLite-файл ядра, WAL),
-//! [`enrol`] (K2 offline-enrol из QR: preview без сети, pinned Noise, persist 0600),
+//! [`auth`] (public profile, signup/login and key-only resume),
 //! [`olm`] (K3 Olm E2E поверх vodozemac: identity + signed prekeys,
 //! claim/refill без планировщика),
 //! [`contacts`] (K3 контакты: ID, request-add, block, contact-QR тем же
@@ -20,11 +20,11 @@
 //! полные невыгружаемые списки запрещены. Списки [`contacts::list`],
 //! [`store::inbox_list`], [`store::outbox_queued`] уже следуют этой форме.
 
+pub mod auth;
 pub mod chat;
 pub mod contacts;
-pub mod enrol;
-pub mod ffi;
 pub mod dns;
+pub mod ffi;
 pub mod olm;
 mod secure;
 pub mod store;
@@ -33,9 +33,9 @@ pub mod transport;
 
 uniffi::setup_scaffolding!();
 
+pub use auth::{login_direct, preview, signup_direct, Account, AuthError, Preview};
 pub use chat::{Core, FetchResult, RawEvent, Received, RetryStats};
 pub use contacts::{Contact, QrResult};
-pub use enrol::{enrol_from_qr, preview, Enrolled, EnrolError, Preview};
 pub use olm::OlmError;
 pub use supervisor::{Config as SupervisorConfig, Status, Supervisor};
 pub use transport::{initiate, initiate_with_key, DirectTcp, Transport, TransportError};

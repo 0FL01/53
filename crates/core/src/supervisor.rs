@@ -2,8 +2,8 @@
 //!
 //! Переподключением владеет Rust: фоновая tokio-задача держит цикл
 //! connect→hold→reconnect, наружу — только [`Status`] через watch-канал.
-//! K1 держит только AUTH (без ENROL — это K2), поэтому сервер закрывает
-//! pre-enrol сессию по idle-timeout и супервизор переподключается: это
+//! The transport-only supervisor holds AUTH_DOMAIN/WELCOME, without account
+//! auth. The server closes its pre-account session on idle timeout: this is
 //! норма скелета и заодно живое доказательство reconnect.
 
 use std::sync::{Arc, Mutex};
@@ -52,12 +52,19 @@ impl Supervisor {
     /// Создать остановленный инстанс.
     pub fn new(cfg: Config) -> Arc<Self> {
         let (status_tx, _) = watch::channel(Status::Stopped);
-        Arc::new(Self { cfg, status_tx, task: Mutex::new(None) })
+        Arc::new(Self {
+            cfg,
+            status_tx,
+            task: Mutex::new(None),
+        })
     }
 
     /// Запустить фоновую задачу. Второй запуск без `stop` — Err.
     pub fn start(&self) -> Result<(), String> {
-        let mut slot = self.task.lock().map_err(|_| "supervisor lock".to_string())?;
+        let mut slot = self
+            .task
+            .lock()
+            .map_err(|_| "supervisor lock".to_string())?;
         if slot.is_some() {
             return Err("supervisor already running".into());
         }
@@ -98,14 +105,14 @@ async fn run_loop(cfg: Config, tx: watch::Sender<Status>) {
             Ok(mut ch) => {
                 attempt = 0;
                 let _ = tx.send_replace(Status::Connected);
-                // Hold: сервер pre-enrol ничего не шлёт и закроет по idle —
+                // Hold: pre-account server sends nothing and closes on idle —
                 // recv вернёт Closed, и уйдём на reconnect. Таймаут тика —
                 // только чтобы не висеть вечно на мёртвом сокете.
                 loop {
                     match tokio::time::timeout(Duration::from_secs(2), ch.recv_frame()).await {
-                        Ok(Ok(_)) => break, // pre-enrol серверу отвечать нечем — чужой кадр, переподключиться
+                        Ok(Ok(_)) => break,  // no unsolicited frame before account auth: reconnect
                         Ok(Err(_)) => break, // закрыто/бито — переподключиться
-                        Err(_) => continue, // idle-тик, канал держим
+                        Err(_) => continue,  // idle-тик, канал держим
                     }
                 }
                 // Пауза перед переподключением живого-канала, чтобы не спиновать
@@ -136,12 +143,19 @@ mod tests {
             let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             l.local_addr().unwrap().port()
         };
-        Config { addr: format!("127.0.0.1:{port}"), domain: b"k1.test".to_vec(), server_pub: [7u8; 32] }
+        Config {
+            addr: format!("127.0.0.1:{port}"),
+            domain: b"k1.test".to_vec(),
+            server_pub: [7u8; 32],
+        }
     }
 
     #[test]
     fn backoff_shape() {
-        assert_eq!((backoff_ms(1), backoff_ms(2), backoff_ms(3)), (100, 200, 400));
+        assert_eq!(
+            (backoff_ms(1), backoff_ms(2), backoff_ms(3)),
+            (100, 200, 400)
+        );
         assert_eq!(backoff_ms(6), 3200);
         assert_eq!(backoff_ms(100), 3200);
     }
@@ -154,7 +168,11 @@ mod tests {
         assert!(sv.start().is_err(), "second start without stop must fail");
         // Задача крутит connect→backoff на закрытом порту, но не Stopped.
         tokio::time::sleep(Duration::from_millis(300)).await;
-        assert!(sv.status() != Status::Stopped, "must be active, got {:?}", sv.status());
+        assert!(
+            sv.status() != Status::Stopped,
+            "must be active, got {:?}",
+            sv.status()
+        );
         sv.stop();
         assert_eq!(sv.status(), Status::Stopped);
         // После stop можно стартовать заново (тот же инстанс).

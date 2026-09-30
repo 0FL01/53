@@ -1,23 +1,8 @@
-//! Свой SQLite-файл ядра (WAL + минимальные миграции).
-//!
-//! Схему сервера НЕ копируем: здесь только нужное core. K1 — identity
-//! (Noise static-приватник устройства, persist для K2); outbox — позже в K3.
-//! Секреты — только через этот файл (0600), никогда в логи/argv/Git.
+//! Fresh unified schema. Old/future schemas fail before any database write.
+//! Same-schema plain-to-sealed conversion is a storage feature, not auth migration.
+pub const SCHEMA_VERSION: i64 = 5;
 
-/// Версия схемы ядра. Миграции — только вперёд, по одной на версию.
-pub const SCHEMA_VERSION: i64 = 4;
-
-/// Открыть (создать) файл БД ядра: parent-dirs, WAL, файл 0600, миграции.
-///
-/// Миграция v1: только `core_identity` (одна строка id=1, сырые 32 байта
-/// Noise static-приватника). Миграция v2 (K2 enrol): `core_account` (одна
-/// строка id=1: user_id 16 байт + contact_id). Миграция v3 (K3 Olm):
-/// `core_olm` (пикл Account + счётчик key_id), `core_sessions` (пиклы
-/// сессий 1-на-1), `core_contacts` (пины identity, состояния),
-/// `core_outbox` (сохранённый ciphertext + статусы), `core_inbox`
-/// (дедуп по sender+message_id). Таблиц сервера здесь нет и не будет.
-/// v4: core_dns_profile, authenticated stored carrier/Noise pins and resolvers.
-/// Прямой API сохраняет legacy plaintext для серверного тестового harness.
+/// Internal plain storage for isolated Rust harnesses.
 pub fn open(path: &std::path::Path) -> Result<rusqlite::Connection, String> {
     open_mode(path, None)
 }
@@ -31,24 +16,49 @@ pub fn open_encrypted(path: &std::path::Path, key: &[u8]) -> Result<rusqlite::Co
     open_mode(path, Some(key))
 }
 
-fn open_mode(path: &std::path::Path, key: Option<[u8; 32]>) -> Result<rusqlite::Connection, String> {
+fn open_mode(
+    path: &std::path::Path,
+    key: Option<[u8; 32]>,
+) -> Result<rusqlite::Connection, String> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
         }
     }
-    let conn = rusqlite::Connection::open(path).map_err(|e| format!("open: {e}"))?;
+    let mut conn = rusqlite::Connection::open(path).map_err(|e| format!("open: {e}"))?;
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(|_| "schema version lookup failed")?;
+    let nonempty: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name NOT LIKE 'sqlite_%')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|_| "schema lookup failed")?;
+    if version != SCHEMA_VERSION && !(version == 0 && !nonempty) {
+        return Err("unsupported core schema".into());
+    }
     // Check the marker BEFORE schema creation or any write, including on the
-    // legacy entrypoint. SQLite reads an existing WAL when opening this handle.
-    let marker_exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='core_storage')",
-        [], |r| r.get(0),
-    ).map_err(|_| "storage marker lookup failed")?;
+    // plain harness entrypoint. SQLite reads an existing WAL on opening.
+    let marker_exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='core_storage')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|_| "storage marker lookup failed")?;
     let marker: Option<(i64, Vec<u8>, i64)> = if marker_exists {
-        conn.query_row("SELECT version, verifier, cleanup_pending FROM core_storage WHERE id=1", [], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-        }).optional().map_err(|_| "storage marker corrupt")?
-    } else { None };
+        conn.query_row(
+            "SELECT version, verifier, cleanup_pending FROM core_storage WHERE id=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(|_| "storage marker corrupt")?
+    } else {
+        None
+    };
     if marker_exists && marker.is_none() {
         return Err("storage marker missing".into());
     }
@@ -61,45 +71,64 @@ fn open_mode(path: &std::path::Path, key: Option<[u8; 32]>) -> Result<rusqlite::
         _ => {}
     }
     crate::secure::register(&conn, key)?;
-    conn.execute_batch(
-        "PRAGMA journal_mode=WAL;
-         CREATE TABLE IF NOT EXISTS core_identity(
+    if version == 0 {
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|_| "schema transaction failed")?;
+        let locked_version: i64 = tx
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .map_err(|_| "schema lookup failed")?;
+        let locked_nonempty: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name NOT LIKE 'sqlite_%')",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|_| "schema lookup failed")?;
+        if locked_version != SCHEMA_VERSION && !(locked_version == 0 && !locked_nonempty) {
+            return Err("unsupported core schema".into());
+        }
+        if locked_version == 0 {
+            tx.execute_batch(
+        "CREATE TABLE core_identity(
            id INTEGER PRIMARY KEY CHECK(id=1),
            device_priv BLOB NOT NULL
          );
-         CREATE TABLE IF NOT EXISTS core_account(
+          CREATE TABLE core_account(
            id INTEGER PRIMARY KEY CHECK(id=1),
            user_id BLOB NOT NULL,
            contact_id TEXT NOT NULL
          );
-         CREATE TABLE IF NOT EXISTS core_olm(
+          CREATE TABLE core_olm(
            id INTEGER PRIMARY KEY CHECK(id=1),
            pickle TEXT NOT NULL,
            next_key_id INTEGER NOT NULL
          );
-         CREATE TABLE IF NOT EXISTS core_sessions(
+          CREATE TABLE core_sessions(
            contact_id TEXT PRIMARY KEY,
            pickle TEXT NOT NULL,
            peer_ed BLOB NOT NULL,
            peer_curve BLOB NOT NULL
          );
-         CREATE TABLE IF NOT EXISTS core_contacts(
+          CREATE TABLE core_contacts(
            contact_id TEXT PRIMARY KEY,
            user_id BLOB,
            device_key BLOB,
            ed_identity BLOB,
            curve_identity BLOB,
-           state TEXT NOT NULL,
-           seen_ed BLOB,
+            state TEXT NOT NULL,
+            seen_user BLOB,
+            seen_device BLOB,
+            seen_ed BLOB,
            seen_curve BLOB
          );
-         CREATE TABLE IF NOT EXISTS core_outbox(
+          CREATE TABLE core_outbox(
            message_id BLOB PRIMARY KEY,
            contact_id TEXT NOT NULL,
            ciphertext BLOB NOT NULL,
            status TEXT NOT NULL
          );
-         CREATE TABLE IF NOT EXISTS core_inbox(
+          CREATE TABLE core_inbox(
            sender_device BLOB NOT NULL,
            message_id BLOB NOT NULL,
            contact_id TEXT NOT NULL,
@@ -107,19 +136,19 @@ fn open_mode(path: &std::path::Path, key: Option<[u8; 32]>) -> Result<rusqlite::
            seq INTEGER NOT NULL,
            PRIMARY KEY(sender_device, message_id)
          );
-         -- K3: bearer-token invite (32 байта) для ENROL-replay на каждом
-         -- новом коннекте: сервер держит enrolled-флаг per-connection и
-         -- требует ENROL даже от известного ключа (replay идемпотентен).
-          CREATE TABLE IF NOT EXISTS core_token(
-            id INTEGER PRIMARY KEY CHECK(id=1),
-            token BLOB NOT NULL
-          );
-          CREATE TABLE IF NOT EXISTS core_dns_profile(
+           CREATE TABLE core_dns_profile(
             id INTEGER PRIMARY KEY CHECK(id=1),
             profile TEXT NOT NULL
-          );",
+           );
+           CREATE UNIQUE INDEX core_contact_user ON core_contacts(user_id) WHERE user_id IS NOT NULL;
+           PRAGMA user_version=5;",
     )
-    .map_err(|e| format!("migrate v4: {e}"))?;
+    .map_err(|_| "create schema v5 failed")?;
+        }
+        tx.commit().map_err(|_| "schema commit failed")?;
+    }
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
+        .map_err(|_| "storage durability setup failed")?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -129,40 +158,47 @@ fn open_mode(path: &std::path::Path, key: Option<[u8; 32]>) -> Result<rusqlite::
     if let Some(k) = key {
         if marker.is_none() {
             // A missing/deleted marker must never re-encrypt existing sealed
-            // values as if they were legacy plaintext.
-            let already_sealed: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM core_identity WHERE substr(device_priv,1,7)=?1)
-                     OR EXISTS(SELECT 1 FROM core_token WHERE substr(token,1,7)=?1)
+            // values as if they were plain v5 storage.
+            let already_sealed: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM core_identity WHERE substr(device_priv,1,7)=?1)
                      OR EXISTS(SELECT 1 FROM core_olm WHERE substr(pickle,1,7)=?1)
                      OR EXISTS(SELECT 1 FROM core_sessions WHERE substr(pickle,1,7)=?1)
                       OR EXISTS(SELECT 1 FROM core_inbox WHERE substr(text,1,7)=?1)
                       OR EXISTS(SELECT 1 FROM core_dns_profile WHERE substr(profile,1,7)=?1)",
-                [b"DMSG-S1".as_slice()], |r| r.get(0),
-            ).map_err(|_| "storage format detection failed")?;
-            if already_sealed { return Err("storage marker missing for encrypted values".into()); }
+                    [b"DMSG-S1".as_slice()],
+                    |r| r.get(0),
+                )
+                .map_err(|_| "storage format detection failed")?;
+            if already_sealed {
+                return Err("storage marker missing for encrypted values".into());
+            }
             // No per-column changes are visible unless all of them AND the
             // authenticated marker commit together. A failed TX leaves the
-            // entire legacy DB readable via the original entrypoint.
+            // entire plain v5 DB readable via the original entrypoint.
             conn.execute_batch("PRAGMA secure_delete=ON; BEGIN EXCLUSIVE;")
                 .map_err(|_| "storage migration begin failed")?;
             let migrate = (|| -> Result<(), String> {
                 for (table, column, field) in [
                     ("core_identity", "device_priv", "device_priv"),
-                    ("core_token", "token", "token"),
                     ("core_olm", "pickle", "olm_pickle"),
                     ("core_sessions", "pickle", "session_pickle"),
                     ("core_inbox", "text", "inbox_text"),
                     ("core_dns_profile", "profile", "dns_profile"),
                 ] {
-                    conn.execute(&format!("UPDATE {table} SET {column}=dmsg_seal('{field}', {column})"), [])
-                        .map_err(|_| "storage migration field failed")?;
+                    conn.execute(
+                        &format!("UPDATE {table} SET {column}=dmsg_seal('{field}', {column})"),
+                        [],
+                    )
+                    .map_err(|_| "storage migration field failed")?;
                 }
-                // Stale legacy handles may outlive this migration. SQLite
+                // Stale plain handles may outlive this sealing. SQLite
                 // reloads the schema after COMMIT; reject their plaintext
                 // writes instead of mixing formats in the sealed DB.
                 for (table, column) in [
-                    ("core_identity", "device_priv"), ("core_token", "token"),
-                    ("core_olm", "pickle"), ("core_sessions", "pickle"),
+                    ("core_identity", "device_priv"),
+                    ("core_olm", "pickle"),
+                    ("core_sessions", "pickle"),
                     ("core_inbox", "text"),
                     ("core_dns_profile", "profile"),
                 ] {
@@ -172,7 +208,8 @@ fn open_mode(path: &std::path::Path, key: Option<[u8; 32]>) -> Result<rusqlite::
                              WHEN typeof(NEW.{column}) != 'blob' OR
                                   substr(NEW.{column},1,7) != x'444d53472d5331'
                              BEGIN SELECT RAISE(ABORT,'unencrypted storage write'); END;"
-                        )).map_err(|_| "storage migration guard failed")?;
+                        ))
+                        .map_err(|_| "storage migration guard failed")?;
                     }
                 }
                 conn.execute_batch("CREATE TABLE core_storage(id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL, verifier BLOB NOT NULL, cleanup_pending INTEGER NOT NULL);")
@@ -180,7 +217,8 @@ fn open_mode(path: &std::path::Path, key: Option<[u8; 32]>) -> Result<rusqlite::
                 let verifier = crate::secure::verifier(&k)?;
                 conn.execute("INSERT INTO core_storage VALUES(1,1,?1,1)", [verifier])
                     .map_err(|_| "storage migration marker failed")?;
-                conn.execute_batch("COMMIT").map_err(|_| "storage migration commit failed".into())
+                conn.execute_batch("COMMIT")
+                    .map_err(|_| "storage migration commit failed".into())
             })();
             if let Err(e) = migrate {
                 let _ = conn.execute_batch("ROLLBACK");
@@ -192,56 +230,59 @@ fn open_mode(path: &std::path::Path, key: Option<[u8; 32]>) -> Result<rusqlite::
             // NOT success: do not admit the connection until it can be
             // truncated, VACUUMed and truncated again. Pending marker makes
             // interruption/restart resume cleanup without re-encryption.
-            conn.execute_batch("PRAGMA secure_delete=ON;").map_err(|_| "storage cleanup failed")?;
+            conn.execute_batch("PRAGMA secure_delete=ON;")
+                .map_err(|_| "storage cleanup failed")?;
             checkpoint(&conn)?;
-            conn.execute_batch("VACUUM").map_err(|_| "storage vacuum failed; cleanup pending")?;
+            conn.execute_batch("VACUUM")
+                .map_err(|_| "storage vacuum failed; cleanup pending")?;
             checkpoint(&conn)?;
             conn.execute("UPDATE core_storage SET cleanup_pending=0 WHERE id=1", [])
                 .map_err(|_| "storage cleanup marker failed")?;
-        }
-        // Add the v4 profile guard to already-encrypted v3 installations too.
-        for action in ["INSERT", "UPDATE"] {
-            conn.execute_batch(&format!(
-                "CREATE TRIGGER IF NOT EXISTS core_dns_profile_sealed_{action}
-                 BEFORE {action} ON core_dns_profile
-                 WHEN typeof(NEW.profile) != 'blob' OR
-                      substr(NEW.profile,1,7) != x'444d53472d5331'
-                 BEGIN SELECT RAISE(ABORT,'unencrypted storage write'); END;"
-            )).map_err(|_| "dns profile guard failed")?;
         }
     }
     Ok(conn)
 }
 
 fn checkpoint(conn: &rusqlite::Connection) -> Result<(), String> {
-    let (busy, _, _): (i64, i64, i64) = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
-        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-    }).map_err(|_| "storage WAL checkpoint failed; cleanup pending")?;
-    if busy != 0 { return Err("storage WAL checkpoint busy; cleanup pending".into()); }
+    let (busy, _, _): (i64, i64, i64) = conn
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .map_err(|_| "storage WAL checkpoint failed; cleanup pending")?;
+    if busy != 0 {
+        return Err("storage WAL checkpoint busy; cleanup pending".into());
+    }
     Ok(())
 }
 
 /// Сохранить Noise static-приватник устройства (upsert единственной строки).
 /// В логи ключ не попадает — только rowcount в ошибке.
 pub fn save_identity(conn: &rusqlite::Connection, privkey: &[u8; 32]) -> Result<(), String> {
+    if load_identity(conn)?.is_some_and(|old| old != *privkey) {
+        return Err("identity cannot be replaced".into());
+    }
     let n = conn
         .execute(
             "INSERT INTO core_identity(id, device_priv) VALUES(1,dmsg_seal('device_priv',?1))
-             ON CONFLICT(id) DO UPDATE SET device_priv=excluded.device_priv",
+              ON CONFLICT(id) DO NOTHING",
             rusqlite::params![privkey.as_slice()],
         )
         .map_err(|e| format!("save identity: {e}"))?;
-    if n != 1 {
+    if n != 1 && load_identity(conn)? != Some(*privkey) {
         return Err("save identity: no row".into());
     }
     Ok(())
 }
 
-/// Загрузить приватник устройства. None — enrol ещё не было (норма K1).
+/// Load pending or authenticated device key. Invalid lengths fail closed.
 /// Мусор длиной ≠32 — Err (fail-closed, не silent-None).
 pub fn load_identity(conn: &rusqlite::Connection) -> Result<Option<[u8; 32]>, String> {
     let row: Option<Vec<u8>> = conn
-        .query_row("SELECT dmsg_unseal('device_priv',device_priv) FROM core_identity WHERE id=1", [], |r| r.get(0))
+        .query_row(
+            "SELECT dmsg_unseal('device_priv',device_priv) FROM core_identity WHERE id=1",
+            [],
+            |r| r.get(0),
+        )
         .optional()
         .map_err(|e| format!("load identity: {e}"))?;
     match row {
@@ -255,7 +296,7 @@ pub fn load_identity(conn: &rusqlite::Connection) -> Result<Option<[u8; 32]>, St
     }
 }
 
-/// Сохранить учётные данные enrolment (upsert единственной строки).
+/// Accept account atomically; a foreign account can never overwrite it.
 /// user_id — ровно 16 байт, contact_id — 12 символов Crockford; иначе Err
 /// (fail-closed, мусор из сети в store не пишем).
 pub fn save_account(
@@ -263,29 +304,31 @@ pub fn save_account(
     user_id: &[u8; 16],
     contact_id: &str,
 ) -> Result<(), String> {
-    if contact_id.len() != 12 || !contact_id.bytes().all(|b| b.is_ascii_alphanumeric()) {
+    if dmsg_protocol::auth::build_authenticated(user_id, contact_id).is_err() {
         return Err("save account: bad contact_id".into());
     }
     let n = conn
         .execute(
             "INSERT INTO core_account(id, user_id, contact_id) VALUES(1,?1,?2)
-             ON CONFLICT(id) DO UPDATE SET user_id=excluded.user_id, contact_id=excluded.contact_id",
+              ON CONFLICT(id) DO NOTHING",
             rusqlite::params![user_id.as_slice(), contact_id],
         )
         .map_err(|e| format!("save account: {e}"))?;
-    if n != 1 {
-        return Err("save account: no row".into());
+    if n != 1 && load_account(conn)? != Some((*user_id, contact_id.to_owned())) {
+        return Err("account cannot be replaced".into());
     }
     Ok(())
 }
 
-/// Загрузить учётные данные. None — enrol ещё не было. Мусор — Err
+/// Load accepted account; malformed rows fail closed.
 /// (fail-closed, не silent-None).
 pub fn load_account(conn: &rusqlite::Connection) -> Result<Option<([u8; 16], String)>, String> {
     let row: Option<(Vec<u8>, String)> = conn
-        .query_row("SELECT user_id, contact_id FROM core_account WHERE id=1", [], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })
+        .query_row(
+            "SELECT user_id, contact_id FROM core_account WHERE id=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
         .optional()
         .map_err(|e| format!("load account: {e}"))?;
     match row {
@@ -293,7 +336,7 @@ pub fn load_account(conn: &rusqlite::Connection) -> Result<Option<([u8; 16], Str
         Some((uid, cid))
             if uid.len() == 16
                 && cid.len() == 12
-                && cid.bytes().all(|b| b.is_ascii_alphanumeric()) =>
+                && dmsg_protocol::auth::build_authenticated(&[0; 16], &cid).is_ok() =>
         {
             let mut user_id = [0u8; 16];
             user_id.copy_from_slice(&uid);
@@ -347,7 +390,12 @@ pub fn save_session(
              VALUES(?1,dmsg_seal('session_pickle',?2),?3,?4)
              ON CONFLICT(contact_id) DO UPDATE SET pickle=excluded.pickle,
                peer_ed=excluded.peer_ed, peer_curve=excluded.peer_curve",
-            rusqlite::params![contact_id, pickle, peer_ed.as_slice(), peer_curve.as_slice()],
+            rusqlite::params![
+                contact_id,
+                pickle,
+                peer_ed.as_slice(),
+                peer_curve.as_slice()
+            ],
         )
         .map_err(|e| format!("save session: {e}"))?;
     if n != 1 {
@@ -384,8 +432,11 @@ pub fn load_session(
 
 /// Удалить сессию (после confirm identity — новая сессия со свежими ключами).
 pub fn delete_session(conn: &rusqlite::Connection, contact_id: &str) -> Result<(), String> {
-    conn.execute("DELETE FROM core_sessions WHERE contact_id=?1", [contact_id])
-        .map_err(|e| format!("delete session: {e}"))?;
+    conn.execute(
+        "DELETE FROM core_sessions WHERE contact_id=?1",
+        [contact_id],
+    )
+    .map_err(|e| format!("delete session: {e}"))?;
     Ok(())
 }
 
@@ -453,7 +504,13 @@ pub fn outbox_queued(
         .map_err(|e| format!("outbox list: {e}"))?;
     let rows = stmt
         .query_map(rusqlite::params![cursor, lim], |r| {
-            Ok((r.get(0)?, r.get::<_, Vec<u8>>(1)?, r.get(2)?, r.get::<_, Vec<u8>>(3)?, r.get(4)?))
+            Ok((
+                r.get(0)?,
+                r.get::<_, Vec<u8>>(1)?,
+                r.get(2)?,
+                r.get::<_, Vec<u8>>(3)?,
+                r.get(4)?,
+            ))
         })
         .map_err(|e| format!("outbox list: {e}"))?;
     let mut out: Vec<(i64, [u8; 16], String, Vec<u8>, String)> = Vec::new();
@@ -515,7 +572,9 @@ pub fn inbox_list(
         .prepare("SELECT seq, contact_id, CAST(dmsg_unseal('inbox_text',text) AS TEXT) FROM core_inbox WHERE seq>?1 ORDER BY seq LIMIT ?2")
         .map_err(|e| format!("inbox list: {e}"))?;
     let rows = stmt
-        .query_map(rusqlite::params![cursor, lim], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .query_map(rusqlite::params![cursor, lim], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
         .map_err(|e| format!("inbox list: {e}"))?;
     let mut out: Vec<(i64, String, String)> = Vec::new();
     for r in rows {
@@ -528,39 +587,6 @@ pub fn inbox_list(
         None
     };
     Ok((out, next))
-}
-/// K3: сохранить bearer-token invite (upsert). Token — секрет: тот же
-/// файл 0600, в логи не попадает. Нужен для ENROL-replay на каждом коннекте
-/// (серверный enrolled-флаг живёт per-connection).
-pub fn save_token(conn: &rusqlite::Connection, token: &[u8; 32]) -> Result<(), String> {
-    let n = conn
-        .execute(
-            "INSERT INTO core_token(id, token) VALUES(1,dmsg_seal('token',?1))
-             ON CONFLICT(id) DO UPDATE SET token=excluded.token",
-            rusqlite::params![token.as_slice()],
-        )
-        .map_err(|e| format!("save token: {e}"))?;
-    if n != 1 {
-        return Err("save token: no row".into());
-    }
-    Ok(())
-}
-
-/// Загрузить token. None — enrol ещё не было. Длина ≠32 — Err (fail-closed).
-pub fn load_token(conn: &rusqlite::Connection) -> Result<Option<[u8; 32]>, String> {
-    let row: Option<Vec<u8>> = conn
-        .query_row("SELECT dmsg_unseal('token',token) FROM core_token WHERE id=1", [], |r| r.get(0))
-        .optional()
-        .map_err(|e| format!("load token: {e}"))?;
-    match row {
-        None => Ok(None),
-        Some(v) if v.len() == 32 => {
-            let mut t = [0u8; 32];
-            t.copy_from_slice(&v);
-            Ok(Some(t))
-        }
-        Some(v) => Err(format!("load token: want 32 bytes, got {}", v.len())),
-    }
 }
 /// Минимум `Option::optional` без нового dep: только для single-row SELECT.
 trait OptionalExt<T> {
@@ -581,103 +607,205 @@ impl<T> OptionalExt<T> for Result<T, rusqlite::Error> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn old_future_and_nonempty_unversioned_schemas_are_rejected_without_mutation() {
+        for version in [0, 1, 2, 3, 4, 6, 99] {
+            let dir =
+                std::env::temp_dir().join(format!("dmsg-schema-{}-{version}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let p = dir.join("core.db");
+            let c = rusqlite::Connection::open(&p).unwrap();
+            c.execute_batch(&format!("CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES('keep'); PRAGMA user_version={version};")).unwrap();
+            drop(c);
+            let before = std::fs::read(&p).unwrap();
+            assert_eq!(open(&p).unwrap_err(), "unsupported core schema");
+            assert_eq!(
+                open_encrypted(&p, &[7; 32]).unwrap_err(),
+                "unsupported core schema"
+            );
+            assert_eq!(before, std::fs::read(&p).unwrap());
+            let c = rusqlite::Connection::open(&p).unwrap();
+            assert_eq!(
+                c.query_row::<String, _, _>("SELECT value FROM sentinel", [], |r| r.get(0))
+                    .unwrap(),
+                "keep"
+            );
+            assert_eq!(
+                c.query_row::<i64, _, _>("PRAGMA user_version", [], |r| r.get(0))
+                    .unwrap(),
+                version
+            );
+            drop(c);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        let dir = std::env::temp_dir().join(format!("dmsg-schema-fresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("core.db");
+        let c = open(&p).unwrap();
+        assert_eq!(
+            c.query_row::<i64, _, _>("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap(),
+            5
+        );
+        drop(c);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     const KEY: [u8; 32] = [0x37; 32];
 
     #[test]
-    fn legacy_migration_seals_every_sensitive_column_and_reopens() {
+    fn same_v5_plain_to_sealed_seals_every_sensitive_column_and_reopens() {
         let p = tmp_db("encrypted-migration");
         cleanup(&p);
         let legacy = open(&p).expect("legacy");
         let device = [0x41; 32];
-        let token = [0x42; 32];
         let account = vodozemac::olm::Account::new();
         let pickle = serde_json::to_string(&account.pickle()).expect("pickle");
         let session_account = vodozemac::olm::Account::new();
         let mut recipient = vodozemac::olm::Account::new();
         recipient.generate_one_time_keys(1);
-        let ot = *recipient.one_time_keys().values().next().unwrap().as_bytes();
-        let session = session_account.create_outbound_session(
-            vodozemac::olm::SessionConfig::version_1(), recipient.curve25519_key(),
-            vodozemac::Curve25519PublicKey::from_bytes(ot),
-        ).unwrap();
+        let ot = *recipient
+            .one_time_keys()
+            .values()
+            .next()
+            .unwrap()
+            .as_bytes();
+        let session = session_account
+            .create_outbound_session(
+                vodozemac::olm::SessionConfig::version_1(),
+                recipient.curve25519_key(),
+                vodozemac::Curve25519PublicKey::from_bytes(ot),
+            )
+            .unwrap();
         let spickle = crate::olm::pickle_session(&session).unwrap();
         save_identity(&legacy, &device).unwrap();
-        save_token(&legacy, &token).unwrap();
         save_olm(&legacy, &pickle, 18).unwrap();
-        save_session(&legacy, "ABCD1234EFGH", &spickle, &[1;32], &[2;32]).unwrap();
-        inbox_insert_ignore(&legacy, &[5;32], &[6;16], "ABCD1234EFGH", "private inbox sentinel", 1).unwrap();
+        save_session(&legacy, "ABCD1234EFGH", &spickle, &[1; 32], &[2; 32]).unwrap();
+        inbox_insert_ignore(
+            &legacy,
+            &[5; 32],
+            &[6; 16],
+            "ABCD1234EFGH",
+            "private inbox sentinel",
+            1,
+        )
+        .unwrap();
         drop(legacy);
         let stale_legacy_handle = open(&p).unwrap();
 
         let encrypted = open_encrypted(&p, &KEY).expect("migrate");
-        assert!(save_token(&stale_legacy_handle, &token).is_err(), "old handle must not rewrite plaintext");
+        assert!(
+            save_olm(&stale_legacy_handle, &pickle, 18).is_err(),
+            "old handle must not rewrite plaintext"
+        );
         drop(stale_legacy_handle);
         assert_eq!(load_identity(&encrypted).unwrap(), Some(device));
-        assert_eq!(load_token(&encrypted).unwrap(), Some(token));
         assert_eq!(load_olm(&encrypted).unwrap(), Some((pickle.clone(), 18)));
-        assert_eq!(load_session(&encrypted, "ABCD1234EFGH").unwrap().unwrap().0, spickle);
-        assert_eq!(inbox_list(&encrypted, 0, 10).unwrap().0[0].2, "private inbox sentinel");
-        let first: Vec<u8> = encrypted.query_row("SELECT token FROM core_token", [], |r| r.get(0)).unwrap();
-        save_token(&encrypted, &token).unwrap();
-        let second: Vec<u8> = encrypted.query_row("SELECT token FROM core_token", [], |r| r.get(0)).unwrap();
+        assert_eq!(
+            load_session(&encrypted, "ABCD1234EFGH").unwrap().unwrap().0,
+            spickle
+        );
+        assert_eq!(
+            inbox_list(&encrypted, 0, 10).unwrap().0[0].2,
+            "private inbox sentinel"
+        );
+        let first: Vec<u8> = encrypted
+            .query_row("SELECT pickle FROM core_olm", [], |r| r.get(0))
+            .unwrap();
+        save_olm(&encrypted, &pickle, 18).unwrap();
+        let second: Vec<u8> = encrypted
+            .query_row("SELECT pickle FROM core_olm", [], |r| r.get(0))
+            .unwrap();
         assert_ne!(first, second, "a new nonce per write");
         drop(encrypted);
 
         for file in [p.clone(), p.with_extension("db-wal")] {
             if let Ok(raw) = std::fs::read(file) {
-                for secret in [&device[..], &token[..], pickle.as_bytes(), spickle.as_bytes(), b"private inbox sentinel"] {
-                    assert!(!raw.windows(secret.len()).any(|w| w == secret), "plaintext on disk");
+                for secret in [
+                    &device[..],
+                    pickle.as_bytes(),
+                    spickle.as_bytes(),
+                    b"private inbox sentinel",
+                ] {
+                    assert!(
+                        !raw.windows(secret.len()).any(|w| w == secret),
+                        "plaintext on disk"
+                    );
                 }
             }
         }
         let reopened = open_encrypted(&p, &KEY).expect("same key");
         assert_eq!(load_olm(&reopened).unwrap().unwrap().1, 18);
-        assert_eq!(load_session(&reopened, "ABCD1234EFGH").unwrap().unwrap().0, spickle);
+        assert_eq!(
+            load_session(&reopened, "ABCD1234EFGH").unwrap().unwrap().0,
+            spickle
+        );
         assert!(open(&p).is_err(), "plaintext entrypoint rejects sealed DB");
-        assert!(open_encrypted(&p, &[8; 32]).unwrap_err().contains("wrong storage key"));
-        let saved: Vec<u8> = reopened.query_row("SELECT token FROM core_token", [], |r| r.get(0)).unwrap();
+        assert!(open_encrypted(&p, &[8; 32])
+            .unwrap_err()
+            .contains("wrong storage key"));
+        let saved: Vec<u8> = reopened
+            .query_row("SELECT pickle FROM core_olm", [], |r| r.get(0))
+            .unwrap();
         let mut broken = saved;
         *broken.last_mut().unwrap() ^= 1;
-        reopened.execute("UPDATE core_token SET token=?1", [broken]).unwrap();
-        assert!(load_token(&reopened).unwrap_err().contains("authentication failed"));
+        reopened
+            .execute("UPDATE core_olm SET pickle=?1", [broken])
+            .unwrap();
+        assert!(load_olm(&reopened)
+            .unwrap_err()
+            .contains("authentication failed"));
         drop(reopened);
-        assert!(load_token(&open_encrypted(&p, &KEY).unwrap()).is_err());
+        assert!(load_olm(&open_encrypted(&p, &KEY).unwrap()).is_err());
         let raw = rusqlite::Connection::open(&p).unwrap();
         raw.execute("DELETE FROM core_storage", []).unwrap();
         drop(raw);
-        assert!(open_encrypted(&p, &KEY).unwrap_err().contains("storage marker"));
+        assert!(open_encrypted(&p, &KEY)
+            .unwrap_err()
+            .contains("storage marker"));
         cleanup(&p);
     }
 
     #[test]
-    fn failed_migration_preserves_legacy_and_pending_cleanup_is_retryable() {
+    fn failed_sealing_preserves_plain_v5_and_pending_cleanup_is_retryable() {
         let p = tmp_db("encrypted-failure");
         cleanup(&p);
         let conn = open(&p).unwrap();
-        save_identity(&conn, &[3;32]).unwrap();
-        save_token(&conn, &[4;32]).unwrap();
-        conn.execute_batch("CREATE TRIGGER reject_migration BEFORE UPDATE ON core_token
-                            BEGIN SELECT RAISE(ABORT,'denied'); END;").unwrap();
+        save_identity(&conn, &[3; 32]).unwrap();
+        save_olm(&conn, "test pickle", 1).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER reject_migration BEFORE UPDATE ON core_olm
+                            BEGIN SELECT RAISE(ABORT,'denied'); END;",
+        )
+        .unwrap();
         drop(conn);
         assert!(open_encrypted(&p, &KEY).is_err());
         let legacy = open(&p).expect("rollback left DB plaintext");
-        assert_eq!(load_identity(&legacy).unwrap(), Some([3;32]));
-        assert_eq!(load_token(&legacy).unwrap(), Some([4;32]));
-        legacy.execute_batch("DROP TRIGGER reject_migration").unwrap();
+        assert_eq!(load_identity(&legacy).unwrap(), Some([3; 32]));
+        assert_eq!(load_olm(&legacy).unwrap(), Some(("test pickle".into(), 1)));
+        legacy
+            .execute_batch("DROP TRIGGER reject_migration")
+            .unwrap();
         drop(legacy);
         let encrypted = open_encrypted(&p, &KEY).expect("migration retry");
-        encrypted.execute("UPDATE core_storage SET cleanup_pending=1", []).unwrap();
+        encrypted
+            .execute("UPDATE core_storage SET cleanup_pending=1", [])
+            .unwrap();
         drop(encrypted);
         let retried = open_encrypted(&p, &KEY).expect("interrupted cleanup resumed");
-        assert_eq!(load_token(&retried).unwrap(), Some([4;32]));
-        let pending: i64 = retried.query_row("SELECT cleanup_pending FROM core_storage", [], |r| r.get(0)).unwrap();
+        assert_eq!(load_olm(&retried).unwrap(), Some(("test pickle".into(), 1)));
+        let pending: i64 = retried
+            .query_row("SELECT cleanup_pending FROM core_storage", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(pending, 0);
         drop(retried);
         cleanup(&p);
     }
 
     #[test]
-    fn active_legacy_reader_blocks_wal_cleanup_until_retry() {
+    fn active_plain_reader_blocks_wal_cleanup_until_retry() {
         let p = tmp_db("encrypted-busy-reader");
         cleanup(&p);
         let writer = open(&p).unwrap();
@@ -685,12 +813,22 @@ mod tests {
         drop(writer);
         let reader = rusqlite::Connection::open(&p).unwrap();
         reader.execute_batch("BEGIN").unwrap();
-        let _: Vec<u8> = reader.query_row(
-            "SELECT device_priv FROM core_identity WHERE id=1", [], |r| r.get(0),
-        ).unwrap();
+        let _: Vec<u8> = reader
+            .query_row(
+                "SELECT device_priv FROM core_identity WHERE id=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         let error = open_encrypted(&p, &KEY).unwrap_err();
-        assert!(error.contains("checkpoint busy"), "unexpected cleanup error: {error}");
-        assert!(open(&p).is_err(), "pending migration must reject legacy open");
+        assert!(
+            error.contains("checkpoint busy"),
+            "unexpected cleanup error: {error}"
+        );
+        assert!(
+            open(&p).is_err(),
+            "pending migration must reject legacy open"
+        );
         reader.execute_batch("ROLLBACK").unwrap();
         drop(reader);
         let encrypted = open_encrypted(&p, &KEY).expect("cleanup after reader closes");
@@ -700,8 +838,7 @@ mod tests {
     }
 
     fn tmp_db(name: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("dmsg-core-{}-{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("dmsg-core-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("tmpdir");
         dir.join("core.db")
     }
@@ -718,8 +855,9 @@ mod tests {
         let _ = std::fs::remove_file(&p);
         let conn = open(&p).expect("open");
         assert_eq!(load_identity(&conn).expect("load"), None);
-        let mode: String =
-            conn.query_row("PRAGMA journal_mode", [], |r| r.get(0)).expect("journal_mode");
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .expect("journal_mode");
         assert_eq!(mode, "wal");
         let k = [0xABu8; 32];
         save_identity(&conn, &k).expect("save");
@@ -761,7 +899,10 @@ mod tests {
         drop(conn);
 
         let reopened = open(&p).expect("reopen");
-        assert_eq!(load_olm(&reopened).expect("reload after reopen"), Some(saved));
+        assert_eq!(
+            load_olm(&reopened).expect("reload after reopen"),
+            Some(saved)
+        );
         let (restored, next) = crate::olm::load_or_create(&reopened).expect("restore olm");
         assert_eq!(next, u32::MAX);
         assert_eq!(restored.identity_keys(), keys);
@@ -770,20 +911,22 @@ mod tests {
     }
 
     #[test]
-    fn token_roundtrip_and_strict() {
+    fn immutable_identity_rejects_replacement_and_invalid_length() {
         let p = tmp_db("store4");
         let _ = std::fs::remove_file(&p);
         let conn = open(&p).expect("open");
-        assert_eq!(load_token(&conn).expect("load"), None);
-        save_token(&conn, &[0xEEu8; 32]).expect("save");
-        assert_eq!(load_token(&conn).expect("reload"), Some([0xEEu8; 32]));
-        // Перезапись тем же путём (re-enrol тем же token — upsert).
-        save_token(&conn, &[0xFFu8; 32]).expect("overwrite");
-        assert_eq!(load_token(&conn).expect("reload2"), Some([0xFFu8; 32]));
+        assert_eq!(load_identity(&conn).expect("load"), None);
+        save_identity(&conn, &[0xEEu8; 32]).expect("save");
+        assert_eq!(load_identity(&conn).expect("reload"), Some([0xEEu8; 32]));
+        assert!(save_identity(&conn, &[0xFFu8; 32]).is_err());
+        assert_eq!(load_identity(&conn).expect("reload2"), Some([0xEEu8; 32]));
         // Мусор fail-closed.
-        conn.execute("UPDATE core_token SET token=?1 WHERE id=1", [&[0u8; 5][..]])
-            .expect("corrupt");
-        assert!(load_token(&conn).is_err(), "short token must fail");
+        conn.execute(
+            "UPDATE core_identity SET device_priv=?1 WHERE id=1",
+            [&[0u8; 5][..]],
+        )
+        .expect("corrupt");
+        assert!(load_identity(&conn).is_err(), "short identity must fail");
         drop(conn);
         cleanup(&p);
     }
@@ -796,7 +939,10 @@ mod tests {
         assert_eq!(load_account(&conn).expect("load"), None);
         let uid = [0xCDu8; 16];
         save_account(&conn, &uid, "ABCD1234EFGH").expect("save");
-        assert_eq!(load_account(&conn).expect("reload"), Some((uid, "ABCD1234EFGH".into())));
+        assert_eq!(
+            load_account(&conn).expect("reload"),
+            Some((uid, "ABCD1234EFGH".into()))
+        );
         // Мусор fail-closed.
         assert!(save_account(&conn, &[0u8; 16], "short").is_err());
         conn.execute(
@@ -804,7 +950,10 @@ mod tests {
             [&[0u8; 5][..]],
         )
         .expect("corrupt");
-        assert!(load_account(&conn).is_err(), "short user_id must fail, not silent-None");
+        assert!(
+            load_account(&conn).is_err(),
+            "short user_id must fail, not silent-None"
+        );
         drop(conn);
         cleanup(&p);
     }

@@ -1,5 +1,5 @@
 //! Persistent public carrier profile and Rust-owned native reconnect lifecycle.
-//! The bootstrap bearer is deliberately not part of the stored profile.
+//! The public profile contains no invitation or credentials.
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use slipstream_sys::{Config, NativeClient, Status};
@@ -23,7 +23,7 @@ pub struct Profile {
 
 impl Profile {
     pub fn from_qr(qr: &str, resolvers: Vec<String>) -> Result<Self, &'static str> {
-        let b = dmsg_protocol::bootstrap::parse(qr).map_err(|_| "invalid bootstrap")?;
+        let b = dmsg_protocol::profile::parse(qr).map_err(|_| "invalid public profile")?;
         let profile = Self {
             domain: String::from_utf8(b.domain).map_err(|_| "invalid domain")?,
             certificate: b.cert_der,
@@ -77,9 +77,9 @@ pub fn load(conn: &Connection) -> Result<Option<Profile>, String> {
     raw.map(|value| {
         let p: Profile =
             serde_json::from_str(&value).map_err(|_| "invalid stored dns profile".to_string())?;
-        if !dmsg_protocol::bootstrap::valid_domain(p.domain.as_bytes())
+        if !dmsg_protocol::profile::valid_domain(p.domain.as_bytes())
             || p.certificate.len() < 2
-            || p.certificate.len() > dmsg_protocol::bootstrap::BOOTSTRAP_MAX
+            || p.certificate.len() > dmsg_protocol::profile::PROFILE_MAX
             || p.certificate[0] != 0x30
         {
             return Err("invalid stored dns profile".into());
@@ -292,10 +292,8 @@ mod tests {
     fn public_profile_roundtrip_excludes_invite_and_rejects_corruption() {
         let conn = Connection::open_in_memory().unwrap();
         crate::secure::register(&conn, None).unwrap();
-        let token = [91u8; 32];
         let uri =
-            dmsg_protocol::bootstrap::build(b"fixture.invalid", &[0x30, 0], &[8u8; 32], &token)
-                .unwrap();
+            dmsg_protocol::profile::build(b"fixture.invalid", &[0x30, 0], &[8u8; 32]).unwrap();
         let p = Profile::from_qr(&uri, vec!["127.0.0.1:53".into()]).unwrap();
         assert!(load(&conn).unwrap().is_none());
         save(&conn, &p).unwrap();
@@ -323,12 +321,10 @@ mod tests {
         assert!(parse_resolvers(vec!["[::1]:53".into()]).is_ok());
     }
     #[test]
-    fn encrypted_profile_is_authenticated_and_legacy_migration_preserves_it() {
+    fn encrypted_profile_is_authenticated_and_same_v5_sealing_preserves_it() {
         let path = std::env::temp_dir().join(format!("dmsg-dns-profile-{}", std::process::id()));
         let _ = std::fs::remove_file(&path);
-        let uri =
-            dmsg_protocol::bootstrap::build(b"fixture.invalid", &[0x30, 0], &[8; 32], &[91; 32])
-                .unwrap();
+        let uri = dmsg_protocol::profile::build(b"fixture.invalid", &[0x30, 0], &[8; 32]).unwrap();
         let profile = Profile::from_qr(&uri, vec!["127.0.0.1:53".into()]).unwrap();
         let conn = crate::store::open(&path).unwrap();
         save(&conn, &profile).unwrap();
