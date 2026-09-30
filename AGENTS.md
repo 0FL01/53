@@ -4,6 +4,7 @@
 ## Map
 - `ARCHITECTURE.md` — инварианты: переиспользование C-транспорта, границы v1, crypto-слои
 - `WORK_PLAN.md` — порядок M0–M7, ворота приёмки, раскладка репозитория (`crates/`, `deploy/`, `docs/`, `vendor/`)
+- `docs/protocol.md`, `crates/server/README.md`, `android/AUTH_GATES.md` — wire2/account-auth, CLI и изолированные device gates
 - `.local/slipstream` — gitignored исследовательский checkout `feat/rust-parity-ab`, не править и не вендорить копипастом
 - `.local/dns-delegation.md` — gitignored детали делегирования поддомена мессенджера; фактические имена/IP только там, в трекаемые файлы не вносить
 
@@ -13,6 +14,9 @@
 - Держать границы v1: 1 authoritative endpoint, 1 устройство на аккаунт, только лички, пилот ≤16 устройств; без федерации/HA/групп/мультиустройства/видео/ботов по ARCHITECTURE.md §1
 - Секреты только read-only файлами, не в Git/образ/логи/argv; данные — в volumes (ARCHITECTURE.md §4)
 - Не коммитить `.local/`, `.opencode/` — они в `.gitignore`
+- `53-opendesign/` — посторонняя работа: не читать, менять или stage
+- Единая auth: `dmsg://server/`, signup/login/key-resume, schema5. Не возвращать ENROL/token fallback или old-schema migration; несовместимый remote rollout только отдельным согласованным шагом
+- Build/diagnostic tools — clean allowlist environment без credentials; не печатать env. Внешнему disposable Rust harness свой `CARGO_TARGET_DIR`, не перезаписывать workspace host-cdylib/rlib
 - `connectedDebugAndroidTest` удаляет target package/Keystore: только `-PgateInstall=true` (отдельный `.gate`). Рабочую identity не стирать; одноразовые device gates запускать по методам вручную `am instrument`.
 - Kotlin UniFFI bindings не править вручную; генерировать host-cdylib тестом ниже. USB/SSH DirectTCP smoke не выдавать за Android DNS acceptance.
 

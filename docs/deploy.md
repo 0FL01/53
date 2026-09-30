@@ -2,20 +2,20 @@
 
 Реальные значения только в `/opt/srv/53/.env` и `/opt/srv/53/secrets/` (на сервере, не в Git).
 
-## Account-auth: целевой сценарий и текущая реализация
+## Единая account-auth логика и отложенный rollout
 
-Пользовательский вход определён в `ARCHITECTURE.md` §6: один публичный код/QR подключения → логин/пароль → диалоги. Код несёт server domain/full DER/Noise pubkey, **не** общий access key или приглашение. Создание аккаунта регулируют два серверных режима: `open` / `invite_only` (default); переключение не запрещает вход существующих пользователей. Invite нужен отдельно только при signup в `invite_only`.
+Реализованы public `dmsg://server/` profile, wire2/server-core schema5, password signup/login, key-only resume, persisted `open` / `invite_only` (default) и confirmed device replacement. Приглашение отдельно требуется только для signup в invite_only. ENROL/token-replay/credential attach/admin invite-rebind удалены. Команды ниже относятся к **новой** ревизии; wire — `docs/protocol.md`, CLI/details — `crates/server/README.md`, Android gates — `android/AUTH_GATES.md`.
 
-Выдача публичного профиля, password credentials, переключатель policy и password-authorized device replacement **ещё не реализованы**. Команды для них появятся вместе с кодом/тестами по R12–R16 в `docs/goals/2026-09-29-client-track.md`; ниже перечислены только реально существующие диагностические/административные команды. `invite-issue` сейчас выдаёт секретный legacy bootstrap, не новый публичный server-код и не рекомендуемый экран входа.
+**Рабочий remote ещё на schema4; wipe/rollout отложен пользователем.** Новый binary отклоняет старую БД read-only, без миграции/автоматического wipe. Сейчас не выполнять несовместимое обновление поверх работающих volumes. Последующий rollout требует backup/архив secrets/rollback-образ, свежую DB и согласованное обновление клиентов. Старый snapshot совместим только с прежней server revision. Основной Android package/Keystore не стирать и новым APK ради теста не обновлять.
 
-## Подъём
+## Подъём (только после отдельного шага fresh DB)
 
 ```sh
 docker compose -f /opt/srv/53/deploy/compose.yml --env-file /opt/srv/53/.env up -d --build
 docker compose -f /opt/srv/53/deploy/compose.yml --env-file /opt/srv/53/.env ps
 ```
 
-Ожидается: `slipstream` Up с маппингом `${DNS_BIND_IP}:53->5353/udp`, `msgd` `healthy`.
+Ожидается: `slipstream` Up с маппингом `${DNS_BIND_IP}:53->5353/udp`, `msgd` `healthy`, `dbversion` = `5`. Не менять endpoint/topology/ключи исходного туннеля.
 
 ## DNS без UDP docker-proxy на внешнем hot path
 
@@ -78,99 +78,56 @@ IP forwarding и существующий masquerade должны уже раб�
 - Для возврата прежней IPAM: удалить endpoint rules, восстановить Compose/env,
   совместно `down`/`up` без `-v`. Не восстанавливать DB поверх живого production.
 
-## Текущие wire/transport проверки (не приёмка нового login/register)
+## Новый wire/transport smoke после rollout
 
-```sh
-. /opt/srv/53/.env
-DMSG_DOMAIN=$DMSG_DOMAIN DIAG_SERVER_PUB=<hex из keygen> timeout 180 python3 /opt/srv/53/diag/noise_dns.py
-# ожидается: noise_dns=PASS, RESULT PASS
-DMSG_DOMAIN=$DMSG_DOMAIN DIAG_SERVER_PUB=<hex> DIAG_TOKEN_FILE=/opt/srv/53/diag/.tok timeout 180 python3 /opt/srv/53/diag/enrol_dns.py
-# токен — только файлом 600 (никогда env/argv/логи); ожидается: enrol_dns=PASS
-DMSG_DOMAIN=$DMSG_DOMAIN DIAG_SERVER_PUB=<hex> DIAG_TOKEN_FILE=/opt/srv/53/diag/.tok timeout 180 python3 /opt/srv/53/diag/mbox_dns.py
-# ожидается: mbox_dns=PASS (A→Б, без дублей)
-dig +tcp @1.1.1.1 probe-p5.${DMSG_DOMAIN} A | grep status
-# ожидается: не SERVFAIL (NXDOMAIN = authoritative отвечает через рекурсию)
-```
+`cargo build -p msgd --examples`: `noise_diag` для AUTH_DOMAIN/WELCOME, `auth_diag` для signup/login/resume, `mbox_dns` для свежих signup двух disposable devices и SEND/FETCH/ACK. Они подключаются к **локальному pinned slipstream-client endpoint**, не публичному backend TCP. `DIAG_PORT`, `DIAG_DOMAIN`, `DIAG_SERVER_PUB` — public metadata. Auth: `DIAG_DEVICE_KEY_FILE`, `DIAG_PAYLOAD_FILE`, операция `DIAG_OPERATION=signup|login|resume`; mailbox: `DIAG_SIGNUP_A_FILE` / `DIAG_SIGNUP_B_FILE`. Это пути к bounded owner-only secret files0600, payload через shared `auth::build_signup/build_login`, не credentials в env. Результат должен быть PASS, не timeout/пропущенная fixture.
 
-`DIAG_SERVER_PUB` — вывод `msgd pubkey --key` (публичный, не секрет).
-`s3_diag.py` в `diag/` — архив plaintext-эры, BROKEN (сервер ждёт Noise), не гонять.
+Старые host-local `enrol_dns.py`, token-based `mbox_dns.py` и plaintext `s3_diag.py` не являются рабочими smoke-командами wire2. Локальная физическая authoritative DNS-проверка новой auth уже выполнена; recursive production Android signup/resume/E2E выполнить **после** отдельного rollout, не подменять её host/DirectTCP evidence.
 
-## Операции через msgctl
+## Операции через msgctl (новая ревизия)
 
 ```sh
 S=/var/lib/msgd/msgctl.sock
-docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl stats       # счётчики
-docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl user-list    # пользователи (префиксы)
-docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl quotas       # квоты vs лимиты
-docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl invite-issue --out-file /var/lib/msgd/invite.txt  # URI только в файл 0600 (refuse-if-exists)
-docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl invite-revoke --file /path/token.hex
-docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl device-block --file /path/devkey.hex
-docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl invite-rebind --file /path/old-device-public.hex --out-file /var/lib/msgd/rebind.txt 86400
-docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl backup        # снапшот db+blobs
+docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl stats
+docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl dbversion
+docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl server-code  # public profile
+docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl registration-mode invite_only  # или open; без аргумента читает
+docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl invite-issue --out-file /var/lib/msgd/invite.txt
+docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl invite-revoke --file /var/lib/msgd/invite.txt
+docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl device-block --file /path/device-public.hex
+docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl user-list
+docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl quotas
+docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl backup
 ```
 
-Секреты — только файлами 600, hex в argv запрещён (светится в `ps`).
-У обычного `invite-issue` без `--out-file` URI печатается в stdout + warning (только руками, не в скрипты/логи); `invite-rebind` требует файл и никогда не печатает URI.
+Секреты только bounded regular owner-only файлами0600, значения не в argv/env/logs. `invite-issue` требует **новый** `--out-file` (refuse-if-exists/symlink, parent должен существовать): standalone base64url43 signup invitation, stdout только `ok`. TTL default86400; expiry/revocation/one-time consumption enforced server-side. При write/sync failure partial output удаляется, выданный invite best-effort отзывается. Списки redacted, password hashes не выводятся.
 
-Ошибся блокировкой — `device-unblock --file <hex-файл>`: разрешено только без другого активного устройства этого аккаунта. После перепривязки старые login-токены остаются отозванными; unblock не восстанавливает их. `device-block` + обычный `invite-issue` создаёт **другой аккаунт**, не перепривязку старого.
+`device-unblock --file <public-device-key-hex-file>` исправляет временный block только ещё не retired устройства, без другого active device. Retired после replacement key нельзя оживить unblock. Приглашение не заменяет LOGIN и не перевыпускает аккаунт.
 
-### Существующая административная перепривязка (R11)
+### Password-confirmed replacement
 
-Это служебная операция с revocation старого доступа, не основной пользовательский вход. Целевой login на новом устройстве: проверить логин/пароль → явное подтверждение замены → прежний account/contact ID, свежие device/E2E keys, peer warning, без старой истории. Такой UI/auth-path ещё предстоит реализовать; следующие команды уже существуют и сохраняются в runbook для администратора.
-
-```sh
-MSGCTL_SOCK=/var/lib/msgd/msgctl.sock msgd msgctl invite-rebind \
-  --file /path/old-device-public.hex --out-file /var/lib/msgd/rebind.txt [ttl_secs]
-```
-
-- `--file`: **публичный Noise static старого устройства**, 32 байта в виде 64 hex-символов (верхний/нижний регистр, whitespace/newline по краям допустим). Не приватный ключ, не Noise-ключ сервера, не Olm identity, не contact ID. Файл берётся из известной администратору записи потерянного тестового устройства; не подставлять ключ рабочего аккаунта. Пути внутри `docker exec` должны существовать в контейнере.
-- `--out-file` обязателен: самодостаточный `dmsg://join/...` с token256 пишется только в новый файл `0600`, в stdout — лишь `ok`, URI/token/ключи не логируются. CLI резервирует файл через `create_new` **до** запроса: существующий путь/симлинк или отсутствующий parent → отказ без изменения БД. TTL по умолчанию 86400 с; целое ≤0 нормализуется в 1 с, переполнение срока отвергается.
-- Одна транзакция отзываёт старое устройство, все прежние bound login-invites аккаунта и его pending rebind-invites, удаляет prekeys только старого устройства и выпускает новое приглашение с target user_id. Уже блокированный старый ключ тоже подходит. Если другой ключ аккаунта уже активен, операция отвергается без изменений. После commit закрываются old-key live/pre-enrol streams.
-- Новый клиент создаёт свежие Noise/Olm ключи и проходит **существующий ENROL wire**. Claim сохраняет `user_id` и `contact_id`, создаёт ровно одно активное устройство, привязывает token и отзывает остальные unbound rebind-токены аккаунта в одной транзакции. Старые ключи/identity/prekeys не копируются. Контакты должны заново подтвердить сменившуюся E2E identity по QR/SAS (клиентский warning gate проверяется отдельно).
-- Повтор ENROL тем же новым Noise static возвращает тот же аккаунт, даже после TTL; другой Noise key не может забрать bound token. Revocation всегда запрещает replay. При повторном выпуске до claim действует только последний rebind-invite; повторный выпуск по старому ключу после успешного claim отвергается, пока новый ключ активен.
-- **История не восстанавливается.** При claim новый cursor устанавливается на максимальный `seq` этого получателя на момент claim: ни старые delivered, ни pending ciphertext (включая пришедшие между выпуском и claim) не выдаются новому устройству. Никакого DELIVERY_ACK за потерянный клиент не подделывается: delivered-флаги, old-device cursors и другие пользователи не меняются. Строки ciphertext сохраняются для sender/message_id дедупликации, квот и обычного TTL/GC; mailbox/blob квоты остаются прежними на user_id, не обнуляются. Blobs, contact permissions и чужие mailbox данные не переносятся/не удаляются. Старый ciphertext свежими Olm-ключами не расшифровать; даже сообщение после claim, отправленное peer со старой Olm-сессией, требует клиентского identity-change workflow.
-- Ошибки CLI — статические категории: usage/exit2; `invalid-source`, `output-unavailable`, `rejected`, `transport-failed`, `output-failed`/exit1. Сырой Unix socket отвечает `err` без SQL/credentials. Wire ENROL: неизвестный/битый token→BAD1; revoked invite→REVOKED3 **до TTL**; same-bound-key→проверка device revocation/сохранённого аккаунта, TTL игнорируется; остальное expired→EXPIRED2, затем occupied/known key→BOUND_OTHER4; SQLITE_BUSY→BUSY7, store failure→BAD1. Неизвестный/битый target fail-closed; неудачная транзакция не оставляет device/cursor/bind.
-- Если ответ потерян или запись/sync файла не удалась **после серверного commit**, старое устройство уже отозвано: автоматического unblock нет. CLI удаляет неготовый output, при write/sync failure best-effort отзывает полученный token; transport failure может оставить недоступный pending invite. Повторить по тому же old-public файлу с **новым** output path: новый выпуск атомарно инвалидирует прежний pending invite. Успехом считать только exit0 + `ok` + файл, а не отсутствие URI в stdout.
-
-### Обновление schema 3 → 4
-
-До обновления — согласованный `msgctl backup` и отдельное хранение server secrets. Schema4 добавляет nullable `invites.rebind_user_id` (обычные invites остаются NULL) и partial UNIQUE index `one_active_device_per_user` по `devices(user_id) WHERE revoked=0 AND user_id IS NOT NULL`. Миграция транзакционная и идемпотентна; если в старой БД уже два active device одного user_id, старт fail-closed без выбора победителя/частичной миграции. После обновления проверить `dbversion` = `4`, healthy/pong и штатный Noise-DNS smoke; rebind/DNS/peer-warning gate проводить только на disposable account (например, отдельный `.gate`), рабочую identity не отзывать. Downgrade схемы не обещается; restore drill — отдельная копия, не поверх production.
+Новый key получает challenge после проверки credentials, **без мутации**. Пользовательский confirm и второй LOGIN с expected-old-key атомарно сохраняют account/contact IDs, отзывают прежний доступ/закрывают sessions, создают fresh device с cursor на high-water mark. Потеря ответа retry-safe, concurrent challenge требует нового подтверждения. Старый ciphertext не выдаётся новому аппарату и не считается доставленным, quota/dedup/TTL сохраняются. Peer binding Noise/Ed/Curve меняется явно: STOP до confirm, pending новое сообщение не ACK/discard. Пароль не восстанавливает историю; admin invite-rebind/password-bypass отсутствует. Проверять только disposable account, не рабочую identity.
 
 ## Backup / restore
 
 - `backup` кладёт `snap-<ts>/` (msgd.db + blobs/) в volume, держит 3 штуки (ротация — до записи нового; недоснапшот удаляется), проверяет `integrity_check`.
-- Покрывает: битую БД, ошибку оператора. НЕ покрывает: смерть диска (тот же диск, SPOF).
-- Секреты в снапшот не входят (статичны): архивировать `secrets/` отдельно одной командой `cp -a`.
-- Рестор (только руками, drill — на отдельной копии, никогда поверх прода):
-  1. `compose stop msgd`
-  2. удалить `msgd.db-wal/-shm` рядом с целью
-  3. подменить `msgd.db` + дерево `blobs/` из снапшота
-  4. `compose up -d`, проверить `dbversion` и `user-list`
+- Покрывает битую БД/ошибку оператора, **не смерть диска** (тот же диск, SPOF).
+- Секреты в snapshot не входят: архивировать `secrets/` отдельно, защищёнными файлами.
+- Restore drill — отдельная копия, не поверх production: остановить соответствующий msgd, убрать WAL/SHM цели, восстановить DB + blobs, запустить **совместимую schema ревизию**, проверить `dbversion`/`user-list`. Schema4 snapshot нельзя открыть новым schema5 binary; downgrade/migration не обещаны.
 
-## Ротация carrier-серта / noise-ключа (инвалидирует invites и пины!)
+## Ротация carrier-серта / noise-ключа (меняет пины)
 
-Строго по порядку, с проверкой после каждого шага; при сбое — откат к предыдущим файлам:
-
-1. `backup` (точка отката).
-2. Положить новые файлы в `secrets/` (noise_key: `0400`, owner `65532`; серт: `644`).
-3. `compose up -d`, дождаться `healthy`.
-4. Noise-DNS PASS.
-5. Для действующих legacy клиентов перевыпустить secret bootstrap через `invite-issue`; это диагностика/совместимость, не публичный код подключения. В новом account-auth потребуется отдельно перевыпустить доверенный public profile и проверить сохранность аккаунта после обновления pins; эту операцию не объявлять существующей до реализации. Смена server pins сама по себе не восстанавливает историю или не разрешает silent device replacement.
+Отдельный согласованный rollout с backup/rollback: новые readonly secret files (noise_key0400, owner65532), joint restart, health/Noise-DNS smoke, новый `server-code`. Existing core pins immutable: импорт другого сертификата/Noise key отклонён. Seamless pin rotation сейчас не реализована, не обходить её wipe/silent device replacement. `invite-issue` не обновляет trust и не восстанавливает историю.
 
 ## Диск, логи, перезапуск
 
-- Следить за местом: `docker system df`, `du -sh` volumes. Капа числа снапшотов — 3 (код), за ростом `msgd-data` — глазами.
-- Логи: `docker logs dmsg53-msgd-1` (в логах нет токенов/ключей — только факты).
-- Перезапуск: `compose restart`; рестарт-цикл входит в smoke (данные в volumes).
-
-## Факты P4–P5
-
-- Mailbox A→Б через DNS PASS (~8.5s); enrol PASS; Noise PASS.
-- Память idle: msgd доли MiB; volumes `msgd-data` + `blobs-data`, owner `65532` (иначе `SQLITE_CANTOPEN`).
-- Серт диагностический (90 дней). Ключи: `noise_key` + `carrier_key.pem` закрыты от остальных.
+- Следить за местом: `docker system df`, `du -sh` volumes. Snapshot cap3; за ростом msgd-data следить отдельно.
+- `docker logs dmsg53-msgd-1`: только bounded факты/статические ошибки, не credentials/ключи. Diagnostic/build tools запускать clean allowlist environment; не печатать полное окружение.
+- `compose restart`: данные в volumes, restart/resume smoke обязателен.
 
 ## Пределы (честно)
 
-- 1 endpoint, пилот ≤16, транспорт max-connections=32 (кап msgd не защищает слоты транспорта — остаток принят).
-- Kill ≠ power-loss: тесты asserts порядка commit→ACK при WAL+FULL, не выживание при обесточивании.
-- Звонки не обещаны. HA/федерации/групп нет.
+- 1 endpoint, пилот ≤16, transport max-connections32; msgd slots не защищают QUIC admission.
+- Kill ≠ power loss: WAL+FULL probes проверяют commit→ACK, не обесточивание.
+- Старые P4/P5 DNS и schema4 rebind результаты исторические, не доказательство wire2 rollout.
+- Звонки/HA/федерации/группы не обещаны; исходный tunnel не менять.

@@ -1,52 +1,51 @@
-# dmsg: account-auth target и реализованный wire
+# dmsg wire v2: единая account-auth логика
 
-## Действующий продуктовый контракт (2026-09-30)
+Реализованный пользовательский путь: **публичный код/QR сервера → Войти / Создать аккаунт → диалоги**. Серверная регистрация `invite_only` (default) или `open`; приглашение — только одноразовое разрешение signup, не credential входа. Server/core schema5, старые schema/wire/`dmsg://join` отвергаются; ENROL/token replay/credential attach/admin invite-rebind удалены. Работающий remote ещё не обновлён: wipe/rollout — отдельный последующий шаг.
 
-Пользовательский путь: **публичный код/QR сервера → Войти / Создать аккаунт с логином/паролем → диалоги**. Приглашение отдельно требуется только для signup в `invite_only`; default `invite_only`, второй режим `open`. Вход существующего пользователя разрешён в обоих режимах, последующие подключения идут по сохранённому device key. Код содержит domain/full carrier DER/Noise pubkey, но не bearer-token, пароль или приватные ключи. Полный контракт: `ARCHITECTURE.md` §6 и `docs/goals/2026-09-29-client-track.md` R12–R16.
-
-**Новые public-profile encoding, auth DTO/opcodes и credential/policy schema ещё не реализованы.** Их версии, bounded lengths и совместимость фиксируются coding-итерацией вместе с test vectors. Эта документация не назначает неподдерживаемые opcode и не предлагает передавать пароль в старом `ENROL` или URI.
-
-Ниже описан **действующий legacy wire для совместимости и диагностики**, а не альтернативный пользовательский способ входа. Его успешные тесты не доказывают готовность нового login/register. Mailbox/Noise/device-key гарантии сохраняются при переходе.
-
-## Legacy bootstrap URI (реализован)
-
-Существующий bootstrap объединяет bearer-токен приглашения и данные подключения. Это секретное приглашение, **не новый публичный код сервера**. Его нельзя публиковать как общий профиль; приватных ключей в нём нет.
+## Публичный профиль
 
 ```text
-dmsg://join/<base64url_nopad(versioned-binary)>
+dmsg://server/<base64url_nopad(binary)>
+[version:u8=1][domain_len:u8][domain:domain_len]
+[cert_len:u16 BE][full_cert_der:cert_len][noise_pubkey:32]
 ```
 
-Legacy QR содержит ту же URI-строку. Сканер/preview офлайн; действующий путь сохраняется в старых клиентах/тестах до явной совместимой миграции, не переносится в целевой UX напрямую.
+Raw cap 4 KiB, LDH domain 1–253, точное потребление payload; длина base64 ограничена до allocation/decode, padding/noncanonical tail/trailing secret отвергаются. Полный сертификат обязателен для DER pinning. Код **не содержит** invitation/password/private key и ничего не авторизует; импорт/offline preview не создают аккаунт. Contact QR остаётся отдельным `dmsg://contact/` типом.
 
-## Legacy binary layout (реализован)
+## Framing и auth
 
-```text
-[version:u8 = 1]
-[domain_len:u8][domain:domain_len]      # туннельный домен, ascii, 1..=253
-[cert_len:u16 BE][cert_der:cert_len]    # ПОЛНЫЙ pinned carrier cert DER
-[noise_pubkey:32]                        # static-публичный ключ msgd
-[token:32]                               # bearer-token, 256 бит
-```
+Внутри завершённого pinned carrier + Noise IK: `[version:u8=2][opcode:u8][length:u16 BE][payload]`, полный кадр ≤16 KiB. Каждому stream свой Noise state; device key берётся из authenticated initiator static, никогда из auth payload. Первое сообщение — `AUTH_DOMAIN(3)` с точным доменом → `WELCOME(2)`. До account-auth нет mailbox/blob доступа.
 
-Кап сырых байт: `BOOTSTRAP_MAX = 4 KiB` (типично ~1.1 KiB: домен ~30 + DER ~1024 + 64).
+| Request | Payload | Response |
+|---|---|---|
+| POLICY `7` | empty | POLICY_RESP `8`: mode u8 (`0` invite_only, `1` open) |
+| SIGNUP `9` | credentials + optional invitation | AUTHENTICATED `12` или ERROR `6` |
+| LOGIN `10` | credentials + optional expected-old-device | AUTHENTICATED, REPLACE_REQUIRED `14` или ERROR |
+| RESUME `11` | empty | AUTHENTICATED или ERROR; только active Noise key |
 
-## Opcode (wire v1, резервы)
+Credentials: `[login_len:u8][login][password_len:u16 BE][password][optional_flag:u8]`, при flag=1 ещё 32 байта invitation/expected-old-device, при 0 никаких trailing bytes. Login — lowercase ASCII `[a-z0-9_.-]`, 3–32; builders переводят ASCII uppercase в lowercase, wire parser требует canonical value. Password — точный UTF-8 8–128 bytes без control chars, пробелы не trim/normalize. Secret DTO не имеют `Debug`.
 
-- `1–15` — auth/enrol: `HELLO=1` (legacy, удалён с P2), `WELCOME=2`, `AUTH_DOMAIN=3`, `ENROL=4` (token 32), `ENROLLED=5` (user_id 16 + contact_id 12 без дефисов), `ERROR=6` (код u8).
-- `16+` — mailbox (P4): `SEND=16` (recipient_user 16 + sender_msg_id 16 + ciphertext ≤ CIPHERTEXT_MAX) → `SEND_ACK=17` (status + sender_msg_id); `FETCH=18` (batch ≤ 32) → `FETCH_RESP=19` (seq8 + recipient 16 + sender_device 32 + msg_id 16 + ciphertext); `DELIVERY_ACK=20` (список seq8, селективный); `UPLOAD_PREKEYS=21` (пачки device 32 + key_id 4 + pubkey 32 + sig 64); `CLAIM=22` (device 32) → `PREKEY=24` (device 32 + key_id 4 + pubkey 32 + sig 64) или `ERROR 5`; `COUNT=23` → `COUNT_RESP=25` (unconsumed u32); `BLOB_RESERVE=26` (blob_id 16 + size u32) → `BLOB_RESERVED=27`.
-- Статусы `SEND_ACK`: `1` accepted, `2` delivered, `3` error. Коды ERROR: `5` no-prekey, `6` quota (1–4 — enrol, см. ниже).
+AUTHENTICATED — user_id16 + contact_id12 Crockford; REPLACE_REQUIRED — текущий device key32. Стабильный pending private key сохраняется core до auth request, accepted account — атомарно/неизменно; пароль не сохраняется. При потере signup/confirm ответа повтор тем же ключом и credentials возвращает прежний аккаунт, не зависит от последующей policy/TTL. Новый signup занятого login — CONFLICT, даже с правильным password. RESUME не использует invitation/password.
 
-## Коды ERROR
+Новый LOGIN после проверки credentials возвращает challenge **без мутации**. Подтверждение пользователя отправляет второй LOGIN с expected key; immediate transaction/CAS отзывает прежний доступ, удаляет старые prekeys, устанавливает новый cursor на recipient high-water mark, сохраняет user/contact IDs. Старые live/pending sessions закрываются; concurrent loser получает новый challenge, требующий нового подтверждения. Retired key не оживляется unblock/password-login. История/ключи не переносятся, квоты/дедуп не обнуляются.
 
-`1` bad/unknown, `2` expired, `3` revoked, `4` bound-to-other. Различимы специально: токен 256 бит не перебрать, оракла нет, а слепая диагностика дороже.
+## Error codes
 
-## Legacy device enrol/replay (реализован, поверх Noise)
+ERROR payload — один byte: BAD1, EXPIRED2, REVOKED3, BOUND_OTHER4, NO_PREKEY5, QUOTA6, BUSY7, CREDENTIALS8, CONFLICT9, INVITE_REQUIRED10, INVALID_INPUT11, THROTTLED12, INVITE_USED13. Opcode и error code — разные пространства. Missing account/wrong password имеют одинаковый CREDENTIALS и same-cost verification; secret invitation 256-bit имеет отдельные lifecycle ошибки. Клиент показывает статические typed сообщения, unknown error остаётся retryable.
 
-1. Клиент после handshake и `AUTH_DOMAIN/WELCOME` шлёт `ENROL(token)`.
-2. Сервер в одной транзакции: revocation → same-bound-key replay либо TTL/проверка первого bind → `ENROLLED` или `ERROR`. Device key — static инициатора из IK-сессии, не из тела запроса.
-3. Повтор тем же ключом (потеря ответа/reconnect) возвращает сохранённый аккаунт даже после TTL; отозванный token/device отклоняется. Другой ключ не забирает bound token; expired unbound token отклоняется.
-4. Revoke invite/device закрывает открытые streams сервера.
+Argon2id v19: 19 MiB, t=2, p=1, random16 salt; максимум два nonqueued hash workers вне DB mutex/Tokio executor. Attempts: 32 global и 8 на canonical login/device за 60 s, bounded counters; без IP/resolver ban. Invitation — отдельная canonical base64url строка 43 символа/raw32, только signup; issue пишет новый файл0600, stdout только `ok`.
 
-Account/password auth добавляется внутри завершённого pinned канала и не заменяет E2E keys. Режим регистрации проверяется на сервере; старый endpoint не должен позволить обойти новую policy, а существующий авторизованный аккаунт не теряется из-за отсутствия credentials. Новый wire потребуется проверить отдельно до объявления login/register готовыми.
+## Mailbox и peer binding
 
-Реальные значения (домен, DER, ключи, пароли и bearer) — только в защищённом deployment/app state/private fixtures, никогда в Git/argv/logs. Public profile и secret invitation различаются даже если оба передаются QR.
+Opcodes16–27: SEND16/ACK17, FETCH18/RESP19, DELIVERY_ACK20, UPLOAD_PREKEYS21, CLAIM22, COUNT23, PREKEY24, COUNT_RESP25, BLOB_RESERVE26/RESERVED27. SEND_ACK: accepted1/delivered2/error3, не read receipt. Payloads/builders/test vectors — `crates/protocol/src/mailbox.rs`.
+
+- SEND: recipient16 + message_id16 + ciphertext ≤16,304 bytes; bound гарантирует помещение события в FETCH_RESP. Durable dedup по sender_device/message_id **до quota**, retry сохраняет ciphertext/status даже на полной quota.
+- FETCH_RESP: count:u16 BE, ≤32 records; каждый `seq8 + sender_device32 + sender_user16 + message_id16 + ciphertext_len2 + ciphertext`. Recipient берётся из authenticated session.
+- UPLOAD_PREKEYS: Ed25519 identity32 + Curve25519 identity32 + count2 + entries(key_id4 + one_time1 + pubkey32 + signature64). Подпись над device_key/key_id/pubkey; две identity immutable для устройства.
+- DEVICE_BINDING28: known user_id16 → RESP29 user_id16 + active device32 + Ed32 + Curve32. Только authenticated exact lookup, не directory/prefix search.
+
+Core обновляет binding известных контактов перед отправкой; смена Noise/Ed/Curve сохраняет warning и **STOP до explicit confirm**. Inbound event со сменившимся sender связывается с известным user_id, не ACK/discard до подтверждения; после confirm новая сессия и доставка один раз. Ratchet/outbox ciphertext одна TX, retry byte-identical. Undecryptable integrity failures также не продвигают ratchet/ACK.
+
+## Проверка и границы
+
+`cargo build -p msgd && cargo test --workspace`, core `accounts`/`e2e_olm`, server `auth_probe`/`msgctl_probe`/backup fixtures проверяют fresh schemas, fail-closed старых версий, policy/races/retry/replace/peer STOP. Android: `android/AUTH_GATES.md`, физический **локальный authoritative DNS** gate; это не recursive production rollout. Реальные credentials/keys/invitations/deployment values не в Git/argv/logs; production secrets read-only файлами.

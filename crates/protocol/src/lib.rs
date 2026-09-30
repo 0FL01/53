@@ -112,7 +112,8 @@ pub const MAILBOX_BYTES_MAX: usize = 32 * 1024 * 1024;
 pub const DATA_TTL_SECS: u64 = 7 * 24 * 3600;
 /// Sweep незавершённых blob-reservation, секунд (24 часа).
 pub const BLOB_RESERVE_TTL_SECS: u64 = 24 * 3600;
-/// Максимум ciphertext в SEND: кадр минус recipient+msgid.
+/// Максимум ciphertext в SEND, который также помещается в один FETCH_RESP:
+/// payload минус count и расширенный event header (включая sender_user).
 pub const CIPHERTEXT_MAX: usize = MAX_PAYLOAD - 2 - (8 + 32 + 16 + 16 + 2);
 /// Максимум wire-ciphertext одного attachment, 512 KiB.
 /// Зеркало blob::BLOB_SIZE_MAX: парсер parse_reserve режет раньше БД.

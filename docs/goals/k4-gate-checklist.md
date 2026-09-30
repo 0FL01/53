@@ -3,23 +3,38 @@
 R4 пока не закрыта. Ниже сохранены исходные ожидания и отдельно записаны
 измерения; сборка и instrumented doubles не подменяют аппаратные gates.
 
-## Актуальный вход в приложение (план, 2026-09-30)
+## Актуальный вход в приложение (реализован, 2026-09-30)
 
 Один публичный код/QR подключения → проверенный сервер → «Войти» / «Создать аккаунт» с логином/паролем → диалоги. Код не содержит bearer или пароль. Приглашение отдельно требуется только для signup в `invite_only` (default), второй режим `open`; существующие пользователи входят в обоих. Ручные crypto-поля не входят в обычный onboarding. Direct invite-enrol больше не является целевым UX.
 
-Новые account-auth операции/UI **не реализованы**. Проверки прежнего ENROL ниже — историческое wire/device-auth evidence, не PASS нового login/register. Полный контракт и coding-план находятся в `2026-09-29-client-track.md` R12–R16. Дополнительная приёмка:
+Account-auth wire2/schema5 и Android UI реализованы, без legacy paths. Проверки прежнего ENROL ниже исторические. Полный контракт — `2026-09-29-client-track.md` R12–R16; runtime fixtures/methods — `android/AUTH_GATES.md`. Новая local приёмка:
 
 | Auth gate | Ожидание |
 |---|---|
 | Код/QR подключения | Paste/scan выбирают один и тот же публичный профиль; offline import не создаёт аккаунт, malformed/oversized/pin mismatch отклонены до передачи credentials |
-| Signup policy | Open: логин/пароль; invite_only: дополнительный valid invitation. Policy enforced server-side, нельзя обойти legacy endpoint; существующий login работает в обоих режимах |
+| Signup policy | Open: логин/пароль; invite_only: дополнительный valid invitation. Policy enforced server-side, legacy endpoint отсутствует; существующий login работает в обоих режимах |
 | Login / restart | Понятные ошибки password/conflict/invite/network; после входа сохранённый device key авторизует restart/reconnect без пароля |
 | Unified auth | ENROL/token-replay/credential attach отсутствуют; старые schema/wire явно отклоняются без мутации. Remote wipe позже отдельным шагом |
 | Новый аппарат | Верные credentials + явное подтверждение; cancel без изменений; один active device, старый доступ отозван, peer identity-change STOP/confirm. Удалённая история не возвращается |
 
-Все auth gates — **PENDING**, измерять отдельно от существующих G1–G11; destructive тесты только на disposable `.gate`, основной аккаунт не очищать/не отзывать.
+Эти auth outcomes проверены на fresh local server/core + физическом disposable `.gate`; **remote wipe/rollout/recursive auth smoke отложены**. Оптическая камера, long DNS background и два физических Android остаются отдельными G/R gates. Основной package/Keystore не очищать/не отзывать.
 
-## Кодовое evidence (эта среда, 2026-09-30)
+### Новое evidence: unified auth, 2026-09-30
+
+- Rust clean-env msgd build + workspace: **161 passed, 0 failed**; native loopback fixture default ignored отдельно. Core all-targets59, protocol40, server62; live two-peer replacement: STOP/retain до explicit confirm, delivery1 then0, byte-identical retry. Old schema/wire reject без мутации; signup/CAS races/rollback/backup и full-quota dedup green.
+- Host cdylib → generated Kotlin; clean NDK r28c arm64 native; JVM **23 passed**, debug/release/test APK green. Release unsigned, permanent signing/R11 не объявлен готовым. Gate APK native bytes matched current AGP stripped output.
+- Moto g54 API35 arm64, только Wi-Fi ADB, `.gate`/`.gate.test`, explicit `am instrument` by method, no skipped fixtures:
+  - `signupPrivateDnsAccountOnlyInGatePackage` ×2 (invite_only/open);
+  - `reopenPrivateDnsAccountOnlyInGatePackage` ×2 (independent process, key-only resume/refill/fetch);
+  - `rejectPrivateCredentialsOnlyInGatePackage` ×1 (typed InvalidCredentials);
+  - `loginPrivateAccountReplacementOnlyInGatePackage` ×2 (cancel/confirm, host old-key active после cancel и ERR_REVOKED после confirm);
+  - `rejectLiveCarrierPinAndNoiseKeyBeforeCredentialsForGate` ×1;
+  - `unifiedAuthUiOnlyInGatePackage` ×2 (actual native facade/view clicks, multiline clipboard paste, offline preview, conditional invitation, secret clearing, warning/cancel/confirm/dialogs/recreate).
+- **10 successful one-test executions**, final scenarios green/0 skips; 5 промежуточных UI test failures: async Dialog callback race и Android overlay focus, устранены ожиданиями/callback/focus, не suppression. Это локальный LAN high-UDP **authoritative DNS/QUIC + full-cert pin + Noise**, pinned C revision `d7cd5555a88933053551128ff8b3741ae93049a0`, synthetic suffix/public fixture certificate; не SSH bridge/recursive production acceptance.
+- Preview не создаёт account; device DB schema5, identity сохраняется при reopen. Gate auth files consumed/wiped, локальные DB/keys/invites/helpers удалены, owned carrier/msgd stopped, `.gate` cleared/force-stopped. Main UID/version/install/update metadata unchanged; no remote changes/radio toggle.
+- Diagnostic incident: subagent Perl command вывел inherited credentials в tool-log; repo files их не содержат. Log не retractable, owner/provider rotation требуется отдельно; disposable cleanup не отзывает inherited credentials. Далее clean allowlist environment, no full env dumps.
+
+## Прежнее кодовое evidence (до единой auth, историческое)
 
 - `cargo test --workspace`: core, protocol и server green. Core покрывает
   encrypted-open/migration, offline queue, повторный приём после reopening,

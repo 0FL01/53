@@ -8,7 +8,7 @@ Last updated: 2026-09-30
 Живой DNS-клиент: один публичный код/QR подключения к серверу → логин/пароль → диалоги; регистрация открытая либо по приглашению, один активный аппарат, автоматический reconnect сохранённым ключом. Единая новая auth-логика без ENROL/token-replay, совместимости старого wire и переноса старых аккаунтов. Сохранить Native/Noise/Olm/outbox/Keystore гарантии. Remote-БД пользователь вайпнет позже: сейчас не стирать, не развёртывать несовместимую schema поверх работающих данных; проверить новую логику на свежих изолированных БД.
 
 ## Execution Directive
-Complete the frozen Required Outcomes using the listed Change Envelope and Primary Evidence. Work on the smallest unresolved outcome. Do not add requirements from reviews, tests, tools, speculative risks, or optional source text. Finish when every required outcome is resolved and affected constraints remain satisfied. Subagents (@general) execute phases iteratively; orchestrator verifies, deploys, tests, commits.
+Complete the frozen Required Outcomes using the listed Change Envelope and Primary Evidence. Work on the smallest unresolved outcome. Do not add requirements from reviews, tests, tools, speculative risks, or optional source text. Finish when every required outcome is resolved and affected constraints remain satisfied. Subagents (@general) execute phases iteratively; orchestrator verifies, tests, commits. Remote deploy/wipe requires a separate user-authorized step.
 
 ## Frozen Contract
 
@@ -24,7 +24,7 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Acceptance: прежний сценарий и его runtime-реализация удаляются; trust/pin/device-key регрессии переводятся на новый auth, без compatibility aliases/fallback
   - Primary evidence: прежние 4 enrol-теста; новая приёмка — R12–R16
   - Status: superseded
-  - Evidence: happy/reconnect, wrong-pin, expired/revoked, wrong-noise-key были проверены. Это не реализация логина/пароля; текущий legacy wire отдельно описан в `docs/protocol.md`
+  - Evidence: happy/reconnect, wrong-pin, expired/revoked, wrong-noise-key были проверены исторически; runtime удалён. Текущий wire2/password auth — `docs/protocol.md`, архив прежних probes — `2026-09-29-msgd-enrol.md`
 - R3: Olm и контакты
   - Source: план K3 + аудит (vodozemac, стоп-при-подмене, refill-побудки, QR тем же конвертом)
   - Acceptance: vodozemac Olm (без Matrix SDK, свой X3DH запрещён); identity + signed prekeys; claim/refill; ratchet+ciphertext одна TX; ретрай сохранённым ciphertext; outbox queued/accepted/delivered; контакты (ID, request-add, block, QR, подмена = стоп+confirm)
@@ -51,8 +51,8 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Evidence: `crates/slipstream-sys` строит pinned Git sources только в target с условным embedding.patch. Host lifecycle и штатные protocol/path/pin/runtime 4/4 green; PEM/DER Ready, неверный pin rejected, 8 raw streams, loss terminal ~30 с. На moto API35 arm64 native executable: 64 start/stop cycles, FD/task stable, max stop 54.11 мс; signal handlers unchanged. APK/core integration относится к R7, recursive DNS не заявлен этим тестом
 - R7: DNS transport в core и QR-профиль
   - Source: DNS-план 2026-09-29 (`b784328`), profile/pinning/device-auth; ARCH §3/§6/§7. Новый пользовательский login/register — R12–R16
-  - Acceptance: сохранённые domain/full DER/Noise pub/resolver; live carrier pinning до enrol; один transport, Rust reconnect/backoff; expired invite не запрещает вход уже зарегистрированного ключа, revoked запрещает
-  - Primary evidence: pin/TTL/reconnect regression tests и реальный Android enrol/reopen через recursive DNS
+  - Acceptance: сохранённые domain/full DER/Noise pub/resolver; live pinning до account-auth; один transport, Rust reconnect/backoff; новый key-only resume не зависит от invitation TTL, revoked device запрещён
+  - Primary evidence: pin/resume/reconnect regression tests; прежний recursive DNS gate исторический, текущая auth DNS-проверка R12–R16
   - Status: verified
   - Evidence: authenticated encrypted `core_dns_profile` (schema v4), immutable domain/full DER/Noise pub, numeric current-network resolvers; Rust single-owner supervisor/backoff/cancel. Android APK independently reached recursive DNS. Fresh `.gate` enrol/reopen/refill/fetch passed on moto via Wi-Fi ADB (actual result code 0, not a skipped fixture); основной account сохранён. Live wrong carrier certificate→typed PinMismatch, wrong Noise key→Transport before enrol, no account created. Explicit same-resolver restart preserved identity/pins/inbox/outbox. Concurrent32-caller initial import RED accepted two different pins→GREEN one winner after BEGIN IMMEDIATE compare/save. TTL fix `93fe771` deployed after backup `snap-1790713278`, healthy/pong and DNS Noise smoke PASS 8.1 s. Workspace129 tests green; JVM13/builds green; generated bindings regenerated from host cdylib.
 - R8: самостоятельная DNS-only доставка
@@ -78,37 +78,37 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Acceptance: same-install backup restore только с исходным Keystore; Clear data/uninstall→явная loss, no replacement silently; rebind revokes old device/new E2E/peer warning/no old history. Итоговая arm64 pilot сборка подписана постоянным защищённым release key; все intended правки закоммичены
   - Primary evidence: existing .gate reset/restore tests, UI disclosure, rebind/identity gates, APK signature и git status
   - Status: in_progress
-  - Evidence: same-install restore и explicit fail-closed после real .gate clear-data уже проверены; старые ключи после инцидента не восстановлены. Server schema4 implements local file-only `invite-rebind`: atomic old-device/token revocation, fresh-device claim with same user/contact ID, one active device, no old-history delivery or quota reset. Server69/workspace146 tests green, including races, rollback, expiry/revocation, output failure and backup restore. Deployed after backup `snap-1790762585`; healthy/pong, dbversion4, recursive DNS Noise smoke PASS8.2s, 16 active devices and zero single-active violations. No production device was rebound/revoked for this checkpoint. Disposable live rebind + client peer warning and permanent release signing remain pending.
+  - Evidence: same-install restore и explicit fail-closed после real .gate clear-data проверены, старые ключи не восстановлены. Исторический schema4 `invite-rebind` (`e3e8aa6`) проверен server69/workspace146 и deployed после backup `snap-1790762585`, healthy/dbversion4/recursive smoke PASS8.2s; рабочие accounts не rebound/revoked. Этот runtime API теперь удалён: R16 password-confirmed replacement + peer STOP/confirm verified на свежем local server/physical `.gate`. Permanent release signing и production rollout остаются отдельными, не заявлены готовыми.
 - R12: один публичный код/QR подключения
   - Source: выбранный пользователем вариант и шаг 1 плана ниже; ARCH §6 / WORK_PLAN M2
   - Acceptance: вставка кода и QR импортируют один bounded versioned профиль (domain/full DER/Noise pub), без invitation token/пароля/приватных ключей. Импорт только выбирает сервер; offline preview и live pins обязательны, резолвер текущей сети автоматический. Обычный экран не требует ручных crypto-полей
   - Primary evidence: parser roundtrip/invalid/oversized/no-secrets tests и одинаковый Android результат paste/scan без создания аккаунта
-  - Status: pending
-  - Evidence: выбран и документирован UX; нынешний `dmsg://join` содержит bearer и не является новым публичным кодом
+  - Status: verified
+  - Evidence: `fba3916` profile/parser wire vectors, protocol40 green; один Server QR/paste QrGate, offline import не создаёт account. Physical `.gate` UI: actual clipboard multiline paste/offline preview/cancel/accept; live wrong full-cert→PinMismatch, wrong Noise→Transport до credentials. Оптическое считывание камеры отдельно R10, не заявлено
 - R13: аккаунты и два серверных режима регистрации
   - Source: утверждённый план, шаг 2; ARCH §4/§6
   - Acceptance: уникальный в пределах сервера логин, Argon2id hash без plaintext password, bounded auth/ограничение попыток; persisted `open` / `invite_only` (default) с msgctl. Invite нужен только для нового аккаунта в invite_only; созданные по новой схеме пользователи входят в обоих режимах. ENROL/token auth отсутствуют; создание/привязка/consumption invite атомарны и replay-safe
   - Primary evidence: backend login/register/policy/TTL/revocation/race tests, fresh-schema backup/restore; несовместимый старый schema/wire явно отклоняется
-  - Status: pending
-  - Evidence: в текущем backend нет password credentials и переключателя регистрации; новые команды/opcodes пока не назначены
+  - Status: verified
+  - Evidence: `1c1ef83`, server62 tests green: fresh5/read-only rejection old/future, Argon2id/bounded workers+attempts, persisted policy, file-only invite lifecycle, signup/replace loss+races+rollback, backup/restore. Physical invite-only/open signup + restart/key-resume passed; remote не обновлялся
 - R14: простой Android вход и запомненное устройство
   - Source: утверждённый план, шаг 3; ARCH §5/§6 / WORK_PLAN M4
   - Acceptance: проверенный сервер → Войти / Создать аккаунт → диалоги. Логин/пароль, invitation field только когда нужен; понятные ошибки. Credentials только через DNS после pinned handshake, не в URI/logs. После входа device key сохранён, restart/reconnect не спрашивает пароль; Native/Noise/Olm не переписываются
   - Primary evidence: core auth integration + Android form/error/permission/restart gates на реальном DNS
-  - Status: pending
-  - Evidence: работающий transport/device auth остаётся основой; существующий Scanner enrol-код не считается новым login UI
+  - Status: verified
+  - Evidence: `57ddbc7` core durable pending-key/immutable atomic acceptance/typed auth APIs, core all-targets59 green; generated Kotlin. `7707700` DNS-only facade/service, short policy then forms, login/signup/conditional invite/dialog state, secret clearing; JVM23 и debug/release/test APK builds green. Moto API35 fresh `.gate`: signup обоих режимов, independent-process resume/refill/fetch, wrong-password typed error, real UI paste/replace/recreate. Local authoritative DNS/QUIC + pins + Noise, не recursive rollout
 - R15: перенос старых аккаунтов исключён пользователем
   - Source: новая инструкция «Выкинуть ... легаси логики ... на обратную совместимость похуй ... бд вайпнем потом на remote»
   - Acceptance: нет credential-attach/legacy migrations/auth fallback; новая server/core schema только для новой логики. Старые БД отклоняются без мутации, remote wipe не выполняется этим шагом
   - Primary evidence: отсутствие старых auth API и fail-closed schema tests
   - Status: superseded
-  - Evidence: пользователь явно отменил compatibility/migration требование; рабочие remote/основной Android данные пока не стирать
+  - Evidence: пользователь явно отменил compatibility/migration требование; ENROL/core_token/credential attach/admin invite-rebind удалены, old-schema tests fail-closed без мутации. Рабочие remote/основной Android данные не стирались
 - R16: подтверждённая замена устройства после password login
   - Source: утверждённый план, шаг 5; ARCH §6, R11 loss policy
   - Acceptance: успешная проверка credentials и явное подтверждение замены предшествуют revocation старого доступа. Отмена не меняет аккаунт. Прежние user/contact IDs нового аккаунта, один active device, свежие локальные Noise/Olm keys, peer identity-change STOP/confirm; пароль не восстанавливает удалённые ключи/историю. CAS защищает от concurrent replace; нет admin invite-rebind обхода password-login
   - Primary evidence: disposable-account login/confirm/cancel/concurrent-replace/old-access/peer-warning gates; запрет main clear-data/revoke
-  - Status: pending
-  - Evidence: atomic server rebind уже есть, password-authorized UX и полный peer gate пока отсутствуют
+  - Status: verified
+  - Evidence: server auth_probe CAS/cancel/concurrent winner/lost confirm/old-key live+pending close/no-history green; core live-msgd two-peer gate сохраняет сообщение до explicit confirm, после decrypt1 then0 и byte-identical retry. Physical Android cancel сохраняет host-old RESUME, explicit confirm отзывает его (ERR_REVOKED), IDs прежние; real UI warning/cancel/confirm/recreate passed. Только fresh disposable fixtures, no main/remote mutation
 
 ### Constraints
 - C1: Обратная совместимость auth/wire/schema отменена пользователем. Рабочий remote и основной Android package не мутировать/не стирать; несовместимый rollout только отдельным шагом после remote wipe
@@ -133,17 +133,18 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 - Forbidden: remote wipe/несовместимый deploy сейчас; Matrix SDK; WebRTC-стек; копипаста diag-main вместо библиотечной функции; чтение/правки `53-opendesign/`
 
 ## Current Checkpoint
-- Closes: R12/R13 — новый public profile/wire, затем server; R15 superseded
-- Smallest next action: commit уточнённого плана, bounded profile/auth wire с test vectors; параллельно server и core consumers, затем Android и end-to-end gates
-- Expected evidence: target Rust tests, workspace green, generated bindings, native/JVM/APK builds; fresh isolated account auth/replace/peer STOP+confirm, старые версии отвергнуты без мутации
+- Closes: R12/R13/R14/R16 verified; R15 superseded. Текущая auth-итерация завершена, весь клиентский трек ещё active
+- Smallest next action: нет дальнейшей реализации в текущей инструкции; финальная фиксация docs/evidence завершает auth-этап. Remote wipe/rollout и старые R8–R11 не запускать автоматически
+- Expected evidence: workspace161, core all-targets59, generated bindings, clean arm64/native + JVM23/debug/release/test builds; physical local authoritative DNS10 successful method executions, peer STOP/confirm host live gate; old versions fail-closed
 - Replan if: Wi-Fi ADB would be disconnected by a test; use an isolated fixture instead, not blind radio toggles. Do not clear/uninstall основной package or claim an emulator is a second physical phone
 
 ## Current State
-- Resolved: R1/R3/R5–R7 verified; R2 пользовательский UX superseded R12–R16, исторические regression results сохранены отдельно
-- Last relevant evidence: standalone Android native recursive DNS works; moto↔native peer E2E in both directions, offline queue after real process death byte-identical and no duplicates. No USB/SSH bridge. Actual new enrol isolated `.gate` succeeded; основной identity unchanged. Current Rust146/server69 tests green; prior JVM13 evidence unchanged, release rebuild green. Schema4 deployed with backup and DNS smoke, same phone process resumed polls
+- Resolved: R1/R3/R5–R7 и R12/R13/R14/R16 verified; R2/R15 superseded. Auth-код/формы/единый wire реализованы и фазы закоммичены
+- Last relevant evidence: clean-env msgd build/workspace161 passed (loopback fixture по умолчанию ignored отдельно), core all-targets59, bindings generated, clean arm64 native, JVM23/debug/release/test APK builds. Physical local authoritative DNS .gate: 10 successful selected method executions/0 skipped, все final scenarios green; 5 промежуточных UI-harness failures диагностированы как async assertion/focus overlay, исправлены тестовые waits. `k4-gate-checklist.md` / `android/AUTH_GATES.md`; no remote service/DB/main package mutation
 - External state not yet obtained: второй physical Android и no-GMS handset; optical positioning not proved. API36/37-16KB official images now installed, runtime tests still pending. G8 loss policy approved, no key export
-- Remaining software/check gap: public profile/login/register/policy/confirmed replace (R12–R14/R16); перенос legacy аккаунтов отменён. Старые R8–R11 аппаратные gates не расширяют текущую auth-итерацию
-- Next: исполнить план ниже и коммитить проверенные фазы. Remote schema4 остаётся до отдельного wipe/rollout; основной Android не очищать. Wi-Fi ADB — единственный control channel, не отключать; прежние DNS/deploy проверки не являются новыми auth gates
+- Remaining outside this iteration: отдельный remote wipe/rollout+recursive auth smoke и прежние R8–R11 аппаратные/signing gates; перенос legacy аккаунтов отменён
+- Incident: Perl diagnostic subagent ошибочно вывел inherited credential-bearing environment в tool-log. Не copied в repo; log не retractable, owner/provider credential rotation вне доступного task permission остаётся внешней remediation. Disposable fixtures/processes удалены, дальнейшие builds clean allowlist. Не объявлять C2/log invariant соблюдённым этим прогоном
+- Next: текущую auth-реализацию завершить docs commit; remote schema4/основной Android остаются прежними до отдельного шага. Wi-Fi ADB сохранён
 
 ## Material Decisions
 - 2026-09-30: пользователь потребовал копию RECON-плана и итеративную реализацию/коммиты, отменил legacy/обратную совместимость и перенос старых аккаунтов. Единая новая схема/wire; ENROL, token-replay и admin invite-rebind удаляются, R15 superseded. «БД вайпнем потом на remote» трактуется как запрет wipe/несовместимого deploy сейчас; свежие изолированные БД для тестов, основной package не трогать
@@ -154,6 +155,7 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 - 2026-09-29: trait Transport в K1 (direct-TCP за ним); UniFFI только в K4; пагинация — требование сейчас; always-on FGS; contact-QR тем же конвертом; подмена = стоп+confirm; Olm строго K3; identity 0600+шов; ARCH > Hazel-Signal при конфликте
 
 ## Checkpoint History
+- 2026-09-30: unified auth реализована/проверена по фазам `4d3e0ab`/`fba3916`/`1c1ef83`/`57ddbc7`/`7707700`; workspace161/core all-targets59/JVM23, regenerated Kotlin, arm64 native/debug/release/gate builds green. Local physical DNS10 final passes, host peer identity STOP/confirm retains delivery; remote untouched. Занятый signup/full-quota retry regressions RED→GREEN. External harness stale Cargo artifact collision исправлен package clean без подгонки tests; log incident отдельно Current State
 - 2026-09-30: новый account-auth план frozen R12–R16; старый direct-invite UX убран из действующих требований ARCH/M2 и заменён единым публичным кодом/QR + login/register. Protocol/runbook описывают действующий legacy wire/CLI отдельно, старый P3 Goal помечен архивным без активных задач. Сверены формы/два режима/secret-free profile/migration/replace и ссылки на tracked docs; `git diff --check` green. Только семь Markdown-документов, код/deployment/аккаунты/данные и чужие изменения не менялись
 - 2026-09-30: committed already-prepared Android x86_64 build-target support after actual API26 cross-build/test-executable linking and 16KB ELF inspection. AOSP/API37-16KB AVDs prepared but not launched; no emulator functional PASS claimed. User-requested pause remains in effect, not a new runtime stage.
 - 2026-09-30: R11 server rebind RED→GREEN, schema3→4 forward migration/partial unique index, same-ID fresh-device login and history/quota isolation verified by 69 server tests. Backup `snap-1790762585` (106496-byte DB, zero blobs), isolated service-unit deploy, healthy/pong/dbversion4/DNS smoke PASS8.2s. Read-only production aggregate unchanged16 users/16 devices/16 active; no rebind performed on working accounts. User requested commit and pause before the next stage.
@@ -164,10 +166,10 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 - 2026-09-29: paired gate выявил global seq gaps в mailbox ACK и повторный decrypt durable inbox; RED→GREEN, server `995b50f` deployed с backup/DNS smoke, core `a0c97bb`. Android native/Keystore/offline/UI fixes проверены на moto; screen-off 32:21 PASS diagnostic TCP. Connected-test инцидент уничтожил прежнюю identity: новая enrol identity не является восстановлением старой. Теперь graph-stage guard запрещает connected tests без отдельного `.gate`, stateful gates manual-only. G8 sealed-only UNMET подтверждён reset только `.gate`; cleanup завершён.
 
 ## Completion
-- Resolved outcomes: R1/R3/R5–R7 verified, R2 UX superseded; R4/R8–R11 не complete, новый R12–R16 implementation pending
-- Commands and artifacts: workspace tests 119, JVM 13, routine device 3; final debug/release/native builds, four ELF 16KB alignment + zipalign; hardware measurements в checklist
-- Constraint and diff-scope check: docs-only auth-plan checkpoint; no runtime/deploy/data changes, no public TCP, secrets/fixtures не в Git, no key export/history transfer. Пользователь утвердил новый account-auth UX и ранее revised G8, аппаратные ожидания не ослаблены
-- Final status: active; текущий docs checkpoint фиксирует новый план, не реализацию авторизации. Полный DNS/R4/auth outcome не complete
+- Resolved outcomes: текущие R12/R13/R14/R16 verified, R15 superseded; R1/R3/R5–R7 verified, R2 superseded. R4/R8–R11 остаются вне текущей auth-инструкции
+- Commands and artifacts: msgd build + workspace161, core all-targets59, generated Kotlin, clean arm64 native, JVM23/debug/release/test APK; physical `.gate` selected DNS/UI10 passed, host live-msgd peer replacement/dedup. Primary evidence подробно в checklist
+- Constraint and diff-scope check: unified auth diff только protocol/server/core/Android/docs/lock; нет remote mutation/public TCP/key export/history transfer/main package reset, no plaintext secrets/private fixtures в Git. Log-secret incident открыт для внешней owner rotation; не скрывать его под green кодовыми gates
+- Final status: текущая auth-реализация и её local gates проверены; общий Goal active (старые hardware/signing gates, будущий rollout). Эта инструкция не выполняет remote wipe и не заявляет весь K4 complete
 
 ## Утверждённый план авторизации — копия для итеративного исполнения
 
