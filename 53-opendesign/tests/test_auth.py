@@ -195,7 +195,7 @@ with sync_playwright() as playwright:
     check('Current mode blocks media deep link and board', "S.screen==='chats' && !document.body.classList.contains('board-mode')")
     evaluate("go('connection');document.querySelector('#app details').open=true")
     check('Connection uses DNS and no manual transport/pin inputs', "document.getElementById('app').textContent.includes('DNS') && !document.querySelector('#app input,#app textarea') && !document.getElementById('app').textContent.includes('DirectTcp')")
-    check('Current mode identifies implemented R18 and pending device runtime', "document.getElementById('mode-note').textContent.includes('R18 encrypted bidirectional history') && document.getElementById('mode-note').textContent.includes('реализованы') && document.getElementById('mode-note').textContent.includes('синтетические') && document.getElementById('mode-note').textContent.includes('device runtime pending')")
+    check('Current mode separates synthetic R18 data from verified native acceptance', "document.getElementById('mode-note').textContent.includes('R18 encrypted bidirectional history') && document.getElementById('mode-note').textContent.includes('реализованы') && document.getElementById('mode-note').textContent.includes('синтетические') && document.getElementById('mode-note').textContent.includes('R19 native acceptance verified отдельно')")
 
     # Supported text fields are visible in current mode; samples are not a core
     # integration test. Media guards above must still hold with these fields.

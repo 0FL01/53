@@ -10,7 +10,7 @@ Functional evidence: paste/scan только preview до согласия; conf
 
 R18 current-mode evidence: local alias/preview/time/unread видимы; optional alias/preview/time имеют ID/empty fallback; ID сохраняется в contact card; incoming/outgoing bubbles и local timestamps доступны; newest-first fixture reverse → chronological; incoming без delivery state/receipt; синтетический offline send виден как queued; retry не дублирует историю и не понижает delivered; unknown не становится delivered. Queue notice ссылается на реализованный historyPage/messageStatus и не выводит доставку из отсутствия строки. Исправлено обёртывание длинного API/status label на 360 px / 200%; geometry expectations сохранены.
 
-Основание текущего API — `../crates/core/R18_API.md` и workspace facade. По evidence координатора: core schema6 / 65 all-targets green / Kotlin bindings generated; R19 native Android / 35 JVM + compile green, device runtime pending. Browser проверки не подтверждают core encryption, реальный storage/paging/read cursor или physical frontend acceptance.
+API — `../crates/core/R18_API.md`/workspace facade. Separate coordinator evidence: core schema6/65 all-targets/codegen/workspace167; JVM35/current ARM64/APK, Moto API35 physical27 distinct gates/38 passes/0 skips и fresh recursive phone↔native E2E/status/trust verified (`../android/AUTH_GATES.md`). Browser checks сами не подтверждают encryption/storage/physical frontend.
 
 `ReplacementChanged` — synthetic UX-конфликт, не новый enum ядра. Mock принимает только демо-сентинел, не настоящие серверные профили. JSON: `qa-auth-results.json`; screenshots: `mobile-auth-signup-360-large-text.png`, `mobile-auth-replace-360-large-text.png` (просмотрены). Вертикальная прокрутка на 200% ожидаема, CTA не обрезаются.
 
@@ -55,6 +55,6 @@ env -i HOME="$HOME" PATH="$PATH" python3 53-opendesign/tests/test_calls.py
 
 ## Не проверено и не заявляется
 
-В рамках этого design QA: настоящие звонки; качество/задержка/трафик аудио; DNS media transport; E2EE; Android permissions, Telecom, DND, background restrictions, notifications, Bluetooth и аппаратные камеры; TalkBack на устройстве; процессная смерть и реальные lifecycle transitions; сборка APK; запуск агента в пользовательском OpenDesign. Core/JVM/compile checks координатора отделены от browser evidence выше; device runtime остаётся pending.
+В рамках browser QA не проверены реальные media/E2EE/Android/platform/lifecycle/APK/OpenDesign runtime. Separate native text/auth/recursive DNS/frontend lifecycle/build evidence координатора указано выше. Media, long Doze, second physical Android, no-GMS/16KB runtime, optical camera и permanent signing остаются отдельными, не browser PASS.
 
 Предлагаемые дедлайны и результат автоответа относятся только к макету. Нативная матрица приёмки и нерешённые вопросы находятся в `CALLS_HANDOFF.md` и `CALLS_SPEC.md`.

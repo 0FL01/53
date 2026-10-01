@@ -1,6 +1,6 @@
 # 53 — связь дизайна с кодом
 
-R17, 01.10.2026: сверены актуальные auth/DNS-границы, реализованный R18 API (`../crates/core/R18_API.md`) и R19 native facade/UI workspace. Координатор подтвердил core schema6 — 65 all-targets green и generated-current Kotlin; R19 — 35 JVM/compile green. Device runtime pending. Основа визуального комплекта — архив `53(1).zip`, 29.09.2026; архивные диапазоны строк относятся только к первоначальному чтению. В этой design-задаче проверен HTML в Chromium; физическая APK/backend/DNS acceptance не заявляется.
+R17–R21, 01.10.2026: auth/DNS, R18 API (`../crates/core/R18_API.md`) и R19 native UI реализованы. Core65 all-targets/codegen, workspace167, JVM35/current ARM64/APK green; separate Moto API35 acceptance27 distinct gates/38 passes/0 skips и fresh remote recursive phone↔native E2E verified (`../android/AUTH_GATES.md`). HTML проверен в Chromium, не заменяет physical evidence. Основа — архив `53(1).zip` от 29.09.2026; архивные диапазоны ниже относятся только к первоначальному чтению. Media/runtime matrix остаётся вне этой text acceptance.
 
 ## Текущий auth/DNS контракт R17
 
@@ -86,7 +86,7 @@ Incoming history `delivery_state=None`. `message_status` принимает ро
 
 Актуальный клиент использует DNS runtime и публичный профиль с закреплённым fullDER/Noise public. Архивное утверждение про DirectTcp больше не определяет текущую UI-семантику. Прототип не выполняет реальные DNS-запросы.
 
-R19 `TextUiState.ConnectionUiState`/`ConnectionFacts` и `DmsgService.connectionState()` уже реализованы: serviceEnabled/pollInFlight/lastSuccessAt/lastFailure/revision отражают реальные worker outcomes. `dnsStatus()` остаётся строковым диагностическим API. `Worker.running` не доказывает соединение. В прототипе подпись «DNS · демо-состояние», без выдуманного last-success timestamp. Device runtime pending.
+R19 `TextUiState.ConnectionUiState`/`ConnectionFacts` и `DmsgService.connectionState()` реализованы: serviceEnabled/pollInFlight/lastSuccessAt/lastFailure/revision отражают actual worker outcomes. `dnsStatus()` — строковая диагностика, `Worker.running` не доказывает сеть. Actual manual DNS check/FGS stop проверены на устройстве; в HTML «DNS · демо-состояние», без выдуманного last-success timestamp.
 
 ### 6. Public profile → offline preview → auth
 

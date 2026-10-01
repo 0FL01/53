@@ -1,6 +1,6 @@
 # 53 — Light / Square
 
-Статус R17, 01.10.2026: дизайн-референс нативного текстового Android-фронтенда проекта 53 (dmsg). Auth/DNS и реализованный R18 core schema6 сверены с workspace и `../crates/core/R18_API.md`; исходная визуальная система — из комплекта 29.09.2026. Координатор подтвердил 65 core all-targets проверок и генерацию Kotlin bindings, R19 native Android — 35 JVM проверок и compile green. Device runtime pending; HTML не является APK или физической приёмкой.
+Статус R17–R21, 01.10.2026: Light/Square перенесён в нативный Kotlin/AppCompat/XML frontend. R18 schema6/API — `../crates/core/R18_API.md`; core65/codegen/workspace167/JVM35/current ARM64/APK green. Separate Moto API35 acceptance27 methods/38 passes/0 skips, actual recursive phone↔native E2E/trust/history/status и 200% font/IME verified; evidence — `../android/AUTH_GATES.md`. HTML остаётся synthetic reference, не APK/physical evidence. Исходная визуальная система — комплект 29.09.2026.
 
 ## 1. Direction
 
@@ -75,7 +75,7 @@
 Защищённая persistent история обеих сторон доступна через `history_page(contact_id, before_local_id?, limit)`. Страницы newest-first по local ID descending; для хронологической ленты reverse каждой страницы и prepend более старых. Чтение страницы не отмечает её прочитанной. Core владеет БД и шифрованием текста/alias; plaintext не дублируется в prefs или логах.
 
 ### ConnectionStrip
-Одна спокойная строка под toolbar: состояние DNS, проверка, ошибка или «Фоновая связь выключена». Нажатие открывает «Связь». R19 `ConnectionUiState`/`ConnectionFacts` строится по реальным worker outcomes; строковый `dnsStatus()` остаётся диагностикой. FGS и искусственный таймер не доказывают связь. В HTML написано «DNS · демо-состояние»; время последнего ответа не выдумывается. Нативный device runtime ещё не принят.
+Одна спокойная строка под toolbar: DNS, проверка, ошибка или «Фоновая связь выключена»; нажатие открывает «Связь». R19 `ConnectionUiState`/`ConnectionFacts` по actual worker outcomes, `dnsStatus()` — диагностика. FGS/таймер не доказывают сеть. Device actual check/FGS stop verified; в HTML «DNS · демо-состояние», last-success timestamp не выдумывается.
 
 ### SafetyBanner
 Прямоугольная предупреждающая область в потоке экрана, с заголовком и объяснением. При `identityMismatch` composer и retry заблокированы. Действие ведёт к проверке, а не молча подтверждает новый ключ.
@@ -102,7 +102,7 @@ Policy: `open` / `invite_only` (закрытый default). Пока ответ �
 
 ## 7. Product boundaries
 
-Граница доступного UI зафиксирована в `CODE_REVIEW.md`, `HANDOFF.md` и реализованном R18 API (`../crates/core/R18_API.md`). R19 перенос в Kotlin + AppCompat/XML реализован и прошёл JVM/compile checks координатора; device runtime pending. HTML нужен только для обсуждения дизайна; его не встраивать в APK через WebView.
+Граница UI — `CODE_REVIEW.md`, `HANDOFF.md`, R18 API (`../crates/core/R18_API.md`). R19 Kotlin/AppCompat/XML прошёл JVM/build и separate physical frontend/recursive DNS acceptance; это не проверка media/полной аппаратной матрицы. HTML только для дизайна, не WebView в APK.
 
 Только личные текстовые чаты. В текущем контракте нет групп, каналов, звонков, файлов, голосовых сообщений, stories, stickers, typing, online/last seen, публичного каталога, cloud backup, мультиаккаунтов и multi-device. Заготовки в сервере/roadmap не считаются работающими действиями. Исключение для дизайна: по запросу пользователя звонки включены в целевой прототип, но скрыты из режима текущего контракта и production до появления API.
 

@@ -7,19 +7,32 @@ R4 пока не закрыта. Ниже сохранены исходные о
 
 Один публичный код/QR подключения → проверенный сервер → «Войти» / «Создать аккаунт» с логином/паролем → диалоги. Код не содержит bearer или пароль. Приглашение отдельно требуется только для signup в `invite_only` (default), второй режим `open`; существующие пользователи входят в обоих. Ручные crypto-поля не входят в обычный onboarding. Direct invite-enrol больше не является целевым UX.
 
-Account-auth wire2/schema5 и Android UI реализованы, без legacy paths. Проверки прежнего ENROL ниже исторические. Полный контракт — `2026-09-29-client-track.md` R12–R16; runtime fixtures/methods — `android/AUTH_GATES.md`. Новая local приёмка:
+Account-auth wire2/server schema5/core schema6 и Light/Square Android UI реализованы, без legacy paths. Проверки прежнего ENROL ниже исторические. Полный контракт — `2026-09-29-client-track.md` R12–R21; runtime fixtures/methods — `android/AUTH_GATES.md`.
 
 | Auth gate | Ожидание |
 |---|---|
 | Код/QR подключения | Paste/scan выбирают один и тот же публичный профиль; offline import не создаёт аккаунт, malformed/oversized/pin mismatch отклонены до передачи credentials |
 | Signup policy | Open: логин/пароль; invite_only: дополнительный valid invitation. Policy enforced server-side, legacy endpoint отсутствует; существующий login работает в обоих режимах |
 | Login / restart | Понятные ошибки password/conflict/invite/network; после входа сохранённый device key авторизует restart/reconnect без пароля |
-| Unified auth | ENROL/token-replay/credential attach отсутствуют; старые schema/wire явно отклоняются без мутации. Remote wipe позже отдельным шагом |
+| Unified auth | ENROL/token-replay/credential attach отсутствуют; старые schema/wire отклоняются без мутации. Scoped dev remote wipe выполнен по разрешению пользователя |
 | Новый аппарат | Верные credentials + явное подтверждение; cancel без изменений; один active device, старый доступ отозван, peer identity-change STOP/confirm. Удалённая история не возвращается |
 
-Эти auth outcomes проверены на fresh local server/core + физическом disposable `.gate`; **remote wipe/rollout/recursive auth smoke отложены**. Оптическая камера, long DNS background и два физических Android остаются отдельными G/R gates. Основной package/Keystore не очищать/не отзывать.
+Auth/text outcomes проверены local и теперь на fresh remote через actual recursive DNS с физическим disposable `.gate`. Оптическая камера, long DNS background и два физических Android остаются отдельными G/R gates. Основной package/Keystore не очищать/не отзывать.
 
-### Новое evidence: unified auth, 2026-09-30
+### Frontend + fresh remote acceptance, 2026-10-01 (R17–R21)
+
+- Native Kotlin/AppCompat/XML Light/Square, реальные encrypted incoming/outgoing history, exact persistent statuses, aliases/local times/unread, per-contact pages/read anchors; UI не выводит delivered из отсутствия outbox. API — `crates/core/R18_API.md`; core schema6/server5/wire2.
+- Clean allowlist: `cargo fmt --all --check`; `cargo build -p msgd && cargo test --workspace -- --test-threads=1`: **167 passed, 0 failed**, 1 native-loopback fixture ignored separately. Core all-targets65 и explicit host cdylib/`DMSG_GEN_BINDINGS=1` codegen green. NDK r28c ARM64 rebuilt; JVM **35 passed**, debug/release/gated test APK green. Release unsigned, permanent signing остаётся R11.
+- HTML source: auth/current-text **492 geometry +82 functional**, retained future-call **330 geometry +58 functional**, JS errors/network requests0. Browser QA не физическая приёмка.
+- Moto API35 ARM64, actual UniFFI/native facade, только Wi-Fi ADB и explicit `.gate` `am instrument` by method: **27 distinct gates, 38 successful one-test executions, 0 skips**. Installed APK/native hashes matched current build. Exact methods/commands — `android/AUTH_GATES.md`, private sanitized evidence — `.local/frontend-gates/evidence.md`.
+- Production LinkProperties resolver selection без fixture override; native C peer использует доступный recursive resolver той же сети, RD/RA/non-authoritative answer checked. ADB — управление, SSH — администрация, не message relay. Full-cert pin + Noise + wire2 + Olm обе стороны: equality=true, received1 then0, all skipped0.
+- UI Queued→Accepted→Delivered, double submit→1 durable row; process death/reopen/retry сохраняют account/inbox/exact ciphertext. Delivered history переживает outbox removal/recreate, native reopened history incoming1/outgoing1. Actual replacement отзывает старый key; phone STOP/cancel/confirm сохраняет сообщение до receive1 then0.
+- Alias/summary/unread/my QR/queue-empty disclosure, actual manual DNS check при FGS off, economy intervals/FGS stop/native cancellation; 551 synthetic rows/paging/read anchors, draft/scroll/recreate, same-key restore и loss после clear-data. 200% font + portrait/landscape IME; coordinator viewed private screenshots, send выше клавиатуры. Synthetic storage/scanner/history fixtures отделены от DNS evidence.
+- 7 диагностированных попыток разрешены; два production RED→GREEN: поздний poll после FGS stop и landscape-IME overlap. Остальное — fixture precondition/IPv4 selection/assertion label/settled-layout/camera-denial timing; final gates не suppressed/skipped.
+- Backup `snap-1790845865` schema4/integrity ok + protected independent backup/old image; authorised loss16 dev users/devices. Только dmsg53 DB/WAL/SHM и empty blobs wiped, joint recreate 09:18:15–16 UTC: healthy/schema5/invite_only. Pins/env/topology/nft/original tunnel unchanged; deployment — `docs/deploy.md`. После smoke3 disposable accounts/5 devices/2 retired, send_fail/mbox_err0.
+- Cleanup: `.gate` cleared/force-stopped, 66 local private fixture/log/key/DB files removed, peer stopped, font restored; main UID/version/install/update unchanged. 16 private screenshots вне Git. Не заявлены long Doze/second physical/no-GMS/16KB runtime/optical QR/permanent signing/media. Прежний credential-log incident требует внешней rotation; новых dumps в этой итерации нет.
+
+### Прежнее evidence: unified auth, 2026-09-30
 
 - Rust clean-env msgd build + workspace: **161 passed, 0 failed**; native loopback fixture default ignored отдельно. Core all-targets59, protocol40, server62; live two-peer replacement: STOP/retain до explicit confirm, delivery1 then0, byte-identical retry. Old schema/wire reject без мутации; signup/CAS races/rollback/backup и full-quota dedup green.
 - Host cdylib → generated Kotlin; clean NDK r28c arm64 native; JVM **23 passed**, debug/release/test APK green. Release unsigned, permanent signing/R11 не объявлен готовым. Gate APK native bytes matched current AGP stripped output.

@@ -20,7 +20,7 @@ Viewport 390 × 844, адаптация на 360 и 412 px; единицы Andro
 
 R17 актуально: личный текст; public server profile `dmsg://server/` (domain/fullDER/Noise public, без token), paste/scan → offline preview → accept → pinned DNS policy → login/signup; invitation только signup invite_only; replacement challenge → второй LOGIN с expected-old key только после согласия; key-only resume. Также contact QR `dmsg://contact/`, ID-контакты, consent/block/identity confirm, outbox/retry, FGS и локальный encrypted snapshot в пределах одной установки. Не возвращай ENROL/join/token/DirectTCP runtime/old-schema migration.
 
-R18 реализован (core schema6, 65 all-targets green и Kotlin bindings generated по evidence координатора): encrypted bidirectional history, exact persistent status, DialogSummary/local alias/time/unread/read cursor. Exact API — `../crates/core/R18_API.md`. R19 native AppCompat/XML реализован, 35 JVM/compile green; device runtime pending. Не объявляй browser QA физической frontend acceptance.
+R18 реализован: core schema6/65 all-targets/generated Kotlin, encrypted bidirectional history/exact status/summaries/local alias/time/unread/read cursor; API — `../crates/core/R18_API.md`. R19 native AppCompat/XML/JVM35/current ARM64/APK и separate physical27 gates/38 passes/0 skips/recursive phone↔native verified; evidence — `../android/AUTH_GATES.md`. Browser QA не физическая acceptance.
 
 Нет в доступном frontend-контракте: звонков, вложений, голосовых, групп, каналов, stories, stickers, typing, presence, read receipts, публичного поиска людей, multi-device, облачного восстановления. По отдельному запросу пользователя звонки теперь проектируются как будущая функция, согласно CALLS_SPEC.md. Остальные перечисленные кнопки не добавляй даже как украшение. Не выдавай дизайн звонков за существующий API. Contact block терминален: без «Разблокировать».
 
@@ -28,7 +28,7 @@ R18 реализован (core schema6, 65 all-targets green и Kotlin bindings 
 
 Сделай переключатель **вне мобильного интерфейса**: «Целевой интерфейс» / «Текущий контракт».
 
-В целевом варианте также доступны будущие личные аудиозвонки; видео отделено выключенным по умолчанию capability. В режиме текущего контракта скрыты все call-действия, журнал, call-события, media lab и call-board. В обоих режимах доступны реализованные R18 local aliases, локальное время, previews, local unread и bidirectional history. Рядом с макетом явно написано: «R18 API реализован; все значения HTML синтетические. Device runtime pending». Future media не является текущим API.
+В целевом варианте будущие аудиозвонки; видео — отдельный default-off capability. Current mode скрывает call-actions/history/events/lab/board. В обоих режимах R18 aliases/local time/previews/unread/bidirectional history. Рядом явно: R18 API реализован, значения HTML synthetic; native acceptance verified отдельно. Future media не текущий API.
 
 В режиме текущего контракта необязательный local alias заменяет display label, исходный contact ID остаётся доступен. Empty dialog не имеет preview/time. History newest-first local ID descending: reverse каждой страницы, prepend older; page read не двигает read cursor. Incoming delivery state `null`, outgoing exact Queued/Accepted/Delivered; `message_status` unknown/incoming-only ID → `null`, не delivered. Local time не sender time/last-seen, local unread/read cursor не read receipts. Все plaintext/alias хранятся защищённо ядром; значения HTML — только память страницы. Геометрия и качество интерфейса сохраняются.
 
@@ -48,7 +48,7 @@ R18 реализован (core schema6, 65 all-targets green и Kotlin bindings 
 
 7. **Мой QR**. Собственный ID, квадратный QR на белом поле, копирование публичного ID. Не показывать телефон, пароль или секреты. Демо-QR не должен регистрировать устройство.
 
-8. **Связь**. DNS runtime, public profile и pinning. R19 `ConnectionUiState` по worker outcomes реализован; строковый `dnsStatus()` — диагностика, FGS отдельно. Нет гарантии 24/7 и synthetic last-success timestamp. Кнопка повторной проверки, выбор public profile, read-only публичные параметры. Resolver automatic; обычного ручного addr/crypto ввода нет. В HTML связь искусственная; device runtime pending.
+8. **Связь**. DNS runtime/public profile/pinning; R19 `ConnectionUiState` по worker outcomes, `dnsStatus()` диагностика/FGS отдельно. Нет гарантии24/7/synthetic last-success. Повторная проверка/public profile/read-only metadata, automatic resolver без manual addr/crypto. Device actual check/FGS cancellation verified; HTML связь synthetic.
 
 9. **Очередь**. В queued: «Ожидает отправки»; accepted: «Принято сервером». Retry повторяет те же сообщения, не создаёт новые. Не менять accepted на delivered по таймеру в якобы реальном режиме; любые демо-переходы явно обозначены. Не заявлять точный total по первой странице max 100.
 
@@ -78,7 +78,7 @@ queued = ядро подтвердило локальное сохранение
 
 Создай самодостаточный `index.html` с локальным CSS/JS или встроенным CSS/JS, чтобы его можно было открыть офлайн и в preview OpenDesign. Все основные переходы и кнопки демонстрируют понятное локальное поведение. Данные только в памяти. Не нужны сетевые запросы, backend и API keys. Без npm/CDN зависимостей.
 
-Сохрани существующее будущее call-demo и его тесты без расширения медиа. Приоритет R17 — text/auth; будущие call-действия, lab, deep links и call-board скрыты/заблокированы в текущем контракте. `prototype.html` и `index.html` должны быть byte-identical. В `HANDOFF.md` используй текущие подтверждённые R18 encrypted bidirectional history/exact status/summaries/local alias/time/unread API из `../crates/core/R18_API.md`; отличай реализованные storage/native API от синтетических HTML данных и ещё pending device runtime acceptance.
+Сохрани future call-demo/tests без расширения media. Приоритет text/auth; future calls/lab/deep links/board скрыты/blocked в current mode. `prototype.html`/`index.html` byte-identical. Handoff использует R18 API `../crates/core/R18_API.md`; отличай native storage/physical acceptance от synthetic HTML и непроверенных media/hardware gates.
 
 Проверь визуально 360 / 390 / 412 px, большие шрифты, длинное русское сообщение, отсутствие горизонтального overflow, корректный focus, клавиатуру/системные insets и 48 px tap targets. Ни один основной CTA не должен вести в пустоту. Без округлых углов во всех состояниях. Сначала доведи список диалогов, чат и связь; остальные экраны используют ту же систему, не придумывают новые стили.
 

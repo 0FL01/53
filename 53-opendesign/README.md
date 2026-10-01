@@ -18,7 +18,7 @@
 
 «Текущий контракт» показывает поддерживаемые auth/DNS и R18 encrypted bidirectional history/exact status/dialog summaries/local alias/time/unread. Все значения в HTML синтетические. Звонки/video/lab/call-board скрыты, media deep links заблокированы; переключение сбрасывает call-session. Exact API и descending page order — `../crates/core/R18_API.md`.
 
-Координатор подтвердил R18 core schema6: 65 all-targets проверок, актуальные Kotlin bindings сгенерированы. R19 native Android реализован, 35 JVM проверок и compile green; device runtime pending. Browser QA этого комплекта подтверждает только HTML.
+Координатор подтвердил core schema6/65 all-targets/codegen, workspace167 и R19 JVM35/current ARM64/APK green. Separate Moto API35 frontend acceptance27 distinct methods/38 passes/0 skips и fresh remote recursive phone↔native E2E verified; evidence — `../android/AUTH_GATES.md`. Browser QA подтверждает только HTML; media/дополнительная аппаратная матрица этим не закрыты.
 
 ## Состав
 
@@ -28,7 +28,7 @@
 - `PROMPT.md`: обновлённое полное задание OpenDesign. `CALLS_PROMPT.md`: отдельное задание именно по звонкам.
 - `CALLS_SPEC.md`: сценарии, кнопки, состояния, ошибки, приватность, фон, история и видео.
 - `CALLS_HANDOFF.md`: будущие модели и команды, граница UI/сигналинга/медиа/Android, первичные источники платформы.
-- `DESIGN.md`, `HANDOFF.md`, `CODE_REVIEW.md`: текущая граница R17 auth/DNS, реализованные R18 storage API и R19 native UI; device runtime pending.
+- `DESIGN.md`, `HANDOFF.md`, `CODE_REVIEW.md`: R17 source, R18 storage API, R19 native UI; separate R20/R21 physical/recursive evidence.
 - `tokens.json`, `tokens.css`, `calls-state-machine.json`: токены и проектная машина состояний.
 
 `mobile-auth-signup-360-large-text.png` и `mobile-auth-replace-360-large-text.png` — текущие R17 screenshot-референсы. Старые `preview.png`, `calls-preview.png`, `messages-preview.png`, `mobile-calls-360.png`, `video-preview.png` — архивные synthetic v2, не актуальные auth/DNS-состояния. `mobile-calls-360-large-text.png` обновляется регрессией. `QA.md`, `qa-auth-results.json`, `qa-results.json`, `tests/test_auth.py`, `tests/test_calls.py` содержат evidence и воспроизводимые проверки.
@@ -45,7 +45,7 @@
 Доработай нативный текстовый Light/Square frontend по R17.
 Сохрани текущий unified auth и все browser checks.
 R18 history/status/summary реализованы; exact API — ../crates/core/R18_API.md.
-R19 native compile/JVM green, device runtime pending; media остаётся future-demo.
+R19 native frontend acceptance verified отдельно в android/AUTH_GATES.md; HTML synthetic, media future-demo.
 
 Светлая тема, radius=0, elevation=0, подписи на русском.
 Не используй iPhone seed. Не превращай прототип в лендинг.
@@ -75,4 +75,4 @@ env -i HOME="$HOME" PATH="$PATH" python3 53-opendesign/tests/test_calls.py
 
 Оба теста завершаются ненулевым кодом при failed check, geometry, JS error или network request. Скрипты обновляют QA JSON и screenshots внутри этой папки.
 
-Этим design QA проверки реального APK/устройства/аудиосвязи и вашего workspace OpenDesign не выполнялись. Подтверждённые координатором R18/R19 core/JVM/compile checks указаны выше; физическая frontend acceptance ещё pending. Матрица будущей media-приёмки находится в конце `CALLS_HANDOFF.md`.
+Browser QA не проверяет APK/аудиосвязь/workspace OpenDesign. Separate core/JVM/native и физическая text/recursive DNS acceptance подтверждены координатором выше и в `../android/AUTH_GATES.md`. Будущая media-приёмка — `CALLS_HANDOFF.md`.

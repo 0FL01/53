@@ -273,7 +273,7 @@
       "ok": true
     },
     {
-      "name": "Current mode identifies implemented R18 and pending device runtime",
+      "name": "Current mode separates synthetic R18 data from verified native acceptance",
       "ok": true
     },
     {

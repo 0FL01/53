@@ -2,13 +2,20 @@
 
 Реальные значения только в `/opt/srv/53/.env` и `/opt/srv/53/secrets/` (на сервере, не в Git).
 
-## Единая account-auth логика и отложенный rollout
+## Единая account-auth логика и fresh dev rollout
 
-Реализованы public `dmsg://server/` profile, wire2/server-core schema5, password signup/login, key-only resume, persisted `open` / `invite_only` (default) и confirmed device replacement. Приглашение отдельно требуется только для signup в invite_only. ENROL/token-replay/credential attach/admin invite-rebind удалены. Команды ниже относятся к **новой** ревизии; wire — `docs/protocol.md`, CLI/details — `crates/server/README.md`, Android gates — `android/AUTH_GATES.md`.
+Реализованы public `dmsg://server/` profile, wire2/server schema5/core schema6, password signup/login, key-only resume, persisted `open` / `invite_only` (default) и confirmed device replacement. Приглашение отдельно требуется только для signup в invite_only. ENROL/token-replay/credential attach/admin invite-rebind удалены. Команды ниже относятся к новой ревизии; wire — `docs/protocol.md`, CLI/details — `crates/server/README.md`, Android gates — `android/AUTH_GATES.md`.
 
-**Рабочий remote ещё на schema4; wipe/rollout отложен пользователем.** Новый binary отклоняет старую БД read-only, без миграции/автоматического wipe. Сейчас не выполнять несовместимое обновление поверх работающих volumes. Последующий rollout требует backup/архив secrets/rollback-образ, свежую DB и согласованное обновление клиентов. Старый snapshot совместим только с прежней server revision. Основной Android package/Keystore не стирать и новым APK ради теста не обновлять.
+**2026-10-01 разрешённый fresh dev rollout выполнен:** remote healthy/schema5, policy `invite_only`; actual recursive Android↔native signup/resume/E2E/retry/trust gates green. Старые16 dev users/devices потеряны намеренно после backup. Основной Android package/Keystore не стирали/не обновляли: physical acceptance только `.gate`.
 
-## Подъём (только после отдельного шага fresh DB)
+- Backup `snap-1790845865`: schema4, DB118784 bytes, blobs0, integrity ok; independent protected DB/source/Compose/env/secrets archive и rollback image `dmsg53-msgd:pre-r21-schema4-1790845865` вне wipe targets.
+- Source export `7f3fcaa0136a4dbfb6af904c3d9c0f969d50a5f0`, locked Docker workspace fix `a6d21e3`; new msgd image `sha256:e69dfe5b59b7ef7d5510076a5ed35f8ed4f4f686adde08b525e666e226c28ec4`, promoted `dmsg53-msgd:s1`.
+- Carrier reused unchanged: `sha256:bb6243409d1909f3250e289052ade0b2f6d5912961c3d2c87f52afdef0152e73`. Joint recreate 09:18:15–16 UTC; secret bytes/ro mounts, pins, env/topology/static IP/volumes/nft/original tunnel unchanged.
+- Only verified project dmsg53 DB/WAL/SHM and already-empty blob volume cleared; not `down -v`, global prune/firewall reset or automatic migration. Private exact records — `.local/frontend-rollout/`; no domains/IPs/secrets in this runbook.
+
+Новый binary отклоняет старую БД read-only без migration/wipe. Для нового несовместимого reset нужны явное разрешение, backup и scoped targets; текущее разрешение не является общим production-wipe регламентом. Schema4 snapshot требует retained old image, не schema5 binary.
+
+## Подъём / обновление совместимой schema5
 
 ```sh
 docker compose -f /opt/srv/53/deploy/compose.yml --env-file /opt/srv/53/.env up -d --build
@@ -82,7 +89,7 @@ IP forwarding и существующий masquerade должны уже раб�
 
 `cargo build -p msgd --examples`: `noise_diag` для AUTH_DOMAIN/WELCOME, `auth_diag` для signup/login/resume, `mbox_dns` для свежих signup двух disposable devices и SEND/FETCH/ACK. Они подключаются к **локальному pinned slipstream-client endpoint**, не публичному backend TCP. `DIAG_PORT`, `DIAG_DOMAIN`, `DIAG_SERVER_PUB` — public metadata. Auth: `DIAG_DEVICE_KEY_FILE`, `DIAG_PAYLOAD_FILE`, операция `DIAG_OPERATION=signup|login|resume`; mailbox: `DIAG_SIGNUP_A_FILE` / `DIAG_SIGNUP_B_FILE`. Это пути к bounded owner-only secret files0600, payload через shared `auth::build_signup/build_login`, не credentials в env. Результат должен быть PASS, не timeout/пропущенная fixture.
 
-Старые host-local `enrol_dns.py`, token-based `mbox_dns.py` и plaintext `s3_diag.py` не являются рабочими smoke-командами wire2. Локальная физическая authoritative DNS-проверка новой auth уже выполнена; recursive production Android signup/resume/E2E выполнить **после** отдельного rollout, не подменять её host/DirectTCP evidence.
+Старые host-local `enrol_dns.py`, token-based `mbox_dns.py` и plaintext `s3_diag.py` не являются рабочими smoke-командами wire2. Recursive Android signup/resume/E2E теперь проверены: production resolvers без override, actual C peer, received1 then0 обе стороны/all skipped0, exact ciphertext retry/status/history/replacement. ADB/SSH не переносили messages; evidence — `android/AUTH_GATES.md` и gate checklist.
 
 ## Операции через msgctl (новая ревизия)
 

@@ -4,7 +4,7 @@ R17 / 01.10.2026. Native Light/Square text UI по `docs/goals/2026-09-29-client
 
 ## Стратегия переноса
 
-R19 визуальные компоненты реализованы в Kotlin/AppCompat/XML слое. Координатор подтвердил 35 JVM проверок и compile green; device runtime pending. R18 core schema6 прошёл 65 all-targets проверок, актуальные Kotlin bindings сгенерированы координатором. Не менять Rust API только ради радиусов/цветов. Compose возможен отдельной миграцией: сейчас он не настроен в Gradle. HTML не встраивать в APK.
+R19 реализован в Kotlin/AppCompat/XML и проверен на Moto API35: 35 JVM, current ARM64/debug/release/test APK green, 27 distinct device gates/38 passes/0 skips. Actual recursive DNS phone↔native E2E/history/status/retry/trust и 200% font/IME verified отдельно от HTML; evidence — `../android/AUTH_GATES.md` и gate checklist. R18 schema6: 65 all-targets/current generated Kotlin. Не менять Rust API ради цветов/радиусов. Compose — отдельная миграция; HTML не встраивать в APK.
 
 Слой экранного состояния отделить от View. UI получает готовые immutable модели; блокирующие facade-команды выполняются вне main thread. Повторные нажатия на send/login/signup/confirm блокируются до результата. Устаревшие ответы lifecycle/paging/auth не обновляют закрытый экран. Пароль и приглашение не входят в saved instance state, prefs, trace или уведомления.
 
@@ -47,7 +47,7 @@ R19 визуальные компоненты реализованы в Kotlin/A
 
 ## UI data handoff
 
-R18 реализован и проверен: `history_page`, `message_status`, `dialogs_page`, `set_contact_alias`, `mark_read`; core schema6, server schema5/wire2 без изменений. История newest-first, для ленты reverse/prepend; read cursor только по реально просмотренной строке. Точные поля, bounds и cursor semantics — `../crates/core/R18_API.md`, generated Kotlin — источник сигнатур. R19 typed connection UI adapter реализован в Android отдельно от этих storage APIs; device runtime pending.
+R18 реализован и проверен: `history_page`, `message_status`, `dialogs_page`, `set_contact_alias`, `mark_read`; core schema6, server schema5/wire2. История newest-first, для ленты reverse/prepend; read cursor по реально просмотренной строке. Exact API — `../crates/core/R18_API.md`, generated Kotlin — сигнатуры. R19 typed connection adapter проверен на устройстве отдельно от browser QA: actual DNS outcomes, FGS start/stop/native cancellation, economy disclosure.
 
 1. `historyPage(contactId, beforeLocalId?, limit)` → `HistoryPage(rows, nextBeforeLocalId?)`; `HistoryMessage(localId, messageIdHex, contactId, direction, text, localTimestampMs, deliveryState?)`. Защищённая persistent история incoming/outgoing; core владеет хранилищем. Страницы newest-first по local ID descending; reverse каждой страницы, prepend older. Next anchor exclusive; `null` next означает конец. Anchor должен существовать в этом контакте, быть положительным; cross-contact/zero/future → InvalidInput.
 2. `dialogsPage(cursor?, limit)` → `DialogsPage(rows, nextCursor?)`; `DialogSummary(contactId, localAlias?, preview?, lastLocalTimestampMs?, localUnread, readCursor, hasKeys, identityMismatch, state)`. Все известные контакты, включая empty/requested/blocked. Order local activity descending, contact ID ascending ties; alias/read/status/trust changes не меняют порядок. Empty имеет `null` preview/time; preview максимум 160 Unicode scalar values. Paging keyset, не frozen snapshot; после send/fetch/contact addition начинать с `null`.

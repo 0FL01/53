@@ -1,6 +1,6 @@
 # План работ: DNS-мессенджер
 
-Дата: 28.09.2026; сценарий account-auth обновлён 30.09.2026. Это план и критерии приёмки, не перечень уже выполненного. Текущие результаты и утверждённые итерации — в `docs/goals/2026-09-29-client-track.md`.
+Дата: 28.09.2026; account-auth 30.09.2026, native Light/Square text frontend/fresh dev rollout 01.10.2026. Это план и критерии приёмки, не перечень уже выполненного. Текущие результаты и утверждённые итерации — в `docs/goals/2026-09-29-client-track.md`.
 Архитектурная основа и источники находятся в ARCHITECTURE.md.
 
 ## Порядок выпуска
@@ -49,7 +49,7 @@
 
 **Безопасность.** Учётные данные отправляются только после pinned carrier + Noise handshake через DNS. Неизвестный key получает лишь ограниченный account-auth API, не mailbox/blob. Режим регистрации проверяется на сервере; существующие пользователи входят в обоих режимах, revoked device и legacy API не обходят ограничения. Пароль/приглашение/приватные ключи не попадают в публичный код, URI, argv, crash logs и аналитику. Сохранить revocation с закрытием открытых streams, bounded frames/pending sessions и доверенный offline bootstrap без скачивания pin с непроверенного URL.
 
-**Готово, когда.** Телефон импортирует один код/QR без внешнего HTTPS, регистрируется/входит через DNS и далее открывает диалоги без повторного ввода пароля. Проверены оба режима, неверный пароль, занятый логин, expired/revoked/used invitation, регистрационные гонки и потеря ответа. Единый новый wire/schema, без ENROL/token-replay/credential attach и compatibility fallback; старые версии отклоняются без мутации. Вход с нового аппарата меняет активное устройство только после подтверждения/CAS; прежний доступ отозван, E2E keys свежие, peer STOP до confirm без потери сообщения, старая история не обещана. Неверный pin/server key и отозванное устройство отклоняются. Remote wipe/rollout — последующий отдельный шаг, не текущая реализация.
+**Готово, когда.** Телефон импортирует один код/QR без внешнего HTTPS, регистрируется/входит через DNS и далее открывает диалоги без повторного ввода пароля. Проверены оба режима, неверный пароль, занятый логин, expired/revoked/used invitation, регистрационные гонки и потеря ответа. Единый новый wire/schema, без ENROL/token-replay/credential attach и compatibility fallback; старые версии отклоняются без мутации. Вход с нового аппарата меняет активное устройство только после подтверждения/CAS; прежний доступ отозван, E2E keys свежие, peer STOP до confirm без потери сообщения, старая история не обещана. Неверный pin/server key и отозванное устройство отклоняются. Fresh dev rollout теперь выполнен R21; будущие несовместимые wipe требуют отдельного разрешения.
 
 ## M3. Надёжный E2E текст и контакты
 
@@ -66,6 +66,8 @@
 **Задачи.** Первый запуск: вставить код/сканировать QR → проверить сервер → войти/создать аккаунт → диалоги. Приглашение показывать только когда его требует сервер; технические поля вынести в дополнительные настройки. Список диалогов, экран чата, composer, понятные ошибки («неверный логин или пароль», «логин занят», «нужно приглашение», «нет связи»), contact QR, настройки хранения и связи. Явные режимы «На связи»/«Экономия»; постоянное уведомление для активного соединения; корректные service types, разрешения и экран диагностики фоновых ограничений. Интеграция уведомлений без обязательного FCM.
 
 **Хранение.** Keystore-wrapped local key, encrypted secrets/ratchets/content в app-private storage, отключение небезопасного auto-backup для identity state. Локальная очистка кэша и истории; политика потери телефона и перевыпуска доступа. Полный cloud backup/перенос истории отложить.
+
+**Текстовый frontend R17–R21 реализован.** Light/Square на Kotlin/AppCompat/XML; Rust schema6 хранит защищённую историю обеих сторон, exact status, summaries/local aliases/time/unread/read cursor. Pages per-contact, TX с ratchet/outbox/inbox; time локальное, delivered не read receipt. Actual recursive phone↔native/UI/200% font/IME verified, полная M4 background/compatibility матрица ниже этим не закрыта.
 
 **Проверки.** Forced Doze и App Standby; экран выключен продолжительное время; normal process death и force-stop отдельно; отсутствие Google Play Services; отказ разрешений; unreadable/oversized QR; очистка данных/переустановка; OEM battery restrictions. Измерить queries/s и батарею в обоих режимах. Проверить штатный выбор клавиатуры, clipboard, accessibility и большие списки сообщений.
 
@@ -119,7 +121,7 @@ docs/                    # архитектура, протокол, решен�
 
 ## Минимальная матрица приёмки
 
-Функциональность: подключение по публичному коду/QR через recursive DNS; неверный pin; login/register в обоих режимах; неверный пароль/занятый логин; one-time invitation race; миграция существующего аккаунта; подтверждённая замена единственного устройства; reconnect без пароля; dedup; prekey depletion; revoked device; oversized frames; interrupted blob; missed-call expiry.
+Функциональность: подключение по публичному коду/QR через recursive DNS; неверный pin; login/register в обоих режимах; неверный пароль/занятый логин; one-time invitation race; old schema/wire fail-closed без migration; подтверждённая замена единственного устройства; reconnect без пароля; encrypted history/status/alias/local unread; dedup; prekey depletion; revoked device; oversized frames; interrupted blob; missed-call expiry.
 
 Надёжность: server/client restart; транспортный обрыв; обе стороны с низким upload; RAM/disk quota; неконсистентный backup не принимается; restore и schema update; цикл смены сети.
 

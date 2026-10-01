@@ -5,6 +5,7 @@
 - `ARCHITECTURE.md` — инварианты: переиспользование C-транспорта, границы v1, crypto-слои
 - `WORK_PLAN.md` — порядок M0–M7, ворота приёмки, раскладка репозитория (`crates/`, `deploy/`, `docs/`, `vendor/`)
 - `docs/protocol.md`, `crates/server/README.md`, `android/AUTH_GATES.md` — wire2/account-auth, CLI и изолированные device gates
+- `crates/core/R18_API.md` — контракт локальной истории, exact status и dialog summaries для native UI
 - `.local/slipstream` — gitignored исследовательский checkout `feat/rust-parity-ab`, не править и не вендорить копипастом
 - `.local/dns-delegation.md` — gitignored детали делегирования поддомена мессенджера; фактические имена/IP только там, в трекаемые файлы не вносить
 
