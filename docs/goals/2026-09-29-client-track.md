@@ -2,13 +2,13 @@
 
 Status: active
 Source: пользовательские инструкции по клиентскому треку и выбранная 2026-09-30 авторизация «один готовый код/QR», ARCHITECTURE.md §3/§5/§6/§7, WORK_PLAN.md M1–M4
-Last updated: 2026-09-30
+Last updated: 2026-10-01
 
 ## Objective
-Живой DNS-клиент: один публичный код/QR подключения к серверу → логин/пароль → диалоги; регистрация открытая либо по приглашению, один активный аппарат, автоматический reconnect сохранённым ключом. Единая новая auth-логика без ENROL/token-replay, совместимости старого wire и переноса старых аккаунтов. Сохранить Native/Noise/Olm/outbox/Keystore гарантии. Remote-БД пользователь вайпнет позже: сейчас не стирать, не развёртывать несовместимую schema поверх работающих данных; проверить новую логику на свежих изолированных БД.
+Живой DNS-клиент: один публичный код/QR подключения к серверу → логин/пароль → удобные личные текстовые диалоги по Light/Square из `53-opendesign/`. История обеих сторон и реальные статусы, summaries/локальные aliases/unread; один активный аппарат, reconnect сохранённым ключом. Единая auth без legacy/migration fallback. Сохранить Native/Noise/Olm/outbox/Keystore гарантии. Пользователь разрешил dev DB wipe и fresh remote rollout; server secrets/pins и исходный туннель сохраняются, основной Android package/Keystore не стирать ради тестов.
 
 ## Execution Directive
-Complete the frozen Required Outcomes using the listed Change Envelope and Primary Evidence. Work on the smallest unresolved outcome. Do not add requirements from reviews, tests, tools, speculative risks, or optional source text. Finish when every required outcome is resolved and affected constraints remain satisfied. Subagents (@general) execute phases iteratively; orchestrator verifies, tests, commits. Remote deploy/wipe requires a separate user-authorized step.
+Complete the frozen Required Outcomes using the listed Change Envelope and Primary Evidence. Work on the smallest unresolved outcome. Do not add requirements from reviews, tests, tools, speculative risks, or optional source text. Finish when every required outcome is resolved and affected constraints remain satisfied. Independent design/core phases may use @general; orchestrator verifies, tests, commits. Current instruction authorizes R17–R21 including scoped dev DB wipe/remote rollout; older hardware/signing gates remain separate.
 
 ## Frozen Contract
 
@@ -110,8 +110,39 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Status: verified
   - Evidence: server auth_probe CAS/cancel/concurrent winner/lost confirm/old-key live+pending close/no-history green; core live-msgd two-peer gate сохраняет сообщение до explicit confirm, после decrypt1 then0 и byte-identical retry. Physical Android cancel сохраняет host-old RESUME, explicit confirm отзывает его (ERR_REVOKED), IDs прежние; real UI warning/cancel/confirm/recreate passed. Только fresh disposable fixtures, no main/remote mutation
 
+- R17: актуальный интерактивный дизайн-источник
+  - Source: пользователь «фронтенд натянуть … 53-opendesign … если элементов не хватает, доделаешь», принятый frontend-план, шаг 1
+  - Acceptance: prototype/index и handoff отражают public code/QR → preview → login/signup/conditional invite → dialogs, replacement-confirm и реальные ошибки; нет старого invite-enrol. Light/Square сохранён, будущие media остаются явно demo и скрыты в текущем контракте
+  - Primary evidence: воспроизводимые HTML state/geometry checks и просмотр контрольных screenshots
+  - Status: pending
+  - Evidence:
+- R18: реальные данные текстового frontend
+  - Source: принятый frontend-план, шаг 2
+  - Acceptance: core владеет защищённой persistent историей обеих сторон; bounded per-contact pages, точный status по message ID, summaries/локальный alias/time/unread/read cursor. History/outbox/ratchet сохраняются атомарно; retries не создают историю/новый ciphertext. Local time не выдаётся за sender time, unread не read receipt; нет plaintext history в Prefs
+  - Primary evidence: core restart/encryption/paging/status/dedup/alias/read-cursor tests и generated UniFFI
+  - Status: pending
+  - Evidence:
+- R19: нативный Light/Square frontend
+  - Source: принятый frontend-план, шаг 3; `53-opendesign/DESIGN.md`
+  - Acceptance: native Kotlin/AppCompat/XML onboarding/dialogs/chat/contact/my QR/connection/outbox/storage соответствуют визуальному контракту; реальные данные/CTA, draft сохранён при ошибке, pending guards, typed human errors/connection state, STOP до trust confirm. App-owned radius/elevation0, light theme, 48dp touch, insets/IME и крупный шрифт; без WebView/Compose migration/fake metadata/call buttons
+  - Primary evidence: JVM + APK builds и actual UI gates/screenshots на disposable `.gate`
+  - Status: pending
+  - Evidence:
+- R20: проверенный текстовый frontend и коммиты
+  - Source: принятый frontend-план, шаг 4 и прежняя инструкция итеративных коммитов
+  - Acceptance: host/workspace/native/JVM/APK gates green, physical real facade проверяет обе стороны истории/статусы/reopen/queue/identity-change, narrow/large-text/keyboard; intended правки закоммичены. Fixture skip не PASS, main identity не reset
+  - Primary evidence: gate checklist с точными командами/результатами и git log/status
+  - Status: pending
+  - Evidence:
+- R21: fresh remote rollout нового текстового клиента
+  - Source: принятый frontend-план, шаг 5; пользователь «бд вайпать можно … идёт разработка, потеря данных не страшна»
+  - Acceptance: только dmsg53 получает актуальный msgd/fresh server DB, сохраняя server secrets/pins/endpoint/topology; healthy/schema5/policy и recursive DNS signup/resume/E2E phone↔native peer/dedup проверены. Loss старых dev accounts явно зафиксирована, исходный tunnel не меняется
+  - Primary evidence: scoped backup/wipe/recreate record + live recursive Android/native smoke
+  - Status: pending
+  - Evidence:
+
 ### Constraints
-- C1: Обратная совместимость auth/wire/schema отменена пользователем. Рабочий remote и основной Android package не мутировать/не стирать; несовместимый rollout только отдельным шагом после remote wipe
+- C1: Auth/wire/schema compatibility отменена. Dev DB wipe/fresh remote rollout теперь разрешены только для dmsg53; secrets/pins и исходный tunnel не менять. Основной Android package/Keystore не стирать ради destructive gates, использовать `.gate`
 - C2: Секреты только файлами 0600, не в Git/логи/argv (прецеденты сервера)
 - C3: Швы сейчас, мясо позже: Transport trait, пагинация как требование, Экономия флагом, contact-QR тем же конвертом
 - C4: ARCH выше любых предложений: только DNS-relay, без WebRTC P2P; E2E только vodozemac
@@ -119,7 +150,7 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 
 ### Non-goals
 - Общий storage-крейт (до реального дубля); адресная книга; prefix-search; группы/typing/link-preview; cloud-backup; автозагрузка; второй FGS-режим; SQLCipher; звонки в K1–K3
-- В auth-плане не добавлять общий секрет сервера, публичный поиск по логину, веб-админку, внешнюю авторизацию или дополнительные обязательные поля регистрации. Не добавлять legacy compatibility/credential attach; remote wipe/deploy и reset основной identity сейчас вне шага
+- Не добавлять общий secret, login directory, web-admin, external auth или обязательные поля регистрации. Нет legacy compatibility/credential attach. Voice/files/calls/video, Compose migration и прежняя аппаратная матрица R8–R11 вне текущего frontend-этапа; server ACK не прочтение
 
 ## Change Envelope
 - Target: crates/core (+ android/ в K4), protocol-дополнения при нужде
@@ -130,23 +161,25 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 - R4/G3/G11 minimal server expansion: paired physical-phone retry exposed a stuck mailbox cursor after another recipient's global seq. Correct `crates/server/src/mbox.rs::ack` to advance over that recipient's delivered events (never over an undelivered event); add interleaved-recipient and replay tests. No schema/wire/deployment topology change. Core must check durable inbox dedup before advancing an Olm ratchet again.
 - R4 storage correction: additive encrypted-open API + standard AEAD for sensitive SQLite values; Android supplies a random local key sealed by Keystore/EncryptedFile. Legacy Rust open remains supported. No SQLCipher, key export, cloud recovery or new service. This is necessary because the current live DB is plaintext and seal/wipe can silently replace the identity with an empty DB.
 - Allowed: rusqlite/tokio/snow reuse; vodozemac (K3); uniffi (K4)
-- Forbidden: remote wipe/несовместимый deploy сейчас; Matrix SDK; WebRTC-стек; копипаста diag-main вместо библиотечной функции; чтение/правки `53-opendesign/`
+- R17–R21 expansion: `53-opendesign/` prototype/docs/tokens/tests (разрешено пользователем); `crates/core/` history/status/summary/local metadata + generated bindings, `android/` native UI/resources/facade/tests/service typed state, `docs/` evidence/runbook. Стандартный AndroidX list component допустим при нужде. Wire/crypto/transport не менять ради дизайна; fresh local schema допустима без old-schema fallback. Remote operations только `/opt/srv/53`/dmsg53 volumes/images/containers, bounded private fixtures и scoped rollback snapshot
+- Forbidden: Matrix SDK, WebRTC, WebView/JS runtime в APK, plaintext message DB в Kotlin/Prefs, generated bindings manual edits, исходный tunnel/global firewall/daemon changes, secrets в Git/env/logs/argv
 
 ## Current Checkpoint
-- Closes: R12/R13/R14/R16 verified; R15 superseded. Текущая auth-итерация завершена, весь клиентский трек ещё active
-- Smallest next action: нет дальнейшей реализации в текущей инструкции; финальная фиксация docs/evidence завершает auth-этап. Remote wipe/rollout и старые R8–R11 не запускать автоматически
-- Expected evidence: workspace161, core all-targets59, generated bindings, clean arm64/native + JVM23/debug/release/test builds; physical local authoritative DNS10 successful method executions, peer STOP/confirm host live gate; old versions fail-closed
+- Closes: R17–R21; auth R12/R13/R14/R16 уже verified
+- Smallest next action: обновить дизайн-источник и реализовать минимальный UI data contract в core независимо, затем генерировать bindings и переносить нативный frontend
+- Expected evidence: HTML checks, core history/status/encryption + workspace, generated bindings, arm64/native/JVM/APK; physical UI/DNS and fresh remote recursive gates. Старые hardware gates не объявлять complete
 - Replan if: Wi-Fi ADB would be disconnected by a test; use an isolated fixture instead, not blind radio toggles. Do not clear/uninstall основной package or claim an emulator is a second physical phone
 
 ## Current State
 - Resolved: R1/R3/R5–R7 и R12/R13/R14/R16 verified; R2/R15 superseded. Auth-код/формы/единый wire реализованы и фазы закоммичены
 - Last relevant evidence: clean-env msgd build/workspace161 passed (loopback fixture по умолчанию ignored отдельно), core all-targets59, bindings generated, clean arm64 native, JVM23/debug/release/test APK builds. Physical local authoritative DNS .gate: 10 successful selected method executions/0 skipped, все final scenarios green; 5 промежуточных UI-harness failures диагностированы как async assertion/focus overlay, исправлены тестовые waits. `k4-gate-checklist.md` / `android/AUTH_GATES.md`; no remote service/DB/main package mutation
 - External state not yet obtained: второй physical Android и no-GMS handset; optical positioning not proved. API36/37-16KB official images now installed, runtime tests still pending. G8 loss policy approved, no key export
-- Remaining outside this iteration: отдельный remote wipe/rollout+recursive auth smoke и прежние R8–R11 аппаратные/signing gates; перенос legacy аккаунтов отменён
+- Remaining outside this iteration: прежние R8–R11 дополнительные аппаратные/signing gates; перенос legacy аккаунтов отменён. Remote wipe/rollout включён в R21 новой инструкцией
 - Incident: Perl diagnostic subagent ошибочно вывел inherited credential-bearing environment в tool-log. Не copied в repo; log не retractable, owner/provider credential rotation вне доступного task permission остаётся внешней remediation. Disposable fixtures/processes удалены, дальнейшие builds clean allowlist. Не объявлять C2/log invariant соблюдённым этим прогоном
-- Next: текущую auth-реализацию завершить docs commit; remote schema4/основной Android остаются прежними до отдельного шага. Wi-Fi ADB сохранён
+- Next: исполнить frontend-план ниже и fresh dmsg53 rollout с приватными fixtures; Wi-Fi ADB и основной Android Keystore сохраняются
 
 ## Material Decisions
+- 2026-10-01: пользователь принял копию frontend-плана и разрешил dev DB wipe («потеря данных не страшна»), supersedes прежний запрет remote wipe. `53-opendesign/` теперь разрешённый дизайн-источник. Трактовка: рабочий текстовый frontend с минимальным core extension и fresh dmsg53 rollout; не реализация макетных звонков/видео, не стирание основного Android Keystore
 - 2026-09-30: пользователь потребовал копию RECON-плана и итеративную реализацию/коммиты, отменил legacy/обратную совместимость и перенос старых аккаунтов. Единая новая схема/wire; ENROL, token-replay и admin invite-rebind удаляются, R15 superseded. «БД вайпнем потом на remote» трактуется как запрет wipe/несовместимого deploy сейчас; свежие изолированные БД для тестов, основной package не трогать
 - 2026-09-30: пользователь «Берём этот вариант … один готовый код/QR … Делай копию плана в цель … прошлый способ авторизации … выкинуть … из документации … потом коммит». Публичный код подключения + логин/пароль принят; приглашение лишь условие signup при invite_only. Это supersedes direct invite-enrol как UX, не удаляет криптографические гарантии/историческое evidence и не выдаёт план за готовый auth-код. Текущий шаг — только документация и commit
 - 2026-09-30: пользователь «как заокнчиш текущий шаг, делай коммит и пауза, я хочу подумать» — finish current server rebind iteration, commit intended edits, pause without starting another stage. This is a user-requested pause, not full completion or an external blocker.
@@ -169,7 +202,7 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 - Resolved outcomes: текущие R12/R13/R14/R16 verified, R15 superseded; R1/R3/R5–R7 verified, R2 superseded. R4/R8–R11 остаются вне текущей auth-инструкции
 - Commands and artifacts: msgd build + workspace161, core all-targets59, generated Kotlin, clean arm64 native, JVM23/debug/release/test APK; physical `.gate` selected DNS/UI10 passed, host live-msgd peer replacement/dedup. Primary evidence подробно в checklist
 - Constraint and diff-scope check: unified auth diff только protocol/server/core/Android/docs/lock; нет remote mutation/public TCP/key export/history transfer/main package reset, no plaintext secrets/private fixtures в Git. Log-secret incident открыт для внешней owner rotation; не скрывать его под green кодовыми gates
-- Final status: текущая auth-реализация и её local gates проверены; общий Goal active (старые hardware/signing gates, будущий rollout). Эта инструкция не выполняет remote wipe и не заявляет весь K4 complete
+- Final status: auth-реализация verified; текущие R17–R21 pending, Goal active. Завершение frontend-итерации отдельно от полного K4/медиа и внешней credential remediation
 
 ## Утверждённый план авторизации — копия для итеративного исполнения
 
@@ -217,3 +250,13 @@ Login на новом key возвращает replace-required с текущи�
 Каждая coding-итерация — целевые tests и commit; финально msgd build/workspace tests, generated bindings, clean native arm64, JVM/debug/release builds. Новые account/DNS gates на свежих disposable fixtures, не выдавать host/DirectTCP за физический recursive DNS. Remote wipe/rollout только позже отдельным шагом с backup и DNS smoke; до него не менять remote data/schema/services. Не сохранять реальные passwords/invites/domains в Git/argv/logs; не менять основной package/identity ради destructive gates.
 
 Проверенный самостоятельный DNS transport (R6/R7), encrypted store, E2E/очередь и реальный обмен phone↔native peer остаются основой. После auth-итераций остаются прежние незакрытые R8–R11: два физических Android, restricted DNS egress, mobile/Wi-Fi, >30 мин DNS screen-off/Doze/оба режима/query/battery/PSS, timeout, AOSP/no-GMS и API36/37-16KB runtime, physical optical QR и постоянный release signing. Исторический TCP 32:21 и image metadata не подменяют их. Политика same-install restore с исходным Keystore и явной loss после reset сохраняется; пароль не возвращает утраченную историю, key export/history transfer в v1 не добавляются. Voice notes/files/calls не ставить впереди text/auth path.
+
+## Принятый frontend-план — копия для исполнения (2026-10-01)
+
+1. **Актуализировать `53-opendesign` (R17).** Public code/QR и offline preview, login/signup/conditional invite, typed auth errors и explicit replacement confirm. Обновить prototype/index/handoff; Light/Square и demo/current-contract границы сохранить.
+2. **Реальные данные вместо demo (R18).** Защищённая история входящих/исходящих в Rust, per-contact paging, exact message status, dialog summary/local alias/time/unread/read cursor. В той же TX с ratchet/outbox/inbox, без изменения wire. Убрать `outbox row absent → delivered`, unread не сетевой receipt.
+3. **Нативный Android frontend (R19).** Тема/компоненты → onboarding → диалоги → чат → контакт/my QR → связь/очередь/хранилище. Существующие facade/DNS/auth/FGS/Keystore и STOP/confirm гарантии сохранить; HTML не embed, на Compose не мигрировать.
+4. **Функциональная/визуальная приёмка и коммиты (R20).** Core/workspace, generated bindings, clean native/JVM/APK; физический `.gate`: реальные сообщения обеих сторон, reopen/status/queue/identity change, narrow/200% font/IME/insets. Исправлять подтверждённые регрессии, каждый завершённый этап коммитить.
+5. **Fresh remote rollout (R21).** Пользователь разрешил dev DB wipe. Scoped rollback snapshot, обновление только dmsg53 с fresh DB и прежними server secrets/pins, joint services recreate, healthy/schema/policy и recursive Android↔native signup/resume/E2E/dedup. Реальные domain/IP/credentials только private files, не Git/argv/logs. Старые dev accounts/history теряются; никакой migration/compatibility логики.
+
+Текущий endpoint/user flow один; local aliases/unread не публичный каталог или read receipts. Звонки/voice/files/video остаются будущими работами, их demo кнопки в release не включать. Основной Android package/Keystore не reset, Wi-Fi ADB не отключать. Предыдущий log-secret incident требует внешней owner/provider rotation и не закрывается frontend gates.
