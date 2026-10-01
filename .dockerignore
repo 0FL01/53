@@ -1,0 +1,18 @@
+# Only source needed by the two Dockerfiles belongs in the build context.
+.git
+**/.git
+.local
+.opencode
+.env
+.env.*
+secrets
+**/secrets
+target
+**/target
+android
+53-opendesign
+**/build
+**/meson-build*
+**/*.db
+**/*.db-wal
+**/*.db-shm

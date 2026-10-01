@@ -4,9 +4,12 @@ WORKDIR /usr/src/msgd
 COPY Cargo.toml Cargo.lock ./
 COPY crates/protocol/ ./crates/protocol/
 COPY crates/server/ ./crates/server/
+# Cargo resolves every workspace member even when only msgd is selected.
+COPY crates/core/ ./crates/core/
+COPY crates/slipstream-sys/ ./crates/slipstream-sys/
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/src/msgd/target,sharing=locked \
-    cargo build --release && cp target/release/msgd /usr/src/msgd-bin
+    cargo build --release --locked -p msgd && cp target/release/msgd /usr/src/msgd-bin
 
 FROM debian:bookworm-slim AS runtime
 COPY --from=builder --chmod=755 /usr/src/msgd-bin /usr/local/bin/msgd
