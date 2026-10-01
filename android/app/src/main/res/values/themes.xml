@@ -1,6 +1,68 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <style name="Theme.Dmsg" parent="Theme.AppCompat.Light.NoActionBar">
-        <item name="colorPrimary">#1a73e8</item>
+        <item name="colorPrimary">@color/accent</item>
+        <item name="colorPrimaryDark">@color/background</item>
+        <item name="colorAccent">@color/accent</item>
+        <item name="android:windowBackground">@color/background</item>
+        <item name="android:colorBackground">@color/background</item>
+        <item name="android:textColorPrimary">@color/text</item>
+        <item name="android:textColorSecondary">@color/text_secondary</item>
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:statusBarColor">@color/background</item>
+        <item name="android:navigationBarColor">@color/background</item>
+        <item name="buttonStyle">@style/Widget.Dmsg.Button</item>
+        <item name="editTextStyle">@style/Widget.Dmsg.Input</item>
+        <item name="android:textViewStyle">@style/Widget.Dmsg.Text</item>
+        <item name="alertDialogTheme">@style/Theme.Dmsg.Dialog</item>
+        <item name="android:windowActionModeOverlay">true</item>
+    </style>
+    <style name="Widget.Dmsg.Text" parent="Widget.AppCompat.TextView">
+        <item name="android:textSize">16sp</item>
+        <item name="android:lineSpacingExtra">3sp</item>
+    </style>
+    <style name="Widget.Dmsg.Button" parent="Widget.AppCompat.Button">
+        <item name="android:background">@drawable/button_square</item>
+        <item name="backgroundTint">@null</item>
+        <item name="android:textColor">@color/accent</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:minHeight">48dp</item>
+        <item name="android:minWidth">48dp</item>
+        <item name="android:padding">12dp</item>
+        <item name="android:elevation">0dp</item>
+        <item name="android:stateListAnimator">@null</item>
+    </style>
+    <style name="Widget.Dmsg.Primary" parent="Widget.Dmsg.Button">
+        <item name="android:background">@drawable/button_primary</item>
+        <item name="android:textColor">@color/background</item>
+    </style>
+    <style name="Widget.Dmsg.Icon" parent="Widget.Dmsg.Button">
+        <item name="android:textSize">0sp</item>
+        <item name="android:includeFontPadding">false</item>
+        <item name="android:gravity">center</item>
+        <item name="android:drawablePadding">0dp</item>
+    </style>
+    <style name="Widget.Dmsg.Input" parent="Widget.AppCompat.EditText">
+        <item name="android:background">@drawable/input_square</item>
+        <item name="backgroundTint">@null</item>
+        <item name="android:padding">12dp</item>
+        <item name="android:minHeight">48dp</item>
+        <item name="android:textSize">16sp</item>
+        <item name="android:layout_marginBottom">8dp</item>
+    </style>
+    <style name="Theme.Dmsg.Dialog" parent="Theme.AppCompat.Light.Dialog.Alert">
+        <item name="colorAccent">@color/accent</item>
+        <item name="android:windowBackground">@drawable/dialog_square</item>
+        <item name="android:windowElevation">0dp</item>
+        <item name="buttonBarButtonStyle">@style/Widget.Dmsg.Button</item>
+    </style>
+    <style name="Dmsg.Title" parent="">
+        <item name="android:textSize">20sp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:accessibilityHeading">true</item>
+        <item name="android:padding">16dp</item>
     </style>
 </resources>

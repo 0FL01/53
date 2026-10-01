@@ -1,40 +1,44 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:orientation="vertical" android:layout_width="match_parent" android:layout_height="match_parent" android:padding="16dp">
-    <TextView android:id="@+id/status" android:layout_width="match_parent" android:layout_height="wrap_content" android:accessibilityLiveRegion="polite" />
+    android:orientation="vertical" android:layout_width="match_parent" android:layout_height="match_parent">
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="56dp" android:gravity="center_vertical">
+        <Button android:id="@+id/btn_menu" style="@style/Widget.Dmsg.Icon" android:layout_width="48dp" android:layout_height="48dp" android:drawableTop="@drawable/ic_menu" android:contentDescription="Меню" />
+        <TextView android:id="@+id/main_title" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" style="@style/Dmsg.Title" android:text="53"/>
+        <Button android:id="@+id/btn_scan" style="@style/Widget.Dmsg.Icon" android:layout_width="48dp" android:layout_height="48dp" android:drawableTop="@drawable/ic_plus" android:contentDescription="Добавить контакт" />
+    </LinearLayout>
+    <TextView android:id="@+id/status" android:layout_width="match_parent" android:layout_height="wrap_content" android:paddingHorizontal="16dp" android:textSize="14sp" android:accessibilityLiveRegion="polite" />
     <ScrollView android:id="@+id/connection_panel" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:visibility="gone">
-        <LinearLayout android:orientation="vertical" android:layout_width="match_parent" android:layout_height="wrap_content" android:saveEnabled="false">
-            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Подключение к серверу" android:textSize="24sp" android:accessibilityHeading="true" />
+        <LinearLayout android:orientation="vertical" android:layout_width="match_parent" android:layout_height="wrap_content" android:padding="16dp" android:saveEnabled="false">
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Личные сообщения" style="@style/Dmsg.Title" />
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:paddingBottom="24dp" android:text="Один публичный код выбирает сервер. Доступ к аккаунту — по логину и паролю. Проверьте код у доверенного источника."/>
             <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:labelFor="@id/connection_code" android:text="Публичный код подключения" />
             <EditText android:id="@+id/connection_code" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="dmsg://server/…" android:inputType="textMultiLine|textNoSuggestions" android:minLines="3" android:maxLength="8192" android:saveEnabled="false" android:importantForAutofill="noExcludeDescendants" />
-            <Button android:id="@+id/btn_preview" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Вставить код / проверить сервер" />
+            <Button android:id="@+id/btn_paste" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Вставить код подключения" />
+            <Button android:id="@+id/btn_preview" style="@style/Widget.Dmsg.Primary" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Проверить сервер офлайн" />
             <Button android:id="@+id/btn_connection_scan" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Сканировать QR сервера" />
         </LinearLayout>
     </ScrollView>
     <ScrollView android:id="@+id/auth_panel" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:visibility="gone">
-        <LinearLayout android:orientation="vertical" android:layout_width="match_parent" android:layout_height="wrap_content" android:saveEnabled="false" android:importantForAutofill="noExcludeDescendants">
+        <LinearLayout android:orientation="vertical" android:layout_width="match_parent" android:layout_height="wrap_content" android:padding="16dp" android:saveEnabled="false" android:importantForAutofill="noExcludeDescendants">
             <Button android:id="@+id/btn_login" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Войти" />
             <Button android:id="@+id/btn_signup" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Создать аккаунт" />
-            <TextView android:id="@+id/auth_title" android:layout_width="match_parent" android:layout_height="wrap_content" android:textSize="24sp" android:text="Войти" android:accessibilityHeading="true" />
+            <TextView android:id="@+id/auth_title" android:layout_width="match_parent" android:layout_height="wrap_content" style="@style/Dmsg.Title" android:text="Войти" />
             <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:labelFor="@id/auth_login" android:text="Логин (3–32 символа ASCII)" />
             <EditText android:id="@+id/auth_login" android:layout_width="match_parent" android:layout_height="wrap_content" android:inputType="textVisiblePassword|textNoSuggestions" android:singleLine="true" android:maxLength="33" android:saveEnabled="false" android:importantForAutofill="no" />
             <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:labelFor="@id/auth_password" android:text="Пароль (8–128 байт UTF-8)" />
             <EditText android:id="@+id/auth_password" android:layout_width="match_parent" android:layout_height="wrap_content" android:inputType="textPassword" android:singleLine="true" android:saveEnabled="false" android:importantForAutofill="no" />
+            <Button android:id="@+id/btn_password_reveal" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Показать пароль"/>
             <LinearLayout android:id="@+id/invitation_group" android:orientation="vertical" android:layout_width="match_parent" android:layout_height="wrap_content" android:visibility="gone" android:saveEnabled="false">
                 <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:labelFor="@id/auth_invitation" android:text="Одноразовое приглашение (43 символа)" />
                 <EditText android:id="@+id/auth_invitation" android:layout_width="match_parent" android:layout_height="wrap_content" android:inputType="textPassword" android:singleLine="true" android:saveEnabled="false" android:importantForAutofill="no" />
             </LinearLayout>
-            <Button android:id="@+id/btn_auth_submit" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Войти" />
+            <Button android:id="@+id/btn_auth_submit" style="@style/Widget.Dmsg.Primary" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Войти" />
             <Button android:id="@+id/btn_policy_retry" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Проверить режим регистрации снова" />
         </LinearLayout>
     </ScrollView>
     <LinearLayout android:id="@+id/dialogs_panel" android:orientation="vertical" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:visibility="gone">
+        <Button android:id="@+id/connection_strip" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Фоновая связь выключена" android:gravity="start|center_vertical" />
         <ListView android:id="@+id/dialogs" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:contentDescription="Диалоги" />
-        <Button android:id="@+id/btn_chat" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Открыть чат" />
-        <Button android:id="@+id/btn_profile" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Профиль / QR контакта" />
-        <Button android:id="@+id/btn_scan" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Сканировать QR контакта" />
-        <Button android:id="@+id/btn_diag" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Диагностика" />
-        <Button android:id="@+id/btn_fgs" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="На связи: вкл/выкл" />
     </LinearLayout>
-    <Button android:id="@+id/btn_storage" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Хранилище" />
+    <Button android:id="@+id/btn_dialogs_retry" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Обновить" />
 </LinearLayout>

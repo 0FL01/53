@@ -4,13 +4,19 @@ import uniffi.dmsg_core.AccountInfo
 import uniffi.dmsg_core.LoginOutcome
 import uniffi.dmsg_core.QrKind
 import uniffi.dmsg_core.RegistrationPolicy
+import uniffi.dmsg_core.DeliveryState
+import uniffi.dmsg_core.DialogsPage
+import uniffi.dmsg_core.HistoryPage
+import uniffi.dmsg_core.QrOutcome
 
 /** UI-level error: only static reasons, never key material / plaintext. */
 class DmsgError(msg: String, val kind: ErrorKind = ErrorKind.Other) : Exception(msg)
 enum class ErrorKind { Other, InvalidCredentials, LoginTaken, InviteRequired, InviteExpired, InviteRevoked,
-    InviteUsed, AuthRateLimited, InvalidInput, Transport, PinMismatch, IdentityMismatch, NotAuthenticated }
+    InviteUsed, AuthRateLimited, InvalidInput, Transport, PinMismatch, IdentityMismatch, NotAuthenticated,
+    BadQr, UnknownContact, NotAccepted, Blocked, MissingKeys, Revoked, Busy, BadText, Store, Crypto, Protocol, NativeUnavailable,
+    StorageKeyLost, SnapshotMissing, LiveDatabaseExists, LiveDatabaseMissing, SnapshotRestoreRequired, SnapshotInvalid }
 
-data class Dialog(val contactId: String, val state: String, val identityMismatch: Boolean = false)
+data class Dialog(val contactId: String, val state: String, val identityMismatch: Boolean = false, val hasKeys: Boolean = false)
 data class DnsProfile(val domain: String, val pub: ByteArray, val fingerprint: String, val resolvers: List<String>)
 data class Msg(val seq: Long, val contactId: String, val text: String)
 data class OutRow(val mid: String, val contactId: String, val status: String)
@@ -33,13 +39,18 @@ interface DmsgFacade {
     fun account(): AccountInfo
     fun profilePreview(code: String): Pair<String, String>
     fun myQr(): String
-    fun addQr(uri: String): String
+    fun addQr(uri: String): QrOutcome
     fun request(id: String): String
     fun accept(id: String)
     fun block(id: String)
     fun confirm(id: String)
     fun get(id: String): Dialog?
     fun contacts(cursor: String?, limit: Int): Pair<List<Dialog>, String?>
+    fun dialogsPage(cursor: String?, limit: Int): DialogsPage
+    fun historyPage(contactId: String, beforeLocalId: Long?, limit: Int): HistoryPage
+    fun messageStatus(mid: String): DeliveryState?
+    fun setContactAlias(id: String, alias: String?)
+    fun markRead(id: String, throughLocalId: Long): Long
     fun inbox(cursor: Long, limit: Int): Pair<List<Msg>, Long?>
     fun outbox(cursor: Long, limit: Int): Pair<List<OutRow>, Long?>
     fun send(id: String, text: String): String

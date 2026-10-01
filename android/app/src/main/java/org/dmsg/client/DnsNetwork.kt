@@ -8,13 +8,13 @@ import java.net.Inet4Address
 internal object DnsNetwork {
     fun resolvers(c: Context): List<String> {
         val cm = c.getSystemService(ConnectivityManager::class.java)
-        val network = cm.activeNetwork ?: throw DmsgError("нет активной сети")
+        val network = cm.activeNetwork ?: throw DmsgError("Нет активной сети", ErrorKind.Transport)
         val addresses = cm.getLinkProperties(network)?.dnsServers.orEmpty()
         val v4 = addresses.filterIsInstance<Inet4Address>()
         val selected = if (v4.isNotEmpty()) v4 else addresses
-        if (selected.isEmpty()) throw DmsgError("сеть не предоставила DNS resolver")
+        if (selected.isEmpty()) throw DmsgError("Сеть не предоставила DNS-резолвер", ErrorKind.Transport)
         return selected.take(8).map {
-            val ip = it.hostAddress ?: throw DmsgError("нет числового DNS адреса")
+            val ip = it.hostAddress ?: throw DmsgError("Нет числового DNS-адреса", ErrorKind.Transport)
             if (it is Inet4Address) "$ip:53" else "[$ip]:53"
         }
     }

@@ -29,4 +29,12 @@ class FfiErrorsTest {
             FfiException.Protocol(secret), FfiException.Server(secret))) assertFalse(ffiErrorMessage(e).contains(secret))
         assertFalse(humanError(IllegalStateException(secret)).contains(secret))
     }
+    @Test fun storageOutcomesUseTypedSafeMessages() {
+        val fixture = "untrusted diagnostic payload"
+        listOf(ErrorKind.StorageKeyLost, ErrorKind.Store, ErrorKind.LiveDatabaseExists,
+            ErrorKind.LiveDatabaseMissing, ErrorKind.SnapshotMissing, ErrorKind.SnapshotRestoreRequired, ErrorKind.SnapshotInvalid).forEach { kind ->
+            assertFalse(humanError(DmsgError(fixture, kind)).contains(fixture))
+        }
+        assertTrue(humanError(DmsgError(fixture, ErrorKind.StorageKeyLost)).contains("Keystore"))
+    }
 }

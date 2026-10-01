@@ -1,192 +1,302 @@
 package org.dmsg.client
 
+import android.content.Intent
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.view.View
 import android.widget.AbsListView
-import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ListView
 import android.widget.TextView
-import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import uniffi.dmsg_core.MessageDirection
 
-/** Chat: paginated history + composer (send is a blocking facade call). */
+/** Retained only in memory: Rust owns durable history; drafts never enter Prefs or saved-state. */
+class ChatMemory : ViewModel() {
+    internal val history = HistoryWindow()
+    internal val outgoing = OutgoingDraft()
+    internal var draft: String
+        get() = outgoing.text
+        set(value) { outgoing.text = value }
+    internal var position = 0
+    internal var offset = 0
+    internal var pending = false
+    internal var action = ""
+    internal var contact: Dialog? = null
+    internal var readThrough = 0L
+    internal var uncertain: TextSendOutcome.Uncertain? = null
+}
+
 class ChatActivity : DmsgActivity() {
-    private lateinit var peer: TextView
+    private lateinit var memory: ChatMemory
     private lateinit var list: ListView
     private lateinit var composer: EditText
     private lateinit var info: TextView
-    private val rows = mutableListOf<String>()
-    private val paging = InboxPaging()
-    private var uiToken = 0L
-    private var loadInfo = ""
-    private var actionInfo = ""
+    private lateinit var adapter: HistoryAdapter
+    private val pageGuard = UiGuard()
+    @Volatile private var active = false
+    @Volatile private var lifecycleStamp = 0L
+    private var readPending = false
+    private var gapBefore: Long? = null
+    private var gapThrough: Long? = null
+    private var pageError = ""
+    private val id get() = intent.getStringExtra("peer").orEmpty()
+    private val handler = Handler(Looper.getMainLooper())
+    private val ticker = object : Runnable {
+        override fun run() {
+            if (!active) return
+            if (!pageGuard.pending && !memory.pending) {
+                if (memory.uncertain != null) resolveUncertain() else loadPage()
+            }
+            render()
+            handler.postDelayed(this, 3_000)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_chat)
-        val id = intent.getStringExtra("peer") ?: ""
-        peer = findViewById(R.id.peer)
+        memory = ViewModelProvider(this)[ChatMemory::class.java]
+        NativeUi.back(this, "Переписка")
         list = findViewById(R.id.messages)
         composer = findViewById(R.id.composer)
         info = findViewById(R.id.info)
-        peer.text = id
-        list.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, rows)
+        composer.setText(memory.draft)
+        composer.isSaveEnabled = false
+        composer.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { memory.draft = s?.toString().orEmpty() }
+            override fun afterTextChanged(s: android.text.Editable?) {}
+        })
+        adapter = HistoryAdapter(this, memory.history.rows)
+        list.adapter = adapter
         list.setOnScrollListener(object : AbsListView.OnScrollListener {
-            override fun onScrollStateChanged(view: AbsListView?, scrollState: Int) {}
-
-            override fun onScroll(
-                view: AbsListView?, firstVisibleItem: Int, visibleItemCount: Int, totalItemCount: Int
-            ) {
-                if (visibleItemCount > 0 && firstVisibleItem + visibleItemCount >= totalItemCount - 5) {
-                    loadNext(id)
+            override fun onScrollStateChanged(view: AbsListView?, state: Int) { if (state == AbsListView.OnScrollListener.SCROLL_STATE_IDLE) markViewed() }
+            override fun onScroll(view: AbsListView?, first: Int, visible: Int, total: Int) {
+                if (active && visible > 0) {
+                    markViewed()
+                    if (first <= 2 && memory.history.initialized && pageError.isEmpty()) loadPage(true)
                 }
             }
         })
-        findViewById<Button>(R.id.btn_send).setOnClickListener { send(id) }
+        findViewById<Button>(R.id.btn_send).setOnClickListener { send() }
         findViewById<Button>(R.id.btn_retry).setOnClickListener { retry() }
+        findViewById<Button>(R.id.btn_history_retry).setOnClickListener {
+            refreshReceived()
+        }
+        findViewById<Button>(R.id.btn_contact).setOnClickListener {
+            startActivity(Intent(this, ProfileActivity::class.java).putExtra("peer", id))
+        }
     }
 
     override fun onResume() {
         super.onResume()
-        load(intent.getStringExtra("peer") ?: "")
+        active = true
+        if (memory.uncertain == null) TextSendCoordinator.pendingFor(id)?.let {
+            memory.uncertain = it
+            if (memory.draft.isEmpty()) memory.draft = it.text
+            memory.outgoing.begin()
+        }
+        adapter.notifyDataSetChanged()
+        list.setSelectionFromTop(memory.position, memory.offset)
+        render()
+        handler.post(ticker)
     }
 
     override fun onPause() {
-        uiToken++
-        paging.stop()
+        memory.draft = composer.text.toString()
+        memory.position = list.firstVisiblePosition
+        memory.offset = list.getChildAt(0)?.top ?: 0
+        active = false; lifecycleStamp++
+        pageGuard.stop(); readPending = false
+        handler.removeCallbacks(ticker)
         super.onPause()
     }
 
-    private fun load(id: String) {
-        paging.reset()
-        rows.clear()
-        (list.adapter as ArrayAdapter<*>).notifyDataSetChanged()
-        loadInfo = "0 сообщений"
-        updateInfo()
-        loadNext(id)
+    override fun onImeVisibilityChanged(visible: Boolean) {
+        findViewById<View>(R.id.chat_actions)?.visibility = if (visible) View.GONE else View.VISIBLE
+        // Large-font landscape leaves very little height above the keyboard.
+        // Keep the draft/send target reachable; dismissing IME restores navigation.
+        val compact = visible && resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
+        findViewById<View>(R.id.chat_header)?.visibility = if (compact) View.GONE else View.VISIBLE
+        findViewById<EditText>(R.id.composer)?.maxLines = if (compact) 1 else 3
     }
 
-    private fun loadNext(id: String) {
-        if (isFinishing || isDestroyed) return
-        val request = paging.begin() ?: return
+    private fun render() {
+        if (!active) return
+        if (composer.text.toString() != memory.draft) composer.setText(memory.draft)
+        val allowed = contactCta(memory.contact) == ContactCta.Chat
+        findViewById<TextView>(R.id.peer).text = intent.getStringExtra("alias") ?: id
+        findViewById<Button>(R.id.btn_contact).contentDescription = if (allowed) "Карточка контакта" else "Проверить контакт"
+        findViewById<Button>(R.id.btn_send).isEnabled = allowed && !memory.pending && memory.uncertain == null
+        findViewById<Button>(R.id.btn_retry).isEnabled = allowed && !memory.pending
+        composer.isEnabled = allowed && !memory.pending && memory.uncertain == null
+        findViewById<Button>(R.id.btn_history_retry).isEnabled = !pageGuard.pending && !memory.pending
+        info.text = listOf(if (allowed) "" else trustLabel(memory.contact), memory.action, pageError).filter { it.isNotEmpty() }.joinToString("\n")
+        findViewById<View>(R.id.chat_notice).visibility = if (info.text.isEmpty()) View.GONE else View.VISIBLE
+        info.setBackgroundResource(if (memory.contact?.identityMismatch == true || memory.contact?.state == "blocked") R.color.error_surface
+            else if (allowed && pageError.isEmpty()) R.color.surface else R.color.warning_surface)
+    }
+
+    private fun loadPage(older: Boolean = false) {
+        if (!active || memory.pending) return
+        val before = if (gapBefore != null) gapBefore else if (older) memory.history.nextBefore ?: return else null
+        val stamp = pageGuard.begin() ?: return
+        val firstId = memory.history.rows.getOrNull(list.firstVisiblePosition)?.localId
+        val offset = list.getChildAt(0)?.top ?: 0
+        val bottom = !memory.history.initialized || list.lastVisiblePosition >= adapter.count - 2
+        val previousNewest = memory.history.rows.lastOrNull()?.localId
+        val bridge = gapBefore != null
+        val outgoingIds = memory.history.rows.filter { it.direction == MessageDirection.OUTGOING && it.deliveryState != uniffi.dmsg_core.DeliveryState.DELIVERED }.map { it.messageIdHex }
         Core.dispatch {
-            val result: Result<Pair<List<String>, Long?>> = try {
+            val result = runCatching {
                 val f = Core.facade(applicationContext)
-                val (page, next) = f.inbox(request.cursor, 50)
-                Result.success(Pair(page.filter { it.contactId == id }.map { format(it) }, next))
-            } catch (e: Exception) {
-                Result.failure(e)
+                val contact = f.get(id)
+                val page = f.historyPage(id, before, 50)
+                // Exact status is also refreshed for older loaded outgoing rows.
+                val statuses = outgoingIds.map { it to f.messageStatus(it) }
+                Triple(contact, page, statuses)
             }
             runOnUiThread {
-                if (isFinishing || isDestroyed || !paging.complete(request, result.getOrNull()?.second)) {
-                    return@runOnUiThread
-                }
-                result.fold(
-                    onSuccess = { (page, _) ->
-                        rows.addAll(page)
-                        (list.adapter as ArrayAdapter<*>).notifyDataSetChanged()
-                        loadInfo = "${rows.size} сообщений"
-                        updateInfo()
-                        // Empty peer-filtered pages must still advance the global inbox cursor.
-                        list.post {
-                            if (rows.isEmpty() || list.lastVisiblePosition >= rows.size - 5) loadNext(id)
-                        }
-                    },
-                    onFailure = {
-                        // Suspend automatic paging until the next reload, rather than spin on an error.
-                        loadInfo = humanError(it)
-                        updateInfo()
+                if (!active || !pageGuard.finish(stamp)) return@runOnUiThread
+                result.fold({ (contact, page, statuses) ->
+                    memory.contact = contact
+                    pageError = ""
+                    if (older && !bridge) memory.history.older(page) else memory.history.latest(page)
+                    statuses.forEach { (mid, status) ->
+                        // Unknown never upgrades a previously known state.
+                        if (status != null) memory.history.rows.find { it.messageIdHex == mid }?.deliveryState = status
                     }
-                )
+                    if (bridge) {
+                        gapBefore = if (page.rows.any { it.localId <= (gapThrough ?: 0L) }) null else page.nextBeforeLocalId
+                    } else if (!older && previousNewest != null && page.rows.isNotEmpty() && page.rows.last().localId > previousNewest) {
+                        gapThrough = previousNewest; gapBefore = page.nextBeforeLocalId
+                    }
+                    adapter.notifyDataSetChanged()
+                    list.post {
+                        if (!active) return@post
+                        if (!older && !bridge && bottom) list.setSelection(adapter.count - 1)
+                        else firstId?.let { anchor ->
+                            val index = memory.history.rows.indexOfFirst { it.localId == anchor }
+                            if (index >= 0) list.setSelectionFromTop(index, offset)
+                        }
+                        markViewed()
+                        if (gapBefore != null) loadPage()
+                    }
+                }, { pageError = humanError(it) })
+                render()
             }
         }
     }
 
-    private fun updateInfo() {
-        info.text = listOf(actionInfo, loadInfo).filter { it.isNotEmpty() }.joinToString("\n")
+    private fun markViewed() {
+        if (!active || readPending || pageGuard.pending || list.childCount == 0) return
+        // Use only intersecting rendered rows, never a page's newest cursor or fetch report.
+        val visible = (0 until list.childCount).filter {
+            val child = list.getChildAt(it)
+            child.bottom > list.paddingTop && child.top < list.height - list.paddingBottom
+        }.mapNotNull { list.getChildAt(it).tag as? Long }
+        val anchor = memory.history.viewedAnchor(visible) ?: return
+        if (anchor <= memory.readThrough) return
+        val stamp = lifecycleStamp
+        readPending = true
+        Core.dispatch {
+            // A paused activity must not start a fresh read mutation.
+            val result = if (active && stamp == lifecycleStamp) runCatching { Core.facade(applicationContext).markRead(id, anchor) } else null
+            runOnUiThread {
+                if (!active || stamp != lifecycleStamp) return@runOnUiThread
+                readPending = false
+                result?.onSuccess { memory.readThrough = maxOf(memory.readThrough, it) }
+            }
+        }
     }
 
-    private fun format(m: Msg) = "[${m.seq}] ${m.contactId}: ${m.text}"
-
-    private fun send(id: String) {
+    private fun send() {
+        if (memory.pending || memory.uncertain != null || contactCta(memory.contact) != ContactCta.Chat) { render(); return }
         val text = composer.text.toString()
-        val token = uiToken
+        if (text.isEmpty() || text.toByteArray(Charsets.UTF_8).size > 4096) {
+            memory.action = "Сообщение должно содержать 1–4096 байт UTF-8"; render(); return
+        }
+        memory.draft = text
+        memory.outgoing.begin() ?: return
+        memory.pending = true
+        memory.action = "Сохраняем и отправляем…"
+        render()
         Core.dispatch {
-            var sent = false
-            val out = try {
-                val f = Core.facade(applicationContext)
-                val mid = f.send(id, text)
-                sent = true
-                var after = 0L
-                var state: String? = null
-                do {
-                    val (page, next) = f.outbox(after, 50)
-                    state = page.firstOrNull { it.mid == mid }?.status
-                    after = next ?: break
-                } while (state == null)
-                "${state ?: "delivered"} $mid"
-            } catch (e: Exception) {
-                humanError(e)
-            }
+            val outcome = try { TextSendCoordinator.send(Core.facade(applicationContext), id, text) }
+                catch (e: Exception) { TextSendOutcome.NotSaved(e) }
+            val status = (outcome as? TextSendOutcome.Saved)?.let { saved -> runCatching { Core.facade(applicationContext).messageStatus(saved.messageId) }.getOrNull() }
             runOnUiThread {
-                if (token != uiToken || isFinishing || isDestroyed) return@runOnUiThread
-                if (sent && composer.text.toString() == text) composer.text.clear()
-                actionInfo = out
-                updateInfo()
-                if (sent) load(id)
+                memory.pending = false
+                completeSend(outcome, status)
+                if (active) { render(); loadPage() }
+            }
+        }
+    }
+
+    private fun completeSend(outcome: TextSendOutcome, status: uniffi.dmsg_core.DeliveryState?) {
+        when (outcome) {
+            is TextSendOutcome.Saved -> {
+                memory.uncertain = null
+                memory.outgoing.finish(true)
+                memory.action = "Сообщение сохранено · ${deliveryLabel(status)}" +
+                    if (outcome.recoveredAfterError) "\nПопытка связи завершилась ошибкой. Повторяйте очередь, а не текст." else ""
+            }
+            is TextSendOutcome.NotSaved -> {
+                memory.uncertain = null; memory.outgoing.finish(false)
+                memory.action = "Не отправлено. ${humanError(outcome.error)}"
+            }
+            is TextSendOutcome.Uncertain -> {
+                memory.uncertain = outcome
+                memory.action = "Не удалось проверить, сохранено ли сообщение. Черновик сохранён; новая отправка приостановлена до проверки локальной истории. Повтор очереди использует прежние ID."
+            }
+        }
+    }
+
+    private fun resolveUncertain() {
+        val uncertain = memory.uncertain ?: return
+        val stamp = pageGuard.begin() ?: return
+        Core.dispatch {
+            val outcome = try { TextSendCoordinator.reconcile(Core.facade(applicationContext), id, uncertain) }
+                catch (_: Exception) { uncertain }
+            val status = (outcome as? TextSendOutcome.Saved)?.let { runCatching { Core.facade(applicationContext).messageStatus(it.messageId) }.getOrNull() }
+            runOnUiThread {
+                if (memory.uncertain != uncertain) return@runOnUiThread
+                completeSend(outcome, status)
+                if (!active || !pageGuard.finish(stamp)) return@runOnUiThread
+                render()
+                if (memory.uncertain == null) loadPage()
             }
         }
     }
 
     private fun retry() {
-        val token = uiToken
+        if (memory.pending || contactCta(memory.contact) != ContactCta.Chat) return
+        memory.pending = true; memory.action = "Повторяем сохранённую очередь…"; render()
         Core.dispatch {
-            val out = try {
-                val f = Core.facade(applicationContext)
-                val r = f.retry()
-                "retry sent=${r[0]} accepted=${r[1]} delivered=${r[2]} skipped=${r[3]}"
-            } catch (e: Exception) {
-                humanError(e)
-            }
+            val result = runCatching { Core.facade(applicationContext).retry() }
             runOnUiThread {
-                if (token != uiToken || isFinishing || isDestroyed) return@runOnUiThread
-                actionInfo = out
-                updateInfo()
+                memory.pending = false
+                memory.action = result.fold({ "Повтор завершён. Статусы обновлены из ядра" }, ::humanError)
+                if (active) { render(); loadPage() }
             }
         }
     }
-}
 
-/** Main-thread pagination state: one request at a time, stale reload/lifecycle results ignored. */
-internal class InboxPaging {
-    data class Request(val generation: Long, val cursor: Long)
-
-    private var generation = 0L
-    private var cursor: Long? = null
-    private var inFlight: Request? = null
-
-    fun reset() {
-        generation++
-        cursor = 0L
-        inFlight = null
-    }
-
-    fun stop() {
-        generation++
-        cursor = null
-        inFlight = null
-    }
-
-    fun begin(): Request? {
-        if (inFlight != null) return null
-        val after = cursor ?: return null
-        return Request(generation, after).also { inFlight = it }
-    }
-
-    fun complete(request: Request, next: Long?): Boolean {
-        if (inFlight != request) return false
-        cursor = next
-        inFlight = null
-        return true
+    private fun refreshReceived() {
+        if (memory.pending || pageGuard.pending) return
+        memory.pending = true; memory.action = "Обновляем сообщения через DNS…"; render()
+        Core.dispatch {
+            val result = runCatching { DmsgService.check(Core.facade(applicationContext)) }
+            runOnUiThread {
+                memory.pending = false
+                memory.action = result.fold({ "Получено локально: ${it.received.size}" }, ::humanError)
+                pageError = ""
+                if (active) { render(); loadPage() }
+            }
+        }
     }
 }

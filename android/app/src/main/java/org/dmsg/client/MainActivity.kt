@@ -1,23 +1,30 @@
 package org.dmsg.client
 
-import android.Manifest
 import android.content.Intent
-import android.content.pm.PackageManager
-import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.View
 import android.view.WindowManager
-import android.widget.ArrayAdapter
+import android.content.ClipboardManager
+import android.widget.AbsListView
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ListView
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
-import androidx.core.app.ActivityCompat
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import uniffi.dmsg_core.LoginOutcome
 import uniffi.dmsg_core.RegistrationPolicy
+import uniffi.dmsg_core.DialogSummary
+
+class DialogMemory : ViewModel() {
+    internal val rows = mutableListOf<DialogSummary>()
+    internal var next: String? = null
+    internal var anchor: String? = null
+    internal var offset = 0
+}
 
 /** Launch router: public connection import -> account forms -> paginated dialogs. */
 class MainActivity : DmsgActivity() {
@@ -27,8 +34,12 @@ class MainActivity : DmsgActivity() {
     private lateinit var login: EditText
     private lateinit var password: EditText
     private lateinit var invitation: EditText
-    private val rows = mutableListOf<String>()
-    private val rowLabels = mutableListOf<String>()
+    private lateinit var memory: DialogMemory
+    private val rows get() = memory.rows
+    private var nextCursor: String?
+        get() = memory.next
+        set(value) { memory.next = value }
+    private var restoring = false
     private var token = 0L
     private var state: LaunchState? = null
     private var action = AuthAction.Login
@@ -38,11 +49,11 @@ class MainActivity : DmsgActivity() {
     private var prompt: AlertDialog? = null
     private var busy = false
     private var activeSecrets: AuthSecrets? = null
-    private var accountLabel = ""
     private val handler = Handler(Looper.getMainLooper())
     private val ticker = object : Runnable {
         override fun run() {
-            if (state == LaunchState.Dialogs && !busy) loadDialogs()
+            if (state == LaunchState.Dialogs && !busy && list.firstVisiblePosition == 0) loadDialogs()
+            if (state == LaunchState.Dialogs) findViewById<Button>(R.id.connection_strip).text = connectionLabel(DmsgService.connectionState())
             handler.postDelayed(this, 5_000)
         }
     }
@@ -50,26 +61,45 @@ class MainActivity : DmsgActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        memory = ViewModelProvider(this)[DialogMemory::class.java]
         status = findViewById(R.id.status)
         list = findViewById(R.id.dialogs)
         code = findViewById(R.id.connection_code)
         login = findViewById(R.id.auth_login)
         password = findViewById(R.id.auth_password)
         invitation = findViewById(R.id.auth_invitation)
-        list.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, rowLabels)
-        list.setOnItemClickListener { _, _, pos, _ -> openChat(rows[pos]) }
-        button(R.id.btn_chat) { rows.firstOrNull()?.let(::openChat) }
+        list.adapter = DialogAdapter(this, rows)
+        list.setOnItemClickListener { _, _, pos, _ -> if (!busy) rows.getOrNull(pos)?.let { openChat(it.contactId) } }
+        list.setOnScrollListener(object : AbsListView.OnScrollListener {
+            override fun onScrollStateChanged(view: AbsListView?, scrollState: Int) {}
+            override fun onScroll(view: AbsListView?, first: Int, visible: Int, total: Int) {
+                if (visible > 0 && first + visible >= total - 3 && nextCursor != null && !busy && !restoring) loadDialogs(true)
+            }
+        })
         button(R.id.btn_preview) { previewCode() }
         button(R.id.btn_connection_scan) { scan(true) }
         button(R.id.btn_login) { selectAction(AuthAction.Login) }
         button(R.id.btn_signup) { selectAction(AuthAction.Signup) }
         button(R.id.btn_auth_submit) { submit() }
         button(R.id.btn_policy_retry) { loadPolicy() }
-        button(R.id.btn_profile) { startActivity(Intent(this, ProfileActivity::class.java)) }
-        button(R.id.btn_scan) { scan(false) }
-        button(R.id.btn_storage) { startActivity(Intent(this, StorageActivity::class.java)) }
-        button(R.id.btn_diag) { startActivity(Intent(this, DiagnosticsActivity::class.java)) }
-        button(R.id.btn_fgs) { toggleFgs() }
+        button(R.id.btn_scan) { addContact() }
+        button(R.id.btn_menu) { menu() }
+        button(R.id.btn_dialogs_retry) {
+            if (state == LaunchState.Dialogs) {
+                work("Обновляем сообщения через DNS…", { DmsgService.check(requireNotNull(facade)) }) { loadDialogs() }
+            } else refresh()
+        }
+        button(R.id.connection_strip) { startActivity(Intent(this, DiagnosticsActivity::class.java)) }
+        button(R.id.btn_paste) {
+            val clip = getSystemService(ClipboardManager::class.java).primaryClip
+            val text = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this)
+            if (text != null && text.length <= 8192) code.setText(text) else status.text = "В буфере нет подходящего кода"
+        }
+        button(R.id.btn_password_reveal) {
+            password.transformationMethod = if (password.transformationMethod == null)
+                android.text.method.PasswordTransformationMethod.getInstance() else null
+            findViewById<Button>(R.id.btn_password_reveal).text = if (password.transformationMethod == null) "Скрыть пароль" else "Показать пароль"
+        }
     }
 
     private fun button(id: Int, click: () -> Unit) { findViewById<Button>(id).setOnClickListener { if (!busy) click() } }
@@ -84,6 +114,8 @@ class MainActivity : DmsgActivity() {
     }
 
     override fun onPause() {
+        memory.anchor = rows.getOrNull(list.firstVisiblePosition)?.contactId
+        memory.offset = list.getChildAt(0)?.top ?: 0
         token++
         handler.removeCallbacks(ticker)
         flow?.cancel()
@@ -95,10 +127,20 @@ class MainActivity : DmsgActivity() {
         super.onPause()
     }
 
-    private fun clearSecrets() { password.text.clear(); invitation.text.clear() }
+    private fun clearSecrets() {
+        password.text.clear(); invitation.text.clear()
+        password.transformationMethod = android.text.method.PasswordTransformationMethod.getInstance()
+        findViewById<Button>(R.id.btn_password_reveal).text = "Показать пароль"
+    }
 
     private fun render(next: LaunchState) {
         state = next
+        findViewById<TextView>(R.id.main_title).text = when (next) {
+            LaunchState.Connection -> "53 · Подключение"
+            LaunchState.Authentication -> "Аккаунт"
+            LaunchState.Dialogs -> "Диалоги"
+        }
+        findViewById<View>(R.id.btn_scan).visibility = if (next == LaunchState.Dialogs) View.VISIBLE else View.GONE
         findViewById<View>(R.id.connection_panel).visibility = if (next == LaunchState.Connection) View.VISIBLE else View.GONE
         findViewById<View>(R.id.auth_panel).visibility = if (next == LaunchState.Authentication) View.VISIBLE else View.GONE
         findViewById<View>(R.id.dialogs_panel).visibility = if (next == LaunchState.Dialogs) View.VISIBLE else View.GONE
@@ -108,6 +150,7 @@ class MainActivity : DmsgActivity() {
     }
 
     private fun <T> work(message: String, task: () -> T, success: (T) -> Unit) {
+        if (busy) return
         val stamp = token
         busy = true
         status.text = message
@@ -187,6 +230,8 @@ class MainActivity : DmsgActivity() {
         findViewById<Button>(R.id.btn_login).isEnabled = !busy
         findViewById<Button>(R.id.btn_signup).isEnabled = !busy
         login.isEnabled = !busy; password.isEnabled = !busy; invitation.isEnabled = !busy
+        for (id in listOf(R.id.btn_preview, R.id.btn_connection_scan, R.id.btn_paste, R.id.btn_password_reveal,
+            R.id.btn_menu, R.id.btn_scan, R.id.btn_dialogs_retry)) findViewById<Button>(id).isEnabled = !busy
     }
 
     private fun submit() {
@@ -228,37 +273,52 @@ class MainActivity : DmsgActivity() {
         status.text = "Замена отменена. Прежнее устройство сохраняет доступ"
     }
 
-    private fun loadDialogs() {
-        work("Открываем диалоги…", {
+    private fun loadDialogs(older: Boolean = false, restoreId: String? = null, restoreOffset: Int = 0) {
+        val cursor = if (older) nextCursor ?: return else null
+        val position = list.firstVisiblePosition
+        val offset = list.getChildAt(0)?.top ?: 0
+        val anchor = restoreId ?: if (!older) memory.anchor else null
+        val anchorOffset = if (restoreId != null) restoreOffset else memory.offset
+        restoring = anchor != null
+        work(if (older) "Загружаем ещё диалоги…" else "", {
             val f = requireNotNull(facade)
             DnsNetwork.mirrorProfile(this, f)
-            val dialogs = mutableListOf<Dialog>()
-            var cursor: String? = null
-            do {
-                val (page, next) = f.contacts(cursor, 50)
-                dialogs.addAll(page)
-                cursor = next
-            } while (cursor != null)
-            Pair(f.account().contactId, dialogs)
-        }) { (id, dialogs) ->
-            rows.clear(); rows.addAll(dialogs.map { it.contactId })
-            rowLabels.clear(); rowLabels.addAll(dialogs.map {
-                "${it.contactId} — ${it.state}" + (if (it.identityMismatch) "\nКлюч изменился: отправка СТОП" else "")
-            })
-            (list.adapter as ArrayAdapter<*>).notifyDataSetChanged()
-            accountLabel = "Мой ID: $id"
-            status.text = "$accountLabel\n${DmsgService.pollStatus()}"
+            f.dialogsPage(cursor, 50)
+        }) { page ->
+            if (!older) rows.clear()
+            val ids = rows.map { it.contactId }.toSet()
+            rows.addAll(page.rows.filter { it.contactId !in ids })
+            nextCursor = page.nextCursor
+            (list.adapter as DialogAdapter).notifyDataSetChanged()
+            val restoredPosition = anchor?.let { id -> rows.indexOfFirst { it.contactId == id } } ?: -1
+            if (restoredPosition >= 0) {
+                list.setSelectionFromTop(restoredPosition, anchorOffset)
+                restoring = false
+            } else if (anchor != null && nextCursor != null) {
+                loadDialogs(true, anchor, anchorOffset)
+            } else {
+                restoring = false
+                if (older) list.setSelectionFromTop(position, offset)
+            }
+            status.text = if (rows.isEmpty()) "Пока нет диалогов. Добавьте контакт по QR или ID." else ""
+            findViewById<Button>(R.id.connection_strip).text = connectionLabel(DmsgService.connectionState())
         }
     }
 
-    private fun openChat(id: String) { startActivity(Intent(this, ChatActivity::class.java).putExtra("peer", id)) }
-    private fun toggleFgs() {
-        if (state != LaunchState.Dialogs) return
-        if (DmsgService.running(this)) DmsgService.stop(this) else {
-            if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
-                ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
-            DmsgService.start(this)
-        }
-        status.postDelayed({ if (!isFinishing && !isDestroyed) status.text = "$accountLabel\n${DmsgService.pollStatus()}" }, 500)
+    private fun menu() {
+        prompt = AlertDialog.Builder(this).setTitle("53")
+            .setItems(arrayOf("Мой QR", "Связь", "Очередь", "Хранилище")) { _, which ->
+                val target = arrayOf(ProfileActivity::class.java, DiagnosticsActivity::class.java, OutboxActivity::class.java, StorageActivity::class.java)[which]
+                startActivity(Intent(this, target).putExtra("mine", which == 0))
+            }.setNegativeButton("Закрыть", null).show()
     }
+
+    private fun addContact() {
+        prompt = AlertDialog.Builder(this).setTitle("Добавить контакт")
+            .setItems(arrayOf("Сканировать / вставить QR", "Ввести контактный ID")) { _, which ->
+                if (which == 0) scan(false) else startActivity(Intent(this, ProfileActivity::class.java))
+            }.setNegativeButton("Отмена", null).show()
+    }
+
+    private fun openChat(id: String) { startActivity(Intent(this, ChatActivity::class.java).putExtra("peer", id).putExtra("alias", rows.find { it.contactId == id }?.localAlias)) }
 }

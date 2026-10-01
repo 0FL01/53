@@ -1,13 +1,22 @@
-<?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:orientation="vertical"
-    android:layout_width="match_parent"
-    android:layout_height="match_parent"
-    android:padding="16dp">
-    <TextView android:id="@+id/peer" android:layout_width="match_parent" android:layout_height="wrap_content" />
-    <ListView android:id="@+id/messages" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" />
-    <EditText android:id="@+id/composer" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="Сообщение (до 4 KiB)" />
-    <Button android:id="@+id/btn_send" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Отправить" />
-    <Button android:id="@+id/btn_retry" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Повторить очередь" />
-    <TextView android:id="@+id/info" android:layout_width="match_parent" android:layout_height="wrap_content" />
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" android:layout_width="match_parent" android:layout_height="match_parent" android:orientation="vertical">
+    <LinearLayout android:id="@+id/chat_header" android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="56dp" android:gravity="center_vertical">
+        <Button android:id="@+id/btn_back" style="@style/Widget.Dmsg.Icon" android:layout_width="48dp" android:layout_height="48dp" android:drawableTop="@drawable/ic_back" android:contentDescription="Назад"/>
+        <LinearLayout android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:orientation="vertical" android:padding="8dp">
+            <TextView android:id="@+id/screen_title" android:layout_width="match_parent" android:layout_height="wrap_content" android:textSize="20sp" android:fontFamily="sans-serif-medium" android:accessibilityHeading="true"/>
+            <TextView android:id="@+id/peer" android:layout_width="match_parent" android:layout_height="wrap_content" android:textSize="14sp"/>
+        </LinearLayout>
+        <Button android:id="@+id/btn_contact" style="@style/Widget.Dmsg.Icon" android:layout_width="48dp" android:layout_height="48dp" android:drawableTop="@drawable/ic_menu" android:contentDescription="Карточка контакта"/>
+    </LinearLayout>
+    <org.dmsg.client.NoticeScrollView android:id="@+id/chat_notice" android:layout_width="match_parent" android:layout_height="wrap_content">
+        <TextView android:id="@+id/info" android:layout_width="match_parent" android:layout_height="wrap_content" android:padding="12dp" android:textSize="14sp" android:background="@color/warning_surface" android:accessibilityLiveRegion="polite"/>
+    </org.dmsg.client.NoticeScrollView>
+    <ListView android:id="@+id/messages" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:divider="@null" android:transcriptMode="disabled" android:contentDescription="История переписки"/>
+    <LinearLayout android:id="@+id/chat_actions" android:layout_width="match_parent" android:layout_height="wrap_content">
+        <Button android:id="@+id/btn_history_retry" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:text="Обновить сообщения"/>
+        <Button android:id="@+id/btn_retry" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:text="Повторить очередь"/>
+    </LinearLayout>
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="bottom" android:padding="8dp">
+        <EditText android:id="@+id/composer" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:minLines="1" android:maxLines="3" android:inputType="textMultiLine|textCapSentences" android:imeOptions="flagNoExtractUi" android:hint="Сообщение" android:saveEnabled="false" android:importantForAutofill="no"/>
+        <Button android:id="@+id/btn_send" style="@style/Widget.Dmsg.Icon" android:layout_width="48dp" android:layout_height="48dp" android:layout_marginStart="8dp" android:drawableTop="@drawable/ic_send" android:contentDescription="Отправить сообщение"/>
+    </LinearLayout>
 </LinearLayout>

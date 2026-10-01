@@ -32,6 +32,8 @@
         <activity android:name=".ScannerActivity" android:exported="false" />
         <activity android:name=".StorageActivity" android:exported="false" />
         <activity android:name=".DiagnosticsActivity" android:exported="false" />
+        <activity android:name=".AdvancedProfileActivity" android:exported="false" />
+        <activity android:name=".OutboxActivity" android:exported="false" />
 
         <!-- Single always-on foreground service (no second FGS mode;
              "Economy" is only a poll-interval flag, see DmsgService). -->

@@ -1,12 +1,14 @@
-<?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:orientation="vertical"
-    android:layout_width="match_parent" android:layout_height="match_parent">
-    <androidx.camera.view.PreviewView android:id="@+id/preview" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" />
-    <TextView android:id="@+id/result" android:layout_width="match_parent" android:layout_height="wrap_content" android:padding="16dp" android:accessibilityLiveRegion="polite" />
-    <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:labelFor="@id/scanner_code" android:text="Код вместо камеры" />
-    <EditText android:id="@+id/scanner_code" android:layout_width="match_parent" android:layout_height="wrap_content" android:inputType="textMultiLine|textNoSuggestions" android:hint="Вставьте публичный код" android:maxLength="8192" android:saveEnabled="false" android:importantForAutofill="no" />
-    <Button android:id="@+id/btn_scanner_paste" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Проверить вставленный код" />
-    <Button android:id="@+id/btn_scan_again" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Сканировать снова" />
-    <Button android:id="@+id/btn_close" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Закрыть" />
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" android:layout_width="match_parent" android:layout_height="match_parent" android:orientation="vertical">
+    <include layout="@layout/toolbar"/>
+    <ScrollView android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:fillViewport="true">
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="16dp">
+            <androidx.camera.view.PreviewView android:id="@+id/preview" android:layout_width="match_parent" android:layout_height="200dp"/>
+            <TextView android:id="@+id/result" android:layout_width="match_parent" android:layout_height="wrap_content" android:paddingVertical="16dp" android:accessibilityLiveRegion="polite"/>
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:labelFor="@id/scanner_code" android:text="Код вместо камеры"/>
+            <EditText android:id="@+id/scanner_code" android:layout_width="match_parent" android:layout_height="wrap_content" android:inputType="textMultiLine|textNoSuggestions" android:hint="Вставьте публичный код" android:maxLength="8192" android:saveEnabled="false" android:importantForAutofill="no"/>
+            <Button android:id="@+id/btn_scanner_paste" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Проверить вставленный код"/>
+            <Button android:id="@+id/btn_scan_again" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Сканировать снова"/>
+            <Button android:id="@+id/btn_close" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="К диалогам / назад"/>
+        </LinearLayout>
+    </ScrollView>
 </LinearLayout>

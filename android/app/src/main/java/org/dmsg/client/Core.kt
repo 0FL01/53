@@ -7,6 +7,10 @@ import uniffi.dmsg_core.AccountInfo
 import uniffi.dmsg_core.LoginOutcome
 import uniffi.dmsg_core.QrKind
 import uniffi.dmsg_core.RegistrationPolicy
+import uniffi.dmsg_core.DeliveryState
+import uniffi.dmsg_core.DialogsPage
+import uniffi.dmsg_core.HistoryPage
+import uniffi.dmsg_core.QrOutcome
 
 /**
  * Owns the app-private DB path and the facade instance.
@@ -33,7 +37,7 @@ object Core {
     }
 
     private class Unready : DmsgFacade {
-        private fun fail(): Nothing = throw DmsgError("Ядро приложения недоступно")
+        private fun fail(): Nothing = throw DmsgError("Ядро приложения недоступно", ErrorKind.NativeUnavailable)
         override fun isReady() = false
         override fun dnsProfile(): DnsProfile? = fail()
         override fun configureDns(code: String, resolvers: List<String>) = fail()
@@ -46,13 +50,18 @@ object Core {
         override fun account(): AccountInfo = fail()
         override fun profilePreview(code: String): Pair<String, String> = fail()
         override fun myQr(): String = fail()
-        override fun addQr(uri: String): String = fail()
+        override fun addQr(uri: String): QrOutcome = fail()
         override fun request(id: String): String = fail()
         override fun accept(id: String) = fail()
         override fun block(id: String) = fail()
         override fun confirm(id: String) = fail()
         override fun get(id: String): Dialog? = fail()
         override fun contacts(cursor: String?, limit: Int): Pair<List<Dialog>, String?> = fail()
+        override fun dialogsPage(cursor: String?, limit: Int): DialogsPage = fail()
+        override fun historyPage(contactId: String, beforeLocalId: Long?, limit: Int): HistoryPage = fail()
+        override fun messageStatus(mid: String): DeliveryState? = fail()
+        override fun setContactAlias(id: String, alias: String?) = fail()
+        override fun markRead(id: String, throughLocalId: Long): Long = fail()
         override fun inbox(cursor: Long, limit: Int): Pair<List<Msg>, Long?> = fail()
         override fun outbox(cursor: Long, limit: Int): Pair<List<OutRow>, Long?> = fail()
         override fun send(id: String, text: String): String = fail()

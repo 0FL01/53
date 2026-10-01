@@ -1,0 +1,4 @@
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="56dp" android:gravity="center_vertical" android:orientation="horizontal">
+    <Button android:id="@+id/btn_back" style="@style/Widget.Dmsg.Icon" android:layout_width="48dp" android:layout_height="48dp" android:drawableTop="@drawable/ic_back" android:contentDescription="Назад" android:padding="12dp"/>
+    <TextView android:id="@+id/screen_title" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" style="@style/Dmsg.Title"/>
+</LinearLayout>

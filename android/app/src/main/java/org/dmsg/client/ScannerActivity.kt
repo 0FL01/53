@@ -7,7 +7,6 @@ import android.os.Bundle
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
-import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.ImageAnalysis
@@ -21,6 +20,7 @@ import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.common.HybridBinarizer
 import java.util.concurrent.Executors
 import uniffi.dmsg_core.QrKind
+import uniffi.dmsg_core.QrOutcome
 
 /**
  * Offline scanner and paste use the same parser. Server import never creates an account.
@@ -34,21 +34,24 @@ class ScannerActivity : DmsgActivity() {
     @Volatile private var done = false
     private var active = true
     private var prompt: AlertDialog? = null
+    private val guard = UiGuard()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_scanner)
+        NativeUi.back(this, if (intent.getBooleanExtra(SERVER_ONLY, false)) "QR сервера" else "QR контакта")
         preview = findViewById(R.id.preview)
         result = findViewById(R.id.result)
         findViewById<Button>(R.id.btn_close).setOnClickListener { finish() }
         findViewById<Button>(R.id.btn_scanner_paste).setOnClickListener {
+            if (guard.pending || prompt?.isShowing == true) return@setOnClickListener
             done = false
             val field = findViewById<EditText>(R.id.scanner_code)
             val input = field.text.toString()
             field.text.clear()
             onText(input)
         }
-        findViewById<Button>(R.id.btn_scan_again).setOnClickListener { done = false; result.text = "Сканируйте снова или вставьте код" }
+        findViewById<Button>(R.id.btn_scan_again).setOnClickListener { if (!guard.pending && prompt?.isShowing != true) { done = false; result.text = "Сканируйте снова или вставьте код" } }
         if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), 2)
         } else {
@@ -113,18 +116,21 @@ class ScannerActivity : DmsgActivity() {
 
     private fun onText(uri: String) {
         done = true
-        runOnUiThread { result.text = "QR считан, проверка…" }
+        runOnUiThread {
+        val stamp = guard.begin() ?: return@runOnUiThread
+        if (!active || prompt?.isShowing == true) { guard.finish(stamp); return@runOnUiThread }
+        result.text = "QR считан, проверка…"
         Core.dispatch {
             try {
                 val code = QrGate.normalize(uri)
                 QrGate.route(code).getOrThrow()
-                val f = Core.facade(this)
+                val f = Core.facade(applicationContext)
                 val serverOnly = intent.getBooleanExtra(SERVER_ONLY, false)
                 when (f.qrKind(code)) {
                     QrKind.SERVER -> {
-                        if (!serverOnly) throw DmsgError("Для добавления контакта нужен QR контакта")
+                         if (!serverOnly) throw DmsgError("Для добавления контакта нужен QR контакта", ErrorKind.BadQr)
                         val p = QrGate.serverPreview(f, code)
-                        runOnUiThread { if (active && !isFinishing && !isDestroyed) {
+                         runOnUiThread { if (active && guard.finish(stamp) && !isFinishing && !isDestroyed) {
                             prompt = AlertDialog.Builder(this)
                                 .setTitle("Подтвердите профиль сервера")
                                 .setMessage("Домен: ${p.domain}\nОтпечаток сертификата: ${p.fingerprint}\n\nСверьте данные с доверенным источником. Код публичный и не создаёт аккаунт.")
@@ -136,30 +142,46 @@ class ScannerActivity : DmsgActivity() {
                         } }
                     }
                     QrKind.CONTACT -> {
-                        if (serverOnly) throw DmsgError("Нужен публичный QR сервера, а не контакта")
-                        if (!f.account().authenticated) throw DmsgError("Сначала войдите в аккаунт")
-                        val out = "контакт: ${f.addQr(code)}"
-                        runOnUiThread { if (active) result.text = out }
+                         if (serverOnly) throw DmsgError("Нужен публичный QR сервера, а не контакта", ErrorKind.BadQr)
+                         if (!f.account().authenticated) throw DmsgError("Сначала войдите в аккаунт", ErrorKind.NotAuthenticated)
+                         val out = when (f.addQr(code)) {
+                             QrOutcome.ADDED -> "Контакт добавлен. Откройте его в диалогах, чтобы принять запрос."
+                             QrOutcome.UNCHANGED -> "Этот контакт уже добавлен. Откройте его в диалогах."
+                             QrOutcome.IDENTITY_CHANGED -> "Ключ контакта изменился — отправка СТОП. Откройте карточку, проверьте QR другим способом и подтвердите новый ключ."
+                         }
+                         runOnUiThread { if (active && guard.finish(stamp)) result.text = out }
                     }
                 }
             } catch (e: Exception) {
-                runOnUiThread { if (active) result.text = "битый QR: ${humanError(e)}" }
+                runOnUiThread { if (active && guard.finish(stamp)) result.text = "битый QR: ${humanError(e)}" }
             }
+        }
         }
     }
 
     private fun importServer(code: String, f: DmsgFacade) {
+        val stamp = guard.begin() ?: return
         result.text = "сохраняем сервер…"
         Core.dispatch {
             val outcome = runCatching {
                 f.configureDns(code, DnsNetwork.resolvers(this))
                 DnsNetwork.mirrorProfile(this, f)
             }
-            runOnUiThread { if (active) outcome.fold(
+            runOnUiThread { if (active && guard.finish(stamp)) outcome.fold(
                 { setResult(RESULT_OK); finish() },
                 { result.text = humanError(it) }
             ) }
         }
+    }
+
+    override fun onResume() {
+        super.onResume(); active = true
+        if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) bind()
+    }
+    override fun onPause() {
+        active = false; guard.stop(); prompt?.dismiss(); prompt = null
+        findViewById<EditText>(R.id.scanner_code).text.clear()
+        super.onPause()
     }
 
     override fun onDestroy() {

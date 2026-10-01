@@ -24,7 +24,7 @@ object SecureStore {
     private fun checkpoint(f: File) {
         SQLiteDatabase.openDatabase(f.absolutePath, null, SQLiteDatabase.OPEN_READWRITE).use { db ->
             db.rawQuery("PRAGMA wal_checkpoint(TRUNCATE)", null).use { cur ->
-                if (!cur.moveToFirst() || cur.getInt(0) != 0) throw DmsgError("storage checkpoint busy")
+                if (!cur.moveToFirst() || cur.getInt(0) != 0) throw DmsgError("storage checkpoint busy", ErrorKind.Store)
             }
         }
     }
@@ -36,26 +36,26 @@ object SecureStore {
             try {
                 sealed(c, file).openFileInput().use { inp ->
                     val bytes = inp.readBytes()
-                    if (bytes.size != 32) throw DmsgError("wrapped key length invalid")
+                    if (bytes.size != 32) throw DmsgError("wrapped key length invalid", ErrorKind.StorageKeyLost)
                     return@synchronized bytes
                 }
             } catch (_: Exception) {
-                throw DmsgError("wrapped key unavailable: identity cannot be restored on this install")
+                throw DmsgError("wrapped key unavailable: identity cannot be restored on this install", ErrorKind.StorageKeyLost)
             }
         }
-        if (sealedDb(c).exists()) throw DmsgError("sealed copy without Keystore key: reinstall_loss")
+        if (sealedDb(c).exists()) throw DmsgError("sealed copy without Keystore key: reinstall_loss", ErrorKind.StorageKeyLost)
         val db = legacyDb(c)
         if (db.exists()) {
             try {
                 SQLiteDatabase.openDatabase(db.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { sql ->
                     sql.rawQuery("SELECT name FROM sqlite_master WHERE type='table' AND name='core_storage'", null).use {
-                        if (it.moveToFirst()) throw DmsgError("Keystore key missing: reinstall_loss")
+                        if (it.moveToFirst()) throw DmsgError("Keystore key missing: reinstall_loss", ErrorKind.StorageKeyLost)
                     }
                 }
             } catch (e: DmsgError) {
                 throw e
             } catch (_: Exception) {
-                throw DmsgError("storage cannot be inspected safely")
+                throw DmsgError("storage cannot be inspected safely", ErrorKind.Store)
             }
         }
         val fresh = ByteArray(32).also { SecureRandom().nextBytes(it) }
@@ -67,7 +67,7 @@ object SecureStore {
             Files.move(tmp.toPath(), file.toPath(), StandardCopyOption.ATOMIC_MOVE)
         } catch (_: Exception) {
             fresh.fill(0)
-            throw DmsgError("could not create wrapped key")
+            throw DmsgError("could not create wrapped key", ErrorKind.Store)
         } finally {
             tmp.delete()
             staging.delete()
@@ -78,7 +78,7 @@ object SecureStore {
     /** Migrate legacy columns first, checkpoint WAL, then keep an encrypted same-install snapshot. */
     fun seal(c: Context) = synchronized(Core.storeLock) {
         val db = legacyDb(c)
-        if (!db.exists()) throw DmsgError("no live db")
+        if (!db.exists()) throw DmsgError("no live db", ErrorKind.LiveDatabaseMissing)
         val k = key(c)
         try {
             // Opens/migrates the DB and verifies the key; never copy an unencrypted legacy file.
@@ -95,7 +95,7 @@ object SecureStore {
                 Files.move(tmp.toPath(), out.toPath(),
                     StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
             } catch (_: Exception) {
-                throw DmsgError("storage backup failed; existing backup unchanged")
+                throw DmsgError("storage backup failed; existing backup unchanged", ErrorKind.Store)
             } finally {
                 tmp.delete()
                 staging.delete()
@@ -106,9 +106,9 @@ object SecureStore {
     /** Restore only into an empty live path, verify under the original device-bound key. */
     fun unseal(c: Context) = synchronized(Core.storeLock) {
         val src = sealedDb(c)
-        if (!src.exists()) throw DmsgError("no sealed copy")
+        if (!src.exists()) throw DmsgError("no sealed copy", ErrorKind.SnapshotMissing)
         val live = legacyDb(c)
-        if (live.exists()) throw DmsgError("live db already exists; refusing to overwrite identity")
+        if (live.exists()) throw DmsgError("live db already exists; refusing to overwrite identity", ErrorKind.LiveDatabaseExists)
         val k = key(c)
         val staging = File(c.filesDir, "restore-staging").also { it.mkdirs() }
         val tmp = File(staging, live.name)
@@ -121,7 +121,7 @@ object SecureStore {
             checkpoint(tmp)
             Files.move(tmp.toPath(), live.toPath(), StandardCopyOption.ATOMIC_MOVE)
         } catch (_: Exception) {
-            throw DmsgError("unseal failed: sealed copy or Keystore key unavailable")
+            throw DmsgError("unseal failed: sealed copy or Keystore key unavailable", ErrorKind.SnapshotInvalid)
         } finally {
             k.fill(0)
             wipe(tmp)

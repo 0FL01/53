@@ -20,7 +20,7 @@ class UniFfiFacade(private val dbPath: String, key: ByteArray, private val conte
         try {
             return synchronized(Core.storeLock) {
                 if (!File(dbPath).exists() && File("$dbPath.sealed").exists()) {
-                    throw DmsgError("sealed identity: restore in Storage before use")
+                    throw DmsgError("sealed identity: restore in Storage before use", ErrorKind.SnapshotRestoreRequired)
                 }
                 block()
             }
@@ -56,13 +56,7 @@ class UniFfiFacade(private val dbPath: String, key: ByteArray, private val conte
 
     override fun myQr(): String = wrap { core.myContactQr() }
 
-    override fun addQr(uri: String): String = wrap {
-        when (core.addContactQr(uri)) {
-            QrOutcome.ADDED -> "added"
-            QrOutcome.UNCHANGED -> "unchanged"
-            QrOutcome.IDENTITY_CHANGED -> "identity_changed"
-        }
-    }
+    override fun addQr(uri: String) = wrap { core.addContactQr(uri) }
 
     override fun request(id: String): String = wrap { core.contactRequest(id) }
     override fun accept(id: String) = wrap { core.contactAccept(id) }
@@ -72,7 +66,7 @@ class UniFfiFacade(private val dbPath: String, key: ByteArray, private val conte
     override fun get(id: String): Dialog? = wrap {
         try {
             val c = core.contactGet(id)
-            Dialog(c.contactId, c.state, c.identityMismatch)
+            Dialog(c.contactId, c.state, c.identityMismatch, c.hasKeys)
         } catch (e: FfiException) {
             // UnknownContact -> null card (not an error screen).
             if (e is FfiException.UnknownContact) null else throw ffiError(e)
@@ -81,8 +75,16 @@ class UniFfiFacade(private val dbPath: String, key: ByteArray, private val conte
 
     override fun contacts(cursor: String?, limit: Int): Pair<List<Dialog>, String?> = wrap {
         val p = core.contactsPage(cursor, pageLimit(limit.toUInt()))
-        Pair(p.rows.map { Dialog(it.contactId, it.state, core.contactGet(it.contactId).identityMismatch) }, p.nextCursor)
+        Pair(p.rows.map { val c = core.contactGet(it.contactId); Dialog(it.contactId, it.state, c.identityMismatch, c.hasKeys) }, p.nextCursor)
     }
+
+    override fun dialogsPage(cursor: String?, limit: Int) = wrap { core.dialogsPage(cursor, limit.coerceIn(1, 100).toUInt()) }
+    override fun historyPage(contactId: String, beforeLocalId: Long?, limit: Int) = wrap {
+        core.historyPage(contactId, beforeLocalId, limit.coerceIn(1, 100).toUInt())
+    }
+    override fun messageStatus(mid: String) = wrap { core.messageStatus(mid) }
+    override fun setContactAlias(id: String, alias: String?) = wrap { core.setContactAlias(id, alias) }
+    override fun markRead(id: String, throughLocalId: Long) = wrap { core.markRead(id, throughLocalId) }
 
     override fun inbox(cursor: Long, limit: Int): Pair<List<Msg>, Long?> = wrap {
         val p = core.inboxPage(cursor, pageLimit(limit.toUInt()))

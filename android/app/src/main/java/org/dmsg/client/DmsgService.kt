@@ -42,29 +42,50 @@ class DmsgService : Service() {
         const val POLL_NORMAL_MS = 15_000L
         const val POLL_ECONOMY_MS = 300_000L
         private const val TAG = "DmsgService"
-        @Volatile private var lastPollMs = 0L
-        @Volatile private var lastPollError = "ожидание опроса"
-
-        fun pollStatus(): String = if (!Worker.running) "FGS выключен" else {
-            val elapsed = (System.currentTimeMillis() - lastPollMs) / 1000
-            if (lastPollMs == 0L) "FGS: $lastPollError (Doze может задерживать)"
-            else "последний ответ ${elapsed}с назад; $lastPollError (Doze может задерживать)"
-        }
+        private val facts = ConnectionFacts()
+        fun connectionState(): ConnectionUiState = facts.snapshot()
 
         fun start(c: Context) {
             val app = c.applicationContext
             Core.dispatch {
                 try {
                     val f = Core.facade(app)
-                    if (f.account().authenticated && f.dnsProfile() != null)
+                    if (f.account().authenticated && f.dnsProfile() != null) {
+                        Worker.prepare(f)
                         app.startForegroundService(Intent(app, DmsgService::class.java))
-                    else lastPollError = "Сначала войдите в аккаунт"
-                } catch (e: Exception) { lastPollError = humanError(e) }
+                    } else recordFailure(ErrorKind.NotAuthenticated)
+                } catch (e: Exception) { recordFailure((e as? DmsgError)?.kind ?: ErrorKind.Other) }
             }
         }
 
         fun stop(c: Context) {
+            Worker.stop() // immediate native cancellation, independent of the UI command/store lock
             c.stopService(Intent(c, DmsgService::class.java))
+        }
+
+        private fun recordFailure(kind: ErrorKind) = facts.finish(facts.begin(), System.currentTimeMillis(), kind)
+
+        /** User-requested foreground check uses the same DNS-only operations and outcome facts. */
+        fun check(f: DmsgFacade, keepGoing: () -> Boolean = { true }): FetchRes {
+            val stamp = facts.begin()
+            fun ensureActive() { if (!keepGoing()) throw InterruptedException("DNS poll stopped") }
+            try {
+                ensureActive()
+                f.reconnect()
+                facts.success(stamp, System.currentTimeMillis())
+                ensureActive()
+                val received = f.fetch()
+                facts.success(stamp, System.currentTimeMillis())
+                ensureActive()
+                f.retry()
+                facts.finish(stamp, System.currentTimeMillis(), null)
+                return received
+            } catch (e: Exception) {
+                facts.finish(stamp, System.currentTimeMillis(), (e as? DmsgError)?.kind ?: ErrorKind.Other)
+                throw e
+            } finally {
+                if (!keepGoing()) f.dnsStop()
+            }
         }
 
         fun running(c: Context): Boolean = Worker.running
@@ -83,6 +104,7 @@ class DmsgService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
+            Worker.stop()
             stopSelf()
             return START_NOT_STICKY
         }
@@ -105,6 +127,7 @@ class DmsgService : Service() {
 
     override fun onTimeout(startId: Int, fgsType: Int) {
         // Never rely on a service category to override an OS stop requirement.
+        Worker.stop()
         stopSelf()
     }
 
@@ -117,7 +140,7 @@ class DmsgService : Service() {
         return NotificationCompat.Builder(this, CH)
             .setContentTitle(getString(R.string.fgs_title))
             .setContentText(getString(R.string.fgs_body, newCount))
-            .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
+            .setSmallIcon(R.drawable.ic_message)
             .setContentIntent(open)
             .setOngoing(true)
             .build()
@@ -130,8 +153,11 @@ class DmsgService : Service() {
         private val worker = SingleWorker { loop(requireNotNull(app)) }
         val running: Boolean get() = worker.running
 
+        fun prepare(f: DmsgFacade) { facade = f }
+
         fun start(c: Context) {
             app = c.applicationContext
+            facts.enabled(true)
             worker.start()
         }
 
@@ -143,15 +169,13 @@ class DmsgService : Service() {
                     val n = pollOnce(app)
                     total += n
                     backoff = 5_000L
-                    lastPollMs = System.currentTimeMillis()
-                    lastPollError = "доступен"
                     app.notify(app.buildCountNotif(total))
                     // Gate-observable poll outcome (no secrets: counts only).
                     Log.d(TAG, "poll ok n=$n total=$total")
                 } catch (e: Exception) {
                     // Fatal VM/Linkage errors are not transient network errors.
                     Log.w(TAG, "poll fail: ${e.javaClass.simpleName}")
-                    lastPollError = humanError(e)
+                    if (worker.running) recordFailure((e as? DmsgError)?.kind ?: ErrorKind.Other)
                     backoff = minOf(backoff * 2, 120_000L)
                 }
                 val interval = if (Prefs.economy(app)) POLL_ECONOMY_MS else POLL_NORMAL_MS
@@ -165,6 +189,7 @@ class DmsgService : Service() {
         }
 
         fun stop() {
+            facts.enabled(false)
             worker.stop()
             try { facade?.dnsStop() } catch (_: Exception) { /* no secret diagnostics */ }
         }
@@ -181,12 +206,10 @@ class DmsgService : Service() {
 
         private fun pollOnce(app: Context): Int {
             val f = facade ?: Core.facade(app).also { facade = it }
-            if (!f.isReady()) throw DmsgError("core is not ready")
-            if (!f.account().authenticated) throw DmsgError("Сначала войдите в аккаунт")
-            if (f.dnsProfile() == null) throw DmsgError("Сначала добавьте сервер")
-            f.reconnect()
-            val rep = f.fetch()
-            f.retry()
+            if (!f.isReady()) throw DmsgError("Ядро приложения недоступно", ErrorKind.NativeUnavailable)
+            if (!f.account().authenticated) throw DmsgError("Сначала войдите в аккаунт", ErrorKind.NotAuthenticated)
+            if (f.dnsProfile() == null) throw DmsgError("Сначала добавьте сервер", ErrorKind.InvalidInput)
+            val rep = check(f) { worker.running && !Thread.currentThread().isInterrupted }
             return rep.received.size
         }
 
@@ -198,7 +221,7 @@ class DmsgService : Service() {
             return NotificationCompat.Builder(this, CH)
                 .setContentTitle(getString(R.string.fgs_title))
                 .setContentText(getString(R.string.fgs_body, total))
-                .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
+                .setSmallIcon(R.drawable.ic_message)
                 .setOngoing(true)
                 .build()
         }
