@@ -1,0 +1,17 @@
+53 — R17 / Native Light Square text frontend
+
+1. Откройте prototype.html или index.html.
+2. Первый запуск: вставить код → демо-образец → offline preview → принять.
+3. Policy → войти / создать аккаунт; invitation только signup invite_only.
+4. Внешние сценарии: open/invite_only, typed errors, replacement/cancel/CAS.
+5. Для переноса: PROMPT.md + DESIGN.md + HANDOFF.md + CODE_REVIEW.md.
+   R18 history/status/summary реализованы: ../crates/core/R18_API.md.
+   Core schema6: 65 all-targets green, Kotlin bindings generated координатором.
+   R19 native Android: 35 JVM/compile green, device runtime pending.
+
+Auth соответствует текущему public dmsg://server/ + DNS контракту,
+но все данные/ответы HTML искусственные. Не вводите реальные секреты.
+Будущее call/video demo скрыто в текущем контракте. Сети и медиа нет.
+HTML не встраивается в APK; код Android/Rust не изменяется.
+
+Дизайн: светлый, минималистичный, все app-owned углы прямые.

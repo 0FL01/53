@@ -1,0 +1,36 @@
+/* 53: proposed light theme. Native equivalents use dp/sp. */
+:root {
+  --background: #FFFFFF;
+  --surface: #F5F7F9;
+  --text: #17212B;
+  --text-secondary: #5B6773;
+  --accent: #246DA8;
+  --accent-pressed: #195382;
+  --accent-soft: #EAF3FA;
+  --divider: #DDE3E8;
+  --incoming: #F1F4F6;
+  --outgoing: #EAF3FA;
+  --success: #27734D;
+  --warning: #8A5410;
+  --warning-surface: #FFF4E3;
+  --error: #A82D35;
+  --error-surface: #FFF0F0;
+  --input-border: #7A8794;
+  --focus: #246DA8;
+  --radius: 0px;
+  --shadow: none;
+  --font-ui: Roboto, Arial, sans-serif;
+  --font-mono: monospace;
+}
+
+/* Proposed future-call tokens; Android units are dp/sp. */
+:root {
+  --call-avatar: 96px;
+  --call-name: 28px;
+  --call-timer: 27px;
+  --call-hangup-min-height: 56px;
+  --call-answer-min-height: 76px;
+  --call-control-min-height: 90px;
+  --call-hangup: #A82D35;
+  --call-answer: #27734D;
+}

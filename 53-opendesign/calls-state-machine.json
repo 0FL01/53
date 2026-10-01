@@ -1,0 +1,85 @@
+{
+  "version": "2.0.0",
+  "status": "proposed UI state machine; native implementation required",
+  "initial": null,
+  "maxActiveCalls": 1,
+  "featureFlags": {
+    "audioProductionDefault": false,
+    "videoProductionDefault": false
+  },
+  "states": {
+    "dialing": [
+      "ringing",
+      "connecting",
+      "ended"
+    ],
+    "ringing": [
+      "connecting",
+      "ended"
+    ],
+    "incoming": [
+      "connecting",
+      "ended"
+    ],
+    "connecting": [
+      "active",
+      "ended"
+    ],
+    "active": [
+      "reconnecting",
+      "held",
+      "ended"
+    ],
+    "reconnecting": [
+      "active",
+      "held",
+      "ended"
+    ],
+    "held": [
+      "active",
+      "reconnecting",
+      "ended"
+    ],
+    "ended": []
+  },
+  "prototypeTimeoutSeconds": {
+    "dialing": 20,
+    "ringing": 45,
+    "incoming": 45,
+    "connecting": 20,
+    "reconnecting": 30
+  },
+  "terminalReasons": [
+    "completed",
+    "cancelled",
+    "declined",
+    "missed",
+    "noAnswer",
+    "busy",
+    "unavailable",
+    "networkLost",
+    "identityChanged",
+    "contactBlocked",
+    "platformError",
+    "remoteEnded",
+    "expired",
+    "securityError"
+  ],
+  "invariants": [
+    "Ended is terminal for a callId.",
+    "Late events must match accountId/callId/revision.",
+    "No audio capture before consent.",
+    "No call enters the text-message outbox.",
+    "One journal entry per accountId/callId.",
+    "No automatic redial after interruption.",
+    "Repeated recovery events do not reset deadline.",
+    "Remote video consent does not enable local camera.",
+    "Mute survives recovery and endpoint changes.",
+    "On blocked/changed contact identity, stop media and gate further calls."
+  ],
+  "sessionTimer": "monotonic since first SessionReady; includes interruption; frozen at Ended",
+  "sources": [
+    "CALLS_SPEC.md",
+    "CALLS_HANDOFF.md"
+  ]
+}
