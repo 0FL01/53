@@ -8,6 +8,7 @@ crates/server/target/
 android/.gradle/
 android/app/build/
 android/build/
+/53.apk
 android/local.properties
 # Legacy local native output (new builds use android/app/build/nativeLibs).
 android/app/src/main/jniLibs/

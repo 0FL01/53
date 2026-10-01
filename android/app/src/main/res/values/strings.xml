@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">dmsg</string>
+    <string name="app_name">53</string>
     <!-- Honest reinstall disclosure (K4 audit): shown in Storage screen. -->
     <string name="reinstall_loss">Очистка данных и переустановка удаляют Keystore-ключ. Даже сохранившаяся sealed-копия без этого ключа не восстановит identity, контакты и историю. Перенос истории в v1 не входит.</string>
     <string name="economy_desc">«На связи»: опрос каждые ~15 с. «Экономия»: только флаг интервала (~5 мин), второго сервиса нет; мгновенные входящие не обещаются.</string>
     <string name="core_missing">Ядро недоступно (нет native lib). Экраны работают в ограниченном режиме.</string>
-    <string name="fgs_title">dmsg на связи</string>
+    <string name="fgs_title">53 на связи</string>
     <string name="fgs_body">Фоновая связь включена; доставка зависит от сети и Doze. Новых сообщений: %1$d</string>
     <string name="notif_channel">Связь</string>
 </resources>
