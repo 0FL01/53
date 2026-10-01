@@ -1,6 +1,6 @@
 //! Fresh unified schema. Old/future schemas fail before any database write.
 //! Same-schema plain-to-sealed conversion is a storage feature, not auth migration.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// Internal plain storage for isolated Rust harnesses.
 pub fn open(path: &std::path::Path) -> Result<rusqlite::Connection, String> {
@@ -120,7 +120,10 @@ fn open_mode(
             seen_user BLOB,
             seen_device BLOB,
             seen_ed BLOB,
-           seen_curve BLOB
+            seen_curve BLOB,
+            local_alias TEXT,
+            read_cursor INTEGER NOT NULL DEFAULT 0 CHECK(read_cursor>=0),
+            local_activity_ms INTEGER NOT NULL DEFAULT 0 CHECK(local_activity_ms>=0)
          );
           CREATE TABLE core_outbox(
            message_id BLOB PRIMARY KEY,
@@ -134,16 +137,33 @@ fn open_mode(
            contact_id TEXT NOT NULL,
            text TEXT NOT NULL,
            seq INTEGER NOT NULL,
-           PRIMARY KEY(sender_device, message_id)
-         );
+            PRIMARY KEY(sender_device, message_id)
+          );
+          CREATE TABLE core_history(
+            local_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id BLOB NOT NULL CHECK(length(message_id)=16),
+            contact_id TEXT NOT NULL,
+            direction TEXT NOT NULL CHECK(direction IN ('incoming','outgoing')),
+            sender_device BLOB,
+            text TEXT NOT NULL,
+            local_timestamp_ms INTEGER NOT NULL CHECK(local_timestamp_ms>=0),
+            delivery_state TEXT,
+            CHECK((direction='incoming' AND sender_device IS NOT NULL AND length(sender_device)=32 AND delivery_state IS NULL)
+               OR (direction='outgoing' AND sender_device IS NULL AND delivery_state IS NOT NULL AND delivery_state IN ('queued','accepted','delivered')))
+          );
+          CREATE UNIQUE INDEX core_history_outgoing ON core_history(message_id) WHERE direction='outgoing';
+          CREATE UNIQUE INDEX core_history_incoming ON core_history(sender_device,message_id) WHERE direction='incoming';
+          CREATE INDEX core_history_contact ON core_history(contact_id,local_id DESC);
+          CREATE INDEX core_history_unread ON core_history(contact_id,local_id) WHERE direction='incoming';
+          CREATE INDEX core_dialog_activity ON core_contacts(local_activity_ms DESC,contact_id ASC);
            CREATE TABLE core_dns_profile(
             id INTEGER PRIMARY KEY CHECK(id=1),
             profile TEXT NOT NULL
            );
            CREATE UNIQUE INDEX core_contact_user ON core_contacts(user_id) WHERE user_id IS NOT NULL;
-           PRAGMA user_version=5;",
+           PRAGMA user_version=6;",
     )
-    .map_err(|_| "create schema v5 failed")?;
+    .map_err(|_| "create schema v6 failed")?;
         }
         tx.commit().map_err(|_| "schema commit failed")?;
     }
@@ -158,14 +178,16 @@ fn open_mode(
     if let Some(k) = key {
         if marker.is_none() {
             // A missing/deleted marker must never re-encrypt existing sealed
-            // values as if they were plain v5 storage.
+            // values as if they were plain current-schema storage.
             let already_sealed: bool = conn
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM core_identity WHERE substr(device_priv,1,7)=?1)
                      OR EXISTS(SELECT 1 FROM core_olm WHERE substr(pickle,1,7)=?1)
                      OR EXISTS(SELECT 1 FROM core_sessions WHERE substr(pickle,1,7)=?1)
                       OR EXISTS(SELECT 1 FROM core_inbox WHERE substr(text,1,7)=?1)
-                      OR EXISTS(SELECT 1 FROM core_dns_profile WHERE substr(profile,1,7)=?1)",
+                       OR EXISTS(SELECT 1 FROM core_dns_profile WHERE substr(profile,1,7)=?1)
+                       OR EXISTS(SELECT 1 FROM core_history WHERE substr(text,1,7)=?1)
+                       OR EXISTS(SELECT 1 FROM core_contacts WHERE substr(local_alias,1,7)=?1)",
                     [b"DMSG-S1".as_slice()],
                     |r| r.get(0),
                 )
@@ -175,7 +197,7 @@ fn open_mode(
             }
             // No per-column changes are visible unless all of them AND the
             // authenticated marker commit together. A failed TX leaves the
-            // entire plain v5 DB readable via the original entrypoint.
+            // entire plain current-schema DB readable via the original entrypoint.
             conn.execute_batch("PRAGMA secure_delete=ON; BEGIN EXCLUSIVE;")
                 .map_err(|_| "storage migration begin failed")?;
             let migrate = (|| -> Result<(), String> {
@@ -185,9 +207,11 @@ fn open_mode(
                     ("core_sessions", "pickle", "session_pickle"),
                     ("core_inbox", "text", "inbox_text"),
                     ("core_dns_profile", "profile", "dns_profile"),
+                    ("core_history", "text", "history_text"),
+                    ("core_contacts", "local_alias", "contact_alias"),
                 ] {
                     conn.execute(
-                        &format!("UPDATE {table} SET {column}=dmsg_seal('{field}', {column})"),
+                        &format!("UPDATE {table} SET {column}=dmsg_seal('{field}', {column}) WHERE {column} IS NOT NULL"),
                         [],
                     )
                     .map_err(|_| "storage migration field failed")?;
@@ -201,12 +225,14 @@ fn open_mode(
                     ("core_sessions", "pickle"),
                     ("core_inbox", "text"),
                     ("core_dns_profile", "profile"),
+                    ("core_history", "text"),
+                    ("core_contacts", "local_alias"),
                 ] {
                     for action in ["INSERT", "UPDATE"] {
                         conn.execute_batch(&format!(
                             "CREATE TRIGGER {table}_sealed_{action} BEFORE {action} ON {table}
-                             WHEN typeof(NEW.{column}) != 'blob' OR
-                                  substr(NEW.{column},1,7) != x'444d53472d5331'
+                             WHEN NEW.{column} IS NOT NULL AND (typeof(NEW.{column}) != 'blob' OR
+                                  substr(NEW.{column},1,7) != x'444d53472d5331')
                              BEGIN SELECT RAISE(ABORT,'unencrypted storage write'); END;"
                         ))
                         .map_err(|_| "storage migration guard failed")?;
@@ -472,19 +498,42 @@ pub fn outbox_insert(
     Ok(())
 }
 
-/// Обновить статус outbox-записи (queued→accepted→delivered, только вперёд
-/// по смыслу — порядок обеспечивает вызывающий).
+/// Advance the exact outgoing history and outbox status in one transaction.
+/// Replayed/late ACKs never regress delivered or accepted to an earlier state.
 pub fn outbox_set_status(
     conn: &rusqlite::Connection,
     message_id: &[u8; 16],
     status: &str,
 ) -> Result<(), String> {
-    conn.execute(
-        "UPDATE core_outbox SET status=?1 WHERE message_id=?2",
-        rusqlite::params![status, message_id.as_slice()],
-    )
-    .map_err(|e| format!("outbox status: {e}"))?;
-    Ok(())
+    if !matches!(status, "queued" | "accepted" | "delivered") {
+        return Err("invalid delivery state".into());
+    }
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(|_| "delivery transaction failed")?;
+    for (table, column, condition) in [
+        ("core_outbox", "status", ""),
+        (
+            "core_history",
+            "delivery_state",
+            " AND direction='outgoing'",
+        ),
+    ] {
+        let n = tx
+            .execute(
+                &format!(
+                    "UPDATE {table} SET {column}=CASE
+                WHEN {column}='delivered' OR ?1='delivered' THEN 'delivered'
+                WHEN {column}='accepted' OR ?1='accepted' THEN 'accepted'
+                ELSE 'queued' END WHERE message_id=?2{condition}"
+                ),
+                rusqlite::params![status, message_id.as_slice()],
+            )
+            .map_err(|_| "delivery update failed")?;
+        if n != 1 {
+            return Err("outgoing delivery record missing".into());
+        }
+    }
+    tx.commit().map_err(|_| "delivery commit failed".into())
 }
 
 /// Все недоставленные (queued + accepted) для ретрая тем же ciphertext.
@@ -609,7 +658,7 @@ mod tests {
 
     #[test]
     fn old_future_and_nonempty_unversioned_schemas_are_rejected_without_mutation() {
-        for version in [0, 1, 2, 3, 4, 6, 99] {
+        for version in [0, 1, 2, 3, 4, 5, 7, 99] {
             let dir =
                 std::env::temp_dir().join(format!("dmsg-schema-{}-{version}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
@@ -647,7 +696,7 @@ mod tests {
         assert_eq!(
             c.query_row::<i64, _, _>("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap(),
-            5
+            SCHEMA_VERSION
         );
         drop(c);
         let _ = std::fs::remove_dir_all(dir);
@@ -656,7 +705,7 @@ mod tests {
     const KEY: [u8; 32] = [0x37; 32];
 
     #[test]
-    fn same_v5_plain_to_sealed_seals_every_sensitive_column_and_reopens() {
+    fn same_current_schema_plain_to_sealed_seals_every_sensitive_column_and_reopens() {
         let p = tmp_db("encrypted-migration");
         cleanup(&p);
         let legacy = open(&p).expect("legacy");
@@ -692,6 +741,21 @@ mod tests {
             1,
         )
         .unwrap();
+        crate::contacts::request_add(&legacy, "ABCD1234EFGH").unwrap();
+        crate::history::set_contact_alias(&legacy, "ABCD1234EFGH", Some("private alias sentinel"))
+            .unwrap();
+        let tx =
+            rusqlite::Transaction::new_unchecked(&legacy, rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+        crate::history::insert(
+            &tx,
+            &[8; 16],
+            "ABCD1234EFGH",
+            None,
+            "private outgoing history sentinel",
+        )
+        .unwrap();
+        tx.commit().unwrap();
         drop(legacy);
         let stale_legacy_handle = open(&p).unwrap();
 
@@ -700,6 +764,12 @@ mod tests {
             save_olm(&stale_legacy_handle, &pickle, 18).is_err(),
             "old handle must not rewrite plaintext"
         );
+        assert!(crate::history::set_contact_alias(
+            &stale_legacy_handle,
+            "ABCD1234EFGH",
+            Some("plaintext stale alias")
+        )
+        .is_err());
         drop(stale_legacy_handle);
         assert_eq!(load_identity(&encrypted).unwrap(), Some(device));
         assert_eq!(load_olm(&encrypted).unwrap(), Some((pickle.clone(), 18)));
@@ -710,6 +780,21 @@ mod tests {
         assert_eq!(
             inbox_list(&encrypted, 0, 10).unwrap().0[0].2,
             "private inbox sentinel"
+        );
+        assert_eq!(
+            crate::history::history_page(&encrypted, "ABCD1234EFGH", None, 10)
+                .unwrap()
+                .rows[0]
+                .text,
+            "private outgoing history sentinel"
+        );
+        assert_eq!(
+            crate::history::dialogs_page(&encrypted, None, 10)
+                .unwrap()
+                .rows[0]
+                .local_alias
+                .as_deref(),
+            Some("private alias sentinel")
         );
         let first: Vec<u8> = encrypted
             .query_row("SELECT pickle FROM core_olm", [], |r| r.get(0))
@@ -728,6 +813,8 @@ mod tests {
                     pickle.as_bytes(),
                     spickle.as_bytes(),
                     b"private inbox sentinel",
+                    b"private alias sentinel",
+                    b"private outgoing history sentinel",
                 ] {
                     assert!(
                         !raw.windows(secret.len()).any(|w| w == secret),
@@ -769,7 +856,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_sealing_preserves_plain_v5_and_pending_cleanup_is_retryable() {
+    fn failed_sealing_preserves_plain_current_schema_and_pending_cleanup_is_retryable() {
         let p = tmp_db("encrypted-failure");
         cleanup(&p);
         let conn = open(&p).unwrap();

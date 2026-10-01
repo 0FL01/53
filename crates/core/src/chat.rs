@@ -3,7 +3,7 @@
 //! Инварианты (ARCH §7, план K3):
 //! - ratchet и ciphertext-outbox — ОДНА TX: сессия читается после write-lock,
 //!   шифруется локально, затем `core_sessions`-пикл + `core_outbox`-строка
-//!   коммитятся вместе; при ошибке TX локальная копия отбрасывается
+//!   и sealed plaintext history коммитятся вместе; при ошибке TX локальная копия отбрасывается
 //!   (перешифровка — только несохранённого/нового; ретрай шлёт ТОЛЬКО
 //!   сохранённый ciphertext с тем же message_id — сервер дедуплицирует);
 //! - статусы outbox: queued → accepted (SEND_ACK ST_ACCEPTED) → delivered
@@ -42,12 +42,20 @@ pub struct RawEvent {
 }
 
 /// Расшифрованное входящее.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Received {
     pub contact_id: String,
     pub text: String,
     pub message_id: [u8; 16],
     pub seq: u64,
+}
+
+impl std::fmt::Debug for Received {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Received")
+            .field("seq", &self.seq)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Итог приёма одной пачки.
@@ -159,6 +167,46 @@ impl Core {
     pub fn confirm_contact(&mut self, contact_id: &str) -> Result<(), OlmError> {
         contacts::confirm_identity(&self.conn, contact_id)?;
         Ok(())
+    }
+
+    pub fn history_page(
+        &self,
+        contact_id: &str,
+        before_local_id: Option<i64>,
+        limit: u32,
+    ) -> Result<crate::history::HistoryPage, crate::history::HistoryError> {
+        crate::history::history_page(&self.conn, contact_id, before_local_id, limit)
+    }
+
+    pub fn message_status(
+        &self,
+        message_id_hex: &str,
+    ) -> Result<Option<crate::history::DeliveryState>, crate::history::HistoryError> {
+        crate::history::message_status(&self.conn, message_id_hex)
+    }
+
+    pub fn dialogs_page(
+        &self,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<crate::history::DialogsPage, crate::history::HistoryError> {
+        crate::history::dialogs_page(&self.conn, cursor, limit)
+    }
+
+    pub fn set_contact_alias(
+        &self,
+        contact_id: &str,
+        alias: Option<&str>,
+    ) -> Result<(), crate::history::HistoryError> {
+        crate::history::set_contact_alias(&self.conn, contact_id, alias)
+    }
+
+    pub fn mark_read(
+        &self,
+        contact_id: &str,
+        through_local_id: i64,
+    ) -> Result<i64, crate::history::HistoryError> {
+        crate::history::mark_read(&self.conn, contact_id, through_local_id)
     }
 
     /// Reconnect refill: key-only RESUME + COUNT + upload when needed.
@@ -310,6 +358,8 @@ impl Core {
             rusqlite::params![message_id.as_slice(), contact_id, wire.as_slice()],
         )
         .map_err(|e| OlmError::Store(format!("outbox: {e}")))?;
+        crate::history::insert(&tx, &message_id, contact_id, None, text)
+            .map_err(OlmError::Store)?;
         tx.commit()
             .map_err(|e| OlmError::Store(format!("commit: {e}")))?;
         Ok(Some((message_id, user_id, wire)))
@@ -636,7 +686,7 @@ impl Core {
         if text.is_empty() || text.len() > TEXT_MAX {
             return Err(Fail::Skip(EventSkip::Undecryptable));
         }
-        // ОДНА TX: пикл account (one-time consumed) + пикл сессии + inbox.
+        // ОДНА TX: account (one-time consumed) + session + inbox dedup + history.
         let apickle = serde_json::to_string(&account.pickle())
             .map_err(|_| OlmError::Store("pickle".into()))?;
         let spickle = olm::pickle_session(session.as_ref().expect("session"))?;
@@ -674,6 +724,10 @@ impl Core {
                     ],
                 )
                 .map_err(|e| OlmError::Store(format!("inbox: {e}")))?;
+            if n == 1 {
+                crate::history::insert(&tx, &e.message_id, &c.contact_id, Some(&e.sender), text)
+                    .map_err(OlmError::Store)?;
+            }
             tx.commit()
                 .map_err(|e| OlmError::Store(format!("commit: {e}")))?;
             Ok(n == 1)
@@ -1034,6 +1088,13 @@ mod tests {
             status_of(&a.conn, &mid).expect("st"),
             crate::store::outbox_status::ACCEPTED
         );
+        let outgoing_history = a.history_page("BOBB00000002", None, 100).unwrap();
+        assert_eq!(outgoing_history.rows.len(), 1);
+        assert_eq!(outgoing_history.rows[0].text, "hello bob");
+        assert_eq!(
+            outgoing_history.rows[0].delivery_state,
+            Some(crate::history::DeliveryState::Accepted)
+        );
         // Ретрай после accept: шлёт ТОТ ЖЕ ciphertext (сравниваем байты).
         let sent_ct = fa
             .sent
@@ -1065,6 +1126,10 @@ mod tests {
         assert_eq!(
             sent_ct, resent_ct,
             "retry must reuse saved ciphertext, not re-encrypt"
+        );
+        assert_eq!(
+            a.history_page("BOBB00000002", None, 100).unwrap(),
+            outgoing_history
         );
         // Приём Бобом: FETCH_RESP с серверным событием + ack cursor.
         let a_dev = a.device_pub();
@@ -1136,6 +1201,15 @@ mod tests {
             account_before
         );
         assert_eq!(crate::store::inbox_count(&b.conn).expect("count"), 1);
+        let incoming = b.history_page("ALICE0000001", None, 100).unwrap();
+        assert_eq!(incoming.rows.len(), 1);
+        assert_eq!(incoming.rows[0].text, "hello bob");
+        assert_eq!(
+            incoming.rows[0].direction,
+            crate::history::MessageDirection::Incoming
+        );
+        assert_eq!(incoming.rows[0].delivery_state, None);
+        assert_eq!(b.dialogs_page(None, 100).unwrap().rows[0].local_unread, 1);
         // The dedup key includes the sender; new/tampered events still fail.
         let mut event = RawEvent {
             seq: 2,
@@ -1270,6 +1344,13 @@ mod tests {
             .expect("outbox")
             .0;
         assert_eq!(rows.len(), 2);
+        assert_eq!(
+            a.history_page("BOBB00000002", None, 100)
+                .unwrap()
+                .rows
+                .len(),
+            2
+        );
         assert!(rows
             .iter()
             .all(|r| r.4 == crate::store::outbox_status::QUEUED));
@@ -1296,6 +1377,13 @@ mod tests {
             .await
             .expect("decrypt in ratchet order");
         assert_eq!(result.received.len(), 2);
+        assert_eq!(
+            b.history_page("ALICE0000001", None, 100)
+                .unwrap()
+                .rows
+                .len(),
+            2
+        );
         assert_eq!(result.skipped_undecryptable, 0);
         let texts: Vec<_> = result.received.iter().map(|m| m.text.as_str()).collect();
         assert!(texts.contains(&"first offline") && texts.contains(&"second offline"));
@@ -1546,5 +1634,155 @@ mod tests {
         assert_eq!(crate::store::inbox_count(&b.conn).unwrap(), 2);
         std::fs::remove_dir_all(da).ok();
         std::fs::remove_dir_all(db).ok();
+    }
+
+    #[tokio::test]
+    async fn history_failure_rolls_back_ratchets_outbox_inbox_and_activity_without_ack() {
+        let (mut a, da) = tmp_core("history-rollback-a");
+        let (mut b, db) = tmp_core("history-rollback-b");
+        drop(a);
+        drop(b);
+        a = Core::open_encrypted(&da.join("core.db"), &[17; 32]).unwrap();
+        b = Core::open_encrypted(&db.join("core.db"), &[18; 32]).unwrap();
+        link(&mut a, &mut b, "ALICE0000001", "BOBB00000002");
+        b.account.generate_one_time_keys(1);
+        olm::persist(&b.conn, &b.account, b.next_key_id).unwrap();
+        let ot = *b
+            .account
+            .one_time_keys()
+            .values()
+            .next()
+            .unwrap()
+            .as_bytes();
+        let (ed, curve) = b.identity_keys();
+        let session = olm::outbound(&a.account, &curve, &ot).unwrap();
+        crate::store::save_session(
+            &a.conn,
+            "BOBB00000002",
+            &olm::pickle_session(&session).unwrap(),
+            &ed,
+            &curve,
+        )
+        .unwrap();
+        let session_before = crate::store::load_session(&a.conn, "BOBB00000002").unwrap();
+        let dialog_before = a.dialogs_page(None, 100).unwrap();
+        // Fail AFTER ratchet, outbox and history writes, at the summary write.
+        a.conn.execute_batch("CREATE TRIGGER reject_activity BEFORE UPDATE OF local_activity_ms ON core_contacts BEGIN SELECT RAISE(ABORT,'denied'); END;").unwrap();
+        assert!(matches!(
+            a.queue_text_existing_session("BOBB00000002", "rollback text"),
+            Err(OlmError::Store(_))
+        ));
+        assert_eq!(
+            crate::store::load_session(&a.conn, "BOBB00000002").unwrap(),
+            session_before
+        );
+        assert!(crate::store::outbox_queued(&a.conn, 0, 100)
+            .unwrap()
+            .0
+            .is_empty());
+        assert!(a
+            .history_page("BOBB00000002", None, 100)
+            .unwrap()
+            .rows
+            .is_empty());
+        assert_eq!(a.dialogs_page(None, 100).unwrap(), dialog_before);
+        drop(a);
+        a = Core::open_encrypted(&da.join("core.db"), &[17; 32]).unwrap();
+        assert_eq!(
+            crate::store::load_session(&a.conn, "BOBB00000002").unwrap(),
+            session_before
+        );
+        a.conn
+            .execute_batch("DROP TRIGGER reject_activity")
+            .unwrap();
+        let mid = a
+            .queue_text_existing_session("BOBB00000002", "rollback text")
+            .unwrap()
+            .unwrap();
+        let wire = a.outbox_ciphertext(&mid).unwrap();
+        let mut batch = vec![0, 1];
+        batch.extend_from_slice(&1u64.to_be_bytes());
+        batch.extend_from_slice(&a.device_pub());
+        batch.extend_from_slice(&a.my_account().unwrap().0);
+        batch.extend_from_slice(&mid);
+        batch.extend_from_slice(&(wire.len() as u16).to_be_bytes());
+        batch.extend_from_slice(&wire);
+        let account_before = crate::store::load_olm(&b.conn).unwrap();
+        let dialog_before = b.dialogs_page(None, 100).unwrap();
+        b.conn.execute_batch("CREATE TRIGGER reject_history AFTER INSERT ON core_history BEGIN SELECT RAISE(ABORT,'denied'); END;").unwrap();
+        let fake = || {
+            Fake::new(vec![
+                authenticated_resp(),
+                count_resp(16),
+                (OP_FETCH_RESP, batch.clone()),
+                binding_resp(&a),
+                (OP_DELIVERY_ACK, 1u64.to_be_bytes().to_vec()),
+            ])
+        };
+        let mut t = fake();
+        assert!(matches!(
+            b.fetch_and_decrypt(&mut t).await,
+            Err(OlmError::Store(_))
+        ));
+        assert!(!t.sent.iter().any(|(op, _)| *op == OP_DELIVERY_ACK));
+        assert_eq!(crate::store::load_olm(&b.conn).unwrap(), account_before);
+        assert!(crate::store::load_session(&b.conn, "ALICE0000001")
+            .unwrap()
+            .is_none());
+        assert_eq!(crate::store::inbox_count(&b.conn).unwrap(), 0);
+        assert!(b
+            .history_page("ALICE0000001", None, 100)
+            .unwrap()
+            .rows
+            .is_empty());
+        assert_eq!(b.dialogs_page(None, 100).unwrap(), dialog_before);
+        drop(b);
+        b = Core::open_encrypted(&db.join("core.db"), &[18; 32]).unwrap();
+        assert_eq!(crate::store::load_olm(&b.conn).unwrap(), account_before);
+        b.conn.execute_batch("DROP TRIGGER reject_history").unwrap();
+        assert_eq!(
+            b.fetch_and_decrypt(&mut fake())
+                .await
+                .unwrap()
+                .received
+                .len(),
+            1
+        );
+        assert_eq!(
+            b.history_page("ALICE0000001", None, 100)
+                .unwrap()
+                .rows
+                .len(),
+            1
+        );
+        assert_eq!(b.dialogs_page(None, 100).unwrap().rows[0].local_unread, 1);
+        let saved_session = crate::store::load_session(&b.conn, "ALICE0000001").unwrap();
+        let mut replay = Fake::new(vec![
+            authenticated_resp(),
+            count_resp(16),
+            (OP_FETCH_RESP, batch),
+            (OP_DELIVERY_ACK, 1u64.to_be_bytes().to_vec()),
+        ]);
+        assert!(b
+            .fetch_and_decrypt(&mut replay)
+            .await
+            .unwrap()
+            .received
+            .is_empty());
+        assert_eq!(
+            b.history_page("ALICE0000001", None, 100)
+                .unwrap()
+                .rows
+                .len(),
+            1
+        );
+        assert_eq!(
+            crate::store::load_session(&b.conn, "ALICE0000001").unwrap(),
+            saved_session
+        );
+        drop(a);
+        drop(b);
+        std::fs::remove_dir_all(da).unwrap();
+        std::fs::remove_dir_all(db).unwrap();
     }
 }

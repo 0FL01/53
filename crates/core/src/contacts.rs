@@ -179,9 +179,12 @@ pub fn request_add(conn: &rusqlite::Connection, contact_id: &str) -> Result<Stri
         return Err(OlmError::Protocol("bad contact id"));
     }
     conn.execute(
-        "INSERT INTO core_contacts(contact_id, state) VALUES(?1,'requested')
+        "INSERT INTO core_contacts(contact_id, state, local_activity_ms) VALUES(?1,'requested',?2)
          ON CONFLICT(contact_id) DO NOTHING",
-        [contact_id],
+        rusqlite::params![
+            contact_id,
+            crate::history::local_time_ms().map_err(OlmError::Store)?
+        ],
     )
     .map_err(|e| OlmError::Store(format!("request: {e}")))?;
     Ok(get(conn, contact_id)?
@@ -197,14 +200,15 @@ pub fn add_from_qr(conn: &rusqlite::Connection, uri: &str) -> Result<QrResult, O
         None => {
             conn.execute(
                 "INSERT INTO core_contacts(contact_id, user_id, device_key,
-                 ed_identity, curve_identity, state)
-                 VALUES(?1,?2,?3,?4,?5,'requested')",
+                  ed_identity, curve_identity, state, local_activity_ms)
+                  VALUES(?1,?2,?3,?4,?5,'requested',?6)",
                 rusqlite::params![
                     q.contact_id,
                     q.user_id.as_slice(),
                     q.device_key.as_slice(),
                     q.ed_identity.as_slice(),
                     q.curve_identity.as_slice(),
+                    crate::history::local_time_ms().map_err(OlmError::Store)?,
                 ],
             )
             .map_err(|e| OlmError::Store(format!("contact: {e}")))?;
@@ -260,9 +264,12 @@ pub fn block(conn: &rusqlite::Connection, contact_id: &str) -> Result<(), OlmErr
         return Err(OlmError::Protocol("bad contact id"));
     }
     conn.execute(
-        "INSERT INTO core_contacts(contact_id, state) VALUES(?1,'blocked')
+        "INSERT INTO core_contacts(contact_id, state, local_activity_ms) VALUES(?1,'blocked',?2)
          ON CONFLICT(contact_id) DO UPDATE SET state='blocked'",
-        [contact_id],
+        rusqlite::params![
+            contact_id,
+            crate::history::local_time_ms().map_err(OlmError::Store)?
+        ],
     )
     .map_err(|e| OlmError::Store(format!("block: {e}")))?;
     Ok(())

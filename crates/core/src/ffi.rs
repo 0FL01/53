@@ -19,6 +19,9 @@ use std::sync::Arc;
 
 use crate::auth::AuthError;
 use crate::contacts::{self, Contact};
+pub use crate::history::{
+    DeliveryState, DialogSummary, DialogsPage, HistoryMessage, HistoryPage, MessageDirection,
+};
 use crate::olm::OlmError;
 use crate::transport::TransportError;
 
@@ -96,11 +99,19 @@ pub struct ContactsPage {
 }
 
 /// Одна входящая строка (plaintext уже расшифрован ядром).
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
 pub struct InboxRow {
     pub seq: i64,
     pub contact_id: String,
     pub text: String,
+}
+
+impl std::fmt::Debug for InboxRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InboxRow")
+            .field("seq", &self.seq)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Страница входящих: cursor — seq последней строки (0 = сначала).
@@ -144,12 +155,20 @@ pub enum LoginOutcome {
 }
 
 /// Одно расшифрованное входящее (событие приёма).
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
 pub struct ReceivedMsg {
     pub contact_id: String,
     pub text: String,
     pub message_id_hex: String,
     pub seq: u64,
+}
+
+impl std::fmt::Debug for ReceivedMsg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReceivedMsg")
+            .field("seq", &self.seq)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Событие приёма пачки: числа, а не строки (см. FetchResult).
@@ -256,6 +275,16 @@ impl std::fmt::Display for FfiError {
 }
 
 impl std::error::Error for FfiError {}
+
+fn map_history(e: crate::history::HistoryError) -> FfiError {
+    match e {
+        crate::history::HistoryError::InvalidInput => FfiError::InvalidInput,
+        crate::history::HistoryError::UnknownContact => FfiError::UnknownContact,
+        crate::history::HistoryError::Store => {
+            FfiError::Store("local history storage failed".into())
+        }
+    }
+}
 
 fn map_olm(e: OlmError) -> FfiError {
     match e {
@@ -366,7 +395,7 @@ pub fn page_limit(limit: u32) -> u32 {
 
 /// Решение хранилища при старте по наличию файлов (чистая функция —
 /// покрытие unit-тестом здесь, зеркало в Kotlin вызывает фасад).
-/// MigrateLegacy means sealing a supported plain v5 store, not schema/auth compatibility.
+/// MigrateLegacy means sealing a supported plain current-schema store, not schema/auth compatibility.
 #[uniffi::export]
 pub fn storage_plan(has_legacy_db: bool, has_wrapped_db: bool) -> StoragePlan {
     if has_wrapped_db {
@@ -835,6 +864,52 @@ impl DmsgClient {
         })
     }
 
+    /// Newest-first bounded local timeline; cursor is exclusive and must belong
+    /// to this contact. Limits clamp to 1..=100. This call does not mark read.
+    pub fn history_page(
+        &self,
+        contact_id: String,
+        before_local_id: Option<i64>,
+        limit: u32,
+    ) -> Result<HistoryPage, FfiError> {
+        crate::history::history_page(&self.conn()?, &contact_id, before_local_id, limit)
+            .map_err(map_history)
+    }
+
+    /// Exact persisted outgoing state. None means unknown/incoming-only, never
+    /// delivered. Both cases are distinct from malformed hex (InvalidInput).
+    pub fn message_status(
+        &self,
+        message_id_hex: String,
+    ) -> Result<Option<DeliveryState>, FfiError> {
+        crate::history::message_status(&self.conn()?, &message_id_hex).map_err(map_history)
+    }
+
+    /// Activity DESC/contact ID ASC, opaque next cursor, limits clamp 1..=100.
+    /// Local unread and local times carry no remote receipt/timing semantics.
+    pub fn dialogs_page(
+        &self,
+        cursor: Option<String>,
+        limit: u32,
+    ) -> Result<DialogsPage, FfiError> {
+        crate::history::dialogs_page(&self.conn()?, cursor.as_deref(), limit).map_err(map_history)
+    }
+
+    pub fn set_contact_alias(
+        &self,
+        contact_id: String,
+        alias: Option<String>,
+    ) -> Result<(), FfiError> {
+        crate::history::set_contact_alias(&self.conn()?, &contact_id, alias.as_deref())
+            .map_err(map_history)
+    }
+
+    /// Monotonic local read-through of a row actually viewed in this contact;
+    /// returns the durable cursor, does not send a network read receipt.
+    pub fn mark_read(&self, contact_id: String, through_local_id: i64) -> Result<i64, FfiError> {
+        crate::history::mark_read(&self.conn()?, &contact_id, through_local_id).map_err(map_history)
+    }
+
     /// Страница входящих (cursor — seq, 0 = сначала).
     pub fn inbox_page(&self, cursor: i64, limit: u32) -> Result<InboxPage, FfiError> {
         let conn = self.conn()?;
@@ -1141,6 +1216,53 @@ mod tests {
         assert_eq!(page.rows.len(), 1);
         assert_eq!(page.rows[0].message_id_hex, mid);
         assert_eq!(page.rows[0].status, "queued");
+        assert_eq!(
+            c.message_status(mid.clone()).unwrap(),
+            Some(DeliveryState::Queued)
+        );
+        let history = c.history_page(id.clone(), None, 100).unwrap();
+        assert_eq!(history.rows.len(), 1);
+        assert_eq!(history.rows[0].text, text);
+        assert_eq!(history.rows[0].message_id_hex, mid);
+        assert_eq!(history.rows[0].direction, MessageDirection::Outgoing);
+        assert_eq!(history.rows[0].delivery_state, Some(DeliveryState::Queued));
+        c.set_contact_alias(id.clone(), Some("Local peer".into()))
+            .unwrap();
+        assert_eq!(
+            c.mark_read(id.clone(), history.rows[0].local_id).unwrap(),
+            history.rows[0].local_id
+        );
+        let summary = c.dialogs_page(None, 100).unwrap().rows.remove(0);
+        assert_eq!(summary.local_alias.as_deref(), Some("Local peer"));
+        assert_eq!(summary.preview.as_deref(), Some(text));
+        assert!(summary.has_keys && !summary.identity_mismatch);
+        assert_eq!(summary.local_unread, 0);
+        assert_eq!(c.message_status("ff".repeat(16)).unwrap(), None);
+        assert_eq!(c.message_status("bad".into()), Err(FfiError::InvalidInput));
+        assert_eq!(
+            c.history_page(id.clone(), Some(-1), 10),
+            Err(FfiError::InvalidInput)
+        );
+        assert_eq!(
+            c.mark_read(id.clone(), i64::MAX),
+            Err(FfiError::InvalidInput)
+        );
+        assert_eq!(
+            c.dialogs_page(Some("bad cursor".into()), 10),
+            Err(FfiError::InvalidInput)
+        );
+        assert_eq!(
+            c.set_contact_alias(id.clone(), Some("".into())),
+            Err(FfiError::InvalidInput)
+        );
+        drop(c);
+        let c = DmsgClient::open_encrypted(
+            dir.join("core.db").to_string_lossy().into_owned(),
+            vec![19; 32],
+        )
+        .unwrap();
+        assert_eq!(c.history_page(id.clone(), None, 100).unwrap(), history);
+        assert_eq!(c.dialogs_page(None, 100).unwrap().rows[0], summary);
         let raw = std::fs::read(&c.db_path).expect("db bytes");
         assert!(!raw.windows(text.len()).any(|w| w == text.as_bytes()));
         std::fs::remove_dir_all(&dir).ok();

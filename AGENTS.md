@@ -15,7 +15,7 @@
 - Секреты только read-only файлами, не в Git/образ/логи/argv; данные — в volumes (ARCHITECTURE.md §4)
 - Не коммитить `.local/`, `.opencode/` — они в `.gitignore`
 - `53-opendesign/` — разрешённый пользователем дизайн-источник Light/Square; HTML не встраивать в APK, demo/calls не выдавать за working API
-- Единая auth: `dmsg://server/`, signup/login/key-resume, schema5. Не возвращать ENROL/token fallback или old-schema migration; несовместимый remote rollout только отдельным согласованным шагом
+- Единая auth: `dmsg://server/`, wire2, server schema5/core schema6. Не возвращать ENROL/token fallback или old-schema migration; dev DB wipe/несовместимый rollout только по явному разрешению
 - Build/diagnostic tools — clean allowlist environment без credentials; не печатать env. Внешнему disposable Rust harness свой `CARGO_TARGET_DIR`, не перезаписывать workspace host-cdylib/rlib
 - `connectedDebugAndroidTest` удаляет target package/Keystore: только `-PgateInstall=true` (отдельный `.gate`). Рабочую identity не стирать; одноразовые device gates запускать по методам вручную `am instrument`.
 - Kotlin UniFFI bindings не править вручную; генерировать host-cdylib тестом ниже. USB/SSH DirectTCP smoke не выдавать за Android DNS acceptance.

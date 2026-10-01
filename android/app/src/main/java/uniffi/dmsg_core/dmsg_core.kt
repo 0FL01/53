@@ -774,6 +774,16 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
+
+
+
+
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is
 // rather `InterfaceTooLargeException`, caused by too many methods
@@ -813,6 +823,8 @@ fun uniffi_dmsg_core_checksum_method_dmsgclient_contact_request(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_contacts_page(
 ): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_dialogs_page(
+): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_dns_network_changed(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_dns_profile_info(
@@ -823,9 +835,15 @@ fun uniffi_dmsg_core_checksum_method_dmsgclient_dns_stop(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_fetch_dns(
 ): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_history_page(
+): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_inbox_page(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_login_dns(
+): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_mark_read(
+): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_message_status(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_my_contact_qr(
 ): Short
@@ -840,6 +858,8 @@ fun uniffi_dmsg_core_checksum_method_dmsgclient_registration_policy_dns(
 fun uniffi_dmsg_core_checksum_method_dmsgclient_retry_dns(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_send_dns(
+): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_set_contact_alias(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_signup_dns(
 ): Short
@@ -924,6 +944,8 @@ fun uniffi_dmsg_core_fn_method_dmsgclient_contact_request(`ptr`: Pointer,`contac
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_contacts_page(`ptr`: Pointer,`cursor`: RustBuffer.ByValue,`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
+fun uniffi_dmsg_core_fn_method_dmsgclient_dialogs_page(`ptr`: Pointer,`cursor`: RustBuffer.ByValue,`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_dns_network_changed(`ptr`: Pointer,`resolvers`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): Unit
 fun uniffi_dmsg_core_fn_method_dmsgclient_dns_profile_info(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
@@ -934,9 +956,15 @@ fun uniffi_dmsg_core_fn_method_dmsgclient_dns_stop(`ptr`: Pointer,uniffi_out_err
 ): Unit
 fun uniffi_dmsg_core_fn_method_dmsgclient_fetch_dns(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
+fun uniffi_dmsg_core_fn_method_dmsgclient_history_page(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,`beforeLocalId`: RustBuffer.ByValue,`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_inbox_page(`ptr`: Pointer,`cursor`: Long,`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_login_dns(`ptr`: Pointer,`login`: RustBuffer.ByValue,`password`: RustBuffer.ByValue,`expectedDevice`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+fun uniffi_dmsg_core_fn_method_dmsgclient_mark_read(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,`throughLocalId`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Long
+fun uniffi_dmsg_core_fn_method_dmsgclient_message_status(`ptr`: Pointer,`messageIdHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_my_contact_qr(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
@@ -952,6 +980,8 @@ fun uniffi_dmsg_core_fn_method_dmsgclient_retry_dns(`ptr`: Pointer,uniffi_out_er
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_send_dns(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,`text`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
+fun uniffi_dmsg_core_fn_method_dmsgclient_set_contact_alias(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,`alias`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): Unit
 fun uniffi_dmsg_core_fn_method_dmsgclient_signup_dns(`ptr`: Pointer,`login`: RustBuffer.ByValue,`password`: RustBuffer.ByValue,`invitation`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_stop_dns(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
@@ -1094,7 +1124,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_dmsg_core_checksum_func_qr_kind() != 17251.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_dmsg_core_checksum_func_storage_plan() != 1427.toShort()) {
+    if (lib.uniffi_dmsg_core_checksum_func_storage_plan() != 16009.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_account_info() != 20705.toShort()) {
@@ -1124,6 +1154,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_contacts_page() != 10699.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_dialogs_page() != 9533.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_dns_network_changed() != 16849.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1139,10 +1172,19 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_fetch_dns() != 21412.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_history_page() != 17501.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_inbox_page() != 13764.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_login_dns() != 16754.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_mark_read() != 29705.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_message_status() != 54732.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_my_contact_qr() != 65076.toShort()) {
@@ -1164,6 +1206,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_send_dns() != 10275.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_set_contact_alias() != 24315.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_signup_dns() != 8953.toShort()) {
@@ -1639,6 +1684,12 @@ public interface DmsgClientInterface {
     fun `contactsPage`(`cursor`: kotlin.String?, `limit`: kotlin.UInt): ContactsPage
 
     /**
+     * Activity DESC/contact ID ASC, opaque next cursor, limits clamp 1..=100.
+     * Local unread and local times carry no remote receipt/timing semantics.
+     */
+    fun `dialogsPage`(`cursor`: kotlin.String?, `limit`: kotlin.UInt): DialogsPage
+
+    /**
      * Network transitions invalidate sockets even if resolver IPs stayed equal.
      */
     fun `dnsNetworkChanged`(`resolvers`: List<kotlin.String>)
@@ -1652,11 +1703,29 @@ public interface DmsgClientInterface {
     fun `fetchDns`(): FetchReport
 
     /**
+     * Newest-first bounded local timeline; cursor is exclusive and must belong
+     * to this contact. Limits clamp to 1..=100. This call does not mark read.
+     */
+    fun `historyPage`(`contactId`: kotlin.String, `beforeLocalId`: kotlin.Long?, `limit`: kotlin.UInt): HistoryPage
+
+    /**
      * Страница входящих (cursor — seq, 0 = сначала).
      */
     fun `inboxPage`(`cursor`: kotlin.Long, `limit`: kotlin.UInt): InboxPage
 
     fun `loginDns`(`login`: kotlin.String, `password`: kotlin.String, `expectedDevice`: kotlin.String?): LoginOutcome
+
+    /**
+     * Monotonic local read-through of a row actually viewed in this contact;
+     * returns the durable cursor, does not send a network read receipt.
+     */
+    fun `markRead`(`contactId`: kotlin.String, `throughLocalId`: kotlin.Long): kotlin.Long
+
+    /**
+     * Exact persisted outgoing state. None means unknown/incoming-only, never
+     * delivered. Both cases are distinct from malformed hex (InvalidInput).
+     */
+    fun `messageStatus`(`messageIdHex`: kotlin.String): DeliveryState?
 
     /**
      * Own contact QR, available only after authentication.
@@ -1680,6 +1749,8 @@ public interface DmsgClientInterface {
     fun `retryDns`(): RetryReport
 
     fun `sendDns`(`contactId`: kotlin.String, `text`: kotlin.String): kotlin.String
+
+    fun `setContactAlias`(`contactId`: kotlin.String, `alias`: kotlin.String?)
 
     fun `signupDns`(`login`: kotlin.String, `password`: kotlin.String, `invitation`: kotlin.String?): AccountInfo
 
@@ -1918,6 +1989,23 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
 
 
     /**
+     * Activity DESC/contact ID ASC, opaque next cursor, limits clamp 1..=100.
+     * Local unread and local times carry no remote receipt/timing semantics.
+     */
+    @Throws(FfiException::class)override fun `dialogsPage`(`cursor`: kotlin.String?, `limit`: kotlin.UInt): DialogsPage {
+            return FfiConverterTypeDialogsPage.lift(
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_dialogs_page(
+        it, FfiConverterOptionalString.lower(`cursor`),FfiConverterUInt.lower(`limit`),_status)
+}
+    }
+    )
+    }
+
+
+
+    /**
      * Network transitions invalidate sockets even if resolver IPs stayed equal.
      */
     @Throws(FfiException::class)override fun `dnsNetworkChanged`(`resolvers`: List<kotlin.String>)
@@ -1984,6 +2072,23 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
 
 
     /**
+     * Newest-first bounded local timeline; cursor is exclusive and must belong
+     * to this contact. Limits clamp to 1..=100. This call does not mark read.
+     */
+    @Throws(FfiException::class)override fun `historyPage`(`contactId`: kotlin.String, `beforeLocalId`: kotlin.Long?, `limit`: kotlin.UInt): HistoryPage {
+            return FfiConverterTypeHistoryPage.lift(
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_history_page(
+        it, FfiConverterString.lower(`contactId`),FfiConverterOptionalLong.lower(`beforeLocalId`),FfiConverterUInt.lower(`limit`),_status)
+}
+    }
+    )
+    }
+
+
+
+    /**
      * Страница входящих (cursor — seq, 0 = сначала).
      */
     @Throws(FfiException::class)override fun `inboxPage`(`cursor`: kotlin.Long, `limit`: kotlin.UInt): InboxPage {
@@ -2005,6 +2110,40 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
     uniffiRustCallWithError(FfiException) { _status ->
     UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_login_dns(
         it, FfiConverterString.lower(`login`),FfiConverterString.lower(`password`),FfiConverterOptionalString.lower(`expectedDevice`),_status)
+}
+    }
+    )
+    }
+
+
+
+    /**
+     * Monotonic local read-through of a row actually viewed in this contact;
+     * returns the durable cursor, does not send a network read receipt.
+     */
+    @Throws(FfiException::class)override fun `markRead`(`contactId`: kotlin.String, `throughLocalId`: kotlin.Long): kotlin.Long {
+            return FfiConverterLong.lift(
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_mark_read(
+        it, FfiConverterString.lower(`contactId`),FfiConverterLong.lower(`throughLocalId`),_status)
+}
+    }
+    )
+    }
+
+
+
+    /**
+     * Exact persisted outgoing state. None means unknown/incoming-only, never
+     * delivered. Both cases are distinct from malformed hex (InvalidInput).
+     */
+    @Throws(FfiException::class)override fun `messageStatus`(`messageIdHex`: kotlin.String): DeliveryState? {
+            return FfiConverterOptionalTypeDeliveryState.lift(
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_message_status(
+        it, FfiConverterString.lower(`messageIdHex`),_status)
 }
     }
     )
@@ -2109,6 +2248,18 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
     }
     )
     }
+
+
+
+    @Throws(FfiException::class)override fun `setContactAlias`(`contactId`: kotlin.String, `alias`: kotlin.String?)
+        =
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_set_contact_alias(
+        it, FfiConverterString.lower(`contactId`),FfiConverterOptionalString.lower(`alias`),_status)
+}
+    }
+
 
 
 
@@ -2358,6 +2509,110 @@ public object FfiConverterTypeContactsPage: FfiConverterRustBuffer<ContactsPage>
 
 
 /**
+ * Every known contact appears, including requested/blocked and empty dialogs.
+ * Preview is at most 160 Unicode scalar values from the latest local history
+ * row. None preview/time means no messages; local_alias None means use the ID.
+ */
+data class DialogSummary (
+    var `contactId`: kotlin.String,
+    var `localAlias`: kotlin.String?,
+    var `preview`: kotlin.String?,
+    var `lastLocalTimestampMs`: kotlin.Long?,
+    var `localUnread`: kotlin.ULong,
+    var `readCursor`: kotlin.Long,
+    var `hasKeys`: kotlin.Boolean,
+    var `identityMismatch`: kotlin.Boolean,
+    var `state`: kotlin.String
+) {
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDialogSummary: FfiConverterRustBuffer<DialogSummary> {
+    override fun read(buf: ByteBuffer): DialogSummary {
+        return DialogSummary(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalLong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterLong.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: DialogSummary) = (
+            FfiConverterString.allocationSize(value.`contactId`) +
+            FfiConverterOptionalString.allocationSize(value.`localAlias`) +
+            FfiConverterOptionalString.allocationSize(value.`preview`) +
+            FfiConverterOptionalLong.allocationSize(value.`lastLocalTimestampMs`) +
+            FfiConverterULong.allocationSize(value.`localUnread`) +
+            FfiConverterLong.allocationSize(value.`readCursor`) +
+            FfiConverterBoolean.allocationSize(value.`hasKeys`) +
+            FfiConverterBoolean.allocationSize(value.`identityMismatch`) +
+            FfiConverterString.allocationSize(value.`state`)
+    )
+
+    override fun write(value: DialogSummary, buf: ByteBuffer) {
+            FfiConverterString.write(value.`contactId`, buf)
+            FfiConverterOptionalString.write(value.`localAlias`, buf)
+            FfiConverterOptionalString.write(value.`preview`, buf)
+            FfiConverterOptionalLong.write(value.`lastLocalTimestampMs`, buf)
+            FfiConverterULong.write(value.`localUnread`, buf)
+            FfiConverterLong.write(value.`readCursor`, buf)
+            FfiConverterBoolean.write(value.`hasKeys`, buf)
+            FfiConverterBoolean.write(value.`identityMismatch`, buf)
+            FfiConverterString.write(value.`state`, buf)
+    }
+}
+
+
+
+/**
+ * Keyset ordering: local activity DESC, contact ID ASC to break equal times.
+ * Activity is max(contact creation time, committed message times); alias/read/
+ * ACK changes do not reorder dialogs. Cursors are opaque canonical versioned
+ * tokens. Each call is a fresh SQLite snapshot: restart at None after activity
+ * changes, rather than treating a paginated list as a frozen live snapshot.
+ */
+data class DialogsPage (
+    var `rows`: List<DialogSummary>,
+    var `nextCursor`: kotlin.String?
+) {
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDialogsPage: FfiConverterRustBuffer<DialogsPage> {
+    override fun read(buf: ByteBuffer): DialogsPage {
+        return DialogsPage(
+            FfiConverterSequenceTypeDialogSummary.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: DialogsPage) = (
+            FfiConverterSequenceTypeDialogSummary.allocationSize(value.`rows`) +
+            FfiConverterOptionalString.allocationSize(value.`nextCursor`)
+    )
+
+    override fun write(value: DialogsPage, buf: ByteBuffer) {
+            FfiConverterSequenceTypeDialogSummary.write(value.`rows`, buf)
+            FfiConverterOptionalString.write(value.`nextCursor`, buf)
+    }
+}
+
+
+
+/**
  * Bounded public metadata for the configured immutable trust anchors.
  */
 data class DnsProfileInfo (
@@ -2446,6 +2701,98 @@ public object FfiConverterTypeFetchReport: FfiConverterRustBuffer<FetchReport> {
             FfiConverterULong.write(value.`skippedUndecryptable`, buf)
             FfiConverterULong.write(value.`skippedMismatch`, buf)
             FfiConverterULong.write(value.`cursor`, buf)
+    }
+}
+
+
+
+/**
+ * Positive durable local ID orders the timeline. Incoming delivery_state is
+ * always None; outgoing status is a persisted server-ACK fact (or Queued).
+ */
+data class HistoryMessage (
+    var `localId`: kotlin.Long,
+    var `messageIdHex`: kotlin.String,
+    var `contactId`: kotlin.String,
+    var `direction`: MessageDirection,
+    var `text`: kotlin.String,
+    var `localTimestampMs`: kotlin.Long,
+    var `deliveryState`: DeliveryState?
+) {
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeHistoryMessage: FfiConverterRustBuffer<HistoryMessage> {
+    override fun read(buf: ByteBuffer): HistoryMessage {
+        return HistoryMessage(
+            FfiConverterLong.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterTypeMessageDirection.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterLong.read(buf),
+            FfiConverterOptionalTypeDeliveryState.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: HistoryMessage) = (
+            FfiConverterLong.allocationSize(value.`localId`) +
+            FfiConverterString.allocationSize(value.`messageIdHex`) +
+            FfiConverterString.allocationSize(value.`contactId`) +
+            FfiConverterTypeMessageDirection.allocationSize(value.`direction`) +
+            FfiConverterString.allocationSize(value.`text`) +
+            FfiConverterLong.allocationSize(value.`localTimestampMs`) +
+            FfiConverterOptionalTypeDeliveryState.allocationSize(value.`deliveryState`)
+    )
+
+    override fun write(value: HistoryMessage, buf: ByteBuffer) {
+            FfiConverterLong.write(value.`localId`, buf)
+            FfiConverterString.write(value.`messageIdHex`, buf)
+            FfiConverterString.write(value.`contactId`, buf)
+            FfiConverterTypeMessageDirection.write(value.`direction`, buf)
+            FfiConverterString.write(value.`text`, buf)
+            FfiConverterLong.write(value.`localTimestampMs`, buf)
+            FfiConverterOptionalTypeDeliveryState.write(value.`deliveryState`, buf)
+    }
+}
+
+
+
+/**
+ * Newest first (local_id DESC), exclusive next_before_local_id. Reverse rows
+ * for chronological rendering; prepend reversed older pages. None = exhausted.
+ */
+data class HistoryPage (
+    var `rows`: List<HistoryMessage>,
+    var `nextBeforeLocalId`: kotlin.Long?
+) {
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeHistoryPage: FfiConverterRustBuffer<HistoryPage> {
+    override fun read(buf: ByteBuffer): HistoryPage {
+        return HistoryPage(
+            FfiConverterSequenceTypeHistoryMessage.read(buf),
+            FfiConverterOptionalLong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: HistoryPage) = (
+            FfiConverterSequenceTypeHistoryMessage.allocationSize(value.`rows`) +
+            FfiConverterOptionalLong.allocationSize(value.`nextBeforeLocalId`)
+    )
+
+    override fun write(value: HistoryPage, buf: ByteBuffer) {
+            FfiConverterSequenceTypeHistoryMessage.write(value.`rows`, buf)
+            FfiConverterOptionalLong.write(value.`nextBeforeLocalId`, buf)
     }
 }
 
@@ -2717,6 +3064,37 @@ public object FfiConverterTypeRetryReport: FfiConverterRustBuffer<RetryReport> {
             FfiConverterULong.write(value.`skipped`, buf)
     }
 }
+
+
+
+
+enum class DeliveryState {
+
+    QUEUED,
+    ACCEPTED,
+    DELIVERED;
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDeliveryState: FfiConverterRustBuffer<DeliveryState> {
+    override fun read(buf: ByteBuffer) = try {
+        DeliveryState.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: DeliveryState) = 4UL
+
+    override fun write(value: DeliveryState, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
 
 
 
@@ -3309,6 +3687,36 @@ public object FfiConverterTypeLoginOutcome : FfiConverterRustBuffer<LoginOutcome
 
 
 
+
+enum class MessageDirection {
+
+    INCOMING,
+    OUTGOING;
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMessageDirection: FfiConverterRustBuffer<MessageDirection> {
+    override fun read(buf: ByteBuffer) = try {
+        MessageDirection.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: MessageDirection) = 4UL
+
+    override fun write(value: MessageDirection, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
 /**
  * QR types understood by the scanner: public server profile or contact.
  */
@@ -3542,6 +3950,38 @@ public object FfiConverterOptionalTypeDnsProfileInfo: FfiConverterRustBuffer<Dns
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeDeliveryState: FfiConverterRustBuffer<DeliveryState?> {
+    override fun read(buf: ByteBuffer): DeliveryState? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeDeliveryState.read(buf)
+    }
+
+    override fun allocationSize(value: DeliveryState?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeDeliveryState.allocationSize(value)
+        }
+    }
+
+    override fun write(value: DeliveryState?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeDeliveryState.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.String>> {
     override fun read(buf: ByteBuffer): List<kotlin.String> {
         val len = buf.getInt()
@@ -3588,6 +4028,62 @@ public object FfiConverterSequenceTypeContactRow: FfiConverterRustBuffer<List<Co
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeContactRow.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeDialogSummary: FfiConverterRustBuffer<List<DialogSummary>> {
+    override fun read(buf: ByteBuffer): List<DialogSummary> {
+        val len = buf.getInt()
+        return List<DialogSummary>(len) {
+            FfiConverterTypeDialogSummary.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<DialogSummary>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeDialogSummary.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<DialogSummary>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeDialogSummary.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeHistoryMessage: FfiConverterRustBuffer<List<HistoryMessage>> {
+    override fun read(buf: ByteBuffer): List<HistoryMessage> {
+        val len = buf.getInt()
+        return List<HistoryMessage>(len) {
+            FfiConverterTypeHistoryMessage.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<HistoryMessage>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeHistoryMessage.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<HistoryMessage>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeHistoryMessage.write(it, buf)
         }
     }
 }
@@ -3704,7 +4200,7 @@ public object FfiConverterSequenceTypeReceivedMsg: FfiConverterRustBuffer<List<R
         /**
          * Решение хранилища при старте по наличию файлов (чистая функция —
          * покрытие unit-тестом здесь, зеркало в Kotlin вызывает фасад).
-         * MigrateLegacy means sealing a supported plain v5 store, not schema/auth compatibility.
+         * MigrateLegacy means sealing a supported plain current-schema store, not schema/auth compatibility.
          */ fun `storagePlan`(`hasLegacyDb`: kotlin.Boolean, `hasWrappedDb`: kotlin.Boolean): StoragePlan {
             return FfiConverterTypeStoragePlan.lift(
     uniffiRustCall() { _status ->

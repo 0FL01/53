@@ -114,20 +114,20 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Source: пользователь «фронтенд натянуть … 53-opendesign … если элементов не хватает, доделаешь», принятый frontend-план, шаг 1
   - Acceptance: prototype/index и handoff отражают public code/QR → preview → login/signup/conditional invite → dialogs, replacement-confirm и реальные ошибки; нет старого invite-enrol. Light/Square сохранён, будущие media остаются явно demo и скрыты в текущем контракте
   - Primary evidence: воспроизводимые HTML state/geometry checks и просмотр контрольных screenshots
-  - Status: pending
-  - Evidence:
+  - Status: verified
+  - Evidence: byte-identical prototype/index; auth/current-text 492 geometry +82 functional checks, retained future-call330 geometry +58 checks, 0 JS errors/network requests. 360px/200% signup/replace screenshots viewed. Exact source/results — `53-opendesign/QA.md`
 - R18: реальные данные текстового frontend
   - Source: принятый frontend-план, шаг 2
   - Acceptance: core владеет защищённой persistent историей обеих сторон; bounded per-contact pages, точный status по message ID, summaries/локальный alias/time/unread/read cursor. History/outbox/ratchet сохраняются атомарно; retries не создают историю/новый ciphertext. Local time не выдаётся за sender time, unread не read receipt; нет plaintext history в Prefs
   - Primary evidence: core restart/encryption/paging/status/dedup/alias/read-cursor tests и generated UniFFI
-  - Status: pending
-  - Evidence:
+  - Status: verified
+  - Evidence: fresh core schema6; 54 unit +9 live integration +gated binding test +1 example =65 all-targets green, explicit host cdylib/gen_bindings green. Encrypted history/alias/restart/keyset/read cursor/exact monotonic status/rollback ratchet+outbox+inbox/no ACK/dedup tested; API — `crates/core/R18_API.md`
 - R19: нативный Light/Square frontend
   - Source: принятый frontend-план, шаг 3; `53-opendesign/DESIGN.md`
   - Acceptance: native Kotlin/AppCompat/XML onboarding/dialogs/chat/contact/my QR/connection/outbox/storage соответствуют визуальному контракту; реальные данные/CTA, draft сохранён при ошибке, pending guards, typed human errors/connection state, STOP до trust confirm. App-owned radius/elevation0, light theme, 48dp touch, insets/IME и крупный шрифт; без WebView/Compose migration/fake metadata/call buttons
   - Primary evidence: JVM + APK builds и actual UI gates/screenshots на disposable `.gate`
-  - Status: pending
-  - Evidence:
+  - Status: in_progress
+  - Evidence: native screens/facade/typed connection state implemented, agent35 JVM/debug/release/test APK compile green. Coordinator ABI rebuild and physical visual/functional gates pending; not runtime acceptance yet
 - R20: проверенный текстовый frontend и коммиты
   - Source: принятый frontend-план, шаг 4 и прежняя инструкция итеративных коммитов
   - Acceptance: host/workspace/native/JVM/APK gates green, physical real facade проверяет обе стороны истории/статусы/reopen/queue/identity-change, narrow/large-text/keyboard; intended правки закоммичены. Fixture skip не PASS, main identity не reset
@@ -188,6 +188,7 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 - 2026-09-29: trait Transport в K1 (direct-TCP за ним); UniFFI только в K4; пагинация — требование сейчас; always-on FGS; contact-QR тем же конвертом; подмена = стоп+confirm; Olm строго K3; identity 0600+шов; ARCH > Hazel-Signal при конфликте
 
 ## Checkpoint History
+- 2026-10-01: R17 browser auth/current-data and retained call regression green; R18 fresh6 encrypted UI API and transactional history/status implemented, coordinator65 core all-targets and explicit generated Kotlin green. R19 native frontend implemented/compile35 JVM; native ABI rebuild/physical/R21 rollout next
 - 2026-09-30: unified auth реализована/проверена по фазам `4d3e0ab`/`fba3916`/`1c1ef83`/`57ddbc7`/`7707700`; workspace161/core all-targets59/JVM23, regenerated Kotlin, arm64 native/debug/release/gate builds green. Local physical DNS10 final passes, host peer identity STOP/confirm retains delivery; remote untouched. Занятый signup/full-quota retry regressions RED→GREEN. External harness stale Cargo artifact collision исправлен package clean без подгонки tests; log incident отдельно Current State
 - 2026-09-30: новый account-auth план frozen R12–R16; старый direct-invite UX убран из действующих требований ARCH/M2 и заменён единым публичным кодом/QR + login/register. Protocol/runbook описывают действующий legacy wire/CLI отдельно, старый P3 Goal помечен архивным без активных задач. Сверены формы/два режима/secret-free profile/migration/replace и ссылки на tracked docs; `git diff --check` green. Только семь Markdown-документов, код/deployment/аккаунты/данные и чужие изменения не менялись
 - 2026-09-30: committed already-prepared Android x86_64 build-target support after actual API26 cross-build/test-executable linking and 16KB ELF inspection. AOSP/API37-16KB AVDs prepared but not launched; no emulator functional PASS claimed. User-requested pause remains in effect, not a new runtime stage.

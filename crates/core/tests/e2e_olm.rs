@@ -1,5 +1,6 @@
 //! Actual v2 live-server E2E, durable retry/dedup, and peer replacement gates.
 mod support;
+use dmsg_core::history::{DeliveryState, MessageDirection};
 use dmsg_core::{contacts, Core, OlmError};
 use support::*;
 fn qr(core: &Core) -> String {
@@ -32,6 +33,11 @@ async fn two_cores_talk_e2e_through_live_msgd() {
         .await
         .unwrap();
     let saved = a.outbox_ciphertext(&mid).unwrap();
+    let mid_hex = mid.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    assert_eq!(
+        a.message_status(&mid_hex).unwrap(),
+        Some(DeliveryState::Accepted)
+    );
     assert!(!saved.windows(9).any(|w| w == b"hello bob"));
     let r = b.fetch_and_decrypt(&mut tb).await.unwrap();
     assert_eq!(r.received.len(), 1);
@@ -48,6 +54,11 @@ async fn two_cores_talk_e2e_through_live_msgd() {
     assert_eq!(b.on_reconnect(&mut tb).await.unwrap(), 15);
     let stats = a.retry_queued(&mut ta).await.unwrap();
     assert_eq!((stats.resent, stats.delivered), (1, 1));
+    assert_eq!(
+        a.message_status(&mid_hex).unwrap(),
+        Some(DeliveryState::Delivered)
+    );
+    assert_eq!(b.message_status(&mid_hex).unwrap(), None);
     assert_eq!(saved, a.outbox_ciphertext(&mid).unwrap());
     let empty = b.fetch_and_decrypt(&mut tb).await.unwrap();
     assert!(empty.received.is_empty());
@@ -74,6 +85,36 @@ async fn two_cores_talk_e2e_through_live_msgd() {
             .received
             .is_empty());
     }
+    let ah = a.history_page(&eb.contact_id, None, 100).unwrap();
+    let bh = b.history_page(&ea.contact_id, None, 100).unwrap();
+    for page in [&ah, &bh] {
+        assert_eq!(page.rows.len(), 4);
+        assert_eq!(
+            page.rows
+                .iter()
+                .map(|r| r.text.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "after forward gap",
+                "after reverse gap",
+                "hi alice",
+                "hello bob"
+            ]
+        );
+        assert!(page
+            .rows
+            .windows(2)
+            .all(|pair| pair[0].local_id > pair[1].local_id));
+        assert!(page.rows.iter().all(|r| r.local_timestamp_ms > 0));
+    }
+    assert_eq!(ah.rows[0].direction, MessageDirection::Incoming);
+    assert_eq!(bh.rows[0].direction, MessageDirection::Outgoing);
+    assert_eq!(a.dialogs_page(None, 100).unwrap().rows[0].local_unread, 2);
+    assert_eq!(b.dialogs_page(None, 100).unwrap().rows[0].local_unread, 2);
+    a.set_contact_alias(&eb.contact_id, Some("Local Bobby"))
+        .unwrap();
+    a.mark_read(&eb.contact_id, ah.rows[2].local_id).unwrap();
+    assert_eq!(a.dialogs_page(None, 100).unwrap().rows[0].local_unread, 1);
     drop(a);
     drop(b);
     // Rust-only facade seam mirrors DNS dispatch without exporting DirectTCP.
@@ -83,6 +124,23 @@ async fn two_cores_talk_e2e_through_live_msgd() {
     tokio::task::spawn_blocking(move || {
         let a = dmsg_core::ffi::DmsgClient::open(da.to_string_lossy().into());
         let b = dmsg_core::ffi::DmsgClient::open(db.to_string_lossy().into());
+        let summary = a.dialogs_page(None, 100).unwrap().rows.remove(0);
+        assert_eq!(summary.local_alias.as_deref(), Some("Local Bobby"));
+        assert_eq!(summary.local_unread, 1);
+        assert_eq!(
+            a.history_page(eb.contact_id.clone(), None, 100)
+                .unwrap()
+                .rows
+                .len(),
+            4
+        );
+        assert_eq!(
+            b.history_page(ea.contact_id.clone(), None, 100)
+                .unwrap()
+                .rows
+                .len(),
+            4
+        );
         for _ in 0..2 {
             assert!(
                 a.reconnect(addr.clone(), key.clone(), domain.clone())
@@ -121,7 +179,10 @@ async fn two_cores_talk_e2e_through_live_msgd() {
             .unwrap()
             .received
             .is_empty());
-        assert_eq!(a.account_info().unwrap().contact_id, Some(ea.contact_id));
+        assert_eq!(
+            a.account_info().unwrap().contact_id,
+            Some(ea.contact_id.clone())
+        );
         drop(a);
         drop(b);
         let a =
@@ -132,14 +193,19 @@ async fn two_cores_talk_e2e_through_live_msgd() {
                 .unwrap();
         a.reconnect(addr.clone(), key.clone(), domain.clone())
             .unwrap();
-        a.send_text(
-            addr.clone(),
-            key.clone(),
-            domain.clone(),
-            eb.contact_id.clone(),
-            "sealed ffi message".into(),
-        )
-        .unwrap();
+        let sealed_mid = a
+            .send_text(
+                addr.clone(),
+                key.clone(),
+                domain.clone(),
+                eb.contact_id.clone(),
+                "sealed ffi message".into(),
+            )
+            .unwrap();
+        assert_eq!(
+            a.message_status(sealed_mid.clone()).unwrap(),
+            Some(DeliveryState::Accepted)
+        );
         assert_eq!(
             b.fetch(addr.clone(), key.clone(), domain.clone())
                 .unwrap()
@@ -159,6 +225,10 @@ async fn two_cores_talk_e2e_through_live_msgd() {
             .rows
             .iter()
             .any(|r| r.text == "sealed ffi message"));
+        assert_eq!(
+            a.message_status(sealed_mid).unwrap(),
+            Some(DeliveryState::Delivered)
+        );
         let count = a.outbox_page(0, 100).unwrap().rows.len();
         assert!(matches!(
             a.send_text(
@@ -183,6 +253,10 @@ async fn two_cores_talk_e2e_through_live_msgd() {
                 "offline-to-online".into(),
             )
             .unwrap();
+        assert_eq!(
+            a.message_status(mid.clone()).unwrap(),
+            Some(DeliveryState::Queued)
+        );
         let ciphertext = || {
             let conn = dmsg_core::store::open_encrypted(&da, &[19; 32]).unwrap();
             dmsg_core::store::outbox_queued(&conn, 0, 100)
@@ -209,6 +283,10 @@ async fn two_cores_talk_e2e_through_live_msgd() {
                 >= 1
         );
         assert_eq!(before, ciphertext());
+        assert_eq!(
+            a.message_status(mid.clone()).unwrap(),
+            Some(DeliveryState::Accepted)
+        );
         let r = b.fetch(addr.clone(), key.clone(), domain.clone()).unwrap();
         assert_eq!(r.received.len(), 1);
         assert_eq!(r.received[0].message_id_hex, mid);
@@ -217,6 +295,64 @@ async fn two_cores_talk_e2e_through_live_msgd() {
             .unwrap()
             .received
             .is_empty());
+        a.retry_queued(addr.clone(), key.clone(), domain.clone())
+            .unwrap();
+        assert_eq!(
+            a.message_status(mid.clone()).unwrap(),
+            Some(DeliveryState::Delivered)
+        );
+        assert_eq!(b.message_status(mid).unwrap(), None);
+        drop(a);
+        drop(b);
+        let a =
+            dmsg_core::ffi::DmsgClient::open_encrypted(da.to_string_lossy().into(), vec![19; 32])
+                .unwrap();
+        let b =
+            dmsg_core::ffi::DmsgClient::open_encrypted(db.to_string_lossy().into(), vec![20; 32])
+                .unwrap();
+        let ah = a.history_page(eb.contact_id.clone(), None, 100).unwrap();
+        let bh = b.history_page(ea.contact_id.clone(), None, 100).unwrap();
+        assert_eq!((ah.rows.len(), bh.rows.len()), (7, 7));
+        assert_eq!(ah.rows[0].text, "offline-to-online");
+        assert_eq!(bh.rows[0].text, "offline-to-online");
+        assert_eq!(
+            ah.rows
+                .iter()
+                .filter(|r| r.direction == MessageDirection::Incoming)
+                .count(),
+            2
+        );
+        assert_eq!(
+            bh.rows
+                .iter()
+                .filter(|r| r.direction == MessageDirection::Outgoing)
+                .count(),
+            2
+        );
+        for path in [&da, &db] {
+            for file in [
+                path.clone(),
+                std::path::PathBuf::from(format!("{}-wal", path.display())),
+            ] {
+                if let Ok(bytes) = std::fs::read(file) {
+                    for secret in [
+                        "hello bob",
+                        "hi alice",
+                        "after reverse gap",
+                        "after forward gap",
+                        "ffi roundtrip",
+                        "sealed ffi message",
+                        "offline-to-online",
+                        "Local Bobby",
+                    ] {
+                        assert!(
+                            !bytes.windows(secret.len()).any(|w| w == secret.as_bytes()),
+                            "plaintext text or alias at rest"
+                        );
+                    }
+                }
+            }
+        }
         assert!(
             dmsg_core::ffi::DmsgClient::open(da.to_string_lossy().into())
                 .account_info()
@@ -323,6 +459,15 @@ async fn replacement_warns_two_peers_retains_message_and_delivers_once_after_con
     assert_eq!(warning.skipped_mismatch, 1);
     assert_eq!(warning.skipped_unknown, 0);
     assert_eq!(
+        p.history_page(&old_account.contact_id, None, 100)
+            .unwrap()
+            .rows
+            .len(),
+        1,
+        "unconfirmed replacement cannot enter history"
+    );
+    assert!(p.dialogs_page(None, 100).unwrap().rows[0].identity_mismatch);
+    assert_eq!(
         before,
         dmsg_core::store::load_session(
             &dmsg_core::store::open(&p_db).unwrap(),
@@ -370,6 +515,13 @@ async fn replacement_warns_two_peers_retains_message_and_delivers_once_after_con
     let r = p.fetch_and_decrypt(&mut pt).await.unwrap();
     assert_eq!(r.received.len(), 1);
     assert_eq!(r.received[0].text, "retained until confirm");
+    assert_eq!(
+        p.history_page(&old_account.contact_id, None, 100)
+            .unwrap()
+            .rows
+            .len(),
+        2
+    );
     assert!(p
         .fetch_and_decrypt(&mut pt)
         .await

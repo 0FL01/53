@@ -15,7 +15,7 @@
 //!   COUNT после upload — refill-сигнал сервера.
 //!
 //! Пиклы Account/Session сериализуются через store; encrypted-open шифрует
-//! both columns before SQLite; the internal plain harness uses the same v5 schema.
+//! both columns before SQLite; the internal plain harness uses the same current schema.
 
 use dmsg_protocol::{
     mailbox as mp, ERR_BAD, ERR_BUSY, ERR_NO_PREKEY, ERR_QUOTA, ERR_REVOKED, OP_CLAIM, OP_COUNT,
