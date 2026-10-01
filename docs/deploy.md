@@ -8,6 +8,14 @@
 
 **2026-10-01 разрешённый fresh dev rollout выполнен:** remote healthy/schema5, policy `invite_only`; actual recursive Android↔native signup/resume/E2E/retry/trust gates green. Старые16 dev users/devices потеряны намеренно после backup. Основной Android package/Keystore не стирали/не обновляли: physical acceptance только `.gate`.
 
+Позднее main rollout R22 выполнен после отдельного явного разрешения dev reset:
+branding `install -r` сохранил несовместимую local schema0 и показал Store. Scoped
+main `pm clear` → fresh6/новая identity → actual UI signup/reopen/recursive messages
+и persistent Delivered verified, один main53 оставлен рабочим. Не менять PRAGMA и
+не добавлять migration/automatic wipe ради несовместимого dev state. Проверяемый
+installer — `android/dev-install.py`, main opt-in gates — `android/AUTH_GATES.md`;
+server schema5/pins/tunnel при этой коррекции не менялись.
+
 - Backup `snap-1790845865`: schema4, DB118784 bytes, blobs0, integrity ok; independent protected DB/source/Compose/env/secrets archive и rollback image `dmsg53-msgd:pre-r21-schema4-1790845865` вне wipe targets.
 - Source export `7f3fcaa0136a4dbfb6af904c3d9c0f969d50a5f0`, locked Docker workspace fix `a6d21e3`; new msgd image `sha256:e69dfe5b59b7ef7d5510076a5ed35f8ed4f4f686adde08b525e666e226c28ec4`, promoted `dmsg53-msgd:s1`.
 - Carrier reused unchanged: `sha256:bb6243409d1909f3250e289052ade0b2f6d5912961c3d2c87f52afdef0152e73`. Joint recreate 09:18:15–16 UTC; secret bytes/ro mounts, pins, env/topology/static IP/volumes/nft/original tunnel unchanged.

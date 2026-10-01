@@ -18,7 +18,7 @@
 - `53-opendesign/` — разрешённый пользователем дизайн-источник Light/Square; HTML не встраивать в APK, demo/calls не выдавать за working API
 - Единая auth: `dmsg://server/`, wire2, server schema5/core schema6. Не возвращать ENROL/token fallback или old-schema migration; dev DB wipe/несовместимый rollout только по явному разрешению
 - Build/diagnostic tools — clean allowlist environment без credentials; не печатать env. Внешнему disposable Rust harness свой `CARGO_TARGET_DIR`, не перезаписывать workspace host-cdylib/rlib
-- `connectedDebugAndroidTest` удаляет target package/Keystore: только `-PgateInstall=true` (отдельный `.gate`). Рабочую identity не стирать; одноразовые device gates запускать по методам вручную `am instrument`.
+- `connectedDebugAndroidTest` удаляет target package/Keystore: только `-PgateInstall=true` (отдельный `.gate`). Main dev reset допустим по явному разрешению; остальные identity сохранять. Device gates вручную по методам `am instrument`, не считать label-only install application acceptance.
 - Kotlin UniFFI bindings не править вручную; генерировать host-cdylib тестом ниже. USB/SSH DirectTCP smoke не выдавать за Android DNS acceptance.
 
 ## Verify
@@ -27,6 +27,7 @@
 - `cargo build -p dmsg-core && DMSG_GEN_BINDINGS=1 cargo test -p dmsg-core --test gen_bindings` — перегенерация bindings
 - `ANDROID_NDK_HOME=<NDK r28+> sh android/build-native.sh` — arm64 native; бинарники только в build/, clean env без credentials
 - Из `android/`: `ANDROID_HOME="$HOME/Android/Sdk" ANDROID_SDK_ROOT="$HOME/Android/Sdk" ./gradlew testDebugUnitTest assembleDebug assembleRelease` — сборки и JVM; runtime gates отдельно
+- `python3 android/dev-install.py --serial "$MAIN_SERIAL" [--reset-data]` — main dev install/startup; reset только с разрешением, DNS/onboarding отдельно по `android/AUTH_GATES.md`
 - Транспортные проверки — из закреплённой ревизии по её докам, не изобретать команды
 
 ## Docs

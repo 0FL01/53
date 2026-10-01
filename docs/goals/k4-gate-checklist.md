@@ -32,6 +32,13 @@ Auth/text outcomes проверены local и теперь на fresh remote ч
 - Backup `snap-1790845865` schema4/integrity ok + protected independent backup/old image; authorised loss16 dev users/devices. Только dmsg53 DB/WAL/SHM и empty blobs wiped, joint recreate 09:18:15–16 UTC: healthy/schema5/invite_only. Pins/env/topology/nft/original tunnel unchanged; deployment — `docs/deploy.md`. После smoke3 disposable accounts/5 devices/2 retired, send_fail/mbox_err0.
 - Cleanup: `.gate` cleared/force-stopped, 66 local private fixture/log/key/DB files removed, peer stopped, font restored; main UID/version/install/update unchanged. 16 private screenshots вне Git. Не заявлены long Doze/second physical/no-GMS/16KB runtime/optical QR/permanent signing/media. Прежний credential-log incident требует внешней rotation; новых dumps в этой итерации нет.
 
+### Main dev rollout correction, 2026-10-01 (R22)
+
+- RED: branding install retained nonempty main schema0; actual Store screen. Label/icon PASS did not establish working app.
+- Explicit user-approved main `pm clear` removed old DB/history/Keystore identity; no schema spoof/migration/automatic wipe. `dev-install.py` rejects this known startup failure without reset, GREEN after explicit reset and again without reset after auth.
+- Main `org.dmsg.client`, current `53.apk`, actual UI onboarding/code/preview/signup and fresh6, production recursive DNS peer both directions receive1 then0/all skips0/equality; exact Accepted→Delivered, no duplicate send/history, new-process reopen/account/history retained. **4 selected main methods/5 passes/0 skips**, `android/AUTH_GATES.md`.
+- JVM35/release/test/export green, current launcher check; one main53, test package/private fixtures/invites/peer keys cleaned, dev owner0400 credentials retained outside Git. Main screenshot viewed: Dialogs/«Проверка DNS»/reply preview, no Store. FGS remains explicitly off, not a network failure. Server healthy5/pins/tunnel unchanged. Earlier main-unchanged statements are historical pre-R22 evidence.
+
 ### Прежнее evidence: unified auth, 2026-09-30
 
 - Rust clean-env msgd build + workspace: **161 passed, 0 failed**; native loopback fixture default ignored отдельно. Core all-targets59, protocol40, server62; live two-peer replacement: STOP/retain до explicit confirm, delivery1 then0, byte-identical retry. Old schema/wire reject без мутации; signup/CAS races/rollback/backup и full-quota dedup green.

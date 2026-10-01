@@ -25,3 +25,12 @@ all locale labels `53`; manual `BrandingTest` on API35 passed (1/0 skips).
 Main update used `adb install -r`: UID/first-install and DB/wrapped-key bytes
 unchanged. Removed only `org.dmsg.client.gate`, `.gate.test`, `.test`;
 the sole remaining application is `org.dmsg.client` (`0.4.1-53`).
+
+That branding-only check was not a successful app rollout: preserving the old
+nonempty schema0 produced Store at startup. After explicit development-reset
+permission, R22 cleared main data, ran real main onboarding and recursive DNS
+messages/reopen/Delivered gates, and left the main account/history working.
+From the repository root: `python3 android/dev-install.py --serial "$MAIN_SERIAL" [--reset-data]`;
+no automatic reset inside the APK.
+Exact workflow/evidence: `../AUTH_GATES.md` main-dev section. Label-only installation
+must not be claimed as application acceptance.

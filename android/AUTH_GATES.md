@@ -17,8 +17,64 @@ listed environment. Do not print inherited environment or provider credentials.
 
 ## Operator fixtures
 
-Runtime gates require the separate `org.dmsg.client.gate` package and explicit
-selection of one `DeviceGatesTest#method`. Never clear/reinstall the main package.
+### Explicit main development rollout (R22)
+
+Main data loss is allowed only with explicit user consent. `adb install -r`
+preserves an incompatible DB; a correct icon/label is not application acceptance.
+The current APK rejects unsupported schemas without migration or automatic wipe.
+From the repository root, with the normal clean SDK environment:
+
+```sh
+python3 android/dev-install.py --serial "$MAIN_SERIAL" --reset-data
+```
+
+This builds `53.apk`, verifies its exact main package/label, updates it, explicitly
+clears only `org.dmsg.client` DB/history/Keystore identity, removes the three known
+test duplicates, and launches/verifies Connection/Authentication/Dialogs. Without
+`--reset-data` it retains data and refuses a Store startup error rather than
+declaring label-only success. `--no-build` installs the existing root artifact.
+Startup readiness alone does not prove DNS signup/messages.
+
+`MainDevRolloutTest` is a separate, non-resetting manual main acceptance. Require
+main target, `allowMainDevReset=true` and one exact class/method; wrong explicit
+targets/missing consent fail before mutation. It is not part of the ordinary
+`.gate` suite. Compile with `assembleDebugAndroidTest` without `gateInstall`,
+install only the main test APK, never run connected tests against main:
+
+```sh
+adb -s "$MAIN_SERIAL" shell am instrument -w -r \
+  -e allowMainDevReset true -e class \
+  'org.dmsg.client.MainDevRolloutTest#METHOD' \
+  org.dmsg.client.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+Sequential methods (each requires its predecessor's private outputs):
+
+| Method | App-private input | Acceptance |
+|---|---|---|
+| `freshMainOnboardingAndDnsSignup` | `files/dev-main-auth.json`, exactly `serverCode/login/password/invitation`, owner0400 | Real UI preview/accept/policy/signup/dialogs, schema6, cleared secrets, recreate/resume/key-only DNS; exports own contact QR/resolvers/proof |
+| `acceptNativePeerAndReceive` | `dev-native-contact.qr`, `dev-incoming.txt`, owner0400/0600 | Actual peer QR/accept/alias, recursive receive1 then0/all skips0, exact protected history |
+| `sendAndVerifyMainHistory` | `dev-outgoing.txt` plus previous peer/history fixtures | Actual chat send/double-submit→1 row/retry, exact Accepted before native ACK |
+| `reopenedMainHasDeliveredHistory` | Previous outputs after native receive/ACK | New process/key resume, persistent Delivered, incoming1/outgoing1 rendered/recreated, real main dialogs/no Store |
+
+Do not put fixture contents in arguments, logs or Git. Auth input is consumed;
+other `dev-*` proof/QR/message files are removed after acceptance, preserving main
+account/profile/history. Remove only `.test`, not the accepted main installation.
+
+Verified 2026-10-01 on actual main API35/ARM64: **4 distinct methods, 5 successful
+one-test executions, 0 skips** (final reopen repeated after test guard change).
+Both native DNS directions received1 then0, skipped0/plaintext equality, exact
+Accepted/Delivered and durable history. Actual production LinkProperties DNS and
+reachable recursive endpoint verified; ADB/SSH were control only. Old main schema0
+was deliberately lost; no core/schema/security validation changed. Final normal
+installer without reset verified Dialogs; one `53`, main account retained, current
+root APK/installed bytes matched. Evidence/screenshot privately in
+`.local/main-dev-rollout/`; owner0400 `account.json` retains the dev login/password
+for the user, not in APK/Git/diagnostics. JVM35/release/test/export builds green.
+
+Ordinary destructive gates require the separate `org.dmsg.client.gate` package and
+explicit selection of one `DeviceGatesTest#method`. Main reset is permitted only
+for an explicitly authorised development rollout; see the main-dev section above.
 Before any install, check both APK application IDs with `apkanalyzer manifest
 application-id`: exactly `org.dmsg.client.gate` and `org.dmsg.client.gate.test`.
 Prepare fresh disposable server accounts/invitations for signup and replacement.
