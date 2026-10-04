@@ -17,7 +17,7 @@ Account-auth wire2/server schema5/core schema6 и Light/Square Android UI реа
 | Unified auth | ENROL/token-replay/credential attach отсутствуют; старые schema/wire отклоняются без мутации. Scoped dev remote wipe выполнен по разрешению пользователя |
 | Новый аппарат | Верные credentials + явное подтверждение; cancel без изменений; один active device, старый доступ отозван, peer identity-change STOP/confirm. Удалённая история не возвращается |
 
-Auth/text outcomes проверены local и теперь на fresh remote через actual recursive DNS с физическим disposable `.gate`. Оптическая камера, long DNS background и два физических Android остаются отдельными G/R gates. Основной package/Keystore не очищать/не отзывать.
+Auth/text outcomes проверены local и теперь на fresh remote через actual recursive DNS с физическим disposable `.gate`. Оптическая камера и long DNS background остаются отдельными G/R gates; два физических Android проверены 2026-10-05 (ниже). Основной package/Keystore не очищать/не отзывать.
 
 ### Frontend + fresh remote acceptance, 2026-10-01 (R17–R21)
 
@@ -38,6 +38,12 @@ Auth/text outcomes проверены local и теперь на fresh remote ч
 - Explicit user-approved main `pm clear` removed old DB/history/Keystore identity; no schema spoof/migration/automatic wipe. `dev-install.py` rejects this known startup failure without reset, GREEN after explicit reset and again without reset after auth.
 - Main `org.dmsg.client`, current `53.apk`, actual UI onboarding/code/preview/signup and fresh6, production recursive DNS peer both directions receive1 then0/all skips0/equality; exact Accepted→Delivered, no duplicate send/history, new-process reopen/account/history retained. **4 selected main methods/5 passes/0 skips**, `android/AUTH_GATES.md`.
 - JVM35/release/test/export green, current launcher check; one main53, test package/private fixtures/invites/peer keys cleaned, dev owner0400 credentials retained outside Git. Main screenshot viewed: Dialogs/«Проверка DNS»/reply preview, no Store. FGS remains explicitly off, not a network failure. Server healthy5/pins/tunnel unchanged. Earlier main-unchanged statements are historical pre-R22 evidence.
+
+### Physical Android pair, 2026-10-05 (R8)
+
+- Moto g54 API35 ↔ A142P Android 16/API36 (4KB pages), оба `.gate`, только Wi-Fi ADB. Production LinkProperties resolver одной Wi-Fi сети, RD/RA non-authoritative проверен; `adb reverse` пуст, TCP bridge/radio toggle нет.
+- **18 one-test executions, 0 failures, 0 skips**: signup обоих (invite_only, свежие invites), обмен contact QR файлами, A→B и B→A received1 then0/skips0, double-submit1 row, Queued→Accepted→Delivered, тот же ciphertext hash в новом процессе, cursor dedup. Последовательность — `android/AUTH_GATES.md`.
+- Не заявлено: live-PID SIGKILL (процесс B уже завершился с instrumentation), Wi-Fi↔mobile, restricted egress, server restart на паре, оптический QR. Cleanup: `.gate` удалены с обоих, invites consumed/файлы удалены, main metadata unchanged.
 
 ### Прежнее evidence: unified auth, 2026-09-30
 

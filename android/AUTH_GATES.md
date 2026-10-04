@@ -254,3 +254,36 @@ metadata exactly. No owned native-peer process remained. Final read-only server
 snapshot: healthy, schema 5, `invite_only`, three owned disposable accounts,
 five device records (two retired), mailbox/send failures zero; deployed server
 and carrier image hashes matched the rollout record.
+
+## Physical Android pair (R8) — 2026-10-05
+
+Two phones, both `.gate` + `.gate.test`, each its own serial; ADB controls
+instrumentation/fixtures only. Every step is one `am instrument -e class
+org.dmsg.client.DeviceGatesTest#METHOD` on the named phone (`A`/`B`). Public
+contact QRs move phone→phone as app-private files (`run-as` pipe), never printed:
+
+1. Both: `exportActiveNetworkResolversOnlyInGatePackage`, then
+   `signupPrivateDnsAccountOnlyInGatePackage` (`gate-auth.json`, one fresh
+   invitation per phone, no `resolvers` field).
+2. Both `exportMyContactQrForGate`; A `gate-my-contact.qr` → B
+   `gate-peer-contact.qr` and back; both `acceptPeerFromPrivateFile`.
+3. A→B: A `sendSessionProbeForGate` (marker `gate-offline-request`, removed
+   afterwards); B `pairedIncomingHistoryUiOnlyInGatePackage`.
+4. B→A: B `pairedQueuedSendUiOnlyInGatePackage` → `gate-delivered.json`{mid}
+   from `gate-queued-record` → new process
+   `retryAndVerifyPreservedCiphertextForGate` →
+   `pairedAcceptedHistoryUiOnlyInGatePackage`; A
+   `pairedIncomingHistoryUiOnlyInGatePackage`; B
+   `pairedDeliveredHistoryReopenUiOnlyInGatePackage`.
+5. A `recordInboxBaselineForGate`, B probe, A `verifyNextDeliveryAndDedupForGate`.
+
+Result: moto g54 (API35) ↔ A142P (API36), 18 one-test executions, 0 failures,
+0 skips. Both directions received one then zero, all skip counters zero, exact
+text; one row despite double click; Queued → Accepted → Delivered with the same
+ciphertext hash across a new process. Both phones used the production
+LinkProperties resolver of the shared Wi-Fi (recursive RD/RA, non-authoritative
+answer verified), `adb reverse` empty, no TCP bridge or radio toggle. The B
+process had already exited with instrumentation, so no live-PID SIGKILL is
+claimed. Cleanup uninstalled `.gate`/`.gate.test` on both phones, removed both
+consumed remote invitation files and local fixtures; main-package metadata
+unchanged. Wi-Fi↔mobile, restricted egress and server restart remain separate.
