@@ -2,6 +2,7 @@
 .opencode
 .opencode.jsonc
 opencode.jsonc
+.mcp.json
 target/
 crates/server/target/
 # Android build outputs (APK, intermediates, caches) — never in Git.
