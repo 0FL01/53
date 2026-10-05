@@ -28,6 +28,7 @@
 - `ANDROID_NDK_HOME=<NDK r28+> sh android/build-native.sh` — arm64 native; бинарники только в build/, clean env без credentials
 - Из `android/`: `ANDROID_HOME="$HOME/Android/Sdk" ANDROID_SDK_ROOT="$HOME/Android/Sdk" ./gradlew testDebugUnitTest assembleDebug assembleRelease` — сборки и JVM; runtime gates отдельно
 - `python3 android/dev-install.py --serial "$MAIN_SERIAL" [--reset-data]` — main dev install/startup; reset только с разрешением, DNS/onboarding отдельно по `android/AUTH_GATES.md`
+- `sh deploy/build-apk.sh` — контейнерная сборка `53.apk` (Dockerfile.apk; тот же debug-key identity, `adb install -r` совместим). Нужен `android/keystore/debug.keystore` (копия `~/.android/debug.keystore`, gitignored)
 - Транспортные проверки — из закреплённой ревизии по её докам, не изобретать команды
 
 ## Docs

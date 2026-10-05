@@ -1,0 +1,79 @@
+# Containerized 53.apk build: rust native (cargo-ndk) + gradle export53Apk.
+# Context: repository root with deploy/Dockerfile.apk.dockerignore (whitelist).
+# Keystore: android/keystore/debug.keystore is COPY'd to the AGP default
+# location so the container signs with the same identity as the host —
+# `adb install -r` updates keep app data. No secrets beyond that local key.
+#
+# Layers of `deps` cache the toolchain; cargo and gradle caches live in
+# BuildKit cache mounts and survive rebuilds. First build is slow, later
+# builds only rebuild what changed.
+
+ARG JDK_IMAGE=eclipse-temurin:17-jdk-noble
+
+# ---- Toolchain: pinned SDK, NDK, Rust, Gradle. Rarely rebuilt. --------------
+FROM ${JDK_IMAGE} AS deps
+ENV ANDROID_HOME=/opt/android-sdk \
+    ANDROID_SDK_ROOT=/opt/android-sdk \
+    ANDROID_NDK_HOME=/opt/android-sdk/ndk/28.2.13676358 \
+    PATH=/root/.cargo/bin:/opt/gradle/bin:$PATH
+# NOTE: rustup stays at its stock HOME-relative locations (/root/.cargo,
+# /root/.rustup). android/build-native.sh runs under `env -i` keeping only
+# HOME+PATH, so any relocated CARGO_HOME/RUSTUP_HOME would blind the rustup
+# shims ("could not choose a version of cargo to run").
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+      build-essential cmake ninja-build pkg-config git python3 perl \
+      unzip curl xz-utils ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+# Android SDK: exact components of the dev environment (see AGENTS.md).
+RUN --mount=type=tmpfs,target=/tmp \
+    curl -fsSL -o /tmp/clt.zip \
+      https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip \
+ && mkdir -p ${ANDROID_HOME}/cmdline-tools \
+ && unzip -q /tmp/clt.zip -d ${ANDROID_HOME}/cmdline-tools \
+ && mv ${ANDROID_HOME}/cmdline-tools/cmdline-tools ${ANDROID_HOME}/cmdline-tools/latest \
+ && yes | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null \
+ && ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager \
+      "platform-tools" "platforms;android-37.0" "build-tools;37.0.0" \
+      "ndk;28.2.13676358" > /dev/null \
+ && rm -rf ${ANDROID_HOME}/cmdline-tools
+# Rust pinned to the workspace toolchain (rustc 1.97.1 / 2026-07-14).
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.97.1 --profile minimal \
+ && rustup target add aarch64-linux-android --toolchain 1.97.1
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
+    cargo install cargo-ndk@4.1.2 --locked
+# Gradle on PATH: android/gradlew is a shim that falls back to `gradle`.
+RUN curl -fsSL https://services.gradle.org/distributions/gradle-8.14.3-bin.zip -o /tmp/gradle.zip \
+ && unzip -q /tmp/gradle.zip -d /opt \
+ && mv /opt/gradle-8.14.3 /opt/gradle \
+ && rm /tmp/gradle.zip
+
+# ---- Native: libdmsg_core.so via the unmodified build-native.sh. ------------
+FROM deps AS native
+WORKDIR /src
+# slipstream-sys stage.py exports sources with git archive from the submodule
+# gitdir, so the git objects must be present at the pinned paths.
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ ./crates/
+COPY vendor/slipstream/ ./vendor/slipstream/
+COPY .git/modules/ ./.git/modules/
+COPY android/build-native.sh ./android/build-native.sh
+RUN --mount=type=cache,target=/root/.cargo/registry,id=apk-cargo-registry,sharing=locked \
+    --mount=type=cache,target=/root/.cargo/git,id=apk-cargo-git,sharing=locked \
+    --mount=type=cache,target=/src/target,id=apk-rust-target,sharing=locked \
+    sh android/build-native.sh
+
+# ---- APK: gradle export53Apk with the project's own sources. ----------------
+FROM deps AS apk
+WORKDIR /src
+COPY --from=native /src/android/app/build/nativeLibs ./android/app/build/nativeLibs
+COPY android/ ./android/
+# Same signing identity as the host build (AGP debug keystore default location).
+COPY android/keystore/debug.keystore /root/.android/debug.keystore
+RUN --mount=type=cache,target=/root/.gradle,id=apk-gradle-home,sharing=locked \
+    cd android && sh gradlew --no-daemon export53Apk
+
+# ---- Output only: 53.apk (docker buildx --target=out --output=type=local). --
+FROM scratch AS out
+COPY --from=apk /src/53.apk /53.apk

@@ -13,3 +13,5 @@ android/build/
 android/local.properties
 # Legacy local native output (new builds use android/app/build/nativeLibs).
 android/app/src/main/jniLibs/
+# Signing key copy for the container build (deploy/Dockerfile.apk); never in Git.
+android/keystore/

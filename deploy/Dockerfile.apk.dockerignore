@@ -1,0 +1,33 @@
+# Whitelist for deploy/Dockerfile.apk (per-Dockerfile ignore, BuildKit).
+# Context must contain: android sources, Rust workspace, pinned transport
+# checkout AND its git objects (stage.py does git archive from .git/modules),
+# plus the local signing keystore copy. Everything else stays out.
+*
+
+# Rust workspace + lockfile.
+!Cargo.toml
+!Cargo.lock
+!crates/**
+
+# Pinned transport worktree (stage.py validates the pinned revision in-place).
+!vendor/slipstream/**
+
+# Git objects for vendor/slipstream incl. nested submodules: stage.py exports
+# sources with `git archive` from the submodule gitdir, worktree alone is not enough.
+!.git/modules/**
+
+# Android project (sources, gradle files, build-native.sh, keystore copy).
+!android/**
+
+# Inside android/: no build outputs or host caches — stale host .so must not
+# override the fresh native-stage build, host .gradle/.kotlin are noise.
+android/app/build/**
+android/.gradle/**
+android/.kotlin/**
+android/build/**
+# Legacy jniLibs srcDir is ignored; APK packaging uses app/build/nativeLibs.
+android/app/src/main/jniLibs/**
+
+# Nested ignore files never belong to any context.
+**/.dockerignore
+**/.gitignore
