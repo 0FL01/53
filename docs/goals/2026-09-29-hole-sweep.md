@@ -1,11 +1,11 @@
-# Goal: hole-sweep — разминирование сервера (3 коммита)
+# Goal: hole-sweep — hardening сервера (3 коммита)
 
 Status: complete
-Source: пользовательская инструкция + синтез аудита разминирования (верифицирован чтением кода), ARCHITECTURE.md §4/§6/§7/§8
+Source: пользовательская инструкция + синтез security-аудита (верифицирован чтением кода), ARCHITECTURE.md §4/§6/§7/§8
 Last updated: 2026-09-29
 
 ## Objective
-12 подтверждённых дыр закрыты тремя коммитами: каждый — тесты + деплой n-de2 + DNS-smoke PASS, дерево чистое, без утечек секретов.
+12 подтверждённых уязвимостей закрыты тремя коммитами: каждый — тесты + деплой n-de2 + DNS-smoke PASS, дерево чистое, без утечек секретов.
 
 ## Execution Directive
 Complete the frozen Required Outcomes using the listed Change Envelope and Primary Evidence. Work on the smallest unresolved outcome. Do not add requirements from reviews, tests, tools, speculative risks, or optional source text. Finish when every required outcome is resolved and affected constraints remain satisfied. Orchestrator delegates file-disjoint zones to subagents; verifies every diff (tests + code read) before commit.
@@ -14,7 +14,7 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 
 ### Required Outcomes
 - R1: Коммит 1 — сессии и revoke
-  - Source: план разминирования блоки 1–2
+  - Source: план security-аудита блоки 1–2
   - Acceptance: timeout только handshake (10s) + per-read idle 300–900s со счётчиком idle_close; cleanup через guard; двухкап pre 8 / post 16–24; буферы ~16402 + bound шифртекста 16400 + assert после decrypt + fill(0); per-op re-check revoked в той же TX; wake строго после commit; pre-auth реестр token→Notify (timeout 10s); oversize-ожидания в пробах обновлены
   - Primary evidence: `cargo test --workspace`; сессия >60s; N+1 на post-кап закрыт; SEND в окне block→notify отклонён
   - Status: verified
@@ -75,7 +75,7 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 - 2026-09-29: R3 секреты/парсеры/ops готов (без коммита): *-file (argv-hex удалён), invite-issue --out-file 0600 refuse-if-exists (без флага warning+stdout), msgctl line-too-long + строгие args, парсеры bootstrap/mailbox (b64-пречек, DER-минимум, LDH, try_from, пустой SEND/huge-reserve reject + контракты-векторы), backup: ротация до записи + чистка недоснапшота, EXPOSE 7000 убран, runbook-правки; cargo test зелёный, release без warning
 
 ## Completion
-- Resolved outcomes: R1–R4 verified (12 дыр закрыты)
+- Resolved outcomes: R1–R4 verified (12 уязвимостей закрыто)
 - Commands and artifacts: cargo test 69/69 ×N; DNS noise/enrol/mbox PASS; live stats без ошибок; secrets 0400/65532
-- Constraint and diff-scope check: argv чист; C2 токены файлами (следы затёрты); транспорт не тронут; ban нет; недоказанное (power-loss, смерть диска) зафиксировано
+- Constraint and diff-scope check: argv чист; токены передаются файлами по C2, argv-варианты удалены; транспорт не тронут; ban нет; недоказанное (power-loss, смерть диска) зафиксировано
 - Final status: complete
