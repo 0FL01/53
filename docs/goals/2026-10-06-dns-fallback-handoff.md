@@ -1,6 +1,6 @@
 # Goal: настоящий DNS fallback и Wi-Fi/LTE handoff
 
-Status: active
+Status: blocked
 Source: пользователь 2026-10-06 утвердил приведённый ниже план, копию в цель, итеративную реализацию, commit и deploy.
 Last updated: 2026-10-06
 
@@ -41,8 +41,8 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Source: «делай копию плана в цель и итеративно реализовать и коммит, деплой».
   - Acceptance: relevant Rust/JVM/ARM64/APK gates green; updated client installed/launched without reset; evidence recorded and intended commit created.
   - Primary evidence: commands/results, installer readiness, git status/log.
-  - Status: in_progress
-  - Evidence: Rust build/workspace/codegen, NDK r28c ARM64, JVM43/debug/release/gated test APK/main export green. Current `53.apk` installed on Moto main without reset; Dialogs startup; schema6, wrapped key/device/account/history2/contacts byte-identical before/after; actual main UI DNS key-resume check passed. Commit outstanding.
+  - Status: verified
+  - Evidence: implementation commit `293a723`. Rust build/workspace/codegen, NDK r28c ARM64, JVM43/debug/release/gated test APK/main export green. Current `53.apk` installed on Moto main without reset; installed APK and ARM64 native bytes match build, UID/first-install preserved; Dialogs startup; schema6, wrapped key/device/account/history2/contacts byte-identical before/after install AND real main UI DNS key-resume check. Main on second phone remained absent/unchanged.
 
 ### Constraints / non-goals
 - Не менять VPN policy/physical network selection/socket binding, C DNS/QUIC/scheduler, backend/deploy topology, wire/schema/crypto. Current active Android network остаётся источником; network identifier только runtime comparison.
@@ -54,12 +54,12 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 - `crates/core/src/dns.rs`, directly affected core tests/FFI only if needed; existing native boundary narrowly for traffic measurement only if controlled endpoints cannot provide it.
 - `android/.../DnsNetwork.kt`, `UniFfiFacade.kt`, `DmsgService.kt`, `SingleWorker.kt`, direct tests/device gates.
 - `docs/goals/`, `android/AUTH_GATES.md`, APK build/install artifacts gitignored; main install update retains identity.
-- Live devices: app-scoped fixture/ordinary Wi-Fi/LTE toggle with independent control connection; backend readonly fixture issuance, no backend rollout/reset required.
+- Live devices: app-scoped fixture/ordinary Wi-Fi/LTE toggle with independent control connection; backend scoped disposable signup-invitation issuance/cleanup, no backend rollout/reset required.
 
 ## Current Checkpoint
-- Closes: R4 independent of physical handoff blocker.
-- Smallest next action: commit intended implementation/evidence, record final closure/blocker.
-- Expected evidence: intended commit, no credentials/binaries/user PNG staged; deploy proof preserved.
+- Closes: remaining physical-transition portion of R2/R3; externally blocked.
+- Smallest next action after unlock: verify independent USB ADB transport before any radio mutation, provision disposable queue fixture and run the explicit guarded handoff gate.
+- Expected evidence: actual foreground/economy Wi-Fi↔cellular transitions with saved-key resume, queued mid/ciphertext preserved and wake bypassing300s; no Wi-Fi-only control loss.
 
 ## Current State
 - Resolved: R1; implementation of R2/R3 and all their non-radio evidence.
@@ -91,9 +91,11 @@ Android UID deltas for actual fallback + reconnect/refill/fetch/retry/reconnect:
 - 2026-10-06: R1 + Kotlin implementation completed; isolated native gates/traffic and JVM43 green. System Perl lacked FindBin; documented `OPENSSL_SRC_PERL=$HOME/miniconda3/envs/jnabuild/bin/perl` built ARM64 successfully (no dependency/source workaround).
 - 2026-10-06: actual Yandex passed on both phones; real queued Yandex retry→peer receive1 then0→Delivered passed. First .gate was empty after earlier cleanup, fresh disposable accounts provisioned. Initial peer UI gate failed with screen/focus prerequisite (transport receive1/0 already passed); final fresh message/UI sequence green after waking screen. An Accepted gate ran after the fallback probe had fetched the peer mailbox and correctly reported Delivered; reordered fresh message sequence passed, expectations unchanged.
 - 2026-10-06: R4 main compatible install preserved schema/key/identity/account/history/contacts; live UI DNS check passed. Server remained healthy/schema5/invite_only, no topology/schema/pin/tunnel changes.
+- 2026-10-06: `293a723` committed intended13 files, no `.local`/binaries/credentials/user PNG. Closure: R1/R4 verified; R2/R3 blocked solely for physical radio acceptance. Both disposable gate packages and their local credentials removed; only this run's consumed remote invitation files removed. Server accounts intentionally not wiped, main device identity/history retained.
 
 ## Completion
-- Resolved outcomes:
-- Commands and artifacts:
-- Constraint and diff-scope check:
-- Final status:
+- Resolved outcomes: R1/R4 verified; R2/R3 implementation and non-radio evidence verified, physical transition unresolved, not waived.
+- Commands and artifacts: clean `cargo build -p msgd -p dmsg-core`, `cargo test --workspace` (168 passed,2 explicit native fixtures ignored in default run then both executed successfully), `DMSG_GEN_BINDINGS=1 cargo test -p dmsg-core --test gen_bindings`, `cargo fmt --all -- --check`; documented Perl + NDK r28c `android/build-native.sh`; JDK21 clean `testDebugUnitTest assembleDebug assembleRelease assembleDebugAndroidTest -PgateInstall=true`, main `export53Apk`; `dev-install.py --serial <Moto Wi-Fi ADB> --no-build` WITHOUT reset; actual main UI DNS check and private before/after/hash proof.
+- Artifact: root gitignored `53.apk`, 10097587 bytes, exact installed bytes and native bytes matched. Main remained at Dialogs; second main untouched. No credentials/binaries in commits.
+- Constraint and diff-scope check: schema/wire/pins/crypto/C transport/VPN/topology/original tunnel unchanged. User's untracked design PNG preserved. No added dependencies/services/workers/store/API. Native tests/phone probes used scoped file fixtures; original Stop/account/ratchet/dedup guarantees covered.
+- Final status: **BLOCKED**, not DONE. Necessary unavailable dependency: independent USB control for physical handoff acceptance. Host has only Wi-Fi ADB; repeating Wi-Fi disable is forbidden after observed sole-channel loss/user objection. The tested safe non-radio alternatives cannot establish this outcome. No outstanding code failure is hidden by this blocker.
