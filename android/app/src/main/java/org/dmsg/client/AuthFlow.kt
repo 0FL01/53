@@ -13,11 +13,16 @@ internal object AuthForm {
 
     fun validate(action: AuthAction, policy: RegistrationPolicy?, login: String, password: String, invitation: String?) {
         // Core performs canonical ASCII lowercasing. Pass the original login to its builder.
-        if (login.length !in 3..32 || login.any {
+        if (login.length !in 3..32)
+            throw DmsgError("Логин должен содержать от 3 до 32 знаков", ErrorKind.InvalidInput)
+        if (login.any {
                 it !in 'a'..'z' && it !in 'A'..'Z' && it !in '0'..'9' && it != '_' && it != '-' && it != '.'
-            }) throw DmsgError("Логин: 3–32 символа, латинские буквы, цифры, . _ -", ErrorKind.InvalidInput)
-        if (password.toByteArray(Charsets.UTF_8).size !in 8..128)
-            throw DmsgError("Пароль: от 8 до 128 байт UTF-8, пробелы учитываются", ErrorKind.InvalidInput)
+            }) throw DmsgError("Проверьте логин: используйте латинские буквы и цифры, без пробелов", ErrorKind.InvalidInput)
+        val passwordBytes = password.toByteArray(Charsets.UTF_8).size
+        if (passwordBytes < 8)
+            throw DmsgError("Пароль слишком короткий. Добавьте ещё несколько знаков", ErrorKind.InvalidInput)
+        if (passwordBytes > 128)
+            throw DmsgError("Пароль слишком длинный. Сделайте его короче", ErrorKind.InvalidInput)
         if (action == AuthAction.Signup && policy == null) throw DmsgError("Сначала проверьте режим регистрации сервера")
         if (needsInvitation(action, policy) && (invitation == null || !InvitationInput.isCanonical(invitation)))
             throw DmsgError("Сканируйте приглашение или выберите его приватный файл", ErrorKind.InviteRequired)

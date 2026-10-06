@@ -133,6 +133,10 @@ Android: release ABI; 16 KB native loading; Doze; background permissions; force-
 
 Безопасность: server trust bootstrap; peer identity verification; нет ключей в URI/logs; транзакционное сохранение ratchet/outbox; nonce/replay/epoch handling; blob ACL; contact restrictions; SDK не обращаются к внешнему интернету.
 
+## Следующий UX scope
+
+Ближайший отдельный UX scope по запросу пользователя: продумать English-локаль. В текущую правку упрощения экрана входа локализация не входит; перенос строк/переключение языка заранее не внедряются.
+
 ## Что оставляем после v1
 
 HA и несколько authoritative серверов; транспортная client authentication до прикладного handshake; настоящий unreliable media transport, если stream-based вариант не подходит; multi-device; перенос истории; группы; публичный каталог/поиск по логинам (логин для входа входит в текущий M2); iOS/desktop; большие вложения и видео.

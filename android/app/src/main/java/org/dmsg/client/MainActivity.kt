@@ -315,6 +315,7 @@ class MainActivity : DmsgActivity() {
 
     private fun updateForm() {
         if (!::password.isInitialized) return
+        login.hint = if (action == AuthAction.Signup) "Например, marina53" else ""
         val showInvitation = AuthForm.needsInvitation(action, policy) ||
             (action == AuthAction.Signup && invitation.hasInvitation)
         findViewById<View>(R.id.invitation_group).visibility = if (showInvitation) View.VISIBLE else View.GONE

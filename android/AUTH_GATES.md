@@ -75,6 +75,26 @@ PASS. Own secret fixtures/QR captures and disposable gate apps removed. Ignored
 aggregate proofs: `.local/invite-onboarding/`; goal:
 `docs/goals/2026-10-06-invite-onboarding.md`.
 
+### Simple authentication copy
+
+Current auth-copy check (2026-10-06): select
+`InvitationOnboardingGatesTest#simpleAuthLabelsAndSignupExampleOnlyInGatePackage`
+using the same exact-method `.gate` command above, fresh unauthenticated gate.
+Physical USB PASS/no skips: labels exactly «Логин»/«Пароль», no login hint on
+Login, «Например, marina53» on Signup, cleared again on Login; local invalid
+input shows an ordinary-language error and clears password, no account created.
+JVM auth tests retain the existing accepted punctuation and exact UTF-8 byte
+bounds; presentation does not change validation. English locale is next scope,
+not included in this copy-only change.
+
+Clean JDK21 JVM52/debug/release/test builds and main export PASS. Final USB method
+PASS/no skips after cancelling its synthetic Autofill context (no password-manager
+save prompt left behind). Main install-r/no-reset startup Dialogs and actual DNS
+key resume PASS; installed APK/native/public asset exact, before/after encrypted
+identity/account/history/contacts/wrapped-key digests plus UID/first-install
+unchanged. Scoped .gate apps and private diagnostic captures removed. No backend,
+native, schema or pin changes; aggregate ignored proofs `.local/auth-copy/`.
+
 ### Explicit main development rollout (R22)
 
 Main data loss is allowed only with explicit user consent. `adb install -r`

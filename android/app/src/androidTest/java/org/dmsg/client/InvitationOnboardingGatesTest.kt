@@ -78,6 +78,47 @@ class InvitationOnboardingGatesTest {
         } finally { raw.fill('\u0000') }
     }
 
+    @Test fun simpleAuthLabelsAndSignupExampleOnlyInGatePackage() {
+        val app = gate()
+        val f = Core.facade(app)
+        assertFalse("fresh disposable account required", f.account().authenticated)
+        try {
+            ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+                await(scenario, "authentication ready") {
+                    field(it, "state") == LaunchState.Authentication && field(it, "busy") == false && field(it, "policy") != null
+                }
+                fun labelsAndHint(expected: String) = scenario.onActivity {
+                    assertEquals("Логин", it.findViewById<TextView>(R.id.auth_login_label).text.toString())
+                    assertEquals("Пароль", it.findViewById<TextView>(R.id.auth_password_label).text.toString())
+                    assertEquals(expected, it.findViewById<EditText>(R.id.auth_login).hint.toString())
+                    assertTrue(it.findViewById<EditText>(R.id.auth_password).hint.isNullOrEmpty())
+                }
+                labelsAndHint("")
+                scenario.onActivity { it.findViewById<Button>(R.id.btn_signup).performClick() }
+                labelsAndHint("Например, marina53")
+                scenario.onActivity { it.findViewById<Button>(R.id.btn_login).performClick() }
+                labelsAndHint("")
+                scenario.onActivity {
+                    it.findViewById<EditText>(R.id.auth_login).setText("ab")
+                    it.findViewById<EditText>(R.id.auth_password).setText("synthetic password")
+                    it.findViewById<Button>(R.id.btn_auth_submit).performClick()
+                }
+                await(scenario, "ordinary validation error") {
+                    field(it, "busy") == false && it.findViewById<TextView>(R.id.status).text.toString() ==
+                        "Логин должен содержать от 3 до 32 знаков"
+                }
+                scenario.onActivity {
+                    assertTrue(it.findViewById<EditText>(R.id.auth_password).text.isEmpty())
+                    assertFalse(memory(it).hasInvitation)
+                    // Dispose the synthetic form context, never save it into the
+                    // device's password manager when this test activity closes.
+                    it.getSystemService(android.view.autofill.AutofillManager::class.java)?.cancel()
+                }
+                assertFalse("local invalid input never creates an account", f.account().authenticated)
+            }
+        } finally { f.dnsStop() }
+    }
+
     /** Real activity-result lifecycle, injected synthetic decoder text; NOT optical evidence. */
     @Test fun scannerResultLifecycleOnlyInGatePackage() {
         val app = gate()

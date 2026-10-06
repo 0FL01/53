@@ -48,6 +48,22 @@ class AuthFlowTest {
             assertEquals(ErrorKind.InvalidInput, failure { AuthForm.validate(AuthAction.Login, null, "abc", password, null) }.kind)
         }
     }
+    @Test fun validationExplainsOnlyTheErrorWithoutTechnicalEncodingHints() {
+        val cases = listOf(
+            Triple("ab", "12345678", "Логин должен содержать от 3 до 32 знаков"),
+            Triple("abc def", "12345678", "Проверьте логин: используйте латинские буквы и цифры, без пробелов"),
+            Triple("abc", "1234567", "Пароль слишком короткий. Добавьте ещё несколько знаков"),
+            Triple("abc", "é".repeat(65), "Пароль слишком длинный. Сделайте его короче")
+        )
+        for ((login, password, expected) in cases) {
+            val error = failure { AuthForm.validate(AuthAction.Login, null, login, password, null) }
+            assertEquals(ErrorKind.InvalidInput, error.kind)
+            assertEquals(expected, humanError(error))
+        }
+        // Presentation must not change the established accepted characters or byte limits.
+        AuthForm.validate(AuthAction.Login, null, "ABC._-012", "é".repeat(4), null)
+        AuthForm.validate(AuthAction.Login, null, "abc", "é".repeat(64), null)
+    }
     @Test fun missingMalformedInvitationOrUnknownPolicyCannotSubmitSignup() {
         val f = FakeFacade(); val flow = AuthFlow(f)
         for (invite in listOf("", "A".repeat(42), "A".repeat(42) + "=", "dmsg://server/AAAA")) {

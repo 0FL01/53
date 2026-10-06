@@ -23,9 +23,9 @@
             <Button android:id="@+id/btn_login" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Войти" />
             <Button android:id="@+id/btn_signup" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Создать аккаунт" />
             <TextView android:id="@+id/auth_title" android:layout_width="match_parent" android:layout_height="wrap_content" style="@style/Dmsg.Title" android:text="Войти" />
-            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:labelFor="@id/auth_login" android:text="Логин (3–32 символа ASCII)" />
+            <TextView android:id="@+id/auth_login_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:labelFor="@id/auth_login" android:text="Логин" />
             <EditText android:id="@+id/auth_login" android:layout_width="match_parent" android:layout_height="wrap_content" android:inputType="textVisiblePassword|textNoSuggestions" android:singleLine="true" android:maxLength="33" android:saveEnabled="false" android:importantForAutofill="no" />
-            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:labelFor="@id/auth_password" android:text="Пароль (8–128 байт UTF-8)" />
+            <TextView android:id="@+id/auth_password_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:labelFor="@id/auth_password" android:text="Пароль" />
             <EditText android:id="@+id/auth_password" android:layout_width="match_parent" android:layout_height="wrap_content" android:inputType="textPassword" android:singleLine="true" android:saveEnabled="false" android:importantForAutofill="no" />
             <Button android:id="@+id/btn_password_reveal" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Показать пароль"/>
             <LinearLayout android:id="@+id/invitation_group" android:orientation="vertical" android:layout_width="match_parent" android:layout_height="wrap_content" android:visibility="gone" android:saveEnabled="false">
