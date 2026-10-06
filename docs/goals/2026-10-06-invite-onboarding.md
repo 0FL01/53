@@ -1,6 +1,6 @@
 # Goal: приглашение QR/файлом и простые серверные команды
 
-Status: active
+Status: complete
 Source: утверждённый пользователем план onboarding (QR/приватный файл вместе с доверенным сервером в APK), terminal qr-invite и «53-1, 53, 53ctl»; «Делай копию плана в цель и итеративно реализовать, мобильник по adb для тестов у тебя есть, qr коды я сам просканирую».
 Last updated: 2026-10-06
 
@@ -47,8 +47,8 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Source: утверждённая итеративная реализация/предыдущая инструкция commit/deploy, ADB проверки.
   - Acceptance: Rust workspace, JVM/debug/release builds green; server same volumes/state, main APK install -r no reset preserves identity; intended commits and docs distinguish automated decoder/file evidence from user optical scan.
   - Primary evidence: clean environment gates, main before/after identity digest/install metadata, git diff/commit review.
-  - Status: in_progress
-  - Evidence: clean Rust build/workspace170 + fmt; JVM51/debug/release/test, host main export and actual container APK build PASS. Main install-r/no-reset retained encrypted device/account/history/contacts/wrapped-key digests, UID/first-install identity; APK/native/public asset exact, actual main DNS key resume PASS. CLI/deploy/auth/architecture/checklist docs updated. Intended commit/closure next.
+  - Status: verified
+  - Evidence: clean Rust build/workspace170 + fmt; JVM51/debug/release/test, host main export and actual container APK build PASS. Main install-r/no-reset retained encrypted device/account/history/contacts/wrapped-key digests, UID/first-install identity; APK/native/public asset exact, actual main DNS key resume PASS. CLI/deploy/auth/architecture/checklist docs updated. Feature commit39181c3 contains intended implementation/tests/docs only; final diff/scope check clean, own disposable secrets removed, user design PNG untouched.
 
 ### Constraints
 - Server schema5/core6/wire2, password auth/one-device CAS, TTL/revoke/onetime/idempotence, full cert DER + Noise pins unchanged; no credentials before pinned server.
@@ -65,16 +65,13 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 - Tests/docs, ignored local fixtures/build outputs; existing .gate only. Compatible server backend recreate and main APK install -r, no reset.
 
 ## Current Checkpoint
-- Closes: R4 commit/closure.
-- Smallest next action: final diff/scope/secret review and intended feature commit, then record closure.
-- Expected evidence: intended commit, no secret artifacts, tracked tree clean except this goal closure.
-- Stop or replan if: schema/pin/state mutation would be required (not permitted).
+- None: R1–R4 verified; closure passed. Optical scan is user-owned, not an unresolved implementation requirement.
 
 ## Current State
-- Resolved: R1/R2/R3, compatible backend/main deploy, documentation and cleanup.
+- Resolved: R1–R4, compatible backend/main deploy, documentation, cleanup and feature commit39181c3.
 - Last relevant evidence: workspace170/2 unchanged transport fixtures ignored, JVM51, current debug/release/test and Docker APK builds; four selected physical methods, actual main DNS key resume and preserved raw encrypted identity/history. Aggregate private proofs `.local/invite-onboarding/` retained; own credentials/QR captures removed, .gate uninstalled.
 - Blocker: none.
-- Next: R4 intended commit and closure.
+- Next: none; objective complete.
 
 ## Material Decisions
 - 2026-10-06: Keep internal crate, Compose project, service/storage names for compatibility; user-facing container/commands simplified. Default server is a build-time public asset, not auto-trusted invitation content or downloaded pins.
@@ -83,6 +80,10 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 - 2026-10-06: contract frozen before implementation.
 - 2026-10-06: R1/R2 local CLI/independent QR decoder and workspace gates PASS. R3 initial USB scanner-result test exposed premature wipe in scanner onStop before parent delivery; removing that hook retained parent cancel/background cleanup and 5 s undelivered-result expiry, same physical test PASS. SSH SFTP unavailable; exec-raw transfer succeeded, no scope change.
 - 2026-10-06: production backend compatible recreate unchanged state/carrier PASS; Docker QR file → physical file signup → fresh-process key resume PASS. Proxy SSH later unavailable; managed SSH safely completed file transfer/non-TTY/own-file cleanup, no repeated issuance. Main compatible update and actual DNS check preserved identity/history, fixtures cleaned; actual container APK optional-public-input build PASS. Final root artifact restored from the same host build tested/deployed (container native compiled separately).
+- 2026-10-06: closure compares all R1–R4 to current evidence; feature39181c3 committed after intended diff/status/log review. No known blocker or created regression; only user design PNG remains untracked. Main relaunched after final unchanged identity/history snapshot (cold632ms).
 
 ## Completion
-- Not complete.
+- Resolved outcomes: R1/R2/R3/R4 verified, no pending/blocked items.
+- Commands/artifacts: clean `cargo build -p msgd -p dmsg-core`, `cargo test --workspace` (170 PASS, 2 unchanged transport fixtures default ignored), `cargo fmt --all --check`; clean JDK21 `testDebugUnitTest assembleDebug assembleRelease assembleDebugAndroidTest -PgateInstall=true -PserverProfileFile=<public-file>` and final main `testDebugUnitTest assembleDebug assembleRelease export53Apk`; actual `sh deploy/build-apk.sh <public-file>` PASS. Four exact USB instrumentation methods PASS/no skips. Managed SSH compatible backend recreate + CLI/PTY/state evidence; main `dev-install.py --no-build` without reset, exact installed artifact and actual DNS key resume PASS.
+- Constraint/diff scope: wire2/server5/core6/password/key/CAS/TTL/revocation/one-use/pins unchanged; no carrier restart, same volumes/schema/tables at recreate. Only scoped .gate destructive fixtures, main identity/history retained. Public profile generated build-only, secret QR/token/credentials not in Git/argv/env/logs; intentional PTY capture private then removed. Optical scan not claimed; system picker not substituted with an optical PASS. No transport/VPN/Doze scope expansion; no secret artifacts or user design file staged.
+- Final status: complete. Implementation commit39181c3; this document records terminal closure.
