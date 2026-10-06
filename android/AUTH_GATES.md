@@ -84,8 +84,8 @@ Physical USB PASS/no skips: labels exactly «Логин»/«Пароль», no l
 Login, «Например, marina53» on Signup, cleared again on Login; local invalid
 input shows an ordinary-language error and clears password, no account created.
 JVM auth tests retain the existing accepted punctuation and exact UTF-8 byte
-bounds; presentation does not change validation. English locale is next scope,
-not included in this copy-only change.
+bounds; presentation does not change validation. That copy-only change preceded
+the separate bilingual scope below; current checks use resources, not RU literals.
 
 Clean JDK21 JVM52/debug/release/test builds and main export PASS. Final USB method
 PASS/no skips after cancelling its synthetic Autofill context (no password-manager
@@ -94,6 +94,61 @@ key resume PASS; installed APK/native/public asset exact, before/after encrypted
 identity/account/history/contacts/wrapped-key digests plus UID/first-install
 unchanged. Scoped .gate apps and private diagnostic captures removed. No backend,
 native, schema or pin changes; aggregate ignored proofs `.local/auth-copy/`.
+
+### Automatic English/Russian UI
+
+Current UI follows Android preferred locales: first supported EN/RU, English
+fallback if neither is available. Full English defaults in `values/`, Russian
+in `values-ru/` (276 matching translatable keys); IDs, domains, user text/aliases,
+QR contents and logs are not translated. EN/RU resource packaging also filters
+dependency translations: without this, AppCompat French assets caused `fr,ru`
+to fall back to English instead of choosing RU. No app picker, language prefs,
+`localeConfig`, schema/auth/transport changes or locale resolver.
+
+From `android/`, with the usual clean JDK21/SDK allowlist environment:
+
+```sh
+./gradlew --no-daemon testDebugUnitTest assembleDebug assembleRelease assembleDebugAndroidTest -PgateInstall=true -PserverProfileFile="$PUBLIC_PROFILE_FILE"
+./gradlew --no-daemon lintDebug --init-script localization-lint.init.gradle -PgateInstall=true -PserverProfileFile="$PUBLIC_PROFILE_FILE"
+```
+
+`PUBLIC_PROFILE_FILE` is the existing absolute **public** trusted profile input,
+not an invitation/password. Scoped lint checks translations, positional formats,
+hardcoded text and plural candidates, without altering the normal lint config.
+Full `lintDebug` still fails on 14 pre-existing NewApi/camera-opt-in errors in
+generated UniFFI/the unchanged theme/existing scanner callers; it is **not PASS**.
+Those unrelated APIs/bindings are not edited or suppressed in this scope.
+
+Select these exact single methods with the normal `.gate` instrumentation command:
+
+| `LocaleGatesTest#…` | Prerequisite / primary evidence |
+| --- | --- |
+| `preferredLocalesAndSafeErrorsOnlyInGatePackage` | Configuration contexts: en/ru/fr/en,ru/ru,en/fr,ru; specific safe errors, password bounds, pin/Keystore/status/trust disclosure, no payload echo |
+| `retainedSendStateRendersCurrentResourcesOnlyInGatePackage` | Retained send-state fixture renders RU/EN at display time; draft/uncertain and late Saved/Delivered transitions unchanged; not a network send gate |
+| `authConfigurationClearsSecretsAndUpdatesLabelsOnlyInGatePackage` | API33+ disposable unauthenticated account; actual `.gate` OS app-locale RU→EN recreation clears password/invitation, no automatic submit; simple labels/signup-only example |
+| `englishLargeFontDisclosuresOnlyInGatePackage` | Real compiled English Storage layout, Configuration font-scale200%; complete Keystore/password/history warnings wrap and fit; not a claim of the entire display/orientation matrix |
+| `notificationLocaleRefreshKeepsWorkerAndCountOnlyInGatePackage` | API33+ authenticated `.gate`, POST_NOTIFICATIONS granted, FGS initially off; successful actual DNS poll, Economy, known **synthetic** runtime count7; OS locale EN→RU updates same channel/notification, same Thread/facts revision/Ready/account/importance |
+
+Only disposable package app locales are changed, restored in finally and removed
+by uninstall; device system/main app language is never overridden. Do not run
+the whole suite against main. For the notification prerequisite use the existing
+`InvitationOnboardingGatesTest#privateFileImportSignupThroughRecursiveDns`, then
+`#reopenImportedAccountWithSavedDeviceKey` in separate processes with a fresh
+owner-only invitation/login/password fixture. The stream input after SAF is
+tested; DocumentsUI optics remain the prior user-owned scope.
+
+**Verified 2026-10-06:** JVM52 and debug/release/test/main-export builds PASS;
+scoped localization lint PASS. All five Locale methods and the two existing
+actual recursive-DNS signup/key-resume methods PASS/no skips on USB API35.
+Main APK installed-r without reset, automatic English Dialogs on the existing
+English system, actual DNS key resume/localized diagnostics PASS. Exact installed
+APK/native/public asset and preserved encrypted identity/account/history/contacts,
+wrapped key, UID/first-install, system/main locale state checked. Installer's
+first readiness wait timed out after successful install; subsequent actual
+resource-ID/translated-title Dialogs and DNS checks passed without reinstall/reset.
+Own invitation revoked/file removed, gate apps/overrides and raw secret/diagnostic
+fixtures removed. Aggregate ignored proofs: `.local/english-locale/`; durable goal:
+`docs/goals/2026-10-06-english-locale.md`.
 
 ### Explicit main development rollout (R22)
 

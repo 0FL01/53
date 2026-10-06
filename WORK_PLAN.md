@@ -133,9 +133,9 @@ Android: release ABI; 16 KB native loading; Doze; background permissions; force-
 
 Безопасность: server trust bootstrap; peer identity verification; нет ключей в URI/logs; транзакционное сохранение ratchet/outbox; nonce/replay/epoch handling; blob ACL; contact restrictions; SDK не обращаются к внешнему интернету.
 
-## Следующий UX scope
+## Автоматическая EN/RU локаль
 
-Ближайший отдельный UX scope по запросу пользователя: продумать English-локаль. В текущую правку упрощения экрана входа локализация не входит; перенос строк/переключение языка заранее не внедряются.
+English-локаль реализована по отдельному утверждённому scope: полные English default и русский перевод, язык из списка Android, English fallback; без ручного переключателя/locale prefs. В APK упакованы EN/RU ресурсы, чтобы переводы dependency не перехватывали первый неподдерживаемый язык. Ошибки разрешаются через resource IDs при показе, секреты и правила auth не меняются; locale refresh сохраняет тот же FGS worker/channel/count. Приёмка и compatible main install без reset — `docs/goals/2026-10-06-english-locale.md`, точные gates — `android/AUTH_GATES.md`.
 
 ## Что оставляем после v1
 

@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.os.IBinder
 import android.net.ConnectivityManager
 import android.net.LinkProperties
@@ -92,6 +93,36 @@ class DmsgService : Service() {
 
         fun running(c: Context): Boolean = Worker.running
         internal fun wakeAfterNetworkApplied() = Worker.wake()
+
+        private fun Context.updateChannel() {
+            getSystemService(NotificationManager::class.java).createNotificationChannel(
+                NotificationChannel(CH, getString(R.string.notif_channel), NotificationManager.IMPORTANCE_LOW)
+            )
+        }
+
+        private fun Context.buildCountNotif(total: Int): Notification {
+            updateChannel()
+            val open = PendingIntent.getActivity(
+                this, 0, Intent(this, MainActivity::class.java),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+            // No history / filenames in notifications (ARCH S14).
+            return NotificationCompat.Builder(this, CH)
+                .setContentTitle(getString(R.string.fgs_title))
+                .setContentText(getString(R.string.fgs_body, total))
+                .setSmallIcon(R.drawable.ic_message)
+                .setContentIntent(open)
+                .setOngoing(true)
+                .build()
+        }
+
+        private fun Context.notify(n: Notification) {
+            try {
+                getSystemService(NotificationManager::class.java).notify(ID, n)
+            } catch (_: SecurityException) {
+                // POST_NOTIFICATIONS denied: stay alive, stay silent.
+            }
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -99,10 +130,13 @@ class DmsgService : Service() {
     override fun onCreate() {
         super.onCreate()
         getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(networkCallback)
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(
-            NotificationChannel(CH, getString(R.string.notif_channel), NotificationManager.IMPORTANCE_LOW)
-        )
+        updateChannel()
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        updateChannel()
+        if (Worker.running) notify(buildCountNotif(Worker.countSnapshot()))
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -111,7 +145,7 @@ class DmsgService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        val notif = buildNotif(0)
+        val notif = buildCountNotif(if (Worker.running) Worker.countSnapshot() else 0)
         ServiceCompat.startForeground(
             this, ID, notif,
             if (android.os.Build.VERSION.SDK_INT >= 34)
@@ -134,27 +168,14 @@ class DmsgService : Service() {
         stopSelf()
     }
 
-    private fun buildNotif(newCount: Int): Notification {
-        val open = PendingIntent.getActivity(
-            this, 0, Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-        // No history / filenames in notifications (ARCH S14).
-        return NotificationCompat.Builder(this, CH)
-            .setContentTitle(getString(R.string.fgs_title))
-            .setContentText(getString(R.string.fgs_body, newCount))
-            .setSmallIcon(R.drawable.ic_message)
-            .setContentIntent(open)
-            .setOngoing(true)
-            .build()
-    }
-
     /** Poll loop: reconnect (refill) -> fetch -> retry. Backoff on failure. */
     private object Worker {
         private var app: Context? = null
         @Volatile private var facade: DmsgFacade? = null
         private val worker = SingleWorker { loop(requireNotNull(app)) }
         val running: Boolean get() = worker.running
+        @Volatile private var total = 0
+        fun countSnapshot(): Int = total
 
         fun prepare(f: DmsgFacade) { facade = f }
 
@@ -166,7 +187,7 @@ class DmsgService : Service() {
 
         private fun loop(app: Context) {
             var backoff = 5_000L
-            var total = 0
+            total = 0
             while (worker.active) {
                 try {
                     val n = pollOnce(app)
@@ -211,33 +232,11 @@ class DmsgService : Service() {
 
         private fun pollOnce(app: Context): Int {
             val f = facade ?: Core.facade(app).also { facade = it }
-            if (!f.isReady()) throw DmsgError("Ядро приложения недоступно", ErrorKind.NativeUnavailable)
-            if (!f.account().authenticated) throw DmsgError("Сначала войдите в аккаунт", ErrorKind.NotAuthenticated)
-            if (f.dnsProfile() == null) throw DmsgError("Сначала добавьте сервер", ErrorKind.InvalidInput)
+            if (!f.isReady()) throw DmsgError(R.string.error_native_unavailable, ErrorKind.NativeUnavailable)
+            if (!f.account().authenticated) throw DmsgError(R.string.error_sign_in_required, ErrorKind.NotAuthenticated)
+            if (f.dnsProfile() == null) throw DmsgError(R.string.error_server_required, ErrorKind.InvalidInput)
             val rep = check(f) { worker.active }
             return rep.received.size
-        }
-
-        private fun Context.buildCountNotif(total: Int): Notification {
-            val nm = getSystemService(NotificationManager::class.java)
-            nm.createNotificationChannel(
-                NotificationChannel(CH, getString(R.string.notif_channel), NotificationManager.IMPORTANCE_LOW)
-            )
-            return NotificationCompat.Builder(this, CH)
-                .setContentTitle(getString(R.string.fgs_title))
-                .setContentText(getString(R.string.fgs_body, total))
-                .setSmallIcon(R.drawable.ic_message)
-                .setOngoing(true)
-                .build()
-        }
-
-        private fun Context.notify(n: Notification) {
-            val nm = getSystemService(NotificationManager::class.java)
-            try {
-                nm.notify(ID, n)
-            } catch (_: SecurityException) {
-                // POST_NOTIFICATIONS denied: stay alive, stay silent.
-            }
         }
     }
 }

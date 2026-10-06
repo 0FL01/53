@@ -90,11 +90,11 @@ class PagingTest {
         assertTrue(f.outbox(0, 50).first.isEmpty())
         assertEquals(DeliveryState.QUEUED, f.messageStatus(mid))
         f.history.single().deliveryState = DeliveryState.ACCEPTED
-        assertEquals("На сервере", deliveryLabel(f.messageStatus(mid)))
+        assertEquals(R.string.delivery_accepted, deliveryLabelRes(f.messageStatus(mid)))
         f.history.single().deliveryState = DeliveryState.DELIVERED
-        assertEquals("Доставка подтверждена сервером", deliveryLabel(f.messageStatus(mid)))
+        assertEquals(R.string.delivery_delivered, deliveryLabelRes(f.messageStatus(mid)))
         assertNull(f.messageStatus("f".repeat(32)))
-        assertEquals("Статус пока неизвестен", deliveryLabel(null))
+        assertEquals(R.string.delivery_unknown, deliveryLabelRes(null))
         f.history.add(row(2))
         assertNull(f.messageStatus(row(2).messageIdHex))
     }

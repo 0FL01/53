@@ -21,7 +21,7 @@ internal object TextSendCoordinator {
     fun send(f: DmsgFacade, contactId: String, text: String): TextSendOutcome {
         unresolved?.let { (peer, attempt) ->
             if (reconcile(f, peer, attempt) is TextSendOutcome.Uncertain)
-                return TextSendOutcome.NotSaved(DmsgError("Сначала дождитесь проверки незавершённой отправки в предыдущем чате"))
+                return TextSendOutcome.NotSaved(DmsgError(R.string.error_pending_send))
         }
         return sendTextSafely(f, contactId, text).also { if (it is TextSendOutcome.Uncertain) unresolved = contactId to it }
     }
@@ -48,7 +48,7 @@ internal fun sendTextSafely(f: DmsgFacade, contactId: String, text: String): Tex
 }
 
 internal fun reconcileTextSend(f: DmsgFacade, contactId: String, baseline: Long, text: String,
-    error: Throwable = DmsgError("Отправка не была сохранена. Черновик сохранён")): TextSendOutcome {
+    error: Throwable = DmsgError(R.string.error_send_not_saved)): TextSendOutcome {
     return try {
         var before: Long? = null
         do {

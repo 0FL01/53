@@ -23,7 +23,7 @@ class DiagnosticsActivity : DmsgActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_diagnostics)
-        NativeUi.back(this, "Связь")
+        NativeUi.back(this, getString(R.string.title_connectivity))
         findViewById<Button>(R.id.btn_economy).setOnClickListener {
             Prefs.setEconomy(this, !Prefs.economy(this)); showFacts()
         }
@@ -42,7 +42,7 @@ class DiagnosticsActivity : DmsgActivity() {
                 val result = runCatching { DmsgService.check(Core.facade(applicationContext)) }
                 runOnUiThread {
                     if (!active || !guard.finish(stamp)) return@runOnUiThread
-                    findViewById<TextView>(R.id.stats).text = result.fold({ "DNS-проверка завершена. Получено локально: ${it.received.size}. Очередь повторена прежними ID." }, ::humanError)
+                    findViewById<TextView>(R.id.stats).text = result.fold({ getString(R.string.dns_check_complete, it.received.size) }, { humanError(resources, it) })
                     showFacts()
                 }
             }
@@ -55,21 +55,21 @@ class DiagnosticsActivity : DmsgActivity() {
         Core.dispatch {
             val result = runCatching { Core.facade(applicationContext).account() }
             runOnUiThread { if (active && guard.accepts(stamp)) findViewById<TextView>(R.id.account).text = result.fold({
-                if (it.authenticated) "Устройство авторизовано · ${it.contactId}" else "Сначала войдите в аккаунт"
-            }, ::humanError) }
+                if (it.authenticated) getString(R.string.device_authenticated, it.contactId) else getString(R.string.connection_not_authenticated)
+            }, { humanError(resources, it) }) }
         }
     }
     override fun onPause() { active = false; guard.stop(); handler.removeCallbacks(ticker); super.onPause() }
     private fun showFacts() {
         val facts = DmsgService.connectionState()
         findViewById<TextView>(R.id.fgs).text = listOf(
-            if (facts.serviceEnabled) "Фоновая связь включена" else "Фоновая связь выключена",
-            connectionLabel(facts),
-            "Последний успешный ответ: ${facts.lastSuccessAt?.let(::localTime) ?: "ещё не получен"}",
-            if (NotificationManagerCompat.from(this).areNotificationsEnabled()) "Уведомления разрешены" else "Уведомления выключены в настройках Android"
+            getString(if (facts.serviceEnabled) R.string.connection_enabled else R.string.connection_disabled),
+            connectionLabel(resources, facts),
+            getString(R.string.last_response, facts.lastSuccessAt?.let(::localTime) ?: getString(R.string.no_response)),
+            getString(if (NotificationManagerCompat.from(this).areNotificationsEnabled()) R.string.notifications_allowed else R.string.notifications_disabled)
         ).joinToString("\n")
-        findViewById<Button>(R.id.btn_fgs).text = if (facts.serviceEnabled) "Выключить фоновую связь" else "Включить фоновую связь"
-        findViewById<Button>(R.id.btn_economy).text = if (Prefs.economy(this)) "Экономия: включена" else "Экономия: выключена"
+        findViewById<Button>(R.id.btn_fgs).setText(if (facts.serviceEnabled) R.string.disable_connectivity else R.string.enable_connectivity)
+        findViewById<Button>(R.id.btn_economy).setText(if (Prefs.economy(this)) R.string.economy_on else R.string.economy_off)
         findViewById<Button>(R.id.btn_reconnect).isEnabled = !guard.pending && !facts.pollInFlight
     }
 }

@@ -12,20 +12,20 @@ class StorageActivity : DmsgActivity() {
     private var prompt: AlertDialog? = null
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState); setContentView(R.layout.activity_storage)
-        NativeUi.back(this, "Хранилище")
+        NativeUi.back(this, getString(R.string.title_storage))
         findViewById<Button>(R.id.btn_migrate).setOnClickListener {
-            work("Сохраняем защищённую копию…", { SecureStore.seal(applicationContext) }) { "Локальная копия обновлена. Восстановление возможно только в этой установке с исходным Keystore-ключом." }
+            work(getString(R.string.saving_copy), { SecureStore.seal(applicationContext) }) { getString(R.string.copy_saved) }
         }
         findViewById<Button>(R.id.btn_unseal).setOnClickListener {
-            prompt = AlertDialog.Builder(this).setTitle("Восстановить локальную копию?")
-                .setMessage("Нужен исходный Keystore-ключ этой установки. Существующая рабочая база не будет перезаписана. Пароль аккаунта не восстанавливает удалённые ключи и историю.")
-                .setNegativeButton("Отмена", null).setPositiveButton("Восстановить") { _, _ ->
-                    work("Проверяем и восстанавливаем…", { SecureStore.unseal(applicationContext) }) { "Копия восстановлена, identity проверена ядром." }
+            prompt = AlertDialog.Builder(this).setTitle(R.string.restore_title)
+                .setMessage(R.string.restore_warning)
+                .setNegativeButton(R.string.cancel, null).setPositiveButton(R.string.restore_confirm) { _, _ ->
+                    work(getString(R.string.restoring_copy), { SecureStore.unseal(applicationContext) }) { getString(R.string.copy_restored) }
                 }.show()
         }
         findViewById<Button>(R.id.btn_wipe_cache).setOnClickListener {
-            work("Очищаем временные файлы…", { cacheDir.deleteRecursively() }) {
-                if (it) "Временный кэш очищен. История, ключи и локальная копия сохранены." else "Часть временного кэша не удалось удалить. История и ключи сохранены."
+            work(getString(R.string.clearing_cache), { cacheDir.deleteRecursively() }) {
+                getString(if (it) R.string.cache_cleared else R.string.cache_partial)
             }
         }
     }
@@ -41,7 +41,7 @@ class StorageActivity : DmsgActivity() {
             val result = runCatching(task)
             runOnUiThread {
                 if (!active || !guard.finish(stamp)) return@runOnUiThread
-                findViewById<TextView>(R.id.info).text = result.fold(success, ::humanError)
+                findViewById<TextView>(R.id.info).text = result.fold(success, { humanError(resources, it) })
                 controls(); showPlan()
             }
         }
@@ -54,13 +54,13 @@ class StorageActivity : DmsgActivity() {
             runOnUiThread {
             if (!active || !guard.finish(stamp)) return@runOnUiThread
             result.fold({ (plan, live, copy) ->
-            findViewById<TextView>(R.id.plan).text = when (plan) {
-                "ready" -> "Keystore-обёртка ключа сохранена. Ключ проверяется ядром при открытии."
-                "reinstall_loss" -> "Keystore-ключ утрачен. Локальную копию открыть нельзя; новая identity не создаётся автоматически."
-                "migrate" -> "Найдена локальная база без обёрнутого ключа. Старые схемы отвергаются без переноса и без автоматического сброса."
-                else -> "Новая установка. Защищённое хранилище создаётся при первом открытии ядра."
-            } + "\nРабочая база: ${if (live) "есть" else "нет"}\nЛокальная копия: ${if (copy) "есть" else "нет"}"
-            }, { findViewById<TextView>(R.id.plan).text = humanError(it) })
+            findViewById<TextView>(R.id.plan).text = getString(when (plan) {
+                "ready" -> R.string.store_ready
+                "reinstall_loss" -> R.string.store_key_lost
+                "migrate" -> R.string.store_unwrapped
+                else -> R.string.store_new
+            }) + getString(R.string.store_files, getString(if (live) R.string.file_present else R.string.file_absent), getString(if (copy) R.string.file_present else R.string.file_absent))
+            }, { findViewById<TextView>(R.id.plan).text = humanError(resources, it) })
             controls()
             }
         }

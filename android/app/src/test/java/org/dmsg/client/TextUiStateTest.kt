@@ -50,7 +50,7 @@ class TextUiStateTest {
         assertEquals(ContactCta.Accept, contactCta(Dialog("P", "requested", hasKeys = true)))
         assertEquals(ContactCta.Chat, contactCta(Dialog("P", "accepted", hasKeys = true)))
         assertEquals(ContactCta.VerifyChanged, contactCta(Dialog("P", "accepted", true, true)))
-        assertTrue(trustLabel(Dialog("P", "accepted", true, true)).contains("СТОП"))
+        assertEquals(R.string.trust_changed, trustLabelRes(Dialog("P", "accepted", true, true)))
         assertEquals(ContactCta.Blocked, contactCta(Dialog("P", "blocked", true, true)))
     }
     @Test fun asyncGuardRejectsDoubleActionsDuplicateCompletionsAndPausedResults() {
@@ -78,7 +78,7 @@ class TextUiStateTest {
         val retried = draft.begin()!!
         val sent = runCatching { f.send("P", retried) }
         // Status can be unknown independently of the committed message.
-        assertEquals("Статус пока неизвестен", deliveryLabel(null))
+        assertEquals(R.string.delivery_unknown, deliveryLabelRes(null))
         draft.finish(sent.isSuccess)
         assertEquals("", draft.text)
         assertEquals(1, f.history.size)

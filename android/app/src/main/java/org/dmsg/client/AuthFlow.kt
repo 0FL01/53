@@ -14,18 +14,18 @@ internal object AuthForm {
     fun validate(action: AuthAction, policy: RegistrationPolicy?, login: String, password: String, invitation: String?) {
         // Core performs canonical ASCII lowercasing. Pass the original login to its builder.
         if (login.length !in 3..32)
-            throw DmsgError("Логин должен содержать от 3 до 32 знаков", ErrorKind.InvalidInput)
+            throw DmsgError(R.string.error_login_length, ErrorKind.InvalidInput)
         if (login.any {
                 it !in 'a'..'z' && it !in 'A'..'Z' && it !in '0'..'9' && it != '_' && it != '-' && it != '.'
-            }) throw DmsgError("Проверьте логин: используйте латинские буквы и цифры, без пробелов", ErrorKind.InvalidInput)
+            }) throw DmsgError(R.string.error_login_characters, ErrorKind.InvalidInput)
         val passwordBytes = password.toByteArray(Charsets.UTF_8).size
         if (passwordBytes < 8)
-            throw DmsgError("Пароль слишком короткий. Добавьте ещё несколько знаков", ErrorKind.InvalidInput)
+            throw DmsgError(R.string.error_password_short, ErrorKind.InvalidInput)
         if (passwordBytes > 128)
-            throw DmsgError("Пароль слишком длинный. Сделайте его короче", ErrorKind.InvalidInput)
-        if (action == AuthAction.Signup && policy == null) throw DmsgError("Сначала проверьте режим регистрации сервера")
+            throw DmsgError(R.string.error_password_long, ErrorKind.InvalidInput)
+        if (action == AuthAction.Signup && policy == null) throw DmsgError(R.string.error_policy_required)
         if (needsInvitation(action, policy) && (invitation == null || !InvitationInput.isCanonical(invitation)))
-            throw DmsgError("Сканируйте приглашение или выберите его приватный файл", ErrorKind.InviteRequired)
+            throw DmsgError(R.string.error_invite_import, ErrorKind.InviteRequired)
     }
 }
 
@@ -79,7 +79,7 @@ internal class AuthFlow(private val f: DmsgFacade) {
             AuthForm.validate(action, policy, login, password, invitation)
             val outcome = if (action == AuthAction.Signup) {
                 val account = f.signupDns(login, password, invitation)
-                if (!account.authenticated || account.contactId == null) throw DmsgError("Сервер не подтвердил аккаунт")
+                if (!account.authenticated || account.contactId == null) throw DmsgError(R.string.error_account_unconfirmed)
                 LoginOutcome.Authenticated(account.contactId!!)
             } else f.loginDns(login, password, null)
             if (outcome is LoginOutcome.ReplacementRequired) synchronized(lock) {
@@ -102,7 +102,7 @@ internal class AuthFlow(private val f: DmsgFacade) {
         val stamp: Long
         val attempt: Pending
         synchronized(lock) {
-            attempt = pending ?: throw DmsgError("Подтверждение отменено. Введите пароль заново")
+            attempt = pending ?: throw DmsgError(R.string.error_confirmation_cancelled)
             pending = null
             active = attempt.secrets
             stamp = generation
@@ -128,6 +128,6 @@ internal class AuthFlow(private val f: DmsgFacade) {
 
     private fun checkDevice(value: String) {
         if (value.length != 64 || value.any { it !in '0'..'9' && it !in 'a'..'f' })
-            throw DmsgError("Некорректный ответ подтверждения устройства")
+            throw DmsgError(R.string.error_device_confirmation)
     }
 }

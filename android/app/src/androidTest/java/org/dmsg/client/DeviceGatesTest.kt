@@ -416,16 +416,17 @@ class DeviceGatesTest {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val activity = instrumentation.startActivitySync(
             Intent(app, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        val expected = humanError(activity.resources, DmsgError("reinstall_loss", ErrorKind.StorageKeyLost))
         try {
             val deadline = System.nanoTime() + 5_000_000_000L
             var label = ""
-            while (!label.contains("Keystore-ключ недоступен") && System.nanoTime() < deadline) {
+            while (!label.contains(expected) && System.nanoTime() < deadline) {
                 instrumentation.runOnMainSync {
                     label = activity.findViewById<android.widget.TextView>(R.id.status).text.toString()
                 }
                 Thread.sleep(50)
             }
-            assertTrue("loss must be shown rather than an uncaught worker-thread crash", label.contains("Keystore-ключ недоступен"))
+            assertTrue("loss must be shown rather than an uncaught worker-thread crash", label.contains(expected))
         } finally { instrumentation.runOnMainSync { activity.finish() } }
     }
 
@@ -687,7 +688,7 @@ class DeviceGatesTest {
                     assertEquals("stopped", real.dnsStatus())
                     scenario.onActivity {
                         val message = dialog(it)!!.findViewById<android.widget.TextView>(android.R.id.message)!!.text.toString()
-                        assertTrue(message.contains("потеряет доступ")); assertTrue(message.contains("история"))
+                        assertEquals(it.getString(R.string.replacement_warning), message)
                         assertTrue(it.findViewById<android.widget.EditText>(R.id.auth_password).text.isEmpty())
                         assertFalse((field(it, "invitation") as InvitationMemory).hasInvitation)
                     }
@@ -896,14 +897,14 @@ class DeviceGatesTest {
             ActivityScenario.launch(MainActivity::class.java).use { scenario ->
                 gateAwait(scenario, "real unread dialog summary") {
                     val list = it.findViewById<android.widget.ListView>(R.id.dialogs)
-                    list.childCount > 0 && texts(list).any { text -> text.contains("Непрочитано здесь:") }
+                    list.childCount > 0 && texts(list).any { text -> text.contains(it.getString(R.string.local_unread, summary.localUnread.toString())) }
                 }
                 gateScreenshot(app, "dialogs-unread")
             }
             ActivityScenario.launch<ChatActivity>(Intent(app, ChatActivity::class.java).putExtra("peer", peer)).use { scenario ->
                 gateAwait(scenario, "decrypted incoming bubble and local time") {
                     val content = texts(it.findViewById(R.id.messages))
-                    fixture.getString("text") in content && content.any { label -> label.contains("Входящее") && label.contains("Локально:") }
+                    fixture.getString("text") in content && content.any { label -> label.contains(it.getString(R.string.message_incoming)) && label.contains(it.getString(R.string.local_timestamp, "")) }
                 }
                 gateScreenshot(app, "chat-incoming")
                 scenario.recreate()
@@ -937,7 +938,7 @@ class DeviceGatesTest {
             assertEquals("real native connection is pending", "connecting", native.dnsStatus())
             native.dnsStop()
             gateAwait(scenario, "durably saved text clears draft") {
-                it.findViewById<android.widget.EditText>(R.id.composer).text.isEmpty() && it.findViewById<android.widget.TextView>(R.id.info).text.contains("Сообщение сохранено")
+                it.findViewById<android.widget.EditText>(R.id.composer).text.isEmpty() && it.findViewById<android.widget.TextView>(R.id.info).text.contains(it.getString(R.string.message_saved, it.getString(R.string.delivery_queued)))
             }
             val rows = f.historyPage(peer, null, 100).rows
             assertEquals("one history row despite repeated click", before.size + 1, rows.size)
@@ -947,7 +948,7 @@ class DeviceGatesTest {
             gateWrite(app, "gate-queued-record", JSONObject().put("mid", sent.messageIdHex).put("ciphertextHash", ciphertextHash(app, sent.messageIdHex)).put("account", f.account().contactId).put("inboxCount", f.inbox(0, 100).first.size).toString())
             gateAwait(scenario, "queued bubble renders exact local status") {
                 val content = texts(it.findViewById(R.id.messages))
-                fixture.getString("text") in content && content.any { label -> label.contains("В очереди") }
+                fixture.getString("text") in content && content.any { label -> label.contains(it.getString(R.string.delivery_queued)) }
             }
             gateScreenshot(app, "chat-queued")
         }
@@ -967,7 +968,7 @@ class DeviceGatesTest {
         ActivityScenario.launch<ChatActivity>(Intent(app, ChatActivity::class.java).putExtra("peer", peer)).use { scenario ->
             gateAwait(scenario, "accepted bubble renders server acceptance") {
                 val content = texts(it.findViewById(R.id.messages))
-                fixture.getString("text") in content && content.any { label -> label.contains("На сервере") }
+                fixture.getString("text") in content && content.any { label -> label.contains(it.getString(R.string.delivery_accepted)) }
             }
             gateScreenshot(app, "chat-accepted")
         }
@@ -990,14 +991,14 @@ class DeviceGatesTest {
         ActivityScenario.launch<ChatActivity>(Intent(app, ChatActivity::class.java).putExtra("peer", peer)).use { scenario ->
             gateAwait(scenario, "delivered history renders exact status") {
                 val content = texts(it.findViewById(R.id.messages))
-                fixture.getString("text") in content && content.any { label -> label.contains("Доставка подтверждена сервером") }
+                fixture.getString("text") in content && content.any { label -> label.contains(it.getString(R.string.delivery_delivered)) }
             }
             gateScreenshot(app, "chat-delivered")
             scenario.recreate()
             gateAwait(scenario, "delivered history survives activity restart") { fixture.getString("text") in texts(it.findViewById(R.id.messages)) }
         }
         ActivityScenario.launch(OutboxActivity::class.java).use { scenario ->
-            gateAwait(scenario, "queue emptiness is not a false delivery inference") { it.findViewById<android.widget.TextView>(R.id.outbox_empty).text.contains("не подтверждает доставку") }
+            gateAwait(scenario, "queue emptiness is not a false delivery inference") { it.findViewById<android.widget.TextView>(R.id.outbox_empty).text.toString() == it.getString(R.string.outbox_empty) }
             gateScreenshot(app, "outbox-empty")
         }
         f.dnsStop()
@@ -1012,7 +1013,7 @@ class DeviceGatesTest {
         assertTrue("actual 200 percent system font required", app.resources.configuration.fontScale >= 1.99f)
         ActivityScenario.launch<ProfileActivity>(Intent(app, ProfileActivity::class.java).putExtra("peer", peer)).use { scenario ->
             gateAwait(scenario, "contact card ready") {
-                it.findViewById<android.widget.Button>(R.id.btn_alias_save).isEnabled && it.findViewById<android.widget.TextView>(R.id.info).text.toString() == trustLabel(f.get(peer))
+                it.findViewById<android.widget.Button>(R.id.btn_alias_save).isEnabled && it.findViewById<android.widget.TextView>(R.id.info).text.toString() == trustLabel(it.resources, f.get(peer))
             }
             if (f.get(peer)!!.state == "requested") {
                 scenario.onActivity { it.findViewById<android.widget.Button>(R.id.btn_accept).performClick() }
@@ -1028,7 +1029,7 @@ class DeviceGatesTest {
             scenario.onActivity { it.findViewById<android.widget.Button>(R.id.btn_block).performClick() }
             scenario.onActivity {
                 val prompt = ProfileActivity::class.java.getDeclaredField("prompt").also { field -> field.isAccessible = true }.get(it) as androidx.appcompat.app.AlertDialog
-                assertTrue(prompt.findViewById<android.widget.TextView>(android.R.id.message)!!.text.contains("снять блокировку нельзя"))
+                assertEquals(it.getString(R.string.block_warning), prompt.findViewById<android.widget.TextView>(android.R.id.message)!!.text.toString())
                 prompt.getButton(android.content.DialogInterface.BUTTON_NEGATIVE).performClick()
             }
             assertEquals("accepted", f.get(peer)!!.state)
@@ -1046,7 +1047,7 @@ class DeviceGatesTest {
             assertEquals(!economy, Prefs.economy(app))
             scenario.onActivity { it.findViewById<android.widget.Button>(R.id.btn_economy).performClick(); it.findViewById<android.widget.Button>(R.id.btn_reconnect).performClick() }
             gateAwait(scenario, "real manual DNS success while service disabled") {
-                it.findViewById<android.widget.TextView>(R.id.stats).text.contains("DNS-проверка завершена") && !DmsgService.connectionState().serviceEnabled && DmsgService.connectionState().lastSuccessAt != null
+                it.findViewById<android.widget.TextView>(R.id.stats).text.contains(it.getString(R.string.dns_check_complete).substringBefore("%1\$d")) && !DmsgService.connectionState().serviceEnabled && DmsgService.connectionState().lastSuccessAt != null
             }
             scenario.onActivity { it.findViewById<android.widget.Button>(R.id.btn_fgs).performClick() }
             gateAwait(scenario, "real foreground DNS started") { DmsgService.running(app) && DmsgService.connectionState().serviceEnabled }
@@ -1112,7 +1113,7 @@ class DeviceGatesTest {
         assertTrue(f.get(selection)!!.identityMismatch)
         ActivityScenario.launch<ChatActivity>(Intent(app, ChatActivity::class.java).putExtra("peer", selection)).use { scenario ->
             gateAwait(scenario, "changed identity blocks actual send") {
-                !it.findViewById<android.widget.Button>(R.id.btn_send).isEnabled && it.findViewById<android.widget.TextView>(R.id.info).text.contains("СТОП")
+                !it.findViewById<android.widget.Button>(R.id.btn_send).isEnabled && it.findViewById<android.widget.TextView>(R.id.info).text.contains(it.getString(R.string.trust_changed))
             }
             gateScreenshot(app, "chat-stop-changed-key")
         }
@@ -1148,7 +1149,7 @@ class DeviceGatesTest {
             gateScreenshot(app, "contact-blocked")
         }
         ActivityScenario.launch<ChatActivity>(Intent(app, ChatActivity::class.java).putExtra("peer", peer)).use { scenario ->
-            gateAwait(scenario, "blocked chat STOP") { !it.findViewById<android.widget.Button>(R.id.btn_send).isEnabled && it.findViewById<android.widget.TextView>(R.id.info).text.contains("заблокирован") }
+            gateAwait(scenario, "blocked chat STOP") { !it.findViewById<android.widget.Button>(R.id.btn_send).isEnabled && it.findViewById<android.widget.TextView>(R.id.info).text.contains(it.getString(R.string.trust_blocked)) }
         }
     }
 
@@ -1170,12 +1171,12 @@ class DeviceGatesTest {
             f.request(missing)
             assertFalse(f.get(missing)!!.hasKeys)
             for ((peer, label, shot) in listOf(
-                Triple(requested, "ожидает вашего согласия", "chat-requested"),
-                Triple(missing, "Нет ключей контакта", "chat-no-keys")
+                Triple(requested, R.string.trust_requested, "chat-requested"),
+                Triple(missing, R.string.trust_no_keys, "chat-no-keys")
             )) {
                 ActivityScenario.launch<ChatActivity>(Intent(app, ChatActivity::class.java).putExtra("peer", peer)).use { scenario ->
                     gateAwait(scenario, "actual trust warning renders") {
-                        it.findViewById<android.widget.TextView>(R.id.info).text.contains(label) && !it.findViewById<android.widget.Button>(R.id.btn_send).isEnabled
+                        it.findViewById<android.widget.TextView>(R.id.info).text.contains(it.getString(label)) && !it.findViewById<android.widget.Button>(R.id.btn_send).isEnabled
                     }
                     gateScreenshot(app, shot)
                 }
@@ -1352,7 +1353,7 @@ class DeviceGatesTest {
             val activity = start(ScannerActivity::class.java)
             try {
                 // Operator denies CAMERA only for .gate. The real paste control stays usable.
-                waitLabel(activity, R.id.result, "Камера запрещена")
+                waitLabel(activity, R.id.result, activity.getString(R.string.camera_denied_code))
                 instrumentation.runOnMainSync {
                     activity.findViewById<android.widget.EditText>(R.id.scanner_code).setText(uri)
                     activity.findViewById<android.widget.Button>(R.id.btn_scanner_paste).performClick()
@@ -1363,14 +1364,14 @@ class DeviceGatesTest {
         }
         val before = f.contacts(null, 100).first.size
         for (bad in listOf("garbage", "dmsg://contact/", "dmsg://server/broken", "dmsg://server/" + "x".repeat(9000))) {
-            scan(bad, "битый QR:")
+            scan(bad, app.getString(R.string.qr_failed, ""))
         }
         assertEquals(before, f.contacts(null, 100).first.size)
         assertEquals(AccountInfo(true, id), f.account())
-        scan(f.myQr(), "Контакт добавлен")
+        scan(f.myQr(), app.getString(R.string.qr_contact_added))
         f.accept(id)
         val changed = UniFfiFacade(seedFixtureDb("changed-ui.db", 9).absolutePath, ByteArray(32) { 4 })
-        scan(changed.myQr(), "Ключ контакта изменился")
+        scan(changed.myQr(), app.getString(R.string.qr_identity_changed))
         fun sendAndExpect(expected: String) {
             val activity = start(ChatActivity::class.java, id)
             try {
@@ -1384,7 +1385,7 @@ class DeviceGatesTest {
                 }
             } finally { instrumentation.runOnMainSync { activity.finish() } }
         }
-        sendAndExpect("СТОП")
+        sendAndExpect(app.getString(R.string.trust_changed))
         assertTrue(f.outbox(0, 100).first.isEmpty())
         val profile = start(ProfileActivity::class.java)
         try {
@@ -1392,7 +1393,7 @@ class DeviceGatesTest {
                 profile.findViewById<android.widget.EditText>(R.id.peer_id).setText(id)
                 profile.findViewById<android.widget.Button>(R.id.btn_check).performClick()
             }
-            waitLabel(profile, R.id.info, "отправка СТОП")
+            waitLabel(profile, R.id.info, profile.getString(R.string.trust_changed))
             instrumentation.runOnMainSync { profile.findViewById<android.widget.Button>(R.id.btn_confirm).performClick() }
             instrumentation.runOnMainSync {
                 val prompt = ProfileActivity::class.java.getDeclaredField("prompt").also { it.isAccessible = true }.get(profile) as androidx.appcompat.app.AlertDialog
@@ -1400,13 +1401,13 @@ class DeviceGatesTest {
                 assertTrue(f.get(id)?.identityMismatch == true)
                 prompt.getButton(android.content.DialogInterface.BUTTON_POSITIVE).performClick()
             }
-            waitLabel(profile, R.id.info, "Ключи контакта закреплены")
+            waitLabel(profile, R.id.info, profile.getString(R.string.trust_pinned))
             assertEquals(false, f.get(id)?.identityMismatch)
             instrumentation.runOnMainSync { profile.findViewById<android.widget.Button>(R.id.btn_check).performClick() }
-            val label = waitLabel(profile, R.id.info, "Ключи контакта закреплены")
-            assertFalse(label.contains("СТОП"))
+            val label = waitLabel(profile, R.id.info, profile.getString(R.string.trust_pinned))
+            assertEquals(profile.getString(R.string.trust_pinned), label)
         } finally { instrumentation.runOnMainSync { profile.finish() } }
-        sendAndExpect("Нет связи")
+        sendAndExpect(humanError(app.resources, ffiError(uniffi.dmsg_core.FfiException.Transport("synthetic gate error"))))
         assertTrue(f.outbox(0, 100).first.isEmpty())
     }
 

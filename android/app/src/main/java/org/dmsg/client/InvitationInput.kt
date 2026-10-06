@@ -12,7 +12,7 @@ internal object InvitationInput {
         value.all { it in alphabet } && alphabet.indexOf(value.last()) % 4 == 0
 
     fun parse(value: String): CharArray {
-        if (!isCanonical(value)) throw DmsgError("Неверный формат приглашения", ErrorKind.InvalidInput)
+        if (!isCanonical(value)) throw DmsgError(R.string.error_invite_format, ErrorKind.InvalidInput)
         return value.toCharArray()
     }
 
@@ -29,10 +29,10 @@ internal object InvitationInput {
                 count == TOKEN_LENGTH -> count
                 count == TOKEN_LENGTH + 1 && bytes[count - 1] == 10.toByte() -> count - 1
                 count == FILE_MAX && bytes[count - 2] == 13.toByte() && bytes[count - 1] == 10.toByte() -> count - 2
-                else -> throw DmsgError("Неверный формат файла приглашения", ErrorKind.InvalidInput)
+                else -> throw DmsgError(R.string.error_invite_file_format, ErrorKind.InvalidInput)
             }
             if ((0 until tokenSize).any { bytes[it].toInt() !in 0..127 })
-                throw DmsgError("Неверный формат приглашения", ErrorKind.InvalidInput)
+                throw DmsgError(R.string.error_invite_format, ErrorKind.InvalidInput)
             return parse(String(bytes, 0, tokenSize, Charsets.US_ASCII))
         } finally { bytes.fill(0) }
     }

@@ -9,7 +9,7 @@ class AdvancedProfileActivity : DmsgActivity() {
     private val guard = UiGuard()
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState); setContentView(R.layout.activity_advanced_profile)
-        NativeUi.back(this, "Профиль сервера")
+        NativeUi.back(this, getString(R.string.title_server_profile))
     }
     override fun onResume() {
         super.onResume(); active = true
@@ -19,9 +19,9 @@ class AdvancedProfileActivity : DmsgActivity() {
             runOnUiThread {
                 if (!active || !guard.finish(stamp)) return@runOnUiThread
                 findViewById<TextView>(R.id.profile_details).text = result.fold({ p ->
-                    p?.let { "Домен: ${it.domain}\n\nОтпечаток полного сертификата:\n${it.fingerprint}\n\nПубличный Noise-ключ:\n${Prefs.bytesToHex(it.pub)}\n\nРезолверы текущей сети:\n${it.resolvers.joinToString("\n")}\n\nПрофиль закреплён ядром. Проверка сертификата обязательна; вход передаётся только после pinned handshake." }
-                        ?: "Сервер пока не выбран. Вставьте публичный код на первом экране."
-                }, ::humanError)
+                    p?.let { getString(R.string.profile_details, it.domain, it.fingerprint, Prefs.bytesToHex(it.pub), it.resolvers.joinToString("\n")) }
+                        ?: getString(R.string.profile_missing)
+                }, { humanError(resources, it) })
             }
         }
     }

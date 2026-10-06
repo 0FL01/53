@@ -112,7 +112,7 @@ class UniFfiFacade(private val dbPath: String, key: ByteArray, private val conte
         observeDnsNetwork()
         return wrap {
             if (Thread.currentThread().isInterrupted) throw InterruptedException("DNS command stopped")
-            core.dnsProfileInfo() ?: throw DmsgError("Сначала добавьте код подключения")
+            core.dnsProfileInfo() ?: throw DmsgError(R.string.error_connection_code_required)
             applyDns()
             if (Thread.currentThread().isInterrupted) throw InterruptedException("DNS command stopped")
             block()

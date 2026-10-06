@@ -50,15 +50,15 @@ class AuthFlowTest {
     }
     @Test fun validationExplainsOnlyTheErrorWithoutTechnicalEncodingHints() {
         val cases = listOf(
-            Triple("ab", "12345678", "Логин должен содержать от 3 до 32 знаков"),
-            Triple("abc def", "12345678", "Проверьте логин: используйте латинские буквы и цифры, без пробелов"),
-            Triple("abc", "1234567", "Пароль слишком короткий. Добавьте ещё несколько знаков"),
-            Triple("abc", "é".repeat(65), "Пароль слишком длинный. Сделайте его короче")
+            Triple("ab", "12345678", R.string.error_login_length),
+            Triple("abc def", "12345678", R.string.error_login_characters),
+            Triple("abc", "1234567", R.string.error_password_short),
+            Triple("abc", "é".repeat(65), R.string.error_password_long)
         )
         for ((login, password, expected) in cases) {
             val error = failure { AuthForm.validate(AuthAction.Login, null, login, password, null) }
             assertEquals(ErrorKind.InvalidInput, error.kind)
-            assertEquals(expected, humanError(error))
+            assertEquals(expected, humanErrorRes(error))
         }
         // Presentation must not change the established accepted characters or byte limits.
         AuthForm.validate(AuthAction.Login, null, "ABC._-012", "é".repeat(4), null)

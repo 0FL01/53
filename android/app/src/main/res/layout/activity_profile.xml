@@ -4,24 +4,24 @@
         <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="16dp">
             <LinearLayout android:id="@+id/mine_panel" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:visibility="gone">
                 <TextView android:id="@+id/my_id" android:layout_width="match_parent" android:layout_height="wrap_content" android:fontFamily="monospace" android:textIsSelectable="true"/>
-                <ImageView android:id="@+id/qr" android:layout_width="match_parent" android:layout_height="280dp" android:adjustViewBounds="true" android:scaleType="fitCenter" android:contentDescription="Мой публичный QR контакта"/>
+                <ImageView android:id="@+id/qr" android:layout_width="match_parent" android:layout_height="280dp" android:adjustViewBounds="true" android:scaleType="fitCenter" android:contentDescription="@string/my_public_qr"/>
             </LinearLayout>
             <LinearLayout android:id="@+id/contact_panel" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical">
-                <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Публичный ID контакта" android:labelFor="@id/peer_id"/>
+                <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/public_contact_id" android:labelFor="@id/peer_id"/>
                 <EditText android:id="@+id/peer_id" android:layout_width="match_parent" android:layout_height="wrap_content" android:inputType="textVisiblePassword|textNoSuggestions" android:fontFamily="monospace"/>
-                <Button android:id="@+id/btn_check" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Проверить контакт"/>
-                <Button android:id="@+id/btn_request" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Добавить запрос по ID"/>
-                <Button android:id="@+id/btn_contact_scan" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Сканировать / вставить QR контакта"/>
-                <Button android:id="@+id/btn_accept" style="@style/Widget.Dmsg.Primary" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Принять контакт" android:visibility="gone"/>
-                <Button android:id="@+id/btn_confirm" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Проверить новый ключ" android:visibility="gone"/>
-                <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Локальное имя · только на этом устройстве" android:labelFor="@id/contact_alias" android:paddingTop="24dp"/>
-                <EditText android:id="@+id/contact_alias" android:layout_width="match_parent" android:layout_height="wrap_content" android:inputType="textCapWords" android:saveEnabled="false" android:hint="До 128 байт UTF-8"/>
-                <Button android:id="@+id/btn_alias_save" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Сохранить локальное имя"/>
-                <Button android:id="@+id/btn_alias_clear" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Убрать локальное имя"/>
-                <Button android:id="@+id/btn_contact_chat" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Открыть переписку"/>
-                <Button android:id="@+id/btn_block" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Заблокировать контакт…" android:textColor="@color/error"/>
+                <Button android:id="@+id/btn_check" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/check_contact"/>
+                <Button android:id="@+id/btn_request" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/request_by_id"/>
+                <Button android:id="@+id/btn_contact_scan" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/scan_contact_qr"/>
+                <Button android:id="@+id/btn_accept" style="@style/Widget.Dmsg.Primary" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/accept_contact" android:visibility="gone"/>
+                <Button android:id="@+id/btn_confirm" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/verify_new_key" android:visibility="gone"/>
+                <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/local_alias_label" android:labelFor="@id/contact_alias" android:paddingTop="24dp"/>
+                <EditText android:id="@+id/contact_alias" android:layout_width="match_parent" android:layout_height="wrap_content" android:inputType="textCapWords" android:saveEnabled="false" android:hint="@string/alias_bounds"/>
+                <Button android:id="@+id/btn_alias_save" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/save_alias"/>
+                <Button android:id="@+id/btn_alias_clear" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/clear_alias"/>
+                <Button android:id="@+id/btn_contact_chat" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/open_chat"/>
+                <Button android:id="@+id/btn_block" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/block_contact" android:textColor="@color/error"/>
             </LinearLayout>
-            <Button android:id="@+id/btn_id_copy" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Скопировать публичный ID"/>
+            <Button android:id="@+id/btn_id_copy" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/copy_id"/>
             <TextView android:id="@+id/info" android:layout_width="match_parent" android:layout_height="wrap_content" android:padding="12dp" android:background="@color/warning_surface" android:accessibilityLiveRegion="polite"/>
         </LinearLayout>
     </ScrollView>

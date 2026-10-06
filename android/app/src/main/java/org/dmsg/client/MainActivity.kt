@@ -70,7 +70,7 @@ class MainActivity : DmsgActivity() {
     private val ticker = object : Runnable {
         override fun run() {
             if (state == LaunchState.Dialogs && !busy && list.firstVisiblePosition == 0) loadDialogs()
-            if (state == LaunchState.Dialogs) findViewById<Button>(R.id.connection_strip).text = connectionLabel(DmsgService.connectionState())
+            if (state == LaunchState.Dialogs) findViewById<Button>(R.id.connection_strip).text = connectionLabel(resources, DmsgService.connectionState())
             handler.postDelayed(this, 5_000)
         }
     }
@@ -119,19 +119,19 @@ class MainActivity : DmsgActivity() {
         button(R.id.btn_menu) { menu() }
         button(R.id.btn_dialogs_retry) {
             if (state == LaunchState.Dialogs) {
-                work("Обновляем сообщения через DNS…", { DmsgService.check(requireNotNull(facade)) }) { loadDialogs() }
+                work(getString(R.string.refreshing_dns), { DmsgService.check(requireNotNull(facade)) }) { loadDialogs() }
             } else refresh()
         }
         button(R.id.connection_strip) { startActivity(Intent(this, DiagnosticsActivity::class.java)) }
         button(R.id.btn_paste) {
             val clip = getSystemService(ClipboardManager::class.java).primaryClip
             val text = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this)
-            if (text != null && text.length <= 8192) code.setText(text) else status.text = "В буфере нет подходящего кода"
+            if (text != null && text.length <= 8192) code.setText(text) else status.text = getString(R.string.clipboard_no_code)
         }
         button(R.id.btn_password_reveal) {
             password.transformationMethod = if (password.transformationMethod == null)
                 android.text.method.PasswordTransformationMethod.getInstance() else null
-            findViewById<Button>(R.id.btn_password_reveal).text = if (password.transformationMethod == null) "Скрыть пароль" else "Показать пароль"
+            findViewById<Button>(R.id.btn_password_reveal).setText(if (password.transformationMethod == null) R.string.hide_password else R.string.show_password)
         }
     }
 
@@ -166,7 +166,7 @@ class MainActivity : DmsgActivity() {
     private fun clearSecrets() {
         password.text.clear(); invitation.clear()
         password.transformationMethod = android.text.method.PasswordTransformationMethod.getInstance()
-        findViewById<Button>(R.id.btn_password_reveal).text = "Показать пароль"
+        findViewById<Button>(R.id.btn_password_reveal).setText(R.string.show_password)
         updateInvitationIndicator()
     }
 
@@ -178,7 +178,7 @@ class MainActivity : DmsgActivity() {
 
     private fun updateInvitationIndicator() {
         findViewById<TextView>(R.id.invitation_status).text =
-            if (invitation.hasInvitation) "Приглашение считано" else "Приглашение не считано"
+            getString(if (invitation.hasInvitation) R.string.invitation_imported else R.string.invitation_empty)
         findViewById<Button>(R.id.btn_invitation_cancel).isEnabled = !busy && invitation.hasInvitation
     }
 
@@ -197,7 +197,7 @@ class MainActivity : DmsgActivity() {
         clearSecrets()
         val stamp = token
         busy = true
-        status.text = "Читаем приватный файл…"
+        status.text = getString(R.string.reading_invitation)
         updateForm()
         Core.dispatch {
             val result = runCatching { open().use(InvitationInput::read) }
@@ -209,10 +209,10 @@ class MainActivity : DmsgActivity() {
                 busy = false
                 result.fold({
                     acceptInvitation(it)
-                    status.text = "Приглашение считано. Введите логин и пароль"
+                    status.text = getString(R.string.invitation_ready)
                     if (policy == null) loadPolicy()
                 },
-                    { status.text = "Не удалось прочитать приглашение. Выберите корректный приватный файл" })
+                    { status.text = getString(R.string.invitation_read_failed) })
                 updateForm()
             }
         }
@@ -220,11 +220,11 @@ class MainActivity : DmsgActivity() {
 
     private fun render(next: LaunchState) {
         state = next
-        findViewById<TextView>(R.id.main_title).text = when (next) {
-            LaunchState.Connection -> "53 · Подключение"
-            LaunchState.Authentication -> "Аккаунт"
-            LaunchState.Dialogs -> "Диалоги"
-        }
+        findViewById<TextView>(R.id.main_title).setText(when (next) {
+            LaunchState.Connection -> R.string.title_connection
+            LaunchState.Authentication -> R.string.title_account
+            LaunchState.Dialogs -> R.string.title_dialogs
+        })
         findViewById<View>(R.id.btn_scan).visibility = if (next == LaunchState.Dialogs) View.VISIBLE else View.GONE
         findViewById<View>(R.id.connection_panel).visibility = if (next == LaunchState.Connection) View.VISIBLE else View.GONE
         findViewById<View>(R.id.auth_panel).visibility = if (next == LaunchState.Authentication) View.VISIBLE else View.GONE
@@ -245,7 +245,7 @@ class MainActivity : DmsgActivity() {
             runOnUiThread {
                 if (stamp != token || isFinishing || isDestroyed) return@runOnUiThread
                 busy = false
-                result.fold(success, { status.text = humanError(it) })
+                result.fold(success, { status.text = humanError(resources, it) })
                 updateForm()
             }
         }
@@ -254,7 +254,7 @@ class MainActivity : DmsgActivity() {
     private fun refresh() {
         token++
         policy = null
-        work("Открываем защищённое хранилище…", {
+        work(getString(R.string.opening_store), {
             val f = Core.facade(applicationContext)
             val configured = TrustedServerProfile.configureIfFresh(f, { DnsNetwork.resolvers(this) }) {
                 if (TrustedServerProfile.ASSET in assets.list("").orEmpty()) assets.open(TrustedServerProfile.ASSET) else null
@@ -266,7 +266,7 @@ class MainActivity : DmsgActivity() {
             facade = f; flow = auth
             render(next)
             when (next) {
-                LaunchState.Connection -> status.text = "Вставьте публичный код сервера или сканируйте QR"
+                LaunchState.Connection -> status.text = getString(R.string.enter_server_code)
                 LaunchState.Authentication -> loadPolicy()
                 LaunchState.Dialogs -> { invitation.clear(); pendingInvitationFile = null; loadDialogs() }
             }
@@ -275,12 +275,12 @@ class MainActivity : DmsgActivity() {
 
     private fun previewCode() {
         val input = code.text.toString()
-        work("Проверяем код офлайн…", { QrGate.serverPreview(requireNotNull(facade), input) }) { p ->
-            prompt = AlertDialog.Builder(this).setTitle("Проверьте сервер")
-                .setMessage("Домен: ${p.domain}\nОтпечаток сертификата: ${p.fingerprint}\n\nСверьте данные с доверенным источником. Код публичный и не создаёт аккаунт.")
-                .setNegativeButton("Отмена", null)
-                .setPositiveButton("Принять сервер") { _, _ ->
-                    work("Сохраняем сервер…", {
+        work(getString(R.string.checking_code), { QrGate.serverPreview(requireNotNull(facade), input) }) { p ->
+            prompt = AlertDialog.Builder(this).setTitle(R.string.verify_server_title)
+                .setMessage(getString(R.string.server_trust_preview, p.domain, p.fingerprint))
+                .setNegativeButton(R.string.cancel, null)
+                .setPositiveButton(R.string.accept_server) { _, _ ->
+                    work(getString(R.string.saving_server), {
                         requireNotNull(facade).configureDns(p.code, DnsNetwork.resolvers(this))
                         DnsNetwork.mirrorProfile(this, requireNotNull(facade))
                     }) { code.text.clear(); render(LaunchState.Authentication); loadPolicy() }
@@ -299,10 +299,9 @@ class MainActivity : DmsgActivity() {
             return
         }
         policy = null
-        work("Проверяем режим регистрации через DNS…", { auth.policy() }) { result ->
+        work(getString(R.string.checking_policy), { auth.policy() }) { result ->
             policy = result
-            status.text = if (result == RegistrationPolicy.OPEN) "Сервер разрешает создание аккаунтов"
-                else "Для создания аккаунта нужно приглашение. Для входа оно не требуется"
+            status.setText(if (result == RegistrationPolicy.OPEN) R.string.policy_open else R.string.policy_invitation)
         }
     }
 
@@ -315,14 +314,14 @@ class MainActivity : DmsgActivity() {
 
     private fun updateForm() {
         if (!::password.isInitialized) return
-        login.hint = if (action == AuthAction.Signup) "Например, marina53" else ""
+        login.hint = if (action == AuthAction.Signup) getString(R.string.signup_example) else ""
         val showInvitation = AuthForm.needsInvitation(action, policy) ||
             (action == AuthAction.Signup && invitation.hasInvitation)
         findViewById<View>(R.id.invitation_group).visibility = if (showInvitation) View.VISIBLE else View.GONE
         updateInvitationIndicator()
-        findViewById<TextView>(R.id.auth_title).text = if (action == AuthAction.Login) "Войти" else "Создать аккаунт"
+        findViewById<TextView>(R.id.auth_title).setText(if (action == AuthAction.Login) R.string.sign_in else R.string.sign_up)
         findViewById<Button>(R.id.btn_auth_submit).apply {
-            text = if (action == AuthAction.Login) "Войти" else "Создать аккаунт"
+            setText(if (action == AuthAction.Login) R.string.sign_in else R.string.sign_up)
             isEnabled = !busy && (action == AuthAction.Login || policy != null)
         }
         findViewById<Button>(R.id.btn_policy_retry).isEnabled = !busy
@@ -342,7 +341,7 @@ class MainActivity : DmsgActivity() {
         val chosen = action
         val serverPolicy = policy
         clearSecrets()
-        work("Проверяем аккаунт через DNS…", { auth.submit(chosen, serverPolicy, name, secrets) }, ::authOutcome)
+        work(getString(R.string.checking_account), { auth.submit(chosen, serverPolicy, name, secrets) }, ::authOutcome)
     }
 
     private fun authOutcome(outcome: LoginOutcome) {
@@ -355,13 +354,13 @@ class MainActivity : DmsgActivity() {
             }
             is LoginOutcome.ReplacementRequired -> {
                 if (flow?.awaitingConfirmation != true) return
-                status.text = "Нужно подтвердить замену устройства"
-                prompt = AlertDialog.Builder(this).setTitle("Заменить прежнее устройство?")
-                    .setMessage("Прежнее устройство потеряет доступ. Старая история на этом устройстве недоступна. Контактам потребуется подтвердить новый ключ.")
-                    .setNegativeButton("Отмена") { _, _ -> cancelReplacement() }
+                status.setText(R.string.replacement_required)
+                prompt = AlertDialog.Builder(this).setTitle(R.string.replacement_title)
+                    .setMessage(R.string.replacement_warning)
+                    .setNegativeButton(R.string.cancel) { _, _ -> cancelReplacement() }
                     .setOnCancelListener { cancelReplacement() }
-                    .setPositiveButton("Заменить устройство") { _, _ ->
-                        work("Подтверждаем замену через DNS…", { requireNotNull(flow).confirm() }, ::authOutcome)
+                    .setPositiveButton(R.string.replace_device) { _, _ ->
+                        work(getString(R.string.confirming_replacement), { requireNotNull(flow).confirm() }, ::authOutcome)
                     }.show()
             }
         }
@@ -370,7 +369,7 @@ class MainActivity : DmsgActivity() {
     private fun cancelReplacement() {
         flow?.cancel(); clearSecrets()
         activeSecrets?.clear(); activeSecrets = null
-        status.text = "Замена отменена. Прежнее устройство сохраняет доступ"
+        status.setText(R.string.replacement_cancelled)
     }
 
     private fun loadDialogs(older: Boolean = false, restoreId: String? = null, restoreOffset: Int = 0) {
@@ -380,7 +379,7 @@ class MainActivity : DmsgActivity() {
         val anchor = restoreId ?: if (!older) memory.anchor else null
         val anchorOffset = if (restoreId != null) restoreOffset else memory.offset
         restoring = anchor != null
-        work(if (older) "Загружаем ещё диалоги…" else "", {
+        work(if (older) getString(R.string.loading_dialogs) else "", {
             val f = requireNotNull(facade)
             DnsNetwork.mirrorProfile(this, f)
             f.dialogsPage(cursor, 50)
@@ -400,24 +399,24 @@ class MainActivity : DmsgActivity() {
                 restoring = false
                 if (older) list.setSelectionFromTop(position, offset)
             }
-            status.text = if (rows.isEmpty()) "Пока нет диалогов. Добавьте контакт по QR или ID." else ""
-            findViewById<Button>(R.id.connection_strip).text = connectionLabel(DmsgService.connectionState())
+            status.text = if (rows.isEmpty()) getString(R.string.no_dialogs) else ""
+            findViewById<Button>(R.id.connection_strip).text = connectionLabel(resources, DmsgService.connectionState())
         }
     }
 
     private fun menu() {
-        prompt = AlertDialog.Builder(this).setTitle("53")
-            .setItems(arrayOf("Мой QR", "Связь", "Очередь", "Хранилище")) { _, which ->
+        prompt = AlertDialog.Builder(this).setTitle(R.string.app_name)
+            .setItems(arrayOf(getString(R.string.title_my_qr), getString(R.string.title_connectivity), getString(R.string.title_outbox), getString(R.string.title_storage))) { _, which ->
                 val target = arrayOf(ProfileActivity::class.java, DiagnosticsActivity::class.java, OutboxActivity::class.java, StorageActivity::class.java)[which]
                 startActivity(Intent(this, target).putExtra("mine", which == 0))
-            }.setNegativeButton("Закрыть", null).show()
+            }.setNegativeButton(R.string.close, null).show()
     }
 
     private fun addContact() {
-        prompt = AlertDialog.Builder(this).setTitle("Добавить контакт")
-            .setItems(arrayOf("Сканировать / вставить QR", "Ввести контактный ID")) { _, which ->
+        prompt = AlertDialog.Builder(this).setTitle(R.string.add_contact)
+            .setItems(arrayOf(getString(R.string.scan_or_paste_qr), getString(R.string.enter_contact_id))) { _, which ->
                 if (which == 0) scan(false) else startActivity(Intent(this, ProfileActivity::class.java))
-            }.setNegativeButton("Отмена", null).show()
+            }.setNegativeButton(R.string.cancel, null).show()
     }
 
     private fun openChat(id: String) { startActivity(Intent(this, ChatActivity::class.java).putExtra("peer", id).putExtra("alias", rows.find { it.contactId == id }?.localAlias)) }

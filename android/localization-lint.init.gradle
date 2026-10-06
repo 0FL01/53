@@ -1,0 +1,8 @@
+// A scoped verification invocation, not a baseline or production lint suppression.
+allprojects {
+    plugins.withId('com.android.application') {
+        android.lint.checkOnly.addAll(['MissingTranslation', 'ExtraTranslation',
+            'StringFormatInvalid', 'StringFormatMatches', 'StringFormatCount',
+            'HardcodedText', 'PluralsCandidate'])
+    }
+}

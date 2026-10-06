@@ -15,6 +15,13 @@ PACKAGE = "org.dmsg.client"
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def localized_texts(name):
+    """Read the checked-in translations; do not duplicate or guess UI copy."""
+    return {node.text or "" for directory in ("values", "values-ru")
+            for file in (ROOT / "android/app/src/main/res" / directory).glob("*.xml")
+            for node in ET.parse(file).getroot().findall("string") if node.get("name") == name}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--serial", required=True, help="explicit ADB device")
@@ -68,6 +75,11 @@ def main():
                 raise RuntimeError("test duplicate cleanup failed")
     adb("shell", "am", "start", "-W", "-n", PACKAGE + "/.MainActivity")
     remote = "/data/local/tmp/53-dev-startup.xml"
+    storage_errors = localized_texts("error_store")
+    native_errors = localized_texts("error_native_unavailable") | localized_texts("core_missing")
+    states = {text: state for name, state in (("title_connection", "connection"),
+              ("title_account", "authentication"), ("title_dialogs", "dialogs"))
+              for text in localized_texts(name)}
     try:
         # The hierarchy can contain dialog previews. Never create a world-readable dump.
         adb("shell", "umask 077; : > " + remote + "; chmod 600 " + remote)
@@ -77,12 +89,11 @@ def main():
             tree = ET.fromstring(adb("shell", "cat", remote))
             nodes = [node for node in tree.iter("node") if node.get("package") == PACKAGE]
             status = next((node.get("text", "") for node in nodes if node.get("resource-id") == PACKAGE + ":id/status"), "")
-            if "Ошибка защищённого хранилища" in status:
+            if status in storage_errors:
                 raise RuntimeError("main storage startup failed: unsupported/corrupt local data; explicit --reset-data required for disposable dev data")
-            if "Ядро приложения недоступно" in status or "Ядро недоступно" in status:
+            if status in native_errors:
                 raise RuntimeError("main native core unavailable")
             title = next((node.get("text") for node in nodes if node.get("resource-id") == PACKAGE + ":id/main_title"), None)
-            states = {"53 · Подключение": "connection", "Аккаунт": "authentication", "Диалоги": "dialogs"}
             if title in states:
                 print("Main 53 startup verified: " + states[title])
                 print("Startup is not DNS/signup acceptance; verify the requested network workflow separately")

@@ -37,7 +37,7 @@ object Core {
     }
 
     private class Unready : DmsgFacade {
-        private fun fail(): Nothing = throw DmsgError("Ядро приложения недоступно", ErrorKind.NativeUnavailable)
+        private fun fail(): Nothing = throw DmsgError(R.string.error_native_unavailable, ErrorKind.NativeUnavailable)
         override fun isReady() = false
         override fun dnsProfile(): DnsProfile? = fail()
         override fun configureDns(code: String, resolvers: List<String>) = fail()

@@ -58,20 +58,20 @@ internal object DnsNetwork {
         val v4 = addresses.filterIsInstance<Inet4Address>()
         val selected = if (v4.isNotEmpty()) v4 else addresses
         val resolvers = selected.take(8).map {
-            val ip = it.hostAddress ?: throw DmsgError("Нет числового DNS-адреса", ErrorKind.Transport)
+            val ip = it.hostAddress ?: throw DmsgError(R.string.error_dns_numeric, ErrorKind.Transport)
             if (it is Inet4Address) "$ip:53" else "[$ip]:53"
         }
         return DnsSnapshot(network, resolvers)
     }
 
     fun resolvers(c: Context): List<String> {
-        val snapshot = snapshot(c) ?: throw DmsgError("Нет активной сети", ErrorKind.Transport)
-        if (snapshot.resolvers.isEmpty()) throw DmsgError("Сеть не предоставила DNS-резолвер", ErrorKind.Transport)
+        val snapshot = snapshot(c) ?: throw DmsgError(R.string.error_no_network, ErrorKind.Transport)
+        if (snapshot.resolvers.isEmpty()) throw DmsgError(R.string.error_no_dns, ErrorKind.Transport)
         return snapshot.resolvers
     }
 
     fun mirrorProfile(c: Context, f: DmsgFacade) {
-        val p = f.dnsProfile() ?: throw DmsgError("DNS профиль не сохранён")
+        val p = f.dnsProfile() ?: throw DmsgError(R.string.error_profile_unsaved)
         Prefs.mirrorDns(c, p)
     }
 }

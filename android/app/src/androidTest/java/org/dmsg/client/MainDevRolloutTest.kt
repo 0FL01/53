@@ -218,7 +218,7 @@ class MainDevRolloutTest {
             }
             await(scenario, "durably saved send clears draft and completes") {
                 !chatMemory(it).pending && it.findViewById<EditText>(R.id.composer).text.isEmpty() &&
-                    it.findViewById<TextView>(R.id.info).text.contains("Сообщение сохранено")
+                    it.findViewById<TextView>(R.id.info).text.contains(it.getString(R.string.message_saved, ""))
             }
             sent = core(app) {
                 val rows = exactHistory(peer, incoming, outgoing)
@@ -240,7 +240,7 @@ class MainDevRolloutTest {
                 assertTrue("real queue retry is pending", chatMemory(it).pending)
             }
             await(scenario, "real DNS queue retry completes successfully") {
-                !chatMemory(it).pending && it.findViewById<TextView>(R.id.info).text.contains("Повтор завершён")
+                !chatMemory(it).pending && it.findViewById<TextView>(R.id.info).text.contains(it.getString(R.string.retry_complete))
             }
             val accepted = core(app) {
                 assertEquals("real server acceptance before host ACK", DeliveryState.ACCEPTED, messageStatus(sent!!.messageIdHex))
@@ -249,7 +249,7 @@ class MainDevRolloutTest {
                     assertTrue("retry reuses the same public message ID", it.messageIdHex == sent!!.messageIdHex)
                 }
             }
-            awaitRow(scenario, accepted, "На сервере")
+            awaitRow(scenario, accepted, R.string.delivery_accepted)
         }
         val proof = core(app) {
             assertEquals("UI send/retry preserves main account", account, establishedAccount(app))
@@ -300,9 +300,9 @@ class MainDevRolloutTest {
             }
         }
         ActivityScenario.launch<ChatActivity>(chatIntent(app, peer)).use { scenario ->
-            for (row in rows) awaitRow(scenario, row, if (row.direction == MessageDirection.INCOMING) "Входящее" else "Доставка подтверждена сервером")
+            for (row in rows) awaitRow(scenario, row, if (row.direction == MessageDirection.INCOMING) R.string.message_incoming else R.string.delivery_delivered)
             scenario.recreate()
-            for (row in rows) awaitRow(scenario, row, if (row.direction == MessageDirection.INCOMING) "Входящее" else "Доставка подтверждена сервером")
+            for (row in rows) awaitRow(scenario, row, if (row.direction == MessageDirection.INCOMING) R.string.message_incoming else R.string.delivery_delivered)
         }
         val dialogPreview = core(app) { summary(peer)?.preview ?: throw AssertionError("real persisted dialog preview required") }
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
@@ -462,7 +462,9 @@ class MainDevRolloutTest {
         assertEquals(View.GONE, activity.findViewById<View>(R.id.auth_panel).visibility)
         assertEquals(View.GONE, activity.findViewById<View>(R.id.connection_panel).visibility)
         assertTrue("no Store error in actual visible main UI", visibleTexts(activity.window.decorView).none {
-            it.contains("Store", ignoreCase = true) || it.contains("Ошибка защищённого хранилища") || it.contains("Ошибка локального хранилища")
+            it.contains("Store", ignoreCase = true) ||
+                it.contains(humanError(activity.resources, DmsgError("synthetic gate error", ErrorKind.Store))) ||
+                it.contains(humanError(activity.resources, ffiError(uniffi.dmsg_core.FfiException.Store("synthetic gate error"))))
         })
     }
 
@@ -473,7 +475,7 @@ class MainDevRolloutTest {
         else -> emptyList()
     }
 
-    private fun awaitRow(scenario: ActivityScenario<ChatActivity>, row: HistoryMessage, label: String) {
+    private fun awaitRow(scenario: ActivityScenario<ChatActivity>, row: HistoryMessage, labelRes: Int) {
         await(scenario, "real history adapter contains expected local row") {
             val list = it.findViewById<ListView>(R.id.messages)
             (0 until (list.adapter?.count ?: 0)).any { pos -> list.adapter.getItemId(pos) == row.localId }
@@ -487,7 +489,7 @@ class MainDevRolloutTest {
             (0 until list.childCount).any { pos ->
                 val child = list.getChildAt(pos)
                 val content = visibleTexts(child)
-                child.tag == row.localId && row.text in content && content.any { text -> text.contains(label) }
+                child.tag == row.localId && row.text in content && content.any { text -> text.contains(it.getString(labelRes)) }
             }
         }
     }

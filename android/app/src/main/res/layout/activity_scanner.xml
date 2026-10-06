@@ -4,11 +4,11 @@
         <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="16dp">
             <androidx.camera.view.PreviewView android:id="@+id/preview" android:layout_width="match_parent" android:layout_height="200dp"/>
             <TextView android:id="@+id/result" android:layout_width="match_parent" android:layout_height="wrap_content" android:paddingVertical="16dp" android:accessibilityLiveRegion="polite"/>
-            <TextView android:id="@+id/scanner_code_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:labelFor="@id/scanner_code" android:text="Код вместо камеры"/>
-            <EditText android:id="@+id/scanner_code" android:layout_width="match_parent" android:layout_height="wrap_content" android:inputType="textMultiLine|textNoSuggestions" android:hint="Вставьте публичный код" android:maxLength="8192" android:saveEnabled="false" android:importantForAutofill="no"/>
-            <Button android:id="@+id/btn_scanner_paste" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Проверить вставленный код"/>
-            <Button android:id="@+id/btn_scan_again" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Сканировать снова"/>
-            <Button android:id="@+id/btn_close" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="К диалогам / назад"/>
+            <TextView android:id="@+id/scanner_code_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:labelFor="@id/scanner_code" android:text="@string/paste_instead_camera"/>
+            <EditText android:id="@+id/scanner_code" android:layout_width="match_parent" android:layout_height="wrap_content" android:inputType="textMultiLine|textNoSuggestions" android:hint="@string/paste_public_code" android:maxLength="8192" android:saveEnabled="false" android:importantForAutofill="no"/>
+            <Button android:id="@+id/btn_scanner_paste" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/check_pasted_code"/>
+            <Button android:id="@+id/btn_scan_again" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/scan_again"/>
+            <Button android:id="@+id/btn_close" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/dialogs_or_back"/>
         </LinearLayout>
     </ScrollView>
 </LinearLayout>

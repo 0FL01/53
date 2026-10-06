@@ -55,6 +55,8 @@ android {
     buildToolsVersion = "37.0.0"
 
     defaultConfig {
+        // Dependency translations must not select an unsupported app language ahead of RU/EN.
+        resourceConfigurations += listOf("en", "ru")
         applicationId = "org.dmsg.client"
         minSdk = 26
         targetSdk = 37

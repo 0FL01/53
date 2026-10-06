@@ -8,9 +8,14 @@ import uniffi.dmsg_core.DeliveryState
 import uniffi.dmsg_core.DialogsPage
 import uniffi.dmsg_core.HistoryPage
 import uniffi.dmsg_core.QrOutcome
+import androidx.annotation.StringRes
 
 /** UI-level error: only static reasons, never key material / plaintext. */
-class DmsgError(msg: String, val kind: ErrorKind = ErrorKind.Other) : Exception(msg)
+class DmsgError(msg: String, val kind: ErrorKind = ErrorKind.Other,
+    @param:StringRes val uiMessageRes: Int? = null) : Exception(msg) {
+    constructor(@StringRes uiMessageRes: Int, kind: ErrorKind = ErrorKind.Other) :
+        this("UI error", kind, uiMessageRes)
+}
 enum class ErrorKind { Other, InvalidCredentials, LoginTaken, InviteRequired, InviteExpired, InviteRevoked,
     InviteUsed, AuthRateLimited, InvalidInput, Transport, PinMismatch, IdentityMismatch, NotAuthenticated,
     BadQr, UnknownContact, NotAccepted, Blocked, MissingKeys, Revoked, Busy, BadText, Store, Crypto, Protocol, NativeUnavailable,

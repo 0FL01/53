@@ -26,7 +26,7 @@ class OutboxActivity : DmsgActivity() {
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState); setContentView(R.layout.activity_outbox)
-        NativeUi.back(this, "Очередь")
+        NativeUi.back(this, getString(R.string.title_outbox))
         list = findViewById(R.id.outbox_rows)
         adapter = ArrayAdapter(this, R.layout.row_outbox, R.id.row_label, labels)
         list.adapter = adapter
@@ -44,14 +44,14 @@ class OutboxActivity : DmsgActivity() {
             if (!retryable) return@setOnClickListener
             val stamp = guard.begin() ?: return@setOnClickListener
             controls()
-            findViewById<TextView>(R.id.info).text = "Повторяем прежние сообщения…"
+            findViewById<TextView>(R.id.info).setText(R.string.retrying_messages)
             Core.dispatch {
                 val result = runCatching { Core.facade(applicationContext).retry() }
                 runOnUiThread {
                     if (!active || !guard.finish(stamp)) return@runOnUiThread
                     findViewById<TextView>(R.id.info).text = result.fold({
-                        "Повтор: отправлено ${it[0]}, принято ${it[1]}, доставка подтверждена ${it[2]}, пропущено ${it[3]}. Это результат попытки, не прочтение."
-                    }, ::humanError)
+                        getString(R.string.retry_counts, it[0], it[1], it[2], it[3])
+                    }, { humanError(resources, it) })
                     controls(); load()
                 }
             }
@@ -76,22 +76,25 @@ class OutboxActivity : DmsgActivity() {
                 val page = f.outbox(after, 50)
                 Triple(page, page.first.map { row ->
                     val contact = f.get(row.contactId)
-                    "${row.contactId}\n${deliveryLabel(f.messageStatus(row.mid))}\nID: ${row.mid}" +
-                        if (contactCta(contact) != ContactCta.Chat) "\n${trustLabel(contact)}" else ""
+                    Pair(f.messageStatus(row.mid), contact)
                 }, page.first.any { contactCta(f.get(it.contactId)) == ContactCta.Chat })
             }
             runOnUiThread {
                 if (!active || !guard.finish(stamp)) return@runOnUiThread
-                result.fold({ (page, text, allowed) ->
+                result.fold({ (page, states, allowed) ->
                     if (!older) { rows.clear(); labels.clear(); retryable = false }
                     val ids = rows.map { it.mid }.toMutableSet()
-                    page.first.zip(text).filter { ids.add(it.first.mid) }.forEach { (row, label) -> rows.add(row); labels.add(label) }
+                    page.first.zip(states).filter { ids.add(it.first.mid) }.forEach { (row, state) ->
+                        rows.add(row)
+                        labels.add(getString(R.string.outbox_row, row.contactId, deliveryLabel(resources, state.first), row.mid) +
+                            if (contactCta(state.second) != ContactCta.Chat) "\n" + trustLabel(resources, state.second) else "")
+                    }
                     next = page.second
                     retryable = retryable || allowed
                     adapter.notifyDataSetChanged()
                     if (older) list.setSelectionFromTop(position, offset)
-                    findViewById<TextView>(R.id.outbox_empty).text = if (rows.isEmpty()) "Сохранённая очередь пуста. Это не подтверждает доставку конкретного сообщения — его статус в истории." else "Показано ${rows.size} записей${if (next != null) " · есть ещё" else ""}"
-                }, { findViewById<TextView>(R.id.info).text = humanError(it) })
+                    findViewById<TextView>(R.id.outbox_empty).text = if (rows.isEmpty()) getString(R.string.outbox_empty) else getString(R.string.outbox_count, rows.size) + if (next != null) getString(R.string.outbox_more) else ""
+                }, { findViewById<TextView>(R.id.info).text = humanError(resources, it) })
                 controls()
             }
         }

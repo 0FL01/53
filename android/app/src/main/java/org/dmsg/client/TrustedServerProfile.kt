@@ -16,10 +16,10 @@ internal object TrustedServerProfile {
                 bytes[count++] = next.toByte()
             }
             if (count == bytes.size || (0 until count).any { bytes[it].toInt() !in 0..127 })
-                throw DmsgError("Неверный встроенный профиль сервера", ErrorKind.BadQr)
+                throw DmsgError(R.string.error_bundled_profile, ErrorKind.BadQr)
             val code = QrGate.normalize(String(bytes, 0, count, Charsets.US_ASCII))
             if (QrGate.route(code).getOrThrow() != uniffi.dmsg_core.QrKind.SERVER)
-                throw DmsgError("Неверный встроенный профиль сервера", ErrorKind.BadQr)
+                throw DmsgError(R.string.error_bundled_profile, ErrorKind.BadQr)
             return code
         } finally { bytes.fill(0) }
     }

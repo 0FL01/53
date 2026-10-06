@@ -1,9 +1,9 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" android:layout_width="match_parent" android:layout_height="match_parent" android:orientation="vertical">
     <include layout="@layout/toolbar"/>
-    <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:padding="16dp" android:textSize="14sp" android:text="В очереди — сохранено локально. На сервере — принято сервером. Повтор использует прежний ID и шифротекст. Подтверждение доставки не означает прочтение."/>
+    <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:padding="16dp" android:textSize="14sp" android:text="@string/outbox_disclosure"/>
     <TextView android:id="@+id/outbox_empty" android:layout_width="match_parent" android:layout_height="wrap_content" android:paddingHorizontal="16dp" android:textSize="14sp"/>
-    <ListView android:id="@+id/outbox_rows" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:contentDescription="Сохранённая очередь отправки"/>
+    <ListView android:id="@+id/outbox_rows" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:contentDescription="@string/saved_outbox"/>
     <TextView android:id="@+id/info" android:layout_width="match_parent" android:layout_height="wrap_content" android:padding="12dp" android:textSize="14sp" android:accessibilityLiveRegion="polite"/>
-    <Button android:id="@+id/btn_outbox_retry" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Повторить сохранённую очередь"/>
-    <Button android:id="@+id/btn_outbox_refresh" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Обновить"/>
+    <Button android:id="@+id/btn_outbox_retry" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/retry_saved_outbox"/>
+    <Button android:id="@+id/btn_outbox_refresh" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/refresh"/>
 </LinearLayout>

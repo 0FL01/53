@@ -50,7 +50,7 @@ class ScannerActivity : DmsgActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_scanner)
-        NativeUi.back(this, if (invitationOnly) "Приглашение" else if (intent.getBooleanExtra(SERVER_ONLY, false)) "QR сервера" else "QR контакта")
+        NativeUi.back(this, getString(if (invitationOnly) R.string.title_invitation else if (intent.getBooleanExtra(SERVER_ONLY, false)) R.string.title_server_qr else R.string.title_contact_qr))
         if (invitationOnly) {
             window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
             findViewById<View>(R.id.scanner_code).visibility = View.GONE
@@ -68,7 +68,7 @@ class ScannerActivity : DmsgActivity() {
             field.text.clear()
             onText(input)
         }
-        findViewById<Button>(R.id.btn_scan_again).setOnClickListener { if (!guard.pending && prompt?.isShowing != true) { done = false; result.text = "Сканируйте снова или вставьте код" } }
+        findViewById<Button>(R.id.btn_scan_again).setOnClickListener { if (!guard.pending && prompt?.isShowing != true) { done = false; result.setText(R.string.scan_or_paste_again) } }
         if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), 2)
         } else {
@@ -80,7 +80,7 @@ class ScannerActivity : DmsgActivity() {
         super.onRequestPermissionsResult(code, perms, res)
         if (code != 2) return
         if (res.firstOrNull() == PackageManager.PERMISSION_GRANTED) bind()
-        else result.text = if (invitationOnly) "Камера запрещена. Вернитесь и выберите приватный файл" else "Камера запрещена. Вставьте код в поле ниже"
+        else result.setText(if (invitationOnly) R.string.camera_denied_invitation else R.string.camera_denied_code)
     }
 
     private fun bind() {
@@ -106,7 +106,7 @@ class ScannerActivity : DmsgActivity() {
                 },
                 analysis
             )
-            } catch (_: Exception) { result.text = if (invitationOnly) "Камера недоступна. Вернитесь и выберите приватный файл" else "Камера недоступна. Вставьте код в поле ниже" }
+            } catch (_: Exception) { result.setText(if (invitationOnly) R.string.camera_unavailable_invitation else R.string.camera_unavailable_code) }
         }, ContextCompat.getMainExecutor(this))
     }
 
@@ -139,7 +139,7 @@ class ScannerActivity : DmsgActivity() {
             try {
                 val value = InvitationInput.parse(uri)
                 if (!InvitationScanTransfer.publish(invitationTicket, value)) {
-                    result.text = "Сканирование отменено. Вернитесь и начните снова"
+                    result.setText(R.string.scan_cancelled)
                     return@runOnUiThread
                 }
                 returningInvitation = true
@@ -149,13 +149,13 @@ class ScannerActivity : DmsgActivity() {
                 setResult(RESULT_OK)
                 finish()
             } catch (_: Exception) {
-                result.text = "Неверный формат приглашения. Сканируйте снова"
+                result.setText(R.string.invitation_invalid)
             }
             return@runOnUiThread
         }
         val stamp = guard.begin() ?: return@runOnUiThread
         if (!active || prompt?.isShowing == true) { guard.finish(stamp); return@runOnUiThread }
-        result.text = "QR считан, проверка…"
+        result.setText(R.string.qr_checking)
         Core.dispatch {
             try {
                 val code = QrGate.normalize(uri)
@@ -164,32 +164,32 @@ class ScannerActivity : DmsgActivity() {
                 val serverOnly = intent.getBooleanExtra(SERVER_ONLY, false)
                 when (f.qrKind(code)) {
                     QrKind.SERVER -> {
-                         if (!serverOnly) throw DmsgError("Для добавления контакта нужен QR контакта", ErrorKind.BadQr)
+                         if (!serverOnly) throw DmsgError(R.string.error_contact_qr_required, ErrorKind.BadQr)
                         val p = QrGate.serverPreview(f, code)
                          runOnUiThread { if (active && guard.finish(stamp) && !isFinishing && !isDestroyed) {
                             prompt = AlertDialog.Builder(this)
-                                .setTitle("Подтвердите профиль сервера")
-                                .setMessage("Домен: ${p.domain}\nОтпечаток сертификата: ${p.fingerprint}\n\nСверьте данные с доверенным источником. Код публичный и не создаёт аккаунт.")
-                                .setNegativeButton("Отмена") { _, _ -> done = false; result.text = "отменено, сканируйте снова" }
+                                .setTitle(R.string.confirm_server_profile)
+                                .setMessage(getString(R.string.server_trust_preview, p.domain, p.fingerprint))
+                                .setNegativeButton(R.string.cancel) { _, _ -> done = false; result.setText(R.string.server_cancelled) }
                                 .setOnCancelListener { done = false }
-                                .setPositiveButton("Принять сервер") { _, _ -> importServer(p.code, f) }
+                                .setPositiveButton(R.string.accept_server) { _, _ -> importServer(p.code, f) }
                                 .show()
-                            result.text = "ожидается подтверждение сервера"
+                            result.setText(R.string.server_awaiting_confirmation)
                         } }
                     }
                     QrKind.CONTACT -> {
-                         if (serverOnly) throw DmsgError("Нужен публичный QR сервера, а не контакта", ErrorKind.BadQr)
-                         if (!f.account().authenticated) throw DmsgError("Сначала войдите в аккаунт", ErrorKind.NotAuthenticated)
+                         if (serverOnly) throw DmsgError(R.string.error_server_qr_required, ErrorKind.BadQr)
+                         if (!f.account().authenticated) throw DmsgError(R.string.error_sign_in_required, ErrorKind.NotAuthenticated)
                          val out = when (f.addQr(code)) {
-                             QrOutcome.ADDED -> "Контакт добавлен. Откройте его в диалогах, чтобы принять запрос."
-                             QrOutcome.UNCHANGED -> "Этот контакт уже добавлен. Откройте его в диалогах."
-                             QrOutcome.IDENTITY_CHANGED -> "Ключ контакта изменился — отправка СТОП. Откройте карточку, проверьте QR другим способом и подтвердите новый ключ."
+                             QrOutcome.ADDED -> R.string.qr_contact_added
+                             QrOutcome.UNCHANGED -> R.string.qr_contact_unchanged
+                             QrOutcome.IDENTITY_CHANGED -> R.string.qr_identity_changed
                          }
-                         runOnUiThread { if (active && guard.finish(stamp)) result.text = out }
+                         runOnUiThread { if (active && guard.finish(stamp)) result.setText(out) }
                     }
                 }
             } catch (e: Exception) {
-                runOnUiThread { if (active && guard.finish(stamp)) result.text = "битый QR: ${humanError(e)}" }
+                runOnUiThread { if (active && guard.finish(stamp)) result.text = getString(R.string.qr_failed, humanError(resources, e)) }
             }
         }
         }
@@ -197,7 +197,7 @@ class ScannerActivity : DmsgActivity() {
 
     private fun importServer(code: String, f: DmsgFacade) {
         val stamp = guard.begin() ?: return
-        result.text = "сохраняем сервер…"
+        result.setText(R.string.saving_server)
         Core.dispatch {
             val outcome = runCatching {
                 f.configureDns(code, DnsNetwork.resolvers(this))
@@ -205,7 +205,7 @@ class ScannerActivity : DmsgActivity() {
             }
             runOnUiThread { if (active && guard.finish(stamp)) outcome.fold(
                 { setResult(RESULT_OK); finish() },
-                { result.text = humanError(it) }
+                { result.text = humanError(resources, it) }
             ) }
         }
     }

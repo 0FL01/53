@@ -4,12 +4,12 @@
         <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="16dp">
             <TextView android:id="@+id/account" android:layout_width="match_parent" android:layout_height="wrap_content"/>
             <TextView android:id="@+id/fgs" android:layout_width="match_parent" android:layout_height="wrap_content" android:paddingVertical="16dp" android:accessibilityLiveRegion="polite"/>
-            <Button android:id="@+id/btn_fgs" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Включить фоновую связь"/>
-            <TextView android:id="@+id/economy_desc" android:layout_width="match_parent" android:layout_height="wrap_content" android:paddingVertical="16dp" android:text="Обычный опрос: каждые 15 секунд. Экономия: каждые 5 минут. Это частота попыток, не гарантия доставки. Doze, ограничения сети и force-stop могут задержать или остановить связь."/>
-            <Button android:id="@+id/btn_economy" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Экономия"/>
-            <Button android:id="@+id/btn_reconnect" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Проверить DNS и обновить сообщения"/>
+            <Button android:id="@+id/btn_fgs" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/enable_connectivity"/>
+            <TextView android:id="@+id/economy_desc" android:layout_width="match_parent" android:layout_height="wrap_content" android:paddingVertical="16dp" android:text="@string/economy_desc"/>
+            <Button android:id="@+id/btn_economy" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/economy"/>
+            <Button android:id="@+id/btn_reconnect" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/check_dns"/>
             <TextView android:id="@+id/stats" android:layout_width="match_parent" android:layout_height="wrap_content" android:paddingVertical="12dp" android:accessibilityLiveRegion="polite"/>
-            <Button android:id="@+id/btn_advanced" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Дополнительно · публичный профиль сервера"/>
+            <Button android:id="@+id/btn_advanced" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/advanced_profile"/>
         </LinearLayout>
     </ScrollView>
 </LinearLayout>

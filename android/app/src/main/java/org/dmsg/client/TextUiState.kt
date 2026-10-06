@@ -1,5 +1,7 @@
 package org.dmsg.client
 
+import android.content.res.Resources
+import androidx.annotation.StringRes
 import uniffi.dmsg_core.DeliveryState
 import uniffi.dmsg_core.HistoryMessage
 import uniffi.dmsg_core.HistoryPage
@@ -37,11 +39,12 @@ internal class ConnectionFacts {
     }
 }
 
-internal fun deliveryLabel(state: DeliveryState?): String = when (state) {
-    DeliveryState.QUEUED -> "В очереди"
-    DeliveryState.ACCEPTED -> "На сервере"
-    DeliveryState.DELIVERED -> "Доставка подтверждена сервером"
-    null -> "Статус пока неизвестен"
+internal fun deliveryLabel(resources: Resources, state: DeliveryState?): String = resources.getString(deliveryLabelRes(state))
+@StringRes internal fun deliveryLabelRes(state: DeliveryState?): Int = when (state) {
+    DeliveryState.QUEUED -> R.string.delivery_queued
+    DeliveryState.ACCEPTED -> R.string.delivery_accepted
+    DeliveryState.DELIVERED -> R.string.delivery_delivered
+    null -> R.string.delivery_unknown
 }
 
 internal enum class ContactCta { ScanKeys, Accept, VerifyChanged, Blocked, Chat, Loading }
@@ -54,13 +57,14 @@ internal fun contactCta(contact: Dialog?): ContactCta = when {
     contact.state == "accepted" -> ContactCta.Chat
     else -> ContactCta.Loading
 }
-internal fun trustLabel(contact: Dialog?): String = when (contactCta(contact)) {
-    ContactCta.VerifyChanged -> "Ключ контакта изменился — отправка СТОП. Проверьте QR другим способом, затем подтвердите новый ключ."
-    ContactCta.Blocked -> "Контакт заблокирован. Блокировка в этой версии необратима."
-    ContactCta.ScanKeys -> "Нет ключей контакта. Сканируйте его QR."
-    ContactCta.Accept -> "Контакт ожидает вашего согласия."
-    ContactCta.Chat -> "Ключи контакта закреплены локально"
-    ContactCta.Loading -> "Контакт ещё не загружен"
+internal fun trustLabel(resources: Resources, contact: Dialog?): String = resources.getString(trustLabelRes(contact))
+@StringRes internal fun trustLabelRes(contact: Dialog?): Int = when (contactCta(contact)) {
+    ContactCta.VerifyChanged -> R.string.trust_changed
+    ContactCta.Blocked -> R.string.trust_blocked
+    ContactCta.ScanKeys -> R.string.trust_no_keys
+    ContactCta.Accept -> R.string.trust_requested
+    ContactCta.Chat -> R.string.trust_pinned
+    ContactCta.Loading -> R.string.trust_loading
 }
 
 /** One local per-contact window; page reads themselves never move the read cursor. */

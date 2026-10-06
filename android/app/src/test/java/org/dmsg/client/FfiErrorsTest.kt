@@ -18,23 +18,32 @@ class FfiErrorsTest {
         )
         errors.forEach { (error, kind) ->
             assertEquals(kind, ffiError(error).kind)
-            assertTrue(ffiErrorMessage(error).isNotBlank())
+            assertNotNull(ffiError(error).uiMessageRes)
         }
-        assertEquals(errors.size, errors.map { ffiErrorMessage(it.first) }.distinct().size)
-        assertTrue(ffiErrorMessage(FfiException.IdentityMismatch()).contains("СТОП"))
+        assertEquals(errors.size, errors.map { humanErrorRes(ffiError(it.first)) }.distinct().size)
+        assertEquals(R.string.error_identity_changed, humanErrorRes(ffiError(FfiException.IdentityMismatch())))
     }
     @Test fun nativeAndUnexpectedPayloadsNeverReachUi() {
         val secret = "example-password-invitation"
         for (e in listOf(FfiException.Transport(secret), FfiException.BadQr(secret), FfiException.Store(secret),
-            FfiException.Protocol(secret), FfiException.Server(secret))) assertFalse(ffiErrorMessage(e).contains(secret))
-        assertFalse(humanError(IllegalStateException(secret)).contains(secret))
+            FfiException.Protocol(secret), FfiException.Server(secret))) {
+            val error = ffiError(e)
+            assertFalse(error.message.orEmpty().contains(secret))
+            assertNotNull(error.uiMessageRes)
+        }
+        assertEquals(R.string.error_operation, humanErrorRes(IllegalStateException(secret)))
+        assertEquals(R.string.error_operation, humanErrorRes(DmsgError(secret)))
     }
     @Test fun storageOutcomesUseTypedSafeMessages() {
         val fixture = "untrusted diagnostic payload"
-        listOf(ErrorKind.StorageKeyLost, ErrorKind.Store, ErrorKind.LiveDatabaseExists,
-            ErrorKind.LiveDatabaseMissing, ErrorKind.SnapshotMissing, ErrorKind.SnapshotRestoreRequired, ErrorKind.SnapshotInvalid).forEach { kind ->
-            assertFalse(humanError(DmsgError(fixture, kind)).contains(fixture))
+        listOf(ErrorKind.StorageKeyLost to R.string.error_storage_key_lost,
+            ErrorKind.Store to R.string.error_store,
+            ErrorKind.LiveDatabaseExists to R.string.error_live_db_exists,
+            ErrorKind.LiveDatabaseMissing to R.string.error_live_db_missing,
+            ErrorKind.SnapshotMissing to R.string.error_snapshot_missing,
+            ErrorKind.SnapshotRestoreRequired to R.string.error_restore_required,
+            ErrorKind.SnapshotInvalid to R.string.error_snapshot_invalid).forEach { (kind, resource) ->
+            assertEquals(resource, humanErrorRes(DmsgError(fixture, kind)))
         }
-        assertTrue(humanError(DmsgError(fixture, ErrorKind.StorageKeyLost)).contains("Keystore"))
     }
 }

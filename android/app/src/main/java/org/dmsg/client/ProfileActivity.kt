@@ -30,7 +30,7 @@ class ProfileActivity : DmsgActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_profile)
-        NativeUi.back(this, if (mine) "Мой QR" else "Контакт")
+        NativeUi.back(this, getString(if (mine) R.string.title_my_qr else R.string.title_contact))
         peerId = findViewById(R.id.peer_id)
         alias = findViewById(R.id.contact_alias)
         info = findViewById(R.id.info)
@@ -39,28 +39,28 @@ class ProfileActivity : DmsgActivity() {
         findViewById<View>(R.id.contact_panel).visibility = if (mine) View.GONE else View.VISIBLE
         findViewById<Button>(R.id.btn_request).setOnClickListener {
             val id = peer()
-            act("Добавляем контакт…", { request(id) }) { loadContact() }
+            act(getString(R.string.adding_contact), { request(id) }) { loadContact() }
         }
         findViewById<Button>(R.id.btn_accept).setOnClickListener {
             val id = contact?.contactId ?: return@setOnClickListener
-            if (contactCta(contact) == ContactCta.Accept) act("Принимаем контакт…", { accept(id) }) { loadContact() }
+            if (contactCta(contact) == ContactCta.Accept) act(getString(R.string.accepting_contact), { accept(id) }) { loadContact() }
         }
         findViewById<Button>(R.id.btn_block).setOnClickListener {
             if (guard.pending || contact == null || contact?.state == "blocked") return@setOnClickListener
             val id = requireNotNull(contact).contactId
-            prompt = AlertDialog.Builder(this).setTitle("Заблокировать контакт?")
-                .setMessage("Отправка и получение будут остановлены. В этой версии снять блокировку нельзя.")
-                .setNegativeButton("Отмена", null).setPositiveButton("Заблокировать") { _, _ ->
-                    act("Блокируем…", { block(id) }) { loadContact() }
+            prompt = AlertDialog.Builder(this).setTitle(R.string.block_title)
+                .setMessage(R.string.block_warning)
+                .setNegativeButton(R.string.cancel, null).setPositiveButton(R.string.block_confirm) { _, _ ->
+                    act(getString(R.string.blocking_contact), { block(id) }) { loadContact() }
                 }.show()
         }
         findViewById<Button>(R.id.btn_confirm).setOnClickListener {
             if (guard.pending || contactCta(contact) != ContactCta.VerifyChanged) return@setOnClickListener
             val id = requireNotNull(contact).contactId
-            prompt = AlertDialog.Builder(this).setTitle("Подтвердить новый ключ?")
-                .setMessage("Ключ контакта изменился. Свяжитесь с человеком другим способом и проверьте его новый QR. Только после проверки подтвердите новый ключ; отправка сейчас СТОП.")
-                .setNegativeButton("Отмена", null).setPositiveButton("Ключ проверен — подтвердить") { _, _ ->
-                    act("Подтверждаем новый ключ…", { confirm(id) }) { loadContact() }
+            prompt = AlertDialog.Builder(this).setTitle(R.string.confirm_key_title)
+                .setMessage(R.string.confirm_key_warning)
+                .setNegativeButton(R.string.cancel, null).setPositiveButton(R.string.confirm_key) { _, _ ->
+                    act(getString(R.string.confirming_key), { confirm(id) }) { loadContact() }
                 }.show()
         }
         findViewById<Button>(R.id.btn_check).setOnClickListener { loadContact() }
@@ -70,11 +70,11 @@ class ProfileActivity : DmsgActivity() {
         findViewById<Button>(R.id.btn_alias_save).setOnClickListener {
             val value = alias.text.toString().takeIf { it.isNotBlank() }
             val id = contact?.contactId ?: return@setOnClickListener
-            act("Сохраняем локальное имя…", { setContactAlias(id, value) }) { aliasDirty = false; loadContact() }
+            act(getString(R.string.saving_alias), { setContactAlias(id, value) }) { aliasDirty = false; loadContact() }
         }
         findViewById<Button>(R.id.btn_alias_clear).setOnClickListener {
             val id = contact?.contactId ?: return@setOnClickListener
-            act("Убираем локальное имя…", { setContactAlias(id, null) }) { alias.setText(""); aliasDirty = false; loadContact() }
+            act(getString(R.string.clearing_alias), { setContactAlias(id, null) }) { alias.setText(""); aliasDirty = false; loadContact() }
         }
         findViewById<Button>(R.id.btn_contact_chat).setOnClickListener {
             val id = contact?.contactId ?: return@setOnClickListener
@@ -82,7 +82,7 @@ class ProfileActivity : DmsgActivity() {
         }
         findViewById<Button>(R.id.btn_id_copy).setOnClickListener {
             val value = if (mine) ownId else contact?.contactId
-            value?.let { getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Контактный ID", it)); info.text = "Публичный ID скопирован" }
+            value?.let { getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText(getString(R.string.public_contact_id), it)); info.setText(R.string.id_copied) }
         }
         alias.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
@@ -93,7 +93,7 @@ class ProfileActivity : DmsgActivity() {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
                 contact = null; alias.setText(""); aliasDirty = false
-                info.text = "Проверьте введённый ID перед действиями с контактом"; controls()
+                info.setText(R.string.check_entered_id); controls()
             }
             override fun afterTextChanged(s: android.text.Editable?) {}
         })
@@ -125,32 +125,32 @@ class ProfileActivity : DmsgActivity() {
             val result = runCatching { task(Core.facade(fContext)) }
             runOnUiThread {
                 if (!active || !guard.finish(stamp)) return@runOnUiThread
-                result.fold(success, { info.text = humanError(it) }); controls()
+                result.fold(success, { info.text = humanError(resources, it) }); controls()
             }
         }
     }
 
     private fun loadContact() {
         val id = peer()
-        if (id.isEmpty()) { contact = null; info.text = "Добавьте контакт по QR или введите его публичный ID"; controls(); return }
-        act("Проверяем контакт…", { Pair(get(id), summary(id)) }) { (value, summary) ->
+        if (id.isEmpty()) { contact = null; info.setText(R.string.contact_input_help); controls(); return }
+        act(getString(R.string.checking_contact), { Pair(get(id), summary(id)) }) { (value, summary) ->
             contact = value
             if (!aliasDirty) { alias.setText(summary?.localAlias.orEmpty()); aliasDirty = false }
-            info.text = if (value == null) "Контакт не добавлен. Запрос по ID сохраняется только локально; для переписки нужны его ключи из QR." else trustLabel(value)
+            info.text = if (value == null) getString(R.string.contact_not_added) else trustLabel(resources, value)
             controls()
         }
     }
 
     private fun showMine() {
-        act("Открываем публичный QR…", {
+        act(getString(R.string.opening_qr), {
             val account = account()
-            if (!account.authenticated) throw DmsgError("Сначала войдите в аккаунт", ErrorKind.NotAuthenticated)
+            if (!account.authenticated) throw DmsgError(R.string.error_sign_in_required, ErrorKind.NotAuthenticated)
             Pair(account.contactId, renderQr(myQr()))
         }) { (id, bitmap) ->
             ownId = id
             findViewById<TextView>(R.id.my_id).text = id
             findViewById<ImageView>(R.id.qr).setImageBitmap(bitmap)
-            info.text = "Только публичные данные контакта. Пароля и приватных ключей здесь нет."
+            info.setText(R.string.public_qr_disclosure)
         }
     }
 

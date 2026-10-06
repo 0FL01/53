@@ -1,6 +1,7 @@
 package org.dmsg.client
 
 import android.content.Intent
+import android.content.res.Resources
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -24,7 +25,8 @@ class ChatMemory : ViewModel() {
     internal var position = 0
     internal var offset = 0
     internal var pending = false
-    internal var action = ""
+    // Render after recreation with current resources; capture no Activity or Context.
+    internal var action: (Resources) -> String = { "" }
     internal var contact: Dialog? = null
     internal var readThrough = 0L
     internal var uncertain: TextSendOutcome.Uncertain? = null
@@ -60,7 +62,7 @@ class ChatActivity : DmsgActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_chat)
         memory = ViewModelProvider(this)[ChatMemory::class.java]
-        NativeUi.back(this, "Переписка")
+        NativeUi.back(this, getString(R.string.title_chat))
         list = findViewById(R.id.messages)
         composer = findViewById(R.id.composer)
         info = findViewById(R.id.info)
@@ -130,12 +132,12 @@ class ChatActivity : DmsgActivity() {
         if (composer.text.toString() != memory.draft) composer.setText(memory.draft)
         val allowed = contactCta(memory.contact) == ContactCta.Chat
         findViewById<TextView>(R.id.peer).text = intent.getStringExtra("alias") ?: id
-        findViewById<Button>(R.id.btn_contact).contentDescription = if (allowed) "Карточка контакта" else "Проверить контакт"
+        findViewById<Button>(R.id.btn_contact).contentDescription = getString(if (allowed) R.string.contact_card else R.string.check_contact)
         findViewById<Button>(R.id.btn_send).isEnabled = allowed && !memory.pending && memory.uncertain == null
         findViewById<Button>(R.id.btn_retry).isEnabled = allowed && !memory.pending
         composer.isEnabled = allowed && !memory.pending && memory.uncertain == null
         findViewById<Button>(R.id.btn_history_retry).isEnabled = !pageGuard.pending && !memory.pending
-        info.text = listOf(if (allowed) "" else trustLabel(memory.contact), memory.action, pageError).filter { it.isNotEmpty() }.joinToString("\n")
+        info.text = listOf(if (allowed) "" else trustLabel(resources, memory.contact), memory.action(resources), pageError).filter { it.isNotEmpty() }.joinToString("\n")
         findViewById<View>(R.id.chat_notice).visibility = if (info.text.isEmpty()) View.GONE else View.VISIBLE
         info.setBackgroundResource(if (memory.contact?.identityMismatch == true || memory.contact?.state == "blocked") R.color.error_surface
             else if (allowed && pageError.isEmpty()) R.color.surface else R.color.warning_surface)
@@ -186,7 +188,7 @@ class ChatActivity : DmsgActivity() {
                         markViewed()
                         if (gapBefore != null) loadPage()
                     }
-                }, { pageError = humanError(it) })
+                }, { pageError = humanError(resources, it) })
                 render()
             }
         }
@@ -218,12 +220,12 @@ class ChatActivity : DmsgActivity() {
         if (memory.pending || memory.uncertain != null || contactCta(memory.contact) != ContactCta.Chat) { render(); return }
         val text = composer.text.toString()
         if (text.isEmpty() || text.toByteArray(Charsets.UTF_8).size > 4096) {
-            memory.action = "Сообщение должно содержать 1–4096 байт UTF-8"; render(); return
+            memory.action = { it.getString(R.string.message_bounds) }; render(); return
         }
         memory.draft = text
         memory.outgoing.begin() ?: return
         memory.pending = true
-        memory.action = "Сохраняем и отправляем…"
+        memory.action = { it.getString(R.string.saving_sending) }
         render()
         Core.dispatch {
             val outcome = try { TextSendCoordinator.send(Core.facade(applicationContext), id, text) }
@@ -242,16 +244,20 @@ class ChatActivity : DmsgActivity() {
             is TextSendOutcome.Saved -> {
                 memory.uncertain = null
                 memory.outgoing.finish(true)
-                memory.action = "Сообщение сохранено · ${deliveryLabel(status)}" +
-                    if (outcome.recoveredAfterError) "\nПопытка связи завершилась ошибкой. Повторяйте очередь, а не текст." else ""
+                val recovered = outcome.recoveredAfterError
+                memory.action = { res ->
+                    res.getString(R.string.message_saved, deliveryLabel(res, status)) +
+                        if (recovered) "\n" + res.getString(R.string.send_recovered) else ""
+                }
             }
             is TextSendOutcome.NotSaved -> {
                 memory.uncertain = null; memory.outgoing.finish(false)
-                memory.action = "Не отправлено. ${humanError(outcome.error)}"
+                val errorRes = humanErrorRes(outcome.error)
+                memory.action = { res -> res.getString(R.string.message_not_sent, res.getString(errorRes)) }
             }
             is TextSendOutcome.Uncertain -> {
                 memory.uncertain = outcome
-                memory.action = "Не удалось проверить, сохранено ли сообщение. Черновик сохранён; новая отправка приостановлена до проверки локальной истории. Повтор очереди использует прежние ID."
+                memory.action = { it.getString(R.string.send_uncertain) }
             }
         }
     }
@@ -275,12 +281,13 @@ class ChatActivity : DmsgActivity() {
 
     private fun retry() {
         if (memory.pending || contactCta(memory.contact) != ContactCta.Chat) return
-        memory.pending = true; memory.action = "Повторяем сохранённую очередь…"; render()
+        memory.pending = true; memory.action = { it.getString(R.string.retrying_saved_queue) }; render()
         Core.dispatch {
             val result = runCatching { Core.facade(applicationContext).retry() }
             runOnUiThread {
                 memory.pending = false
-                memory.action = result.fold({ "Повтор завершён. Статусы обновлены из ядра" }, ::humanError)
+                val messageRes = result.fold({ R.string.retry_complete }, ::humanErrorRes)
+                memory.action = { it.getString(messageRes) }
                 if (active) { render(); loadPage() }
             }
         }
@@ -288,12 +295,20 @@ class ChatActivity : DmsgActivity() {
 
     private fun refreshReceived() {
         if (memory.pending || pageGuard.pending) return
-        memory.pending = true; memory.action = "Обновляем сообщения через DNS…"; render()
+        memory.pending = true; memory.action = { it.getString(R.string.refreshing_dns) }; render()
         Core.dispatch {
             val result = runCatching { DmsgService.check(Core.facade(applicationContext)) }
             runOnUiThread {
                 memory.pending = false
-                memory.action = result.fold({ "Получено локально: ${it.received.size}" }, ::humanError)
+                memory.action = result.fold({ report ->
+                    val count = report.received.size
+                    val render: (Resources) -> String = { res -> res.getString(R.string.received_local, count) }
+                    render
+                }, { error ->
+                    val messageRes = humanErrorRes(error)
+                    val render: (Resources) -> String = { res -> res.getString(messageRes) }
+                    render
+                })
                 pageError = ""
                 if (active) { render(); loadPage() }
             }

@@ -87,17 +87,20 @@ class InvitationOnboardingGatesTest {
                 await(scenario, "authentication ready") {
                     field(it, "state") == LaunchState.Authentication && field(it, "busy") == false && field(it, "policy") != null
                 }
-                fun labelsAndHint(expected: String) = scenario.onActivity {
-                    assertEquals("Логин", it.findViewById<TextView>(R.id.auth_login_label).text.toString())
-                    assertEquals("Пароль", it.findViewById<TextView>(R.id.auth_password_label).text.toString())
-                    assertEquals(expected, it.findViewById<EditText>(R.id.auth_login).hint.toString())
+                fun labelsAndHint(expectedRes: Int?) = scenario.onActivity {
+                    assertEquals(it.getString(R.string.auth_login), it.findViewById<TextView>(R.id.auth_login_label).text.toString())
+                    assertEquals(it.getString(R.string.auth_password), it.findViewById<TextView>(R.id.auth_password_label).text.toString())
+                    assertEquals(expectedRes?.let(it::getString) ?: "", it.findViewById<EditText>(R.id.auth_login).hint.toString())
                     assertTrue(it.findViewById<EditText>(R.id.auth_password).hint.isNullOrEmpty())
                 }
-                labelsAndHint("")
+                labelsAndHint(null)
                 scenario.onActivity { it.findViewById<Button>(R.id.btn_signup).performClick() }
-                labelsAndHint("Например, marina53")
+                labelsAndHint(R.string.signup_example)
                 scenario.onActivity { it.findViewById<Button>(R.id.btn_login).performClick() }
-                labelsAndHint("")
+                labelsAndHint(null)
+                val invalidLogin = runCatching {
+                    AuthForm.validate(AuthAction.Login, null, "ab", "synthetic password", null)
+                }.exceptionOrNull()!!
                 scenario.onActivity {
                     it.findViewById<EditText>(R.id.auth_login).setText("ab")
                     it.findViewById<EditText>(R.id.auth_password).setText("synthetic password")
@@ -105,7 +108,7 @@ class InvitationOnboardingGatesTest {
                 }
                 await(scenario, "ordinary validation error") {
                     field(it, "busy") == false && it.findViewById<TextView>(R.id.status).text.toString() ==
-                        "Логин должен содержать от 3 до 32 знаков"
+                        humanError(it.resources, invalidLogin)
                 }
                 scenario.onActivity {
                     assertTrue(it.findViewById<EditText>(R.id.auth_password).text.isEmpty())
@@ -147,7 +150,7 @@ class InvitationOnboardingGatesTest {
                         field(it, "action") == AuthAction.Signup && memory(it).hasInvitation
                 }
                 scenario.onActivity {
-                    assertEquals("Приглашение считано", it.findViewById<TextView>(R.id.invitation_status).text.toString())
+                    assertEquals(it.getString(R.string.invitation_imported), it.findViewById<TextView>(R.id.invitation_status).text.toString())
                     it.findViewById<Button>(R.id.btn_invitation_cancel).performClick()
                     assertFalse(memory(it).hasInvitation)
                 }
@@ -183,7 +186,7 @@ class InvitationOnboardingGatesTest {
                         field(it, "busy") == false && field(it, "action") == AuthAction.Signup && memory(it).hasInvitation
                     }
                     scenario.onActivity {
-                        assertEquals("Приглашение считано", it.findViewById<TextView>(R.id.invitation_status).text.toString())
+                        assertEquals(it.getString(R.string.invitation_imported), it.findViewById<TextView>(R.id.invitation_status).text.toString())
                         assertEquals(View.VISIBLE, it.findViewById<View>(R.id.invitation_group).visibility)
                         assertTrue("import has no implicit submit", it.findViewById<EditText>(R.id.auth_password).text.isEmpty())
                     }
