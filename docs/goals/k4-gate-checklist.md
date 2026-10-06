@@ -5,7 +5,7 @@ R4 пока не закрыта. Ниже сохранены исходные о
 
 ## Актуальный вход в приложение (реализован, 2026-09-30)
 
-Текущий scope 2026-10-06: independent crash/recovery топологии сервера закрыта (carrier/msgd crash + msgd-only recreate на паре, см. секцию ниже). R9 (длительный screen-off, Doze/Standby и фоновые измерения) **deferred по указанию пользователя**, не PASS; сейчас не запускается. Wi-Fi/mobile handoff и restricted egress также остаются непроверенными.
+Текущий scope 2026-10-06: independent crash/recovery топологии сервера закрыта (carrier/msgd crash + msgd-only recreate на паре, см. секцию ниже). Последовательный DNS fallback Яндекса реализован и проверен на обоих телефонах; Network+DNS/wake реализованы и проверены JVM/runtime без радио. Physical Wi-Fi/mobile handoff **blocked: нет независимого USB ADB**, не PASS — `2026-10-06-dns-fallback-handoff.md`. R9 (длительный screen-off, Doze/Standby и фоновые измерения) **deferred по указанию пользователя**, не PASS; restricted egress непроверен.
 
 Один публичный код/QR подключения → проверенный сервер → «Войти» / «Создать аккаунт» с логином/паролем → диалоги. Код не содержит bearer или пароль. Приглашение отдельно требуется только для signup в `invite_only` (default), второй режим `open`; существующие пользователи входят в обоих. Ручные crypto-поля не входят в обычный onboarding. Direct invite-enrol больше не является целевым UX.
 

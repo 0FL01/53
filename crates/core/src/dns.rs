@@ -128,6 +128,21 @@ fn finish(run: Run) -> Result<(), &'static str> {
 
 /// A different store cannot silently replace another running account's carrier.
 fn start(owner: &str, profile: &Profile) -> Result<Arc<Mutex<State>>, &'static str> {
+    start_with_fallback(owner, profile, yandex_resolvers())
+}
+
+fn yandex_resolvers() -> Vec<SocketAddr> {
+    ["77.88.8.8:53", "77.88.8.1:53"]
+        .into_iter()
+        .map(|s| s.parse().expect("fixed numeric resolver"))
+        .collect()
+}
+
+fn start_with_fallback(
+    owner: &str,
+    profile: &Profile,
+    fallback: Vec<SocketAddr>,
+) -> Result<Arc<Mutex<State>>, &'static str> {
     let mut running = manager().lock().map_err(|_| "dns manager poisoned")?;
     if let Some(run) = running.as_ref() {
         if run.owner != owner {
@@ -147,7 +162,7 @@ fn start(owner: &str, profile: &Profile) -> Result<Arc<Mutex<State>>, &'static s
     let config = profile.config();
     let worker = thread::Builder::new()
         .name("dmsg-dns-supervisor".into())
-        .spawn(move || supervise(config, worker_state, worker_stop))
+        .spawn(move || supervise(config, fallback, worker_state, worker_stop))
         .map_err(|_| "spawn dns supervisor")?;
     *running = Some(Run {
         owner: owner.into(),
@@ -164,10 +179,38 @@ fn publish(state: &Mutex<State>, value: State) {
         *s = value;
     }
 }
-fn supervise(config: Config, state: Arc<Mutex<State>>, stop: Arc<AtomicBool>) {
+#[derive(Debug, PartialEq, Eq)]
+enum NextAttempt {
+    Terminal,
+    Fallback,
+    Backoff,
+}
+
+fn after_failure(code: i32, is_primary: bool, was_ready: bool) -> NextAttempt {
+    if matches!(code, 2 | 4 | 5 | 7) {
+        NextAttempt::Terminal
+    } else if is_primary && !was_ready {
+        NextAttempt::Fallback
+    } else {
+        NextAttempt::Backoff
+    }
+}
+
+fn supervise(
+    primary: Config,
+    fallback: Vec<SocketAddr>,
+    state: Arc<Mutex<State>>,
+    stop: Arc<AtomicBool>,
+) {
+    let mut backup = primary.clone();
+    backup.resolvers = fallback;
+    let mut is_primary = true;
     let mut delay = 1u32;
     while !stop.load(Ordering::Acquire) {
         publish(&state, State::Connecting);
+        // Separate native runs: upstream probes every resolver in a successful
+        // run as an additional QUIC path. Never append backup to the primary list.
+        let config = if is_primary { &primary } else { &backup };
         let mut native = match NativeClient::start(config.clone()) {
             Ok(n) => n,
             Err(_) => {
@@ -175,12 +218,14 @@ fn supervise(config: Config, state: Arc<Mutex<State>>, stop: Arc<AtomicBool>) {
                 return;
             }
         };
+        let mut was_ready = false;
         let failure = loop {
             if stop.load(Ordering::Acquire) {
                 break None;
             }
             match native.status() {
                 Status::Ready(endpoint) => {
+                    was_ready = true;
                     delay = 1;
                     publish(&state, State::Ready(endpoint.into()));
                 }
@@ -198,9 +243,16 @@ fn supervise(config: Config, state: Arc<Mutex<State>>, stop: Arc<AtomicBool>) {
         if stop.load(Ordering::Acquire) {
             break;
         }
-        if matches!(failure, Some(2 | 4 | 5 | 7)) {
-            publish(&state, State::Failed(failure.unwrap()));
-            return;
+        match after_failure(failure.unwrap_or(1), is_primary, was_ready) {
+            NextAttempt::Terminal => {
+                publish(&state, State::Failed(failure.unwrap_or(1)));
+                return;
+            }
+            NextAttempt::Fallback => {
+                is_primary = false;
+                continue;
+            }
+            NextAttempt::Backoff => (),
         }
         publish(&state, State::Backoff(delay));
         let until = Instant::now() + Duration::from_secs(delay as u64);
@@ -208,6 +260,7 @@ fn supervise(config: Config, state: Arc<Mutex<State>>, stop: Arc<AtomicBool>) {
             thread::sleep(Duration::from_millis(25));
         }
         delay = (delay * 2).min(60);
+        is_primary = true;
     }
     publish(&state, State::Stopped);
 }
@@ -215,7 +268,9 @@ fn supervise(config: Config, state: Arc<Mutex<State>>, stop: Arc<AtomicBool>) {
 /// Wait for actual QUIC readiness, not merely an available local TCP listener.
 pub fn endpoint(owner: &str, profile: &Profile) -> Result<SocketAddr, State> {
     let state = start(owner, profile).map_err(|_| State::Failed(-1))?;
-    let until = Instant::now() + Duration::from_secs(25);
+    // Bootstrap bounds are 3s/resolver (at most 8 primary + 2 backup),
+    // plus setup/join/status polling margin. Listening is never success.
+    let until = Instant::now() + Duration::from_secs(35);
     loop {
         let s = *state.lock().map_err(|_| State::Failed(-1))?;
         match s {
@@ -257,13 +312,15 @@ mod tests {
             noise_pubkey: [0; 32],
             resolvers: vec![sink.local_addr().unwrap()],
         };
-        let shared = start("test-owner", &profile).unwrap();
+        let backup = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let fallback = vec![backup.local_addr().unwrap()];
+        let shared = start_with_fallback("test-owner", &profile, fallback.clone()).unwrap();
         assert!(Arc::ptr_eq(
             &shared,
-            &start("test-owner", &profile).unwrap()
+            &start_with_fallback("test-owner", &profile, fallback.clone()).unwrap()
         ));
         assert!(start("different-owner", &profile).is_err());
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(12);
         let mut backed_off = false;
         loop {
             let state = *shared.lock().unwrap();
@@ -283,10 +340,27 @@ mod tests {
         stop("test-owner").unwrap();
         assert!(began.elapsed() < Duration::from_secs(1));
         assert_eq!(status("test-owner").unwrap(), State::Stopped);
-        let shared = start("test-owner", &profile).unwrap();
+        let shared = start_with_fallback("test-owner", &profile, fallback).unwrap();
         stop("test-owner").unwrap();
         assert_eq!(*shared.lock().unwrap(), State::Stopped);
         stop("test-owner").unwrap();
+    }
+    #[test]
+    fn group_policy_preserves_ready_and_fails_closed() {
+        assert_eq!(yandex_resolvers().len(), 2);
+        for code in [1, 3, 6, -1] {
+            assert_eq!(after_failure(code, true, false), NextAttempt::Fallback);
+            assert_eq!(after_failure(code, true, true), NextAttempt::Backoff);
+            assert_eq!(after_failure(code, false, false), NextAttempt::Backoff);
+            assert_eq!(after_failure(code, false, true), NextAttempt::Backoff);
+        }
+        for code in [2, 4, 5, 7] {
+            for primary in [true, false] {
+                for ready in [true, false] {
+                    assert_eq!(after_failure(code, primary, ready), NextAttempt::Terminal);
+                }
+            }
+        }
     }
     #[test]
     fn public_profile_roundtrip_excludes_invite_and_rejects_corruption() {
@@ -347,3 +421,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 }
+
+#[cfg(test)]
+#[path = "dns_native_tests.rs"]
+mod native_tests;

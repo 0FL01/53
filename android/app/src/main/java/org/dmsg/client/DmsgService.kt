@@ -26,7 +26,9 @@ class DmsgService : Service() {
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         private fun changed() {
             if (!networkEvents.isShutdown) {
-                try { networkEvents.execute { Worker.networkChanged(applicationContext) } }
+                // Cancel before queuing DB work: an earlier event may be waiting on storeLock.
+                Worker.observeNetwork()
+                try { networkEvents.execute { Worker.networkChanged() } }
                 catch (_: java.util.concurrent.RejectedExecutionException) { /* destroying */ }
             }
         }
@@ -89,6 +91,7 @@ class DmsgService : Service() {
         }
 
         fun running(c: Context): Boolean = Worker.running
+        internal fun wakeAfterNetworkApplied() = Worker.wake()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -164,7 +167,7 @@ class DmsgService : Service() {
         private fun loop(app: Context) {
             var backoff = 5_000L
             var total = 0
-            while (worker.running && !Thread.currentThread().isInterrupted) {
+            while (worker.active) {
                 try {
                     val n = pollOnce(app)
                     total += n
@@ -175,16 +178,11 @@ class DmsgService : Service() {
                 } catch (e: Exception) {
                     // Fatal VM/Linkage errors are not transient network errors.
                     Log.w(TAG, "poll fail: ${e.javaClass.simpleName}")
-                    if (worker.running) recordFailure((e as? DmsgError)?.kind ?: ErrorKind.Other)
+                    if (worker.active) recordFailure((e as? DmsgError)?.kind ?: ErrorKind.Other)
                     backoff = minOf(backoff * 2, 120_000L)
                 }
                 val interval = if (Prefs.economy(app)) POLL_ECONOMY_MS else POLL_NORMAL_MS
-                try {
-                    Thread.sleep(maxOf(interval, backoff))
-                } catch (_: InterruptedException) {
-                    Thread.currentThread().interrupt()
-                    break
-                }
+                if (!worker.awaitNext(maxOf(interval, backoff))) break
             }
         }
 
@@ -194,22 +192,29 @@ class DmsgService : Service() {
             try { facade?.dnsStop() } catch (_: Exception) { /* no secret diagnostics */ }
         }
 
-        fun networkChanged(app: Context) {
-            val f = facade ?: return
+        fun observeNetwork() {
+            if (!worker.running) return
+            try { (facade as? UniFfiFacade)?.observeDnsNetwork() }
+            catch (e: Exception) { Log.d(TAG, "network observation: ${e.javaClass.simpleName}") }
+        }
+
+        fun networkChanged() {
+            val f = facade as? UniFfiFacade ?: return
             try {
-                f.dnsStop() // cancellation does not wait for the store lock
-                if (f.dnsProfile() != null) f.dnsNetworkChanged(DnsNetwork.resolvers(app))
+                f.refreshDnsNetwork { worker.running }
             } catch (e: Exception) {
                 Log.d(TAG, "network transition: ${e.javaClass.simpleName}")
             }
         }
+
+        fun wake() = worker.wake()
 
         private fun pollOnce(app: Context): Int {
             val f = facade ?: Core.facade(app).also { facade = it }
             if (!f.isReady()) throw DmsgError("Ядро приложения недоступно", ErrorKind.NativeUnavailable)
             if (!f.account().authenticated) throw DmsgError("Сначала войдите в аккаунт", ErrorKind.NotAuthenticated)
             if (f.dnsProfile() == null) throw DmsgError("Сначала добавьте сервер", ErrorKind.InvalidInput)
-            val rep = check(f) { worker.running && !Thread.currentThread().isInterrupted }
+            val rep = check(f) { worker.active }
             return rep.received.size
         }
 

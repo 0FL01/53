@@ -15,6 +15,7 @@ import java.io.File
 class UniFfiFacade(private val dbPath: String, key: ByteArray, private val context: Context? = null) : DmsgFacade {
     private val core: DmsgClient = try { DmsgClient.openEncrypted(dbPath, key) }
         catch (e: FfiException) { throw ffiError(e) }
+    private val networkState = DnsNetwork.runtime(dbPath)
 
     private inline fun <T> wrap(block: () -> T): T {
         try {
@@ -35,11 +36,11 @@ class UniFfiFacade(private val dbPath: String, key: ByteArray, private val conte
         core.dnsProfileInfo()?.let { DnsProfile(it.domain, it.noisePubkey, it.pinFingerprintHex, it.resolvers) }
     }
     override fun configureDns(code: String, resolvers: List<String>) = wrap { core.configureDns(code, resolvers) }
-    override fun registrationPolicyDns() = wrap { refreshDns(); core.registrationPolicyDns() }
+    override fun registrationPolicyDns() = dnsCommand { core.registrationPolicyDns() }
     override fun signupDns(login: String, password: String, invitation: String?) =
-        wrap { refreshDns(); core.signupDns(login, password, invitation) }
+        dnsCommand { core.signupDns(login, password, invitation) }
     override fun loginDns(login: String, password: String, expectedDevice: String?) =
-        wrap { refreshDns(); core.loginDns(login, password, expectedDevice) }
+        dnsCommand { core.loginDns(login, password, expectedDevice) }
     override fun dnsNetworkChanged(resolvers: List<String>) = wrap { core.dnsNetworkChanged(resolvers) }
     // Cancellation has no DB access and must not wait for a blocked store call.
     override fun dnsStop() {
@@ -96,29 +97,44 @@ class UniFfiFacade(private val dbPath: String, key: ByteArray, private val conte
         Pair(p.rows.map { OutRow(it.messageIdHex, it.contactId, it.status) }, p.nextCursor)
     }
 
-    /** Foreground commands also refresh DNS when the background service is disabled. */
-    private fun refreshDns() {
-        val profile = core.dnsProfileInfo() ?: throw DmsgError("Сначала добавьте код подключения")
+    /** Cancellation precedes the store lock, for foreground commands as well as FGS events. */
+    internal fun observeDnsNetwork() {
         val app = context ?: return
-        val resolvers = try { DnsNetwork.resolvers(app) } catch (_: DmsgError) {
-            // Do not reuse a stale Ready carrier after radio/network loss. The Rust
-            // supervisor decides whether an established session can queue offline.
-            core.dnsStop()
-            return
-        }
-        if (resolvers != profile.resolvers) core.dnsNetworkChanged(resolvers)
+        networkState.observe({ DnsNetwork.snapshot(app) }, ::dnsStop)
     }
 
-    override fun send(id: String, text: String): String = wrap { refreshDns(); core.sendDns(id, text) }
+    private fun applyDns() {
+        if (context != null) networkState.apply(core::dnsNetworkChanged, DmsgService::wakeAfterNetworkApplied)
+    }
 
-    override fun retry(): LongArray = wrap {
-        refreshDns()
+    /** Foreground commands detect a new Network even when its resolver IPs are unchanged. */
+    private fun <T> dnsCommand(block: () -> T): T {
+        observeDnsNetwork()
+        return wrap {
+            if (Thread.currentThread().isInterrupted) throw InterruptedException("DNS command stopped")
+            core.dnsProfileInfo() ?: throw DmsgError("Сначала добавьте код подключения")
+            applyDns()
+            if (Thread.currentThread().isInterrupted) throw InterruptedException("DNS command stopped")
+            block()
+        }
+    }
+
+    internal fun refreshDnsNetwork(keepGoing: () -> Boolean) {
+        if (!keepGoing()) return
+        observeDnsNetwork()
+        wrap {
+            if (keepGoing() && core.dnsProfileInfo() != null) applyDns()
+        }
+    }
+
+    override fun send(id: String, text: String): String = dnsCommand { core.sendDns(id, text) }
+
+    override fun retry(): LongArray = dnsCommand {
         val r = core.retryDns()
         longArrayOf(r.resent.toLong(), r.accepted.toLong(), r.delivered.toLong(), r.skipped.toLong())
     }
 
-    override fun fetch(): FetchRes = wrap {
-        refreshDns()
+    override fun fetch(): FetchRes = dnsCommand {
         val r = core.fetchDns()
         FetchRes(
             r.received.map { Msg(it.seq.toLong(), it.contactId, it.text) },
@@ -130,7 +146,7 @@ class UniFfiFacade(private val dbPath: String, key: ByteArray, private val conte
         )
     }
 
-    override fun reconnect(): Long = wrap { refreshDns(); core.reconnectDns().toLong() }
+    override fun reconnect(): Long = dnsCommand { core.reconnectDns().toLong() }
 
     override fun qrKind(uri: String): QrKind = wrap { uniffi.dmsg_core.qrKind(uri) }
 

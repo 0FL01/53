@@ -115,8 +115,9 @@ private/loopback IPv4 `address:port` strings, with ports 1024–65535. This opti
 is implemented only in `androidTest` and requires `.gate`. These gates use the
 real encrypted UniFFI facade without active-network resolver refresh so the
 synthetic fixture suffix reaches its local C carrier. Without this field they
-use the normal active-network resolvers. There is no production resolver
-fallback, pin bypass or credential argument. Local authoritative DNS/QUIC +
+use the normal active-network resolvers. Production now has a sequential Yandex
+backup group after primary carrier failure (see the DNS section below); there is
+no pin bypass or credential argument. Local authoritative DNS/QUIC +
 pin + Noise account-auth evidence is not recursive-DNS/deployment acceptance.
 
 `unifiedAuthUiOnlyInGatePackage` uses `ActivityScenario`, actual view clicks and
@@ -153,7 +154,8 @@ fixtures use the current schema, not an old-auth compatibility path.
   Cancel/back/lifecycle loss clears secret values; confirmation sends a second
   login with `expectedDevice`. Another challenge needs another prompt.
 - Authenticated restart opens dialogs and uses saved device keys. FGS is
-  user-enabled after authentication. DNS comes from the active network.
+  user-enabled after authentication. Primary DNS comes from the active network;
+  backup is Yandex only after primary bootstrap failure.
 - Camera denial is visible and paste remains usable. Contact QR stays in the
   authenticated contact flow; onboarding rejects it. Dialog cards refresh key
   warnings; send remains STOP until explicit contact-key confirmation.
@@ -387,3 +389,57 @@ healthy/schema5 after; secrets/volumes/pins/nft/tunnel unchanged. Cleanup: gate
 packages uninstalled, remote invitation files removed, local credentials/DBs
 deleted, main metadata unchanged. R9 remains deferred; mobile/restricted egress
 not covered here.
+
+## DNS fallback / network wake gates (2026-10-06)
+
+Goal/status: `docs/goals/2026-10-06-dns-fallback-handoff.md`. Production policy:
+current Network + primary LinkProperties DNS; separate native backup run with
+`77.88.8.8:53`, `77.88.8.1:53` only after transient primary bootstrap exhaustion.
+Ready is QUIC readiness, not Listening/ordinary hostname resolution. Pin/config
+failures are terminal. Ready path stays until network change/loss; both groups
+fail → backoff1/2/4/8/16/32/60s → primary again. Primary profile is never replaced
+by the runtime backup choice. Worst bootstrap budget is 3s per resolver (8+2);
+core endpoint wait35s includes setup/join margin.
+
+Build gated app/test APK as above; verify IDs and native bytes, `adb install -r`
+preserves an existing disposable account. Select exactly one method of
+`org.dmsg.client.DnsNetworkGatesTest`; missing prerequisites fail, not PASS/skips.
+
+| Method | Prerequisites / evidence |
+|---|---|
+| `actualYandexFallbackPreservesPrimaryAndAccount` | Existing `.gate` account/profile, FGS off. Test-only context-free real facade sets a local UDP sink as primary, production backup reaches actual Yandex DNS/QUIC + Noise key resume; repeated commands retain backup/profile/account. Restores primary in finally. Emits owner-only `gate-yandex-proof.json`: sink packet/payload count and **aggregate UID** byte deltas, not isolated handshake/cellular billing. |
+| `retryQueuedPreservesCiphertextWithoutRadioChanges` | FGS off, real-peer `gate-queued-record` with mid/account/ciphertextHash. Local sink forces production Yandex fallback; retry twice retains exact mid/ciphertext, Accepted. Restores primary, emits `gate-retry-proof.json`. |
+| `economyWakeAndStopWithoutRadioChanges` | Existing account, FGS off at start. Real economy worker; invokes the network-applied wake entrypoint without changing radio; new successful poll then Stop/late-wake→no late poll. Restores economy/FGS, emits `gate-wake-proof.json`. **Not a physical handoff claim.** |
+| `wifiCellularHandoffAndEconomyWakePreserveQueuedCiphertext` | Independent **USB ADB verified on host**, cellular data already enabled, Wi-Fi initially active, real queued record, FGS off. Requires `-e radioControl usb` before mutation. Exercises foreground and economy Wi-Fi↔cellular transitions; account/mid/ciphertext retained, emits `gate-handoff-proof.json`. Wi-Fi/economy/FGS restored in finally. Argument is operator attestation, not automatic USB detection. |
+
+**Never launch the radio method through the sole Wi-Fi ADB channel**, even though
+finally restores Wi-Fi: the debugging listener may disappear/change port. No
+USB transport is currently available, so this method is **BLOCKED / NOT PASS**.
+The interrupted attempt lost its only control channel; user restored wireless
+debugging on a new port. Subsequent gates leave radios untouched. VPN binding,
+route overrides or an added control service are outside this goal.
+
+Confirmed on Moto API35 + A142P API36: actual Yandex fallback/key resume on both;
+Moto queued retry over Yandex → A142P receive1 then0/skips0 → persistent Delivered
+on Moto in a new process, exact mid/ciphertext/double-submit1 row. Moto economy
+wake poll completed in4729ms; no late poll after Stop. Fresh accounts/invites are
+disposable; main account not reset. Main `53.apk` compatible update on Moto kept
+schema6, wrapped key/device/account/history2/contacts bytes and opened Dialogs;
+real UI DNS check used the same saved device key. Backend healthy5/invite_only,
+no backend/pin/tunnel rollout. Private evidence: `.local/dns-handoff/`.
+
+Local native counter gate (all UDP endpoints local; real pinned C carrier):
+
+```sh
+env -i HOME="$HOME" PATH="$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin" \
+  DMSG_TEST_CARRIER="<pinned-meson-slipstream-server>" \
+  cargo test -p dmsg-core --lib dns::native_tests -- --ignored --nocapture
+```
+
+Passed explicitly, alongside `slipstream-sys` native loopback gate. Primary Ready
+backup0 packets; silent attempt10/2720 bytes TX,0 RX; failed cycle (1+1)
+20/5440 TX,0 RX (DNS payload, no UDP/IP overhead). On production suffix the
+phone's silent primary was10/2740 bytes. UID totals/refill/Noise are distinct and
+documented in the goal; numbers are a single scenario, not a universal quota.
+Clean workspace, generated host bindings, NDK r28c, JVM43, debug/release/test/main
+export gates green. Physical handoff remains blocked; long Doze R9 deferred.

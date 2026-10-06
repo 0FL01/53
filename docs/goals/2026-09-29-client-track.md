@@ -5,6 +5,8 @@ Source: пользовательский клиентский трек, account-
 Last updated: 2026-10-06
 
 ## Objective
+Утверждённая итерация DNS fallback + Network/DNS handoff/wake 2026-10-06 и её актуальные evidence/blocker вынесены в [`2026-10-06-dns-fallback-handoff.md`](2026-10-06-dns-fallback-handoff.md). Physical handoff не закрыт отсутствием USB control; это не расширяет отложенный R9.
+
 Живой DNS-клиент: один публичный код/QR подключения к серверу → логин/пароль → удобные личные текстовые диалоги по Light/Square из `53-opendesign/`. История обеих сторон и реальные статусы, summaries/локальные aliases/unread; один активный аппарат, reconnect сохранённым ключом. Единая auth без legacy/migration fallback. Сохранить Native/Noise/Olm/outbox/Keystore гарантии. Пользователь разрешил dev DB wipe и fresh remote rollout; server secrets/pins и исходный туннель сохраняются, основной Android package/Keystore не стирать ради тестов.
 
 ## Execution Directive
