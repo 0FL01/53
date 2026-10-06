@@ -413,11 +413,16 @@ preserves an existing disposable account. Select exactly one method of
 | `wifiCellularHandoffAndEconomyWakePreserveQueuedCiphertext` | Independent **USB ADB verified on host**, cellular data already enabled, Wi-Fi initially active, real queued record, FGS off. Requires `-e radioControl usb` before mutation. Exercises foreground and economy Wi-Fi↔cellular transitions; account/mid/ciphertext retained, emits `gate-handoff-proof.json`. Wi-Fi/economy/FGS restored in finally. Argument is operator attestation, not automatic USB detection. |
 
 **Never launch the radio method through the sole Wi-Fi ADB channel**, even though
-finally restores Wi-Fi: the debugging listener may disappear/change port. No
-USB transport is currently available, so this method is **BLOCKED / NOT PASS**.
-The interrupted attempt lost its only control channel; user restored wireless
-debugging on a new port. Subsequent gates leave radios untouched. VPN binding,
-route overrides or an added control service are outside this goal.
+finally restores Wi-Fi: the debugging listener may disappear/change port. The
+initial interrupted attempt lost its only Wi-Fi control channel. USB was later
+provided and verified on host (`get-devpath` begins `usb:`); the guarded attempt
+kept control and restored Wi-Fi, but timed out45s waiting for cellular default.
+Current method status: **BLOCKED / NOT PASS**, because data is disabled for both
+SIMs. Host preflight must verify effective/per-SIM data enablement: global
+`mobile_data=1` alone is insufficient (`mobile_data1=0`, `mobile_data2=0`, both
+telephony `mIsDataEnabled=false`). Do not enable data/change APN/roaming without
+permission. VPN binding, route overrides or an added control service are outside
+this goal.
 
 Confirmed on Moto API35 + A142P API36: actual Yandex fallback/key resume on both;
 Moto queued retry over Yandex → A142P receive1 then0/skips0 → persistent Delivered
@@ -427,6 +432,13 @@ disposable; main account not reset. Main `53.apk` compatible update on Moto kept
 schema6, wrapped key/device/account/history2/contacts bytes and opened Dialogs;
 real UI DNS check used the same saved device key. Backend healthy5/invite_only,
 no backend/pin/tunnel rollout. Private evidence: `.local/dns-handoff/`.
+USB follow-up with only one phone used a disposable native peer over actual
+recursive DNS, isolated `CARGO_TARGET_DIR`, not DirectTCP. The same queued
+ciphertext from the aborted cellular-prerequisite gate subsequently passed actual
+Yandex retry/repeat→Accepted, peer receive1 then0/all skips0/exact plaintext once,
+phone persistent Delivered. Main identity/history/wrapped key/install metadata
+unchanged; disposable gate packages, peer credentials/keys and owned invite files
+cleaned. This is delivery evidence, **not LTE acceptance**.
 
 Local native counter gate (all UDP endpoints local; real pinned C carrier):
 
