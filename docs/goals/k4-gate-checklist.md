@@ -5,6 +5,8 @@ R4 пока не закрыта. Ниже сохранены исходные о
 
 ## Актуальный вход в приложение (реализован, 2026-09-30)
 
+Текущий scope 2026-10-06: independent crash/recovery топологии сервера закрыта (carrier/msgd crash + msgd-only recreate на паре, см. секцию ниже). R9 (длительный screen-off, Doze/Standby и фоновые измерения) **deferred по указанию пользователя**, не PASS; сейчас не запускается. Wi-Fi/mobile handoff и restricted egress также остаются непроверенными.
+
 Один публичный код/QR подключения → проверенный сервер → «Войти» / «Создать аккаунт» с логином/паролем → диалоги. Код не содержит bearer или пароль. Приглашение отдельно требуется только для signup в `invite_only` (default), второй режим `open`; существующие пользователи входят в обоих. Ручные crypto-поля не входят в обычный onboarding. Direct invite-enrol больше не является целевым UX.
 
 Account-auth wire2/server schema5/core schema6 и Light/Square Android UI реализованы, без legacy paths. Проверки прежнего ENROL ниже исторические. Полный контракт — `2026-09-29-client-track.md` R12–R21; runtime fixtures/methods — `android/AUTH_GATES.md`.
@@ -44,6 +46,50 @@ Auth/text outcomes проверены local и теперь на fresh remote ч
 - Moto g54 API35 ↔ A142P Android 16/API36 (4KB pages), оба `.gate`, только Wi-Fi ADB. Production LinkProperties resolver одной Wi-Fi сети, RD/RA non-authoritative проверен; `adb reverse` пуст, TCP bridge/radio toggle нет.
 - **18 one-test executions, 0 failures, 0 skips**: signup обоих (invite_only, свежие invites), обмен contact QR файлами, A→B и B→A received1 then0/skips0, double-submit1 row, Queued→Accepted→Delivered, тот же ciphertext hash в новом процессе, cursor dedup. Последовательность — `android/AUTH_GATES.md`.
 - Не заявлено: live-PID SIGKILL (процесс B уже завершился с instrumentation), Wi-Fi↔mobile, restricted egress, server restart на паре, оптический QR. Cleanup: `.gate` удалены с обоих, invites consumed/файлы удалены, main metadata unchanged.
+
+### Physical pair live-PID / server restart, 2026-10-06 (R8)
+
+- Moto API35 ↔ A142P API36, оба `.gate`, production recursive DNS без fixture
+  override/bridge/radio toggle; main metadata unchanged. **38 записанных успешных
+  one-test executions, 21 device/method pairs, 0 skips**; 3 диагностированных
+  test failures разрешены, final selected results green. Отдельный SIGKILL hold
+  намеренно оборван и не считается PASS; один host SSH/result-reader сбой также
+  не засчитан, restart повторён. Точная последовательность — `android/AUTH_GATES.md`.
+- A142P live PID12559 подтверждён app-private readiness marker + `pidof`, SIGKILL
+  действительно завершил процесс, `stopped=false`. Новый процесс сохранил account,
+  inbox, mid, hash ciphertext; Queued→Accepted→Delivered, Moto receive1 then0,
+  skips0, одна durable outgoing row несмотря на double submit.
+- На обоих телефонах queued rows + actual ready DNS до joint dmsg53 recreate.
+  11:08:25 UTC: оба сохранили identity/pins/inbox/ciphertext, normal reconnect
+  восстановился в пределах90 s (по2 transient Transport errors, без carrier reset),
+  retry→Accepted; оба received1 then0/skips0, reopen→persistent Delivered.
+- Initial Transport signup был вызван pre-existing разными network namespaces
+  carrier/msgd после carrier-only restart. Backup `snap-1791284239` и joint recreate
+  восстановили путь; earlier carrier `decode_rr_opt` assertion не исправлялся и
+  текущим прогоном не воспроизведён. Controlled restart не означает crash self-healing.
+- Canonical image/mount/port snapshot, config/key fingerprints и other-container
+  identities unchanged. Final healthy/schema5/invite_only, send_fail0/mbox_err0.
+  Clean JDK21 gated debug/release/test APK builds green, JVM35 existing green;
+  final test APK rebuilt/installed, APK/native bytes matched; Rust/native unchanged.
+- Cleanup: обе `.gate`/`.gate.test` удалены, PID отсутствуют, consumed invitation
+  files/local credentials/resolvers/queue/message/raw diagnostic fixtures удалены.
+  R9 **deferred**; Wi-Fi/mobile и restricted egress не проверены в этой итерации.
+
+### Independent carrier/msgd recovery, 2026-10-06 (R8/server topology)
+
+- Топология заменена: независимые network namespaces, msgd static private IP
+  `${DMSG_MSGD_IPV4}` (закрытый backend, без published TCP7000), carrier target
+  фиксирован; EDNS OPT decoder patch применён в server и embedded build paths
+  (baseline assertion воспроизведён, fixed ASan+UBSan 12/12).
+- Физическая пара moto API35 ↔ A142P API36, production recursive DNS: **три
+  crash/recreate цикла** (kill -9 carrier только / kill -9 msgd только /
+  `--force-recreate --no-deps msgd`) — каждый раз peer-контейнер не перезапускался
+  (PID unchanged), обе стороны восстановились обычными reconnect/retry с
+  byte-identical ciphertext, peer receive1 then0/skips0, persistent Delivered.
+  **17/17 device-method PASS, 0 skips** в этой итерации.
+- Backup `snap-1791287385` до rollout; healthy/schema5 после; secrets/volumes/
+  pins/nft/tunnel unchanged; gate-пакеты удалены, main identities unchanged.
+  R9 остаётся **deferred**; Wi-Fi/mobile и restricted egress не проверены.
 
 ### Прежнее evidence: unified auth, 2026-09-30
 

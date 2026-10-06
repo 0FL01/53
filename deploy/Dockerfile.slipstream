@@ -7,9 +7,12 @@ WORKDIR /usr/src/slipstream
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y \
-    python3-pip cmake git pkg-config libssl-dev ninja-build gcc g++ \
+     python3-pip cmake git patch pkg-config libssl-dev ninja-build gcc g++ \
  && pip3 install --user --break-system-packages meson
 COPY vendor/slipstream/ ./
+# Shared EDNS OPT bounds fix (see crates/slipstream-sys/native/spcdns-opt.patch).
+COPY crates/slipstream-sys/native/spcdns-opt.patch /usr/src/spcdns-opt.patch
+RUN patch --batch --forward -d extern/SPCDNS -p1 < /usr/src/spcdns-opt.patch
 RUN /root/.local/bin/meson setup \
     -Db_lto=true \
     --buildtype=release \

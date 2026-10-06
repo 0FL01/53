@@ -287,3 +287,103 @@ process had already exited with instrumentation, so no live-PID SIGKILL is
 claimed. Cleanup uninstalled `.gate`/`.gate.test` on both phones, removed both
 consumed remote invitation files and local fixtures; main-package metadata
 unchanged. Wi-Fi↔mobile, restricted egress and server restart remain separate.
+
+## Physical pair process/server restart (R8) — 2026-10-06
+
+Scope: only live-process death/queued retry and scoped messenger-server restart.
+R9 long screen-off/Doze/Standby/background measurements are **deferred by user**.
+Moto API35 (`A`) and A142P API36 (`B`), production LinkProperties DNS, no resolver
+fixture override, radio toggle, TCP bridge or main-package mutation. Install only
+the `.gate`/`.gate.test` APKs and select each method explicitly as above.
+
+1. Provision both disposable accounts, exchange contact QRs privately and establish
+   an actual A→B session using the physical-pair sequence above.
+2. B `pairedQueuedSendUiOnlyInGatePackage`; save `gate-queued-record` privately and
+   select its `mid` in `gate-delivered.json`. Start
+   `holdQueuedProcessForSigkillGate` asynchronously. Wait for app-private
+   `gate-kill-ready` (the actual PID); require equality with `pidof` **before**
+   `run-as org.dmsg.client.gate kill -9 PID`. Require no live PID afterward and
+   `stopped=false`. This deliberately aborts instrumentation and is **not** a
+   passing test. No FGS is allowed to consume the queued row during the hold.
+3. B `retryAndVerifyPreservedCiphertextForGate`, then
+   `pairedAcceptedHistoryUiOnlyInGatePackage`; A
+   `pairedIncomingHistoryUiOnlyInGatePackage`; B
+   `pairedDeliveredHistoryReopenUiOnlyInGatePackage`. Result: account/inbox/mid/
+   ciphertext hash retained, one durable outgoing row, received1 then0, skips0,
+   exact Queued→Accepted→Delivered.
+4. Both queue a distinct message with `pairedQueuedSendUiOnlyInGatePackage` and
+   prepare their delivered/incoming fixtures. Start each
+   `reconnectQueuedAfterServerRestartForGate` asynchronously; wait for both
+   private `gate-restart-ready` PID markers, emitted only after native ready.
+   Snapshot scoped images/mounts/ports, protected configuration/key fingerprints
+   and other-container identities. After a backup, jointly recreate only dmsg53
+   as described in `docs/deploy.md`; require healthy and a shared network namespace.
+   Only then write `gate-restart-resume` on both phones. Collect both full
+   instrumentation results, never discard their ADB readers prematurely.
+5. The restart gate preserves account/pins/inbox/queued ciphertext across the
+   handshake and uses normal reconnect commands for bounded eventual recovery
+   (90 s), not `dnsStop`/resolver override/clear-data. Only typed Transport permits
+   another attempt; each failure checks unchanged queued state and ciphertext.
+   Count is private `gate-restart-recovery.json`. Both final gates passed; each
+   observed **2 transient transport errors**, then ready/retry/Accepted.
+6. Both `pairedAcceptedHistoryUiOnlyInGatePackage` before peer fetch; both
+   `pairedIncomingHistoryUiOnlyInGatePackage` with the opposite message, then
+   both `pairedDeliveredHistoryReopenUiOnlyInGatePackage`: one then zero received,
+   all skipped0, one durable row per ID, persistent Delivered in a new process.
+
+Evidence: **38 recorded successful one-test executions, 21 device/method pairs,
+0 skips**; final selected results all green. Three recorded diagnostic test
+failures were resolved (two initial signup Transport failures and one first-call
+restart expectation). One earlier restart lost its host ADB result readers after
+an SSH control failure and was repeated, not counted as PASS. SIGKILL hold is
+also excluded. Private sanitized records: `.local/r8-reliability/acceptance.json`,
+`runs.jsonl`, `kill-proof.json`, selected test logs/artifact hashes.
+
+Build: clean JDK21 `testDebugUnitTest assembleDebug assembleRelease
+assembleDebugAndroidTest -PgateInstall=true` green; JVM35/0 failures/errors/skips
+(existing results up-to-date); final changed test APK rebuilt and installed on
+both. APK/native bytes matched the build. No Rust/native/binding changes.
+
+Initial signup failure diagnosis: a pre-existing carrier-only restart left msgd
+in the old network namespace. Backup `snap-1791284239` then joint recreate restored
+the real DNS path; profile/images unchanged. Carrier logs showed an earlier
+SPCDNS `decode_rr_opt` assertion, not reproduced by this run and not repaired here.
+Final acceptance joint recreate at 11:08:25 UTC: images, canonical mounts/ports,
+configuration/key fingerprints and other-container identities unchanged. Healthy,
+schema5/invite_only; final restart counters send_fail0/mbox_err0.
+
+Cleanup verified: both `.gate`/`.gate.test` uninstalled, no gate PIDs, both consumed
+invitation files and local credential/resolver/message/queue/raw diagnostic files
+removed; main UID/version/install/update metadata unchanged on both. No R9, mobile,
+restricted-egress, automatic carrier-crash healing or power-loss acceptance claim.
+
+## Independent crash/recovery gates (physical pair, 2026-10-06)
+
+Server topology: independent network namespaces, static private `DMSG_MSGD_IPV4`
+backend (no published TCP7000), EDNS OPT patch in carrier image. Private harness:
+`.local/r8b-independent/run.py` (control-master SSH wrapper, fish-safe `sh -c`).
+
+Per cycle (c1 carrier crash, c2 msgd crash, c3 msgd-only recreate):
+1. `cycle-fixtures <id>` pushes unique `gate-send.json`/`gate-incoming.json`
+   texts to both phones; `cycle-queue` runs `pairedQueuedSendUiOnlyInGatePackage`
+   on both and captures `gate-queued-record` (the reconnect gate deletes it).
+2. Start `reconnectQueuedAfterServerRestartForGate` on both via detached ADB
+   readers; wait for `gate-restart-ready` markers.
+3. Fault, one service only: `kill -9 <carrier PID>` / `kill -9 <msgd PID>` /
+   `docker compose ... up -d --force-recreate --no-deps msgd`. Verify Docker
+   auto-restart (new PID, RestartCount+1, msgd healthy on the same static IP)
+   and the peer container PID unchanged; namespaces must differ.
+4. Write `gate-restart-resume` on both; each gate reconnects (bounded transient
+   Transport errors ≤90 s, ciphertext/queue rechecked per failure) and retries
+   to Accepted.
+5. `cycle-verify A B` / `B A`: sender `pairedAcceptedHistoryUiOnlyInGatePackage`
+   + receiver `pairedIncomingHistoryUiOnlyInGatePackage` (received1 then0,
+   skips0) + sender `pairedDeliveredHistoryReopenUiOnlyInGatePackage`.
+
+Evidence: three fault cycles, **17/17 device-method PASS, 0 skips**; peer
+container untouched in every cycle (PID proof); both directions delivered exactly
+once with persistent Delivered. Backup `snap-1791287385` before rollout;
+healthy/schema5 after; secrets/volumes/pins/nft/tunnel unchanged. Cleanup: gate
+packages uninstalled, remote invitation files removed, local credentials/DBs
+deleted, main metadata unchanged. R9 remains deferred; mobile/restricted egress
+not covered here.

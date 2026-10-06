@@ -39,7 +39,7 @@ docker compose -f /opt/srv/53/deploy/compose.yml --env-file /opt/srv/53/.env ps
 buffer до timeout. Внешний DNS направляем через **точечный kernel DNAT**:
 
 ```text
-resolver → public-IP:53 → nft DNAT → bridge static-IP:5353 → 127.0.0.1:7000
+resolver → public-IP:53 → nft DNAT → bridge static-IP:5353 → msgd private-IP:7000
 host-local OUTPUT probe → retained published port / docker-proxy
 ```
 
@@ -79,8 +79,9 @@ IP forwarding и существующий masquerade должны уже раб�
 
 - DNAT/forward counters растут на **новых flows**; established packets могут
   пройти ранее существующий accept. Published port/proxy остаются — это не ошибка.
-- Проверить recursive Android↔native-peer Noise/E2E, dedup/cursor, joint recreate;
-  backend только loopback7000, прежние volumes, ro secrets и non-root UID.
+- Проверить recursive Android↔native-peer Noise/E2E, dedup/cursor, независимые
+  рестарты carrier/msgd; backend только закрытый private IP:7000, прежние
+  volumes, ro secrets и non-root UID.
 - Измерять **host** available RAM, proxy RSS/FD/sockets и conntrack: 5 min empty FGS,
   5 min fixed message workload, ≥180 s quiescence, repeat workload. RAM >20%,
   proxy working set bounded; container stats недостаточны. RSS не обязан сразу упасть.
@@ -138,7 +139,23 @@ docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl backup
 
 - Следить за местом: `docker system df`, `du -sh` volumes. Snapshot cap3; за ростом msgd-data следить отдельно.
 - `docker logs dmsg53-msgd-1`: только bounded факты/статические ошибки, не credentials/ключи. Diagnostic/build tools запускать clean allowlist environment; не печатать полное окружение.
-- `compose restart`: данные в volumes, restart/resume smoke обязателен.
+- Топология 2026-10-06: независимые network namespaces. `slipstream` (172.18.0.2) и
+  `msgd` (статический `DMSG_MSGD_IPV4`, listen `${DMSG_MSGD_IPV4}:7000`) живут в
+  одной выделенной bridge-сети; carrier подключается к фиксированному private
+  IP, TCP7000 наружу не публикуется. `depends_on: service_healthy` задаёт
+  первоначальный порядок msgd → carrier.
+- Рестарт каждого сервиса независим (`restart: unless-stopped`): падение/рестарт
+  carrier не трогает msgd, падение/пересоздание msgd не трогает carrier и не
+  меняет адрес backend. Проверено 2026-10-06 на физической паре: kill -9 каждого
+  сервиса по отдельности и `--force-recreate --no-deps msgd` — обе стороны
+  восстановились обычными reconnect/retry, received1 then0, Delivered, skips0.
+- Историческая проблема общего namespace (2026-10-06 ранее): отдельный restart
+  carrier оставлял живой msgd в старом namespace без loopback backend —
+  устранена переходом на независимые namespaces, не требуется совместный
+  `--force-recreate slipstream msgd`.
+- QUIC loss/backoff допускает временные Transport errors: bounded eventual
+  recovery обычными reconnect-командами — норма, не гарантия успеха первого
+  reconnect.
 
 ## Пределы (честно)
 

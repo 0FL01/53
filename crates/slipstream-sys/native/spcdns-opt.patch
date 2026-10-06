@@ -1,0 +1,30 @@
+diff --git a/src/codec.c b/src/codec.c
+index 9025786..d37b918 100644
+--- a/src/codec.c
++++ b/src/codec.c
+@@ -1919,19 +1919,20 @@ static inline dns_rcode_t decode_rr_opt(
+     size_t   length;
+     
+     assert(dcontext_okay(data));
+-    assert(len > 4);
+     
+     for (scan = data->parse.ptr , opt->numopts = 0 , length = len ; length > 0 ; )
+     {
+       size_t size;
+       
+-      opt->numopts++;
+-      size    = ((scan[2] << 8) | (scan[3])) + 4;
+-      scan   += size;
++      if (length < 4)
++        return RCODE_FORMAT_ERROR;
+       
++      size    = ((scan[2] << 8) | (scan[3])) + 4;
+       if (size > length)
+         return RCODE_FORMAT_ERROR;
+-        
++      
++      opt->numopts++;
++      scan   += size;
+       length -= size;
+     }
+     

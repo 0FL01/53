@@ -1224,6 +1224,85 @@ class DeviceGatesTest {
         File(app.filesDir, "gate-offline-request").delete()
     }
 
+    /** Operator SIGKILLs this live process; no FGS may consume the queued fixture. */
+    @Test fun holdQueuedProcessForSigkillGate() {
+        explicitGate()
+        val app = ApplicationProvider.getApplicationContext<Context>()
+        val record = privateFixture(File(app.filesDir, "gate-queued-record"))
+        val f = Core.facade(app)
+        assertFalse("FGS must not retry during the kill handshake", DmsgService.running(app))
+        val mid = record.getString("mid")
+        assertEquals(record.getString("account"), f.account().contactId)
+        assertEquals(record.getString("ciphertextHash"), ciphertextHash(app, mid))
+        assertEquals(uniffi.dmsg_core.DeliveryState.QUEUED, f.messageStatus(mid))
+        gateWrite(app, "gate-kill-ready", android.os.Process.myPid().toString())
+        Thread.sleep(120_000)
+        fail("operator must SIGKILL the verified live PID within the bounded hold")
+    }
+
+    /** Both phones hold a real connection until the operator restarts only dmsg53. */
+    @Test fun reconnectQueuedAfterServerRestartForGate() {
+        explicitGate()
+        val app = ApplicationProvider.getApplicationContext<Context>()
+        val record = privateFixture(File(app.filesDir, "gate-queued-record"))
+        val ready = File(app.filesDir, "gate-restart-ready")
+        val resume = File(app.filesDir, "gate-restart-resume")
+        assertFalse("stale restart marker", ready.exists())
+        assertFalse("operator may resume only after restart", resume.exists())
+        val f = Core.facade(app)
+        val before = f.account()
+        val profile = f.dnsProfile()!!
+        val mid = record.getString("mid")
+        try {
+            assertFalse(DmsgService.running(app))
+            assertEquals(record.getString("account"), before.contactId)
+            assertEquals(record.getString("ciphertextHash"), ciphertextHash(app, mid))
+            assertEquals(uniffi.dmsg_core.DeliveryState.QUEUED, f.messageStatus(mid))
+            assertTrue(f.reconnect() > 0L)
+            assertEquals("ready", f.dnsStatus())
+            gateWrite(app, ready.name, android.os.Process.myPid().toString())
+            val deadline = System.nanoTime() + 120_000_000_000L
+            while (!resume.exists() && System.nanoTime() < deadline) Thread.sleep(100)
+            assertTrue("scoped restart must finish before operator resumes", resume.exists())
+            assertEquals(before, f.account())
+            assertEquals(profile.fingerprint, f.dnsProfile()!!.fingerprint)
+            assertTrue(profile.pub.contentEquals(f.dnsProfile()!!.pub))
+            assertEquals(record.getInt("inboxCount"), f.inbox(0, 100).first.size)
+            assertEquals(record.getString("ciphertextHash"), ciphertextHash(app, mid))
+            assertEquals(uniffi.dmsg_core.DeliveryState.QUEUED, f.messageStatus(mid))
+            // A stale QUIC connection may fail before the Rust supervisor observes loss.
+            // Require bounded eventual recovery through normal commands; never reset the carrier.
+            val recoveryDeadline = System.nanoTime() + 90_000_000_000L
+            var transientErrors = 0
+            while (true) {
+                try {
+                    assertTrue(f.reconnect() > 0L)
+                    break
+                } catch (e: DmsgError) {
+                    if (e.kind != ErrorKind.Transport) throw e
+                    transientErrors++
+                    assertEquals(before, f.account())
+                    assertEquals(record.getString("ciphertextHash"), ciphertextHash(app, mid))
+                    assertEquals(uniffi.dmsg_core.DeliveryState.QUEUED, f.messageStatus(mid))
+                    assertTrue("normal reconnect must recover within 90 seconds", System.nanoTime() < recoveryDeadline)
+                    Thread.sleep(1_000)
+                }
+            }
+            gateWrite(app, "gate-restart-recovery.json", JSONObject().put("transientTransportErrors", transientErrors).toString())
+            assertEquals("ready", f.dnsStatus())
+            f.retry()
+            assertEquals(before, f.account())
+            assertEquals(record.getString("ciphertextHash"), ciphertextHash(app, mid))
+            assertEquals(uniffi.dmsg_core.DeliveryState.ACCEPTED, f.messageStatus(mid))
+            assertEquals(1, f.historyPage(gatePeer(app, f), null, 100).rows.count { it.messageIdHex == mid })
+            File(app.filesDir, "gate-queued-record").delete()
+        } finally {
+            f.dnsStop()
+            ready.delete()
+            resume.delete()
+        }
+    }
+
     /** Explicit fixture only. Shell orchestrator force-stops during this bounded hold. */
     @Test fun holdForegroundServiceForForceStopGate() {
         explicitGate()

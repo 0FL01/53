@@ -1,5 +1,5 @@
 # S1: slipstream + msgd как единица развёртывания (ARCH §4).
-# msgd разделяет network namespace slipstream; backend всегда 127.0.0.1:7000.
+# Независимые namespaces; fixed private backend переживает restart любого сервиса.
 # Наружу только DNS-порт. Секреты — ro-mounts, никогда COPY в образ.
 name: dmsg53
 
@@ -12,7 +12,7 @@ services:
     command:
       - --dns-listen-port=${DNS_INTERNAL_PORT:-5353}
       - --domain=${DMSG_DOMAIN:?DMSG_DOMAIN is required}
-      - --target-address=${MSGD_ADDR:-127.0.0.1:7000}
+      - --target-address=${DMSG_MSGD_IPV4:?DMSG_MSGD_IPV4 is required}:7000
       - --cert=/run/secrets/carrier_cert.pem
       - --key=/run/secrets/carrier_key.pem
       - --reset-seed=/run/secrets/reset_seed.hex
@@ -38,6 +38,9 @@ services:
         gid: "65532"
         mode: 0400
     restart: unless-stopped
+    depends_on:
+      msgd:
+        condition: service_healthy
     # Healthcheck нет: distroless без shell, у slipstream нет HTTP.
     # Живость пути проверяет S3-диагностика через msgd.
 
@@ -46,12 +49,12 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.msgd
     image: dmsg53-msgd:s1
-    network_mode: "service:slipstream"
-    depends_on:
-      - slipstream
+    networks:
+      default:
+        ipv4_address: "${DMSG_MSGD_IPV4:?DMSG_MSGD_IPV4 is required}"
     environment:
       DMSG_DOMAIN: "${DMSG_DOMAIN:?DMSG_DOMAIN is required}"
-      MSGD_LISTEN: "127.0.0.1:7000"
+      MSGD_LISTEN: "${DMSG_MSGD_IPV4:?DMSG_MSGD_IPV4 is required}:7000"
       MSGD_DATA_DIR: /var/lib/msgd
       MSGD_BLOBS_DIR: /var/lib/msgd/blobs
       MSGCTL_SOCK: /var/lib/msgd/msgctl.sock
@@ -86,7 +89,7 @@ networks:
     ipam:
       config:
         - subnet: "${DMSG_NETWORK_SUBNET:?DMSG_NETWORK_SUBNET is required}"
-          # Keep the static endpoint outside the dynamic pool: a stale DNAT
+          # Keep both static endpoints outside the dynamic pool: a stale DNAT
           # must never send DNS to another automatically allocated container.
           ip_range: "${DMSG_NETWORK_DYNAMIC_RANGE:?DMSG_NETWORK_DYNAMIC_RANGE is required}"
 
