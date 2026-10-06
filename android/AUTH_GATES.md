@@ -416,13 +416,14 @@ preserves an existing disposable account. Select exactly one method of
 finally restores Wi-Fi: the debugging listener may disappear/change port. The
 initial interrupted attempt lost its only Wi-Fi control channel. USB was later
 provided and verified on host (`get-devpath` begins `usb:`); the guarded attempt
-kept control and restored Wi-Fi, but timed out45s waiting for cellular default.
-Current method status: **BLOCKED / NOT PASS**, because data is disabled for both
-SIMs. Host preflight must verify effective/per-SIM data enablement: global
+kept control and restored Wi-Fi, but initially timed out45s waiting for cellular
+default because per-SIM data was disabled. Host preflight must verify effective/per-SIM data enablement: global
 `mobile_data=1` alone is insufficient (`mobile_data1=0`, `mobile_data2=0`, both
 telephony `mIsDataEnabled=false`). Do not enable data/change APN/roaming without
-permission. VPN binding, route overrides or an added control service are outside
-this goal.
+permission. User later explicitly authorized LTE/Wi-Fi; selected-SIM data was
+enabled and effective state verified. Current guarded method status: **PASS**,
+foreground/economy both directions. VPN binding, route overrides or an added
+control service are outside this goal.
 
 Confirmed on Moto API35 + A142P API36: actual Yandex fallback/key resume on both;
 Moto queued retry over Yandex → A142P receive1 then0/skips0 → persistent Delivered
@@ -439,6 +440,17 @@ Yandex retry/repeat→Accepted, peer receive1 then0/all skips0/exact plaintext o
 phone persistent Delivered. Main identity/history/wrapped key/install metadata
 unchanged; disposable gate packages, peer credentials/keys and owned invite files
 cleaned. This is delivery evidence, **not LTE acceptance**.
+Final authorized USB run **does establish Wi-Fi/LTE acceptance**: fresh queued
+real-peer ciphertext, foreground off-FGS Wi-Fi→LTE→Wi-Fi, economy Wi-Fi→LTE→Wi-Fi
+successful new polls2713ms/4932ms after new default-network availability (not
+radio transition duration). Account/mid/ciphertext unchanged. Physical networks
+had different DNS; same-DNS/new-Network and duplicate/late callback cases remain
+JVM evidence. Native peer then received1/0 with all skips0 and exact plaintext
+once in history; phone persistent Delivered/outbox removal/one history row passed.
+Main installed APK/native equal build, identity/history/wrapped key/metadata
+unchanged after cleanup AND real UI DNS saved-key check. Wi-Fi restored, selected
+data remains enabled as authorized; APN/roaming/VPN/second-SIM unchanged. Private
+final proof/logs: `.local/dns-handoff/usb/lte/`. Goal complete; R9 remains deferred.
 
 Local native counter gate (all UDP endpoints local; real pinned C carrier):
 
@@ -454,4 +466,4 @@ backup0 packets; silent attempt10/2720 bytes TX,0 RX; failed cycle (1+1)
 phone's silent primary was10/2740 bytes. UID totals/refill/Noise are distinct and
 documented in the goal; numbers are a single scenario, not a universal quota.
 Clean workspace, generated host bindings, NDK r28c, JVM43, debug/release/test/main
-export gates green. Physical handoff remains blocked; long Doze R9 deferred.
+export gates green. Physical USB Wi-Fi/LTE handoff passed; long Doze R9 deferred.

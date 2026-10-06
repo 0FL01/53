@@ -1,6 +1,6 @@
 # Goal: настоящий DNS fallback и Wi-Fi/LTE handoff
 
-Status: blocked
+Status: complete
 Source: пользователь 2026-10-06 утвердил приведённый ниже план, копию в цель, итеративную реализацию, commit и deploy.
 Last updated: 2026-10-06
 
@@ -29,14 +29,14 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Source: принятый план §2–3.
   - Acceptance: same-DNS/new-Network restart, duplicate/late event no extra cancel, foreground off-FGS detection, sticky wake without worker overlap/late stopped poll.
   - Primary evidence: JVM state/worker tests и physical network transition.
-  - Status: blocked
-  - Evidence: implemented shared per-DB Network+DNS runtime, cancellation before store lock, coalesced latest apply and sticky wake. 43 JVM tests green (5 network/4 worker tests). Moto real economy wake finished 4729ms, account preserved, no late poll after Stop. USB is now verified and survived radio toggling. Physical Wi-Fi/LTE transition NOT accepted: Android never selected cellular; per-SIM data disabled, see Current State.
+  - Status: verified
+  - Evidence: shared per-DB Network+DNS runtime, cancellation before store lock, coalesced latest apply and sticky wake. 43 JVM tests green (5 network/4 worker tests): same-DNS/new-Network, duplicate/late events, latest apply, one-worker/Stop. Moto USB physical foreground Wi-Fi→LTE→Wi-Fi and economy Wi-Fi→LTE→Wi-Fi passed; economy successful new poll2713ms/4932ms after default-network availability, bypassing300s. Saved-key resume/account preserved. Actual networks had different DNS; same-DNS case proven by JVM state test, not claimed as physical. Earlier non-radio wake4729ms/no late poll after Stop remains valid.
 - R3: реальный DNS путь, сохранность доставки и измерение трафика
   - Source: принятый план §4 и запрос «какие попытки … какой объём трафика».
   - Acceptance: actual Yandex DNS/QUIC ready/auth; physical Wi-Fi/LTE recovery без password; same queued mid/ciphertext, receive1 then0/Delivered; reported packet/TX/RX measurement with boundary and scenario.
   - Primary evidence: explicit isolated `.gate` methods + bounded DNS traffic counters/capture.
-  - Status: blocked
-  - Evidence: actual Yandex fallback/Noise key resume on Moto API35 + A142P API36 with primary loopback UDP sink: 10 packets/2740 DNS payload TX bytes, primary profile preserved across repeat commands. Actual Yandex retry retains queued mid/ciphertext→Accepted, second phone receive1 then0/skips0, persistent Delivered reopen. USB follow-up also passed same queued ciphertext→actual Yandex Accepted/repeat→native recursive-DNS peer receive1 then0/skips0/exact plaintext once→phone persistent Delivered. Local failed cycle and phone UID bytes below. Only physical Wi-Fi/LTE part blocked by disabled per-SIM data.
+  - Status: verified
+  - Evidence: actual Yandex fallback/Noise key resume on Moto API35 + A142P API36 with primary loopback UDP sink: 10 packets/2740 DNS payload TX bytes, primary profile preserved across repeat commands. Actual Yandex retry retains queued mid/ciphertext→Accepted, second phone receive1 then0/skips0, persistent Delivered reopen. Final USB physical handoff gate passed33.4s, foreground off-FGS and economy both directions; identical queued mid/ciphertext/account retained through LTE submission and repeated network wake/retry. Then native recursive-DNS peer receive1 then0/all skips0/exact plaintext exactly once in history; phone Delivered persisted across process/activity reopen, outbox removed, one history row. Local failed-cycle/phone UID traffic measurements below are separate scenarios, not LTE byte/battery measurement.
 - R4: сборки, deploy, docs и commit
   - Source: «делай копию плана в цель и итеративно реализовать и коммит, деплой».
   - Acceptance: relevant Rust/JVM/ARM64/APK gates green; updated client installed/launched without reset; evidence recorded and intended commit created.
@@ -57,16 +57,16 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 - Live devices: app-scoped fixture/ordinary Wi-Fi/LTE toggle with independent control connection; backend scoped disposable signup-invitation issuance/cleanup, no backend rollout/reset required.
 
 ## Current Checkpoint
-- Closes: remaining physical-transition portion of R2/R3; USB prerequisite verified, cellular-data prerequisite externally blocked.
-- Smallest next action after unlock: verify data enabled on selected SIM, independent USB and Wi-Fi initially active; reprovision disposable queue fixture with one USB phone and native DNS peer, run the guarded handoff gate.
-- Expected evidence: actual foreground/economy Wi-Fi↔cellular transitions with saved-key resume, queued mid/ciphertext preserved and wake bypassing300s; no Wi-Fi-only control loss.
+- Closes: remaining physical-transition portion of R2/R3, verified; closure complete.
+- Next: none. Do not expand this completed goal to VPN, long Doze or restricted egress.
+- Evidence: owner-only `.local/dns-handoff/usb/lte/handoff-proof.json`/instrumentation log, native fetch/history and phone Delivered logs, main artifact/data/metadata proof.
 
 ## Current State
-- Resolved: R1; implementation of R2/R3 and all their non-radio evidence.
-- Last relevant evidence: `.local/dns-handoff/` and `.local/dns-handoff/usb/` private logs/proofs; actual recursive DNS, no ADB reverse/SSH message bridge. USB gate build/install/hash, fresh signup/session and real peer delivery passed; main raw encrypted identity/account/history/contacts, wrapped key and install metadata unchanged before/after tests AND disposable cleanup; main cold startup590ms.
-- Blocker: independent USB issue cleared. Guarded `env -i HOME=/home/stfu PATH=/usr/local/bin:/usr/bin:/bin python3 .local/dns-handoff/usb/run.py handoff` failed at `DnsNetworkGatesTest.kt:142`, waiting45s for cellular default after Wi-Fi disable, before any LTE tunnel attempt. USB control survived; finally restored Wi-Fi. Read-only `settings list global`: selected data subscription1, `mobile_data1=0`, `mobile_data2=0` despite stale/global `mobile_data=1`. `dumpsys activity service com.android.phone/.TelephonyDebugService`: both `mIsDataEnabled=false`/`mDataEnabled=false`, POLICY/CARRIER/THERMAL=true. SIMs loaded/LTE registered; enabling data/APN/roaming changes not authorized by this goal.
-- Safe alternatives executed: diagnosed telephony rather than repeating unchanged radio failure. Resumed the identical queued message over actual Yandex on Wi-Fi; native peer fetch1 then0/all skips0/exactly one plaintext history row, phone Delivered reopen passed. Original JVM/latest-snapshot and economy wake/Stop evidence remains current. These cannot prove real Wi-Fi/LTE; VPN binding/route overrides/new control service are not substitutes.
-- Smallest unlock: user enables mobile data on the selected SIM (or explicitly authorizes that device-setting change). Keep USB; no main reset/backend rollout required. Host preflight must check effective/per-SIM data state, not only global mobile_data. Disposable packages/peer keys/credentials/this run's invitation files cleaned; server accounts intentionally not wiped.
+- Resolved: R1–R4. Blocker: none.
+- Last relevant evidence: final `.local/dns-handoff/usb/lte/` USB instrumentation and native peer logs/proofs. Selected-SIM data enabled after explicit user permission (`svc data enable`); effective `mIsDataEnabled=true`, LTE registration. Physical foreground/economy handoff and subsequent exact-once delivery all passed; no ADB reverse/SSH message bridge.
+- Deployment: installed main APK matches root `53.apk`10097587 bytes and current ARM64 native build. Raw encrypted identity/account/history/contacts, wrapped key and install metadata unchanged before/after tests, cleanup AND final actual main UI DNS saved-key check. Main cold startup577ms; no reset/reinstall needed in this follow-up.
+- Cleanup: gate/test packages, native peer DB/keys/credentials and only this run's consumed invite files removed. Raw telephony dumps removed; sanitized prerequisite proof retained. Server test accounts intentionally not wiped. Wi-Fi enabled/restored, selected-SIM mobile data remains enabled as user authorized; second-SIM/APN/roaming/VPN unchanged. Economy preference restored, gate FGS stopped, main launched.
+- Earlier rejected approaches: initial Wi-Fi-only control loss was not PASS; later USB45s prerequisite timeout was caused by per-SIM data disabled despite global `mobile_data=1`. User permission changed that condition; final experiment passed without relaxing tests or contract.
 
 ## Traffic evidence (one run, not a bandwidth guarantee)
 | Scenario | DNS TX packets / payload bytes | DNS RX packets / payload bytes |
@@ -86,6 +86,7 @@ Android UID deltas for actual fallback + reconnect/refill/fetch/retry/reconnect:
 - 2026-10-06: compatible account/core schema6 retained; server deploy is unnecessary for client-only policy.
 - 2026-10-06: user objected to switching Wi-Fi under Wi-Fi ADB; all later device work leaves radios untouched. Radio gate is USB-guarded; unchanged handoff finish line remains blocked rather than waived.
 - 2026-10-06: user supplied independent USB and removed second phone. Resume unchanged R2/R3 using USB Moto plus disposable native peer over actual recursive DNS; no main reset.
+- 2026-10-06: user explicitly authorized «включай LTE/Wifi, доступ есть». Enabling selected-SIM data and ordinary Wi-Fi toggles now allowed; APN/roaming/VPN/main identity remain unchanged.
 
 ## Checkpoint History
 - 2026-10-06: approved plan frozen before implementation.
@@ -94,10 +95,12 @@ Android UID deltas for actual fallback + reconnect/refill/fetch/retry/reconnect:
 - 2026-10-06: R4 main compatible install preserved schema/key/identity/account/history/contacts; live UI DNS check passed. Server remained healthy/schema5/invite_only, no topology/schema/pin/tunnel changes.
 - 2026-10-06: `293a723` committed intended13 files, no `.local`/binaries/credentials/user PNG. Closure: R1/R4 verified; R2/R3 blocked solely for physical radio acceptance. Both disposable gate packages and their local credentials removed; only this run's consumed remote invitation files removed. Server accounts intentionally not wiped, main device identity/history retained.
 - 2026-10-06: user provided USB Moto, second phone removed. Rebuilt gated APK and isolated-target native peer from current core, fresh file-only signup/session passed. Guarded radio experiment kept USB and restored Wi-Fi but cellular never became default: effective data disabled for both SIMs. No APN/data/roaming changes made. Same queued ciphertext completed via actual Yandex→native DNS peer receive1 then0/exactly once history→phone Delivered. Main data/metadata equality, cleanup and main startup passed. R2/R3 remain blocked for cellular prerequisite, not code failure.
+- 2026-10-06: user explicitly authorized LTE/Wi-Fi enablement. Selected-SIM data enabled; effective state true. Fresh isolated queue/session + USB handoff passed33.4s; foreground both directions, economy poll2713ms/4932ms, account/mid/ciphertext unchanged. Native peer receive1 then0/exactly once history and phone Delivered reopen passed. Installed main APK/native match build, same encrypted identity/history/Keystore wrapping bytes/metadata after tests, cleanup AND main real DNS key resume. Wi-Fi restored; selected data stays enabled, APN/roaming/VPN/second-SIM unchanged. Closure R1–R4 verified; complete, no next checkpoint.
 
 ## Completion
-- Resolved outcomes: R1/R4 verified; R2/R3 implementation and non-radio evidence verified, physical transition unresolved, not waived.
+- Resolved outcomes: R1–R4 verified; no waiver or reduced acceptance.
 - Commands and artifacts: clean `cargo build -p msgd -p dmsg-core`, `cargo test --workspace` (168 passed,2 explicit native fixtures ignored in default run then both executed successfully), `DMSG_GEN_BINDINGS=1 cargo test -p dmsg-core --test gen_bindings`, `cargo fmt --all -- --check`; documented Perl + NDK r28c `android/build-native.sh`; JDK21 clean `testDebugUnitTest assembleDebug assembleRelease assembleDebugAndroidTest -PgateInstall=true`, main `export53Apk`; `dev-install.py --serial <Moto Wi-Fi ADB> --no-build` WITHOUT reset; actual main UI DNS check and private before/after/hash proof.
-- Artifact: root gitignored `53.apk`, 10097587 bytes, exact installed bytes and native bytes matched. Main remained at Dialogs; second main untouched. No credentials/binaries in commits.
+- Final physical commands: clean `python3 .local/dns-handoff/usb/run.py queue`, `handoff`, `delivery` (explicit individual instrumentation methods, zero skips; native peer actual DNS); `artifact`, `snapshot after`, `cleanup`, `main-probe`, final `snapshot after` passed. The private harness is disposable/evidence orchestration, not tracked application code. Final phone cold startup577ms.
+- Artifact: root gitignored `53.apk`, 10097587 bytes, exact installed bytes and native bytes matched, including final USB check. Main remained at Dialogs; second main untouched. No credentials/binaries in commits.
 - Constraint and diff-scope check: schema/wire/pins/crypto/C transport/VPN/topology/original tunnel unchanged. User's untracked design PNG preserved. No added dependencies/services/workers/store/API. Native tests/phone probes used scoped file fixtures; original Stop/account/ratchet/dedup guarantees covered.
-- Final status: **BLOCKED**, not DONE. USB supplied/verified; necessary unavailable dependency is enabled cellular data on the selected SIM. Both per-SIM settings/effective telephony state are disabled; changing them requires user action or permission. A45s guarded transition proved no cellular default; unchanged repeat cannot help. Independent delivery/cleanup/main-preservation work is complete; no outstanding code failure is hidden by this blocker.
+- Final status: **DONE**. Closure compared all frozen outcomes and affected constraints to current successful evidence. Physical Wi-Fi/LTE prerequisite unlocked by explicit user permission and acceptance passed; no known blocker or code failure. No substantive follow-on work under this goal.
