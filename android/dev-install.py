@@ -21,6 +21,8 @@ def main():
     parser.add_argument("--reset-data", action="store_true",
                         help="DESTRUCTIVE: delete this development app's DB, history and Keystore identity")
     parser.add_argument("--no-build", action="store_true", help="install existing root 53.apk")
+    parser.add_argument("--server-profile", type=Path,
+                        help="absolute trusted public server-profile file for APK onboarding (not an invitation)")
     args = parser.parse_args()
     sdk = Path(os.environ.get("ANDROID_HOME", str(Path.home() / "Android/Sdk")))
     env = {"HOME": str(Path.home()), "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
@@ -35,7 +37,12 @@ def main():
         return command([adb_path, "-s", args.serial, *argv])
 
     if not args.no_build:
-        subprocess.run(["./gradlew", "export53Apk", "--no-daemon"], cwd=ROOT / "android", env=env, check=True)
+        gradle = ["./gradlew", "export53Apk", "--no-daemon"]
+        if args.server_profile:
+            if not args.server_profile.is_absolute() or not args.server_profile.is_file():
+                raise RuntimeError("server profile must be an absolute existing public file")
+            gradle.append("-PserverProfileFile=" + str(args.server_profile))
+        subprocess.run(gradle, cwd=ROOT / "android", env=env, check=True)
     apk = ROOT / "53.apk"
     if not apk.is_file():
         raise RuntimeError("53.apk missing; build export53Apk first")

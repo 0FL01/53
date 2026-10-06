@@ -1,6 +1,6 @@
-# msgd account authentication
+# 53 server and account authentication
 
-`msgd` uses the shared `dmsg-protocol` version 2 parsers. The device key is
+`53` (internal Cargo package `msgd`) uses shared `dmsg-protocol` version 2 parsers. The device key is
 always the authenticated Noise IK initiator static key.
 
 ## Wire contract
@@ -73,17 +73,19 @@ quota again.
 Set `MSGCTL_SOCK` to the owner-only control socket when using a nondefault path.
 
 ```text
-msgd msgctl server-code
-msgd msgctl registration-mode [open|invite_only]
-msgd msgctl invite-issue --out-file <new-file> [ttl_secs]
-msgd msgctl invite-revoke --file <invitation-file>
-msgd msgctl invite-list
-msgd msgctl device-block --file <device-key-hex-file>
-msgd msgctl device-unblock --file <device-key-hex-file>
-msgd msgctl user-list
-msgd msgctl quotas [contact-prefix]
-msgd msgctl gc
-msgd msgctl backup
+53ctl ping
+53ctl server-code
+53ctl registration-mode [open|invite_only]
+53ctl qr-invite [--ttl <seconds> | --file <existing-private-invitation-file>]
+53ctl invite-issue --out-file <new-file> [ttl_secs]
+53ctl invite-revoke --file <invitation-file>
+53ctl invite-list
+53ctl device-block --file <device-key-hex-file>
+53ctl device-unblock --file <device-key-hex-file>
+53ctl user-list
+53ctl quotas [contact-prefix]
+53ctl gc
+53ctl backup
 ```
 
 `server-code` emits a public `dmsg://server/` profile containing the domain,
@@ -95,6 +97,27 @@ attempt to revoke the unusable invitation. Secret inputs are bounded regular
 owner-only files. `invite-list` redacts tokens to an eight-byte hex prefix and
 reports created/expiry/revoked/used state. User output contains no credentials
 or password hashes.
+
+### Administrator: QR in the terminal
+
+```sh
+docker exec -it 53-1 53ctl qr-invite              # default 24 hours
+docker exec -it 53-1 53ctl qr-invite --ttl 3600
+docker exec -it 53-1 53ctl qr-invite --file /var/lib/msgd/invites/example.invite
+```
+
+Creates a random-named `0600` file in the existing data volume's `0700` `invites/`
+directory and renders its raw token as a fixed-contrast QR with a quiet zone.
+Plaintext token is never echoed. `--file` only renders an existing bounded
+owner-only invitation; it does not issue or validate one. Both stdin and stdout
+must be terminals, otherwise rejection happens **before** issuance. Do not
+capture/share terminal recordings: the QR itself is a secret. Docker exec output
+is not service logs. For same-phone import, transfer the private file via a
+trusted channel; scanning is for another screen/paper. Expiry, revocation and
+one-use authorization are still checked by signup.
+
+Container `53-1`, entrypoint `53`, direct control `53ctl`. Internal crate/service,
+environment/socket/data-volume names remain unchanged to preserve state/pins.
 
 ## Storage and verification
 

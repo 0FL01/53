@@ -4,6 +4,101 @@ use common::*;
 use std::os::unix::fs::PermissionsExt;
 
 #[test]
+fn direct_control_and_qr_terminal_contract() {
+    let srv = Server::new("qr-control");
+    let executable = srv.dir.join("53ctl");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_msgd"), &executable).unwrap();
+    let cli = |args: &[&str]| {
+        std::process::Command::new(&executable)
+            .env("MSGCTL_SOCK", srv.dir.join("ctl.sock"))
+            .env("MSGD_DATA_DIR", srv.dir.join("data"))
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    assert_eq!(cli(&["ping"]).stdout, b"pong\n");
+    let out = cli(&["qr-invite"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    assert!(!srv.dir.join("data/invites").exists());
+    assert_eq!(
+        srv.db()
+            .query_row("SELECT COUNT(*) FROM invites", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    // util-linux script gives the child its own PTY; no real token is printed by
+    // the test runner, and the terminal capture stays in memory.
+    let pty = |args: &str| {
+        std::process::Command::new("script")
+            .args([
+                "--quiet",
+                "--return",
+                "--command",
+                &format!("exec '{}' qr-invite {args}", executable.display()),
+                "/dev/null",
+            ])
+            .env("MSGCTL_SOCK", srv.dir.join("ctl.sock"))
+            .env("MSGD_DATA_DIR", srv.dir.join("data"))
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let issued = pty("");
+    assert!(issued.status.success());
+    let dir = srv.dir.join("data/invites");
+    assert_eq!(
+        std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    let files: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|p| p.unwrap().path())
+        .collect();
+    assert_eq!(files.len(), 1);
+    let file = &files[0];
+    let token = std::fs::read_to_string(file).unwrap();
+    dmsg_protocol::auth::parse_invitation(token.trim()).unwrap();
+    assert_eq!(
+        std::fs::metadata(file).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert!(!String::from_utf8_lossy(&issued.stdout).contains(token.trim()));
+    let ttl: i64 = srv
+        .db()
+        .query_row("SELECT expires_at-created_at FROM invites", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(ttl, 86400);
+    let shown = pty(&format!("--file '{}'", file.display()));
+    assert!(shown.status.success());
+    assert_eq!(shown.stdout, issued.stdout);
+    assert_eq!(
+        srv.db()
+            .query_row("SELECT COUNT(*) FROM invites", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert!(pty("--ttl 3600").status.success());
+    assert_eq!(
+        srv.db()
+            .query_row(
+                "SELECT COUNT(*) FROM invites WHERE expires_at-created_at=3600",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+    std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(
+        pty(&format!("--file '{}'", file.display())).status.code(),
+        Some(1)
+    );
+}
+
+#[test]
 fn empty_db_formats_and_public_profile() {
     let srv = Server::new("control-formats");
     assert_eq!(srv.ctl(&["user-list"]), "ok\n");

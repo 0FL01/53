@@ -4,6 +4,7 @@ import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.net.Uri
 import android.view.View
 import android.view.WindowManager
 import android.content.ClipboardManager
@@ -13,6 +14,7 @@ import android.widget.EditText
 import android.widget.ListView
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import uniffi.dmsg_core.LoginOutcome
@@ -33,7 +35,22 @@ class MainActivity : DmsgActivity() {
     private lateinit var code: EditText
     private lateinit var login: EditText
     private lateinit var password: EditText
-    private lateinit var invitation: EditText
+    private val invitation = InvitationMemory()
+    private var scanTicket: Long? = null
+    private var departingForScan = false
+    private var pendingInvitationFile: Uri? = null
+    private val invitationFilePicker = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        // Only a picker-issued URI, never an invitation/password in Intent extras.
+        pendingInvitationFile = if (result.resultCode == RESULT_OK) result.data?.data else null
+        if (pendingInvitationFile == null) { invitation.clear(); updateForm() }
+    }
+    private val invitationScanner = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val ticket = scanTicket
+        scanTicket = null
+        val value = ticket?.let { InvitationScanTransfer.take(it) }
+        if (result.resultCode == RESULT_OK && value != null) acceptInvitation(value)
+        else { value?.fill('\u0000'); invitation.clear(); updateForm() }
+    }
     private lateinit var memory: DialogMemory
     private val rows get() = memory.rows
     private var nextCursor: String?
@@ -67,7 +84,6 @@ class MainActivity : DmsgActivity() {
         code = findViewById(R.id.connection_code)
         login = findViewById(R.id.auth_login)
         password = findViewById(R.id.auth_password)
-        invitation = findViewById(R.id.auth_invitation)
         list.adapter = DialogAdapter(this, rows)
         list.setOnItemClickListener { _, _, pos, _ -> if (!busy) rows.getOrNull(pos)?.let { openChat(it.contactId) } }
         list.setOnScrollListener(object : AbsListView.OnScrollListener {
@@ -80,6 +96,23 @@ class MainActivity : DmsgActivity() {
         button(R.id.btn_connection_scan) { scan(true) }
         button(R.id.btn_login) { selectAction(AuthAction.Login) }
         button(R.id.btn_signup) { selectAction(AuthAction.Signup) }
+        button(R.id.btn_invitation_scan) {
+            clearSecrets()
+            val ticket = InvitationScanTransfer.begin()
+            scanTicket = ticket
+            departingForScan = true
+            invitationScanner.launch(Intent(this, ScannerActivity::class.java)
+                .putExtra(ScannerActivity.INVITATION_ONLY, true).putExtra(ScannerActivity.INVITATION_TICKET, ticket))
+        }
+        button(R.id.btn_invitation_file) {
+            clearSecrets()
+            invitationFilePicker.launch(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "*/*"
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            })
+        }
+        button(R.id.btn_invitation_cancel) { clearSecrets(); updateForm() }
         button(R.id.btn_auth_submit) { submit() }
         button(R.id.btn_policy_retry) { loadPolicy() }
         button(R.id.btn_scan) { addContact() }
@@ -121,6 +154,9 @@ class MainActivity : DmsgActivity() {
         flow?.cancel()
         activeSecrets?.clear(); activeSecrets = null
         clearSecrets()
+        pendingInvitationFile = null
+        if (!departingForScan) scanTicket?.let(InvitationScanTransfer::cancel)
+        departingForScan = false
         code.text.clear()
         prompt?.dismiss(); prompt = null
         busy = false
@@ -128,9 +164,58 @@ class MainActivity : DmsgActivity() {
     }
 
     private fun clearSecrets() {
-        password.text.clear(); invitation.text.clear()
+        password.text.clear(); invitation.clear()
         password.transformationMethod = android.text.method.PasswordTransformationMethod.getInstance()
         findViewById<Button>(R.id.btn_password_reveal).text = "Показать пароль"
+        updateInvitationIndicator()
+    }
+
+    override fun onDestroy() {
+        scanTicket?.let(InvitationScanTransfer::cancel)
+        invitation.clear()
+        super.onDestroy()
+    }
+
+    private fun updateInvitationIndicator() {
+        findViewById<TextView>(R.id.invitation_status).text =
+            if (invitation.hasInvitation) "Приглашение считано" else "Приглашение не считано"
+        findViewById<Button>(R.id.btn_invitation_cancel).isEnabled = !busy && invitation.hasInvitation
+    }
+
+    private fun acceptInvitation(value: CharArray) {
+        if (state == LaunchState.Dialogs) { value.fill('\u0000'); return }
+        password.text.clear()
+        flow?.cancel()
+        invitation.replace(value)
+        action = AuthAction.Signup
+        updateForm()
+    }
+
+    /** Picker and isolated file gates share this exact bounded stream-to-form path. */
+    internal fun importInvitationFile(open: () -> java.io.InputStream) {
+        if (busy || state != LaunchState.Authentication) return
+        clearSecrets()
+        val stamp = token
+        busy = true
+        status.text = "Читаем приватный файл…"
+        updateForm()
+        Core.dispatch {
+            val result = runCatching { open().use(InvitationInput::read) }
+            runOnUiThread {
+                if (stamp != token || isFinishing || isDestroyed) {
+                    result.getOrNull()?.fill('\u0000')
+                    return@runOnUiThread
+                }
+                busy = false
+                result.fold({
+                    acceptInvitation(it)
+                    status.text = "Приглашение считано. Введите логин и пароль"
+                    if (policy == null) loadPolicy()
+                },
+                    { status.text = "Не удалось прочитать приглашение. Выберите корректный приватный файл" })
+                updateForm()
+            }
+        }
     }
 
     private fun render(next: LaunchState) {
@@ -171,6 +256,10 @@ class MainActivity : DmsgActivity() {
         policy = null
         work("Открываем защищённое хранилище…", {
             val f = Core.facade(applicationContext)
+            val configured = TrustedServerProfile.configureIfFresh(f, { DnsNetwork.resolvers(this) }) {
+                if (TrustedServerProfile.ASSET in assets.list("").orEmpty()) assets.open(TrustedServerProfile.ASSET) else null
+            }
+            if (configured) DnsNetwork.mirrorProfile(this, f)
             val auth = AuthFlow(f)
             Triple(f, auth, auth.launchState())
         }) { (f, auth, next) ->
@@ -179,7 +268,7 @@ class MainActivity : DmsgActivity() {
             when (next) {
                 LaunchState.Connection -> status.text = "Вставьте публичный код сервера или сканируйте QR"
                 LaunchState.Authentication -> loadPolicy()
-                LaunchState.Dialogs -> loadDialogs()
+                LaunchState.Dialogs -> { invitation.clear(); pendingInvitationFile = null; loadDialogs() }
             }
         }
     }
@@ -201,7 +290,14 @@ class MainActivity : DmsgActivity() {
 
     private fun loadPolicy() {
         val auth = flow ?: return
-        invitation.text.clear()
+        val uri = pendingInvitationFile
+        pendingInvitationFile = null
+        if (uri != null) {
+            importInvitationFile {
+                contentResolver.openInputStream(uri) ?: throw java.io.IOException("Invitation file unavailable")
+            }
+            return
+        }
         policy = null
         work("Проверяем режим регистрации через DNS…", { auth.policy() }) { result ->
             policy = result
@@ -219,8 +315,10 @@ class MainActivity : DmsgActivity() {
 
     private fun updateForm() {
         if (!::password.isInitialized) return
-        val needsInvite = AuthForm.needsInvitation(action, policy)
-        findViewById<View>(R.id.invitation_group).visibility = if (needsInvite) View.VISIBLE else View.GONE
+        val showInvitation = AuthForm.needsInvitation(action, policy) ||
+            (action == AuthAction.Signup && invitation.hasInvitation)
+        findViewById<View>(R.id.invitation_group).visibility = if (showInvitation) View.VISIBLE else View.GONE
+        updateInvitationIndicator()
         findViewById<TextView>(R.id.auth_title).text = if (action == AuthAction.Login) "Войти" else "Создать аккаунт"
         findViewById<Button>(R.id.btn_auth_submit).apply {
             text = if (action == AuthAction.Login) "Войти" else "Создать аккаунт"
@@ -229,15 +327,16 @@ class MainActivity : DmsgActivity() {
         findViewById<Button>(R.id.btn_policy_retry).isEnabled = !busy
         findViewById<Button>(R.id.btn_login).isEnabled = !busy
         findViewById<Button>(R.id.btn_signup).isEnabled = !busy
-        login.isEnabled = !busy; password.isEnabled = !busy; invitation.isEnabled = !busy
+        login.isEnabled = !busy; password.isEnabled = !busy
         for (id in listOf(R.id.btn_preview, R.id.btn_connection_scan, R.id.btn_paste, R.id.btn_password_reveal,
-            R.id.btn_menu, R.id.btn_scan, R.id.btn_dialogs_retry)) findViewById<Button>(id).isEnabled = !busy
+            R.id.btn_menu, R.id.btn_scan, R.id.btn_dialogs_retry, R.id.btn_invitation_scan,
+            R.id.btn_invitation_file)) findViewById<Button>(id).isEnabled = !busy
     }
 
     private fun submit() {
         val auth = flow ?: return
         val name = login.text.toString() // Core owns normalization.
-        val secrets = AuthSecrets(password.text.toString().toCharArray(), invitation.text.toString().toCharArray())
+        val secrets = AuthSecrets(password.text.toString().toCharArray(), invitation.take())
         activeSecrets = secrets
         val chosen = action
         val serverPolicy = policy

@@ -1,4 +1,4 @@
-# Деплой dmsg53 на n-de2
+# Деплой 53 на n-de2
 
 Реальные значения только в `/opt/srv/53/.env` и `/opt/srv/53/secrets/` (на сервере, не в Git).
 
@@ -30,7 +30,37 @@ docker compose -f /opt/srv/53/deploy/compose.yml --env-file /opt/srv/53/.env up 
 docker compose -f /opt/srv/53/deploy/compose.yml --env-file /opt/srv/53/.env ps
 ```
 
-Ожидается: `slipstream` Up с маппингом `${DNS_BIND_IP}:53->5353/udp`, `msgd` `healthy`, `dbversion` = `5`. Не менять endpoint/topology/ключи исходного туннеля.
+Ожидается: `slipstream` Up с маппингом `${DNS_BIND_IP}:53->5353/udp`, backend `53-1` `healthy`, `53ctl dbversion` = `5`. Не менять endpoint/topology/ключи исходного туннеля.
+
+### Совместимый rollout 2026-10-06: 53 / 53ctl / 53-1
+
+Image `53:s1`, entrypoint `/usr/local/bin/53`, direct control command `53ctl`;
+backend container `53-1`. Внутренние Compose project `dmsg53`, service `msgd`,
+data/blob volume names, data paths и Unix socket оставлены прежними: их смена
+могла бы незаметно подключить пустую БД. Обновить только backend можно так:
+
+```sh
+docker compose -f /opt/srv/53/deploy/compose.yml --env-file /opt/srv/53/.env \
+  up -d --no-deps --build msgd
+docker exec 53-1 53ctl ping
+docker exec 53-1 53ctl dbversion
+docker exec 53-1 53ctl registration-mode
+```
+
+Проверено: до/после recreate одинаковые schema5, digests всех таблиц, volume
+identities и public server-profile hash; carrier container ID/PID не менялись.
+`pong`, `5`, `invite_only`, затем real recursive Android signup/key-resume PASS.
+Никаких wipe/migration/pin rotation. Terminal QR PTY issue/re-render проверен;
+non-TTY `qr-invite` exit2 без нового приглашения.
+
+Deployment APK включает этот же доверенный **публичный** профиль при сборке:
+`-PserverProfileFile=/absolute/path/to/public-profile.txt` или
+`sh deploy/build-apk.sh /absolute/path/to/public-profile.txt`. Нет credentials
+или приглашения в asset. Без входного файла generic APK сохраняет manual trust
+preview. Main update без reset сохранил identity/history/wrapped Keystore key;
+installed APK/native/asset и actual DNS key resume проверены. File onboarding
+и ограничения optical/SAF evidence — `android/AUTH_GATES.md`; durable goal —
+`docs/goals/2026-10-06-invite-onboarding.md`.
 
 ## DNS без UDP docker-proxy на внешнем hot path
 
@@ -49,7 +79,7 @@ host-local OUTPUT probe → retained published port / docker-proxy
   `DMSG_SLIPSTREAM_IPV4`. Сверить Docker networks и host/VPN routes: без overlap.
 - Static IP принадлежит subnet, **не dynamic pool**, не gateway/network/broadcast.
   Выделенный project network нельзя использовать для посторонних static endpoints.
-- Сохранить прежние Compose/env/firewall и сделать `msgctl backup`. При добавлении
+- Сохранить прежние Compose/env/firewall и сделать `53ctl backup`. При добавлении
   IPAM выполнить `compose down` и `up -d --no-build` **без `-v`**, оба сервиса вместе.
   Использовать команды выше с абсолютными compose/env paths; ключи не менять.
 - Скопировать `deploy/dns-forward.nft.example` в `/etc/dmsg53-dns.nft`; подставить
@@ -100,20 +130,22 @@ IP forwarding и существующий masquerade должны уже раб�
 
 Старые host-local `enrol_dns.py`, token-based `mbox_dns.py` и plaintext `s3_diag.py` не являются рабочими smoke-командами wire2. Recursive Android signup/resume/E2E теперь проверены: production resolvers без override, actual C peer, received1 then0 обе стороны/all skipped0, exact ciphertext retry/status/history/replacement. ADB/SSH не переносили messages; evidence — `android/AUTH_GATES.md` и gate checklist.
 
-## Операции через msgctl (новая ревизия)
+## Операции через 53ctl
 
 ```sh
-S=/var/lib/msgd/msgctl.sock
-docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl stats
-docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl dbversion
-docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl server-code  # public profile
-docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl registration-mode invite_only  # или open; без аргумента читает
-docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl invite-issue --out-file /var/lib/msgd/invite.txt
-docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl invite-revoke --file /var/lib/msgd/invite.txt
-docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl device-block --file /path/device-public.hex
-docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl user-list
-docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl quotas
-docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl backup
+docker exec 53-1 53ctl stats
+docker exec 53-1 53ctl dbversion
+docker exec 53-1 53ctl server-code  # public profile
+docker exec 53-1 53ctl registration-mode invite_only  # или open; без аргумента читает
+docker exec -it 53-1 53ctl qr-invite  # secret terminal QR + private file, TTL 24 h
+docker exec -it 53-1 53ctl qr-invite --ttl 3600
+docker exec -it 53-1 53ctl qr-invite --file /var/lib/msgd/invites/example.invite
+docker exec 53-1 53ctl invite-issue --out-file /var/lib/msgd/invite.txt
+docker exec 53-1 53ctl invite-revoke --file /var/lib/msgd/invite.txt
+docker exec 53-1 53ctl device-block --file /path/device-public.hex
+docker exec 53-1 53ctl user-list
+docker exec 53-1 53ctl quotas
+docker exec 53-1 53ctl backup
 ```
 
 Секреты только bounded regular owner-only файлами0600, значения не в argv/env/logs. `invite-issue` требует **новый** `--out-file` (refuse-if-exists/symlink, parent должен существовать): standalone base64url43 signup invitation, stdout только `ok`. TTL default86400; expiry/revocation/one-time consumption enforced server-side. При write/sync failure partial output удаляется, выданный invite best-effort отзывается. Списки redacted, password hashes не выводятся.
@@ -138,7 +170,7 @@ docker exec -e MSGCTL_SOCK=$S dmsg53-msgd-1 /usr/local/bin/msgd msgctl backup
 ## Диск, логи, перезапуск
 
 - Следить за местом: `docker system df`, `du -sh` volumes. Snapshot cap3; за ростом msgd-data следить отдельно.
-- `docker logs dmsg53-msgd-1`: только bounded факты/статические ошибки, не credentials/ключи. Diagnostic/build tools запускать clean allowlist environment; не печатать полное окружение.
+- `docker logs 53-1`: только bounded факты/статические ошибки, не credentials/ключи. Diagnostic/build tools запускать clean allowlist environment; не печатать полное окружение.
 - Топология 2026-10-06: независимые network namespaces. `slipstream` (172.18.0.2) и
   `msgd` (статический `DMSG_MSGD_IPV4`, listen `${DMSG_MSGD_IPV4}:7000`) живут в
   одной выделенной bridge-сети; carrier подключается к фиксированному private

@@ -670,10 +670,10 @@ class DeviceGatesTest {
                     it.findViewById<android.widget.Button>(R.id.btn_signup).performClick()
                     assertEquals(android.view.View.VISIBLE, it.findViewById<android.view.View>(R.id.invitation_group).visibility)
                     it.findViewById<android.widget.EditText>(R.id.auth_password).setText("disposable draft")
-                    it.findViewById<android.widget.EditText>(R.id.auth_invitation).setText("disposable draft")
+                    (field(it, "invitation") as InvitationMemory).replace(InvitationInput.parse("A".repeat(43)))
                     it.findViewById<android.widget.Button>(R.id.btn_login).performClick()
                     assertTrue(it.findViewById<android.widget.EditText>(R.id.auth_password).text.isEmpty())
-                    assertTrue(it.findViewById<android.widget.EditText>(R.id.auth_invitation).text.isEmpty())
+                    assertFalse((field(it, "invitation") as InvitationMemory).hasInvitation)
                     assertEquals(android.view.View.GONE, it.findViewById<android.view.View>(R.id.invitation_group).visibility)
                 }
                 fun loginUi() {
@@ -689,7 +689,7 @@ class DeviceGatesTest {
                         val message = dialog(it)!!.findViewById<android.widget.TextView>(android.R.id.message)!!.text.toString()
                         assertTrue(message.contains("потеряет доступ")); assertTrue(message.contains("история"))
                         assertTrue(it.findViewById<android.widget.EditText>(R.id.auth_password).text.isEmpty())
-                        assertTrue(it.findViewById<android.widget.EditText>(R.id.auth_invitation).text.isEmpty())
+                        assertFalse((field(it, "invitation") as InvitationMemory).hasInvitation)
                     }
                 }
                 loginUi()

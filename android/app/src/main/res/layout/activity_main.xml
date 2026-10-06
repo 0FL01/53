@@ -29,9 +29,12 @@
             <EditText android:id="@+id/auth_password" android:layout_width="match_parent" android:layout_height="wrap_content" android:inputType="textPassword" android:singleLine="true" android:saveEnabled="false" android:importantForAutofill="no" />
             <Button android:id="@+id/btn_password_reveal" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Показать пароль"/>
             <LinearLayout android:id="@+id/invitation_group" android:orientation="vertical" android:layout_width="match_parent" android:layout_height="wrap_content" android:visibility="gone" android:saveEnabled="false">
-                <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:labelFor="@id/auth_invitation" android:text="Одноразовое приглашение (43 символа)" />
-                <EditText android:id="@+id/auth_invitation" android:layout_width="match_parent" android:layout_height="wrap_content" android:inputType="textPassword" android:singleLine="true" android:saveEnabled="false" android:importantForAutofill="no" />
+                <TextView android:id="@+id/invitation_status" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Приглашение не считано" android:accessibilityLiveRegion="polite" android:saveEnabled="false" />
+                <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Срок действия и доступ проверит сервер при создании аккаунта." />
+                <Button android:id="@+id/btn_invitation_cancel" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Очистить приглашение" />
             </LinearLayout>
+            <Button android:id="@+id/btn_invitation_scan" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Сканировать приглашение" />
+            <Button android:id="@+id/btn_invitation_file" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Выбрать приватный файл приглашения" />
             <Button android:id="@+id/btn_auth_submit" style="@style/Widget.Dmsg.Primary" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Войти" />
             <Button android:id="@+id/btn_policy_retry" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Проверить режим регистрации снова" />
         </LinearLayout>

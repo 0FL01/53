@@ -100,9 +100,14 @@ class MainDevRolloutTest {
                     assertEquals(View.GONE, it.findViewById<View>(R.id.invitation_group).visibility)
                     it.findViewById<Button>(R.id.btn_signup).performClick()
                     assertEquals(View.VISIBLE, it.findViewById<View>(R.id.invitation_group).visibility)
+                    it.importInvitationFile { java.io.ByteArrayInputStream(string(fixture, "invitation").toByteArray(Charsets.US_ASCII)) }
+                }
+                await(scenario, "invitation imported through bounded file parser") {
+                    field(it, "busy") == false && (field(it, "invitation") as InvitationMemory).hasInvitation
+                }
+                scenario.onActivity {
                     it.findViewById<EditText>(R.id.auth_login).setText(string(fixture, "login"))
                     it.findViewById<EditText>(R.id.auth_password).setText(string(fixture, "password"))
-                    it.findViewById<EditText>(R.id.auth_invitation).setText(string(fixture, "invitation"))
                     assertTrue("actual signup button enabled", it.findViewById<Button>(R.id.btn_auth_submit).isEnabled)
                     it.findViewById<Button>(R.id.btn_auth_submit).performClick()
                     assertSecretsCleared(it)
@@ -446,7 +451,7 @@ class MainDevRolloutTest {
 
     private fun assertSecretsCleared(activity: MainActivity) {
         assertTrue("password field cleared", activity.findViewById<EditText>(R.id.auth_password).text.isEmpty())
-        assertTrue("invitation field cleared", activity.findViewById<EditText>(R.id.auth_invitation).text.isEmpty())
+        assertFalse("invitation memory cleared", (field(activity, "invitation") as InvitationMemory).hasInvitation)
         assertTrue("connection code field cleared", activity.findViewById<EditText>(R.id.connection_code).text.isEmpty())
     }
 

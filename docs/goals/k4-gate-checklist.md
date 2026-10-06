@@ -3,11 +3,11 @@
 R4 пока не закрыта. Ниже сохранены исходные ожидания и отдельно записаны
 измерения; сборка и instrumented doubles не подменяют аппаратные gates.
 
-## Актуальный вход в приложение (реализован, 2026-09-30)
+## Актуальный вход в приложение (обновлён, 2026-10-06)
 
 Текущий scope 2026-10-06: independent crash/recovery топологии сервера закрыта (carrier/msgd crash + msgd-only recreate на паре, см. секцию ниже). Последовательный DNS fallback Яндекса проверен на обоих телефонах. Цель fallback/Network+DNS/wake **complete** — `2026-10-06-dns-fallback-handoff.md`: JVM/state/worker и physical USB Wi-Fi↔LTE в foreground/economy прошли; новые successful poll2713ms/4932ms вместо ожидания300s. Перед финальным gate пользователь разрешил включить данные выбранной SIM; APN/roaming/VPN не менялись. Same queued mid/ciphertext/account сохранены; native peer actual DNS receive1 then0/skips0/exact plaintext once→phone persistent Delivered, main identity/history/Keystore/install metadata сохранены; disposable fixtures очищены. Same-DNS/new-Network проверен JVM (в физическом gate DNS различались). R9 (длительный screen-off, Doze/Standby и фоновые измерения) **deferred по указанию пользователя**, не PASS; restricted egress непроверен.
 
-Один публичный код/QR подключения → проверенный сервер → «Войти» / «Создать аккаунт» с логином/паролем → диалоги. Код не содержит bearer или пароль. Приглашение отдельно требуется только для signup в `invite_only` (default), второй режим `open`; существующие пользователи входят в обоих. Ручные crypto-поля не входят в обычный onboarding. Direct invite-enrol больше не является целевым UX.
+Deployment APK уже содержит доверенный публичный server profile; generic APK сохраняет server code/QR и явный trust preview. «Сканировать приглашение» / «Импортировать файл» → signup с логином/паролем → явное создание → диалоги. Приглашение остаётся «считанным», не проверенным до ответа сервера; это отдельный секрет, не browser URI или серверный profile. TTL/отзыв/одноразовость и key-only resume сохранены. `53-1` / `53` / `53ctl qr-invite` deployed с теми же volumes/pins/schema5, carrier не пересоздавался. JVM51/Rust170 и 4 USB onboarding метода PASS: parser, synthetic decoder-result lifecycle, file signup через actual DNS, новый процесс key resume. Optical camera scan user-owned; DocumentsUI picker не заявлен проверенным (проверен точный importer после SAF). Main identity/history сохранены. Goal/evidence — `2026-10-06-invite-onboarding.md`, `android/AUTH_GATES.md`.
 
 Account-auth wire2/server schema5/core schema6 и Light/Square Android UI реализованы, без legacy paths. Проверки прежнего ENROL ниже исторические. Полный контракт — `2026-09-29-client-track.md` R12–R21; runtime fixtures/methods — `android/AUTH_GATES.md`.
 

@@ -12,6 +12,7 @@
 mod auth;
 mod blob;
 mod db;
+mod invite_qr;
 mod mbox;
 mod noise;
 mod prekey;
@@ -1545,7 +1546,7 @@ fn secret_file_arg(sub: &str, rest: &[String]) -> Option<String> {
     if rest.len() == 3 && rest[1] == "--file" {
         return Some(rest[2].clone());
     }
-    eprintln!("usage: msgd msgctl {sub} --file <path-600>");
+    eprintln!("usage: 53ctl {sub} --file <path-600>");
     None
 }
 
@@ -1572,7 +1573,7 @@ fn read_secret_file(path: &str) -> Result<String, String> {
 /// `invite-issue --out-file <path> [ttl]`: mandatory file, canonical positive TTL.
 fn issue_args(rest: &[String]) -> Option<(Option<String>, Option<String>)> {
     let usage = || {
-        eprintln!("usage: msgd msgctl invite-issue --out-file <file> [ttl_secs]");
+        eprintln!("usage: 53ctl invite-issue --out-file <file> [ttl_secs]");
         None
     };
     let mut out_file = None;
@@ -1605,13 +1606,9 @@ fn issue_args(rest: &[String]) -> Option<(Option<String>, Option<String>)> {
     Some((out_file, ttl))
 }
 
-async fn issue_dispatch(sock: &str, rest: &[String]) -> ExitCode {
+async fn issue_to_file(sock: &str, dest: &str, ttl: Option<String>) -> Result<(), &'static str> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
-    let (dest, ttl) = match issue_args(rest) {
-        Some((Some(dest), ttl)) => (dest, ttl),
-        _ => return ExitCode::from(2),
-    };
     // Reserve the 0600 output before the destructive server operation. Existing
     // paths (including symlinks) or missing parents fail without a request.
     let mut file = match std::fs::OpenOptions::new()
@@ -1621,10 +1618,7 @@ async fn issue_dispatch(sock: &str, rest: &[String]) -> ExitCode {
         .open(&dest)
     {
         Ok(f) => f,
-        Err(_) => {
-            eprintln!("invite-issue: output-unavailable");
-            return ExitCode::from(1);
-        }
+        Err(_) => return Err("output-unavailable"),
     };
     let cmd = match ttl {
         Some(t) => format!("invite-issue {t}"),
@@ -1638,8 +1632,7 @@ async fn issue_dispatch(sock: &str, rest: &[String]) -> ExitCode {
                     .and_then(|()| file.sync_all())
                     .is_ok()
                 {
-                    println!("ok");
-                    return ExitCode::SUCCESS;
+                    return Ok(());
                 }
                 // Best-effort retire the unusable invitation after commit.
                 let token_hex: String = invite.iter().map(|b| format!("{b:02x}")).collect();
@@ -1652,8 +1645,73 @@ async fn issue_dispatch(sock: &str, rest: &[String]) -> ExitCode {
     };
     drop(file);
     let _ = std::fs::remove_file(&dest);
-    eprintln!("invite-issue: {result}");
-    ExitCode::from(1)
+    Err(result)
+}
+
+async fn issue_dispatch(sock: &str, rest: &[String]) -> ExitCode {
+    let (dest, ttl) = match issue_args(rest) {
+        Some((Some(dest), ttl)) => (dest, ttl),
+        _ => return ExitCode::from(2),
+    };
+    match issue_to_file(sock, &dest, ttl).await {
+        Ok(()) => {
+            println!("ok");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("invite-issue: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+async fn qr_dispatch(sock: &str, rest: &[String]) -> ExitCode {
+    use std::io::{IsTerminal, Write};
+    let Some(args) = invite_qr::args(&rest[1..]) else {
+        eprintln!("usage: 53ctl qr-invite [--ttl <seconds> | --file <private-file>]");
+        return ExitCode::from(2);
+    };
+    // Before connecting, creating any file or issuing any invitation.
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        eprintln!("qr-invite: interactive-terminal-required (use docker exec -it)");
+        return ExitCode::from(2);
+    }
+    let result: Result<(), String> = async {
+        let path = match args {
+            invite_qr::Args::Show(path) => path,
+            invite_qr::Args::Issue(ttl) => {
+                let data = env::var("MSGD_DATA_DIR").unwrap_or("/var/lib/msgd".into());
+                let path = invite_qr::destination(std::path::Path::new(&data))
+                    .map_err(str::to_string)?
+                    .to_string_lossy()
+                    .into_owned();
+                issue_to_file(sock, &path, ttl)
+                    .await
+                    .map_err(str::to_string)?;
+                path
+            }
+        };
+        let token = read_secret_file(&path)?;
+        let qr = invite_qr::render(&token).map_err(str::to_string)?;
+        // Do not echo a user-provided path into terminal control sequences.
+        let safe_path = path.chars().filter(|c| !c.is_control()).collect::<String>();
+        let mut out = std::io::stdout().lock();
+        writeln!(
+            out,
+            "Private signup invitation — do not share publicly.\n{qr}File: {safe_path}"
+        )
+        .and_then(|()| out.flush())
+        .map_err(|_| "terminal-output-failed".to_string())?;
+        Ok(())
+    }
+    .await;
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("qr-invite: {error}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 /// msgctl-клиент: разбор секретных команд локально (файлы), остальное —
@@ -1661,6 +1719,7 @@ async fn issue_dispatch(sock: &str, rest: &[String]) -> ExitCode {
 /// без hex — как были).
 async fn msgctl_dispatch(sock: &str, rest: &[String]) -> ExitCode {
     match rest.first().map(|s| s.as_str()).unwrap_or("") {
+        "qr-invite" => qr_dispatch(sock, rest).await,
         "invite-issue" => issue_dispatch(sock, rest).await,
         "invite-revoke" | "device-block" | "device-unblock" => {
             let sub = &rest[0];
@@ -1681,7 +1740,7 @@ async fn msgctl_dispatch(sock: &str, rest: &[String]) -> ExitCode {
                 hex32(&input)
             };
             let Some(key) = key else {
-                eprintln!("usage: msgd msgctl {sub} --file <path-600>");
+                eprintln!("usage: 53ctl {sub} --file <path-600>");
                 return ExitCode::from(2);
             };
             let hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
@@ -1714,6 +1773,17 @@ async fn msgctl_dispatch(sock: &str, rest: &[String]) -> ExitCode {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // The image contains 53 and a 53ctl symlink to the same executable. Keep the
+    // internal Cargo binary name for existing integration harnesses, not UI.
+    if env::args_os()
+        .next()
+        .as_deref()
+        .and_then(|p| std::path::Path::new(p).file_name())
+        == Some(std::ffi::OsStr::new("53ctl"))
+    {
+        let sock = env::var("MSGCTL_SOCK").unwrap_or("/var/lib/msgd/msgctl.sock".into());
+        return msgctl_dispatch(&sock, &env::args().skip(1).collect::<Vec<_>>()).await;
+    }
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
         Some("msgctl") => {
@@ -1739,7 +1809,7 @@ async fn main() -> ExitCode {
                     }
                 },
                 None => {
-                    eprintln!("usage: msgd keygen --out <file>");
+                    eprintln!("usage: 53 keygen --out <file>");
                     ExitCode::from(2)
                 }
             };
@@ -1763,7 +1833,7 @@ async fn main() -> ExitCode {
                     }
                 },
                 None => {
-                    eprintln!("usage: msgd pubkey --key <file>");
+                    eprintln!("usage: 53 pubkey --key <file>");
                     ExitCode::from(2)
                 }
             };

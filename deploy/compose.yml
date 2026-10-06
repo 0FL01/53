@@ -45,10 +45,11 @@ services:
     # Живость пути проверяет S3-диагностика через msgd.
 
   msgd:
+    container_name: 53-1
     build:
       context: ..
       dockerfile: deploy/Dockerfile.msgd
-    image: dmsg53-msgd:s1
+    image: 53:s1
     networks:
       default:
         ipv4_address: "${DMSG_MSGD_IPV4:?DMSG_MSGD_IPV4 is required}"
@@ -74,7 +75,7 @@ services:
       - blobs-data:/var/lib/msgd/blobs
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "/usr/local/bin/msgd", "msgctl", "ping"]
+      test: ["CMD", "/usr/local/bin/53ctl", "ping"]
       interval: 15s
       timeout: 3s
       retries: 3

@@ -19,10 +19,8 @@ internal object AuthForm {
         if (password.toByteArray(Charsets.UTF_8).size !in 8..128)
             throw DmsgError("Пароль: от 8 до 128 байт UTF-8, пробелы учитываются", ErrorKind.InvalidInput)
         if (action == AuthAction.Signup && policy == null) throw DmsgError("Сначала проверьте режим регистрации сервера")
-        if (needsInvitation(action, policy) &&
-            (invitation == null || invitation.length != 43 || invitation.any {
-                it !in 'a'..'z' && it !in 'A'..'Z' && it !in '0'..'9' && it != '-' && it != '_'
-            })) throw DmsgError("Нужно приглашение: 43 символа base64url", ErrorKind.InviteRequired)
+        if (needsInvitation(action, policy) && (invitation == null || !InvitationInput.isCanonical(invitation)))
+            throw DmsgError("Сканируйте приглашение или выберите его приватный файл", ErrorKind.InviteRequired)
     }
 }
 

@@ -17,6 +17,64 @@ listed environment. Do not print inherited environment or provider credentials.
 
 ## Operator fixtures
 
+### Invitation onboarding and trusted APK profile (2026-10-06)
+
+Package one trusted **public** server profile (full carrier DER pin + Noise key +
+domain) using an absolute file path, not its contents in argv/environment:
+
+```sh
+# With the clean SDK/JDK environment above:
+./gradlew --no-daemon testDebugUnitTest assembleDebug assembleRelease \
+  assembleDebugAndroidTest -PgateInstall=true \
+  -PserverProfileFile=/absolute/path/to/trusted-public-server-code.txt
+
+# Main, identity-preserving build/install, no reset-data:
+python3 android/dev-install.py --serial "$MAIN_SERIAL" \
+  --server-profile /absolute/path/to/trusted-public-server-code.txt
+
+# Container build with the same public input:
+sh deploy/build-apk.sh /absolute/path/to/trusted-public-server-code.txt
+```
+
+Runtime validates the asset with the existing native parser. Existing accounts/
+profiles are never overwritten. Without this input the generated stale asset is
+removed and manual server-preview/accept remains available. No deployed profile/
+domain is committed. Invitations never establish trust in a server.
+
+Camera/private-file imports accept only the canonical raw 43-character token;
+files may end in LF/CRLF. No secret URI/deep link. Import selects Signup and shows
+«Приглашение считано», not server validation. Login/password and explicit creation
+remain required; TTL/revocation/one-use are server-side. SAF uses temporary read
+access only. Buffers clear on cancellation/background/recreation/submit; scanner
+handoff is process-local and one-shot, not secret Intent/state/preferences data.
+
+Run one exact method against `.gate` only, FGS off:
+
+```sh
+adb -s "$GATE_SERIAL" shell am instrument -w -r -e class \
+  'org.dmsg.client.InvitationOnboardingGatesTest#METHOD' \
+  org.dmsg.client.gate.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+| Method | Input / order | Evidence |
+|---|---|---|
+| `canonicalParserOnlyInGatePackage` | Synthetic data | Canonical token and bounded file parser |
+| `scannerResultLifecycleOnlyInGatePackage` | Fresh gate with trusted profile | Real ScannerActivity launch/result using **injected synthetic decoder text**, Signup/memory/cancel; not optics |
+| `privateFileImportSignupThroughRecursiveDns` | Fresh gate; owner0600 `files/gate-invite-auth.json`, exactly `login/password`, and `files/gate-invitation.txt` | Exact importer downstream of SAF, malformed/cancel/background/recreate clearing, explicit DNS signup/dialogs; consumes secrets and emits private account proof |
+| `reopenImportedAccountWithSavedDeviceKey` | New process, previous proof; auth/token fixtures absent | Same profile/account, actual recursive-DNS key resume/fetch; consumes proof |
+
+**Verified 2026-10-06:** all four selected USB methods PASS, no skips, physical
+API35/ARM64. Signup used the production `53-1` PTY invitation, reopen no password.
+Independent decoder verifies actual terminal glyphs; Docker re-render matches QR,
+non-TTY exits2 before issuance. **Camera optics and system DocumentsUI picker are
+not claimed tested:** optical scanning is user-owned. JVM51/Rust170, host debug/
+release/test and container APK builds PASS. Main install retained encrypted
+device/account/history/contacts and wrapped-key digests, UID and first-install
+identity; installed APK/native/public asset verified, main actual DNS key resume
+PASS. Own secret fixtures/QR captures and disposable gate apps removed. Ignored
+aggregate proofs: `.local/invite-onboarding/`; goal:
+`docs/goals/2026-10-06-invite-onboarding.md`.
+
 ### Explicit main development rollout (R22)
 
 Main data loss is allowed only with explicit user consent. `adb install -r`

@@ -4,6 +4,10 @@ import android.Manifest
 import androidx.appcompat.app.AlertDialog
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.view.View
+import android.view.WindowManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
@@ -27,7 +31,14 @@ import uniffi.dmsg_core.QrOutcome
  */
 @ExperimentalGetImage
 class ScannerActivity : DmsgActivity() {
-    companion object { const val SERVER_ONLY = "serverOnly" }
+    companion object {
+        const val SERVER_ONLY = "serverOnly"
+        const val INVITATION_ONLY = "invitationOnly"
+        const val INVITATION_TICKET = "invitationTicket"
+    }
+    private val invitationOnly get() = intent.getBooleanExtra(INVITATION_ONLY, false)
+    private val invitationTicket get() = intent.getLongExtra(INVITATION_TICKET, -1)
+    private var returningInvitation = false
     private lateinit var preview: PreviewView
     private lateinit var result: TextView
     private val exec = Executors.newSingleThreadExecutor()
@@ -39,7 +50,13 @@ class ScannerActivity : DmsgActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_scanner)
-        NativeUi.back(this, if (intent.getBooleanExtra(SERVER_ONLY, false)) "QR сервера" else "QR контакта")
+        NativeUi.back(this, if (invitationOnly) "Приглашение" else if (intent.getBooleanExtra(SERVER_ONLY, false)) "QR сервера" else "QR контакта")
+        if (invitationOnly) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            findViewById<View>(R.id.scanner_code).visibility = View.GONE
+            findViewById<View>(R.id.scanner_code_label).visibility = View.GONE
+            findViewById<View>(R.id.btn_scanner_paste).visibility = View.GONE
+        }
         preview = findViewById(R.id.preview)
         result = findViewById(R.id.result)
         findViewById<Button>(R.id.btn_close).setOnClickListener { finish() }
@@ -63,7 +80,7 @@ class ScannerActivity : DmsgActivity() {
         super.onRequestPermissionsResult(code, perms, res)
         if (code != 2) return
         if (res.firstOrNull() == PackageManager.PERMISSION_GRANTED) bind()
-        else result.text = "Камера запрещена. Вставьте код в поле ниже"
+        else result.text = if (invitationOnly) "Камера запрещена. Вернитесь и выберите приватный файл" else "Камера запрещена. Вставьте код в поле ниже"
     }
 
     private fun bind() {
@@ -89,7 +106,7 @@ class ScannerActivity : DmsgActivity() {
                 },
                 analysis
             )
-            } catch (_: Exception) { result.text = "Камера недоступна. Вставьте код в поле ниже" }
+            } catch (_: Exception) { result.text = if (invitationOnly) "Камера недоступна. Вернитесь и выберите приватный файл" else "Камера недоступна. Вставьте код в поле ниже" }
         }, ContextCompat.getMainExecutor(this))
     }
 
@@ -117,6 +134,25 @@ class ScannerActivity : DmsgActivity() {
     private fun onText(uri: String) {
         done = true
         runOnUiThread {
+        if (!active || isFinishing || isDestroyed) return@runOnUiThread
+        if (invitationOnly) {
+            try {
+                val value = InvitationInput.parse(uri)
+                if (!InvitationScanTransfer.publish(invitationTicket, value)) {
+                    result.text = "Сканирование отменено. Вернитесь и начните снова"
+                    return@runOnUiThread
+                }
+                returningInvitation = true
+                // Expire an undelivered result; the Intent contains no payload.
+                val ticket = invitationTicket
+                Handler(Looper.getMainLooper()).postDelayed({ InvitationScanTransfer.cancel(ticket) }, 5_000)
+                setResult(RESULT_OK)
+                finish()
+            } catch (_: Exception) {
+                result.text = "Неверный формат приглашения. Сканируйте снова"
+            }
+            return@runOnUiThread
+        }
         val stamp = guard.begin() ?: return@runOnUiThread
         if (!active || prompt?.isShowing == true) { guard.finish(stamp); return@runOnUiThread }
         result.text = "QR считан, проверка…"
@@ -186,6 +222,7 @@ class ScannerActivity : DmsgActivity() {
 
     override fun onDestroy() {
         active = false
+        if (invitationOnly && !returningInvitation) InvitationScanTransfer.cancel(invitationTicket)
         prompt?.dismiss()
         exec.shutdownNow()
         super.onDestroy()
