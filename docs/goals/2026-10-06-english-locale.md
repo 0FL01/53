@@ -1,6 +1,6 @@
 # Goal: полный EN/RU Android UI, автоматический язык и English fallback
 
-Status: active
+Status: complete
 Source: пользователь выбрал «Автоматически» и «English» fallback, утвердил предложенный план: «реализовать и коммит, установка проверка».
 Last updated: 2026-10-06
 
@@ -33,8 +33,8 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Source: пользователь «коммит, установка проверка» и план criteria.
   - Acceptance: locale-aware existing gates/dev installer without weakening startup; compatible main install-r без reset, exact artifact, preserved encrypted identity/history/wrapped key/install identity.
   - Primary evidence: clean JDK/SDK gates + selected USB device tests + before/after main proof + diff/commit.
-  - Status: in_progress
-  - Evidence: JVM52/debug/release/test/main export PASS; scoped translation lint PASS. Seven selected USB API35 gates PASS/no skips. Main installed-r/no-reset; exact APK/native/public asset, automatic English Dialogs and actual DNS key resume/localized diagnostics verified. Before/after encrypted identity/account/history/contacts/wrapped key/UID/first-install/system+main locale proofs unchanged. Initial installer readiness timeout after successful install resolved by subsequent actual UI/DNS proof without reinstall/reset; no guessed cause or full-installer PASS claimed. Own invite revoked/removed, gate apps/locale overrides/secret and raw diagnostic fixtures removed. Intended commit pending.
+  - Status: verified
+  - Evidence: JVM52/debug/release/test/main export PASS; scoped translation lint PASS. Seven selected USB API35 gates PASS/no skips. Main installed-r/no-reset; exact APK/native/public asset, automatic English Dialogs and actual DNS key resume/localized diagnostics verified. Before/after encrypted identity/account/history/contacts/wrapped key/UID/first-install/system+main locale proofs unchanged. Initial installer readiness timeout after successful install resolved by subsequent actual UI/DNS proof without reinstall/reset; no guessed cause or full-installer PASS claimed. Own invite revoked/removed, gate apps/locale overrides/secret and raw diagnostic fixtures removed. Implementation/test/docs commit f122601; reviewed diff stays inside frozen envelope, no secrets/build outputs/design PNG committed.
 
 ## Constraints / Non-goals
 - Никаких auth/wire/schema/pin/backend-code/topology/policy/native/C transport changes; только собственные disposable signup/invitation fixtures через существующий server control API для FGS/key-resume gate. Не переводить пользовательский текст/aliases/logins/IDs/QR payload/domains/fingerprints/logs/CLI. No credentials in env/argv/Git/logs.
@@ -49,15 +49,13 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 - build.gradle.kts resourceConfigurations EN/RU: minimal R1 envelope expansion after physical fr,ru failure due to merged dependency French resources; no custom resolver/locale override.
 
 ## Current Checkpoint
-- Closes: R4 compatible main installation/commit.
-- Next: commit reviewed intended code/tests/docs, then mark closure complete with commit evidence; no further implementation or verification expansion.
-- Expected evidence: commit includes only approved Android localization paths/docs; design PNG/local credentials/build artifacts excluded.
+- Closed: R1–R4. No next implementation checkpoint; objective terminal.
 
 ## Current State
 - Baseline: master519b059, tracked clean; only user untracked design PNG untouched. USB device online; current main identity preserved from prior objective.
 - Blocker: none.
 - Resolved: R1–R3. Debug/release/test APK builds, scoped lint, JVM52 PASS; seven exact selected physical tests PASS/no skips (five LocaleGates + existing file signup/reopen over actual recursive DNS).
-- Next: R4 intended commit. Main rollout and preservation proof complete; own fixtures cleaned, main foreground relaunched. No backend code/config/service restart.
+- Resolved: R4 commit f122601. Main rollout and preservation proof complete; own fixtures cleaned, main foreground relaunched. No backend code/config/service restart.
 
 ## Material Decisions
 - English in default values, RU values-ru; selection uses Android preferred language list, no custom language logic.
@@ -67,4 +65,7 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 - Physical preferredLocalesAndSafeErrorsOnlyInGatePackage: EN/RU/FR/en,ru/ru,en passed, fr,ru returned English instead of RU because AppCompat contributes French assets. Restrict packaged locale resources to EN/RU in existing Android DSL (R1 blocker, no extra locale logic).
 
 ## Completion
-- Not complete.
+- All R1–R4 verified with current compiled/device/rollout evidence and commit f122601.
+- Reproducible commands/methods: `android/AUTH_GATES.md` Automatic English/Russian UI; aggregate private proofs `.local/english-locale/gates-proof.json`, main-before/after, main-dns-proof.
+- Scope/constraints: Android localization only; same native/FFI/wire/schema/pins/auth/transport and main identity preserved. Full pre-existing lint failure disclosed, no baseline/suppressions. User design PNG untouched, no ignored artifacts/credentials committed.
+- Final status: complete; stop.
