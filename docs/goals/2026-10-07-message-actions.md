@@ -17,8 +17,8 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Source: user's fresh DB/refactoring instruction and approved plan step1.
   - Acceptance: no history/inbox/outbox tables or conversion paths; unsupported stores fail without mutation/reset; marker/guards protect sensitive values from first write; current-key/current-schema snapshot remains.
   - Primary evidence: storage unit tests and fresh encrypted integration fixtures.
-  - Status: in_progress
-  - Evidence: direct schema8 and fresh/encryption/unsupported-store proofs PASS. All conversion/old-table Rust and Android fixtures ported, not disabled; encrypted live cores reopen successfully. Android original-key snapshot gate remains to run on Moto.
+  - Status: verified
+  - Evidence: direct schema8/fresh/encryption/unsupported-store proofs PASS; conversion/old-table fixtures ported, not disabled. Moto `freshEncryptedReopenAndRestoreOnlyWithOriginalKey` PASS/zero skips: same-version reopen/snapshot/restore, live-path refusal and missing original key fail closed.
 - R2: authenticated TEXT/EDIT/DELETE and transactional mutations using existing delivery.
   - Source: initial feature request; approved plan steps2–3.
   - Acceptance: own Accepted/Delivered targets only for remote operations; revision CAS, terminal delete, durable dedup/pending controls, unchanged original MID/local ID/seq/time/ciphertext, byte-identical retry; self-hide sends nothing. Own event MID is inside E2E; recipient binding frozen; controls need no chronology. No superseded/deleted plaintext through projections/reports.
@@ -29,20 +29,20 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Source: approved plan step4 and approved schematic UI.
   - Acceptance: Edit/Save/Cancel with separate drafts; SelfOnly/Everyone modal defaults SelfOnly; no deleted placeholder; original and edit delivery distinct; static EN/RU errors; Copy/accessibility preserved; stable visible anchors, hidden-page continuation, filtered viewed/read anchors and existing ingestion watermark/reconciliation.
   - Primary evidence: JVM state/paging tests and exact isolated Moto UI gate.
-  - Status: in_progress
-  - Evidence: generated bindings, application/JVM compilation, JVM74 PASS/zero skips and ported isolated Android test APK build PASS. Copy/accessibility/IME and actual UI/native evidence still pending.
+  - Status: verified
+  - Evidence: generated bindings/JVM74 PASS/zero skips, native exact601-row retained-refresh gate PASS. Moto actual touchscreen Copy/whole-message Edit, accessibility actions, Cancel/Save draft preservation/recreation, 200% font with landscape IME, self-default/cancel/no-placeholder and footer-menu offline everyone-delete PASS/zero skips. Reproduced no-op ticker destroying selection; rebind only changed rows/contact, then native selection-across-ticker and JVM74 PASS. Real peer confirms edited projection, self-only copy unchanged and terminal delete after new-process retry; controls received as zero new texts, no skips.
 - R4: final APK and fresh authorized Moto rollout with real recursive DNS evidence.
   - Source: approved plan steps5–6, superseded pair-device scope by latest Moto-only instruction.
   - Acceptance: Rust/build/codegen/NDK/JVM/debug/release gates green; Moto UI→native→DNS→isolated peer text/edit/self-delete/everyone-delete/offline/reopen verified. Final main installed/reset only on `ZY22JFJ5LP`. No access to Pacman or its accounts/messages/identity. Startup alone is not acceptance.
   - Primary evidence: aggregate one-Moto+fresh isolated peer gates and final installed APK/native readback.
-  - Status: pending
-  - Evidence:
+  - Status: in_progress
+  - Evidence: Moto isolated fresh signup and three texts through actual active-network recursive DNS; real fresh host peer receives/decrypts3. Edit/self-hide/everyone-delete/offline/new-process retry and exact peer projections PASS. Main final fresh install/onboarding/readback remains.
 - R5: scoped commits and closed current documentation/evidence.
   - Source: latest user instruction: «делай копию плана в цель и итеративно реализовать и коммит».
   - Acceptance: intended implementation/doc commits, current contracts/checklist updated, goal complete only after R1–R4; pre-existing user PNG unchanged; no push.
   - Primary evidence: Git diffs/status/log plus closure against this contract.
   - Status: in_progress
-  - Evidence: baseline `eecf7bf`, clean tracked tree, existing untracked user PNG.
+  - Evidence: `9d00f00` frozen goal, `0ecef99` strict codec, `d6b0904` unified fresh core/Android actions and fixture ports. Native action gate and selection fix checkpoint follow; user PNG unchanged, no push.
 
 ### Constraints
 - C1: only Moto `ZY22JFJ5LP`; all adb/install/instrument/reset calls explicitly scoped with `-s`. Never target/discover/connect/operate Pacman. Use a fresh isolated host peer (or isolated package on Moto when sufficient), not a second physical phone.
@@ -89,25 +89,27 @@ Complete isolated gates before main installer removes fixtures; stop old partici
 - Commits explicitly requested; no push. Original user `53-opendesign/Image Sep 30, 2026, 09_24_12 AM.png` untouched.
 
 ## Current Checkpoint
-- Closes: R1/R3–R4
-- Smallest next action: build/install isolated APK only on Moto; prove current-key snapshot and exact history refresh, then UI/native/DNS message actions with fresh isolated peer.
-- Expected evidence: named no-skip Moto gates, then final main artifact/install/readback; no Pacman or old account/contact traffic.
+- Closes: R4–R5
+- Smallest next action: commit verified native action/selection checkpoint, build final main debug/release/artifact, then explicitly fresh-install/onboard only Moto with fresh isolated peer.
+- Expected evidence: final main artifact/readback and actual native/DNS/actions evidence; current contracts/checklist and closure. No Pacman or old account/contact traffic.
 - Stop or replan if: actual unresolved outcome cannot be satisfied in envelope; record concrete cause, not speculative hardening.
 
 ## Current State
-- Resolved: goal/approved plan frozen; Moto-only replaces previous two-phone rollout; core actions verified and all old fixture assumptions ported.
+- Resolved: R1–R3; sole Moto plus own fresh peer proves native UI/DNS and pending control delivery. No main reset/install yet; backend/schema/policy/old accounts untouched.
 - Last relevant evidence: `cargo build -p msgd -p dmsg-core && cargo test --workspace` PASS (core55/protocol53; two pre-existing explicit native ignores), explicit host bindings generation PASS, NDKr28c arm64 PASS, JVM74/zero skips and gated Android test APK PASS. JDK17 is the existing ignored `.local/frontend-gates/jdk`; system Java25 is incompatible with this Gradle/Kotlin toolchain.
 - Blocker: none.
-- Next: isolated Moto runtime evidence and final fresh main rollout.
+- Next: final fresh main rollout and documentation closure.
 
 ## Material Decisions
 - 2026-10-07: latest explicit device restriction overrides physical pair evidence; substitute fresh isolated peer while keeping actual Moto recursive-DNS acceptance. Do not interact with existing Pacman contact/account.
 - 2026-10-07: fresh reset is explicit rollout, not error handling. Remote DB wipe unnecessary; current wire2/server5 remain.
+- 2026-10-07: native selection test uses explicit touchscreen event source per Android Editor contract; pointer-class-only synthetic events select text but cannot open its toolbar. One real no-op refresh defect fixed without disabling the ticker or changing chronology/paging.
 
 ## Checkpoint History
 - 2026-10-07: plan copied/frozen, R5 started; implementation not yet performed.
 - 2026-10-07: strict codec checkpoint complete (53 protocol tests); core and Android source work underway. Native bindings/UI/device gates still pending.
 - 2026-10-07: core/storage/actions and generated Android consumers implemented; mandatory Rust suite, JVM74 and test-APK compilation green. Physical snapshot/UI/DNS and final artifact remain unclaimed.
+- 2026-10-07: R1–R3 native Moto gates and fresh recursive-DNS peer projections PASS/zero skips, including offline deletion/new process and persistent system selection. Temporary font/network settings restored; main rollout is the remaining runtime checkpoint.
 
 ## Completion
 - Pending R1–R4 implementation/evidence and R5 closure; no new PASS claimed.

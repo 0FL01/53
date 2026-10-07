@@ -220,6 +220,7 @@ class ChatActivity : DmsgActivity() {
             runOnUiThread {
                 if (!active || !pageGuard.finish(stamp)) return@runOnUiThread
                 result.fold({ (contact, pages, refresh) ->
+                    val contactChanged = memory.contact != contact
                     memory.contact = contact
                     pageError = ""
                     pages.forEachIndexed { index, page ->
@@ -237,11 +238,15 @@ class ChatActivity : DmsgActivity() {
                             }
                         }
                     }
-                    adapter.notifyDataSetChanged()
+                    // A no-op ticker must not destroy the system text-selection action mode.
+                    val rebind = contactChanged || adapter.visibleRows != memory.history.visibleRows
+                    if (rebind) adapter.notifyDataSetChanged()
                     list.post {
                         if (!active) return@post
-                        if (bottom && (!older || continuing) && !bridge) list.setSelection(adapter.count - 1)
-                        else restoreAnchor(anchor)
+                        if (rebind) {
+                            if (bottom && (!older || continuing) && !bridge) list.setSelection(adapter.count - 1)
+                            else restoreAnchor(anchor)
+                        }
                         markViewed()
                         if (memory.history.gapBefore != null) loadPage()
                     }
