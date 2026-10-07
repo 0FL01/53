@@ -24,7 +24,7 @@ class ChronologyGatesTest {
     private fun corruptOnlyFixtureLocalClock(value: Long) {
         synchronized(Core.storeLock) {
             SQLiteDatabase.openDatabase(File(app.filesDir, "core.db").path, null, SQLiteDatabase.OPEN_READWRITE).use {
-                it.execSQL("UPDATE core_history SET local_timestamp_ms=?", arrayOf(value))
+                it.execSQL("UPDATE core_messages SET local_timestamp_ms=?", arrayOf(value))
             }
         }
     }
@@ -113,13 +113,14 @@ class ChronologyGatesTest {
         assertFalse(DmsgService.running(context))
         val file = File(context.filesDir, "core.db")
         assertFalse("fresh disposable fixture required", file.exists())
-        uniffi.dmsg_core.DmsgClient.open(file.absolutePath).use { it.accountInfo() }
+        val key = SecureStore.key(context)
+        uniffi.dmsg_core.DmsgClient.openEncrypted(file.absolutePath,key).use { it.accountInfo() }
         val first = "PEER1234ABCD"
         val other = "OTHER1234567"
         SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READWRITE).use { db ->
             db.beginTransaction()
             try {
-                db.execSQL("INSERT INTO core_identity(id,device_priv) VALUES(1,?)", arrayOf(ByteArray(32) { 7 }))
+                db.execSQL("INSERT INTO core_identity(id,device_priv) VALUES(1,?)", arrayOf(sealedFixtureValue(key,"device_priv",ByteArray(32) { 7 })))
                 db.execSQL("INSERT INTO core_account(id,user_id,contact_id) VALUES(1,?,?)", arrayOf(ByteArray(16) { 1 }, "7K3MP9TX4V2N"))
                 for (contact in listOf(first, other)) {
                     db.execSQL("INSERT INTO core_contacts(contact_id,state) VALUES(?,'requested')", arrayOf(contact))
@@ -127,15 +128,16 @@ class ChronologyGatesTest {
                 for (id in 1..601) {
                     val mid = ByteArray(16)
                     mid[0] = (id shr 8).toByte(); mid[1] = id.toByte()
-                    db.execSQL("INSERT INTO core_history(message_id,contact_id,direction,sender_device,text,local_timestamp_ms,server_seq,server_timestamp_ms,order_checked) VALUES(?,?,'incoming',?,?,?,?,?,1)",
-                        arrayOf(mid, first, ByteArray(32) { 2 }, "Chronology fixture $id", id.toLong(), 602L-id, 1000L))
+                    db.execSQL("INSERT INTO core_messages(message_id,contact_id,direction,kind,sender_device,text,local_timestamp_ms,server_seq,server_timestamp_ms) VALUES(?,?,'incoming','text',?,?,?,?,?)",
+                        arrayOf(mid, first, ByteArray(32) { 2 }, sealedFixtureValue(key,"message_text","Chronology fixture $id".toByteArray()), id.toLong(), 602L-id, 1000L))
                 }
-                db.execSQL("INSERT INTO core_history(message_id,contact_id,direction,text,local_timestamp_ms,delivery_state) VALUES(?,?,'outgoing',?,2,'queued')",
-                    arrayOf(ByteArray(16) { 99 }, other, "Chronology retained fixture"))
+                db.execSQL("INSERT INTO core_messages(message_id,contact_id,direction,kind,sender_device,text,local_timestamp_ms,delivery_state,ciphertext,recipient_binding) VALUES(?,?,'outgoing','text',?,?,2,'queued',?,?)",
+                    arrayOf(ByteArray(16) { 99 }, other, ByteArray(32) { 3 }, sealedFixtureValue(key,"message_text","Chronology retained fixture".toByteArray()),ByteArray(64),ByteArray(32)))
                 db.setTransactionSuccessful()
             } finally { db.endTransaction() }
         }
-        val f = Core.facade(context) // current-schema fixture is sealed by the real store
+        key.fill(0)
+        val f = Core.facade(context)
         assertTrue(f.account().authenticated)
         assertEquals(601L, f.historyMessage(first, 601L).localId)
         assertEquals(1L, f.historyMessage(first, 601L).serverSeq)
@@ -170,7 +172,7 @@ class ChronologyGatesTest {
             awaitRow(uniffi.dmsg_core.DeliveryState.QUEUED, null)
             synchronized(Core.storeLock) {
                 SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READWRITE).use {
-                    it.execSQL("UPDATE core_history SET delivery_state='delivered',server_seq=1000,server_timestamp_ms=1000000,order_checked=1 WHERE local_id=602")
+                    it.execSQL("UPDATE core_messages SET delivery_state='delivered',server_seq=1000,server_timestamp_ms=1000000 WHERE local_id=602")
                 }
             }
             awaitRow(uniffi.dmsg_core.DeliveryState.DELIVERED, 1000L)

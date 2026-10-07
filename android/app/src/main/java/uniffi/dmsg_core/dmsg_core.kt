@@ -811,8 +811,6 @@ internal interface IntegrityCheckingUniffiLib : Library {
 ): Short
 fun uniffi_dmsg_core_checksum_func_qr_kind(
 ): Short
-fun uniffi_dmsg_core_checksum_func_storage_plan(
-): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_account_info(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_add_contact_qr(
@@ -833,6 +831,8 @@ fun uniffi_dmsg_core_checksum_method_dmsgclient_contact_request(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_contacts_page(
 ): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_delete_message(
+): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_dialogs_page(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_dns_network_changed(
@@ -842,6 +842,8 @@ fun uniffi_dmsg_core_checksum_method_dmsgclient_dns_profile_info(
 fun uniffi_dmsg_core_checksum_method_dmsgclient_dns_status(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_dns_stop(
+): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_edit_message(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_fetch_dns(
 ): Short
@@ -880,8 +882,6 @@ fun uniffi_dmsg_core_checksum_method_dmsgclient_signup_dns(
 fun uniffi_dmsg_core_checksum_method_dmsgclient_stop_dns(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_timeline_page(
-): Short
-fun uniffi_dmsg_core_checksum_constructor_dmsgclient_open(
 ): Short
 fun uniffi_dmsg_core_checksum_constructor_dmsgclient_open_encrypted(
 ): Short
@@ -938,8 +938,6 @@ internal interface UniffiLib : Library {
 ): Pointer
 fun uniffi_dmsg_core_fn_free_dmsgclient(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
 ): Unit
-fun uniffi_dmsg_core_fn_constructor_dmsgclient_open(`dbPath`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
-): Pointer
 fun uniffi_dmsg_core_fn_constructor_dmsgclient_open_encrypted(`dbPath`: RustBuffer.ByValue,`key`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): Pointer
 fun uniffi_dmsg_core_fn_method_dmsgclient_account_info(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
@@ -962,6 +960,8 @@ fun uniffi_dmsg_core_fn_method_dmsgclient_contact_request(`ptr`: Pointer,`contac
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_contacts_page(`ptr`: Pointer,`cursor`: RustBuffer.ByValue,`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
+fun uniffi_dmsg_core_fn_method_dmsgclient_delete_message(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,`localId`: Long,`scope`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_dialogs_page(`ptr`: Pointer,`cursor`: RustBuffer.ByValue,`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_dns_network_changed(`ptr`: Pointer,`resolvers`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
@@ -972,6 +972,8 @@ fun uniffi_dmsg_core_fn_method_dmsgclient_dns_status(`ptr`: Pointer,uniffi_out_e
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_dns_stop(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
 ): Unit
+fun uniffi_dmsg_core_fn_method_dmsgclient_edit_message(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,`localId`: Long,`expectedRevision`: Long,`text`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_fetch_dns(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_history_message(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,`localId`: Long,uniffi_out_err: UniffiRustCallStatus,
@@ -1013,8 +1015,6 @@ fun uniffi_dmsg_core_fn_method_dmsgclient_timeline_page(`ptr`: Pointer,`contactI
 fun uniffi_dmsg_core_fn_func_page_limit(`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
 ): Int
 fun uniffi_dmsg_core_fn_func_qr_kind(`uri`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
-): RustBuffer.ByValue
-fun uniffi_dmsg_core_fn_func_storage_plan(`hasLegacyDb`: Byte,`hasWrappedDb`: Byte,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 fun ffi_dmsg_core_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
@@ -1148,9 +1148,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_dmsg_core_checksum_func_qr_kind() != 17251.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_dmsg_core_checksum_func_storage_plan() != 16009.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_account_info() != 20705.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1181,6 +1178,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_contacts_page() != 10699.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_delete_message() != 56541.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_dialogs_page() != 9533.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1194,6 +1194,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_dns_stop() != 59695.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_edit_message() != 2303.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_fetch_dns() != 21412.toShort()) {
@@ -1251,9 +1254,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_timeline_page() != 11414.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_dmsg_core_checksum_constructor_dmsgclient_open() != 28712.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dmsg_core_checksum_constructor_dmsgclient_open_encrypted() != 11807.toShort()) {
@@ -1724,6 +1724,8 @@ public interface DmsgClientInterface {
      */
     fun `contactsPage`(`cursor`: kotlin.String?, `limit`: kotlin.UInt): ContactsPage
 
+    fun `deleteMessage`(`contactId`: kotlin.String, `localId`: kotlin.Long, `scope`: DeleteScope): HistoryMessage
+
     /**
      * Activity DESC/contact ID ASC, opaque next cursor, limits clamp 1..=100.
      * Local unread and local times carry no remote receipt/timing semantics.
@@ -1740,6 +1742,8 @@ public interface DmsgClientInterface {
     fun `dnsStatus`(): kotlin.String
 
     fun `dnsStop`()
+
+    fun `editMessage`(`contactId`: kotlin.String, `localId`: kotlin.Long, `expectedRevision`: kotlin.ULong, `text`: kotlin.String): HistoryMessage
 
     fun `fetchDns`(): FetchReport
 
@@ -2060,6 +2064,19 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
 
 
 
+    @Throws(FfiException::class)override fun `deleteMessage`(`contactId`: kotlin.String, `localId`: kotlin.Long, `scope`: DeleteScope): HistoryMessage {
+            return FfiConverterTypeHistoryMessage.lift(
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_delete_message(
+        it, FfiConverterString.lower(`contactId`),FfiConverterLong.lower(`localId`),FfiConverterTypeDeleteScope.lower(`scope`),_status)
+}
+    }
+    )
+    }
+
+
+
     /**
      * Activity DESC/contact ID ASC, opaque next cursor, limits clamp 1..=100.
      * Local unread and local times carry no remote receipt/timing semantics.
@@ -2127,6 +2144,19 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
 }
     }
 
+
+
+
+    @Throws(FfiException::class)override fun `editMessage`(`contactId`: kotlin.String, `localId`: kotlin.Long, `expectedRevision`: kotlin.ULong, `text`: kotlin.String): HistoryMessage {
+            return FfiConverterTypeHistoryMessage.lift(
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_edit_message(
+        it, FfiConverterString.lower(`contactId`),FfiConverterLong.lower(`localId`),FfiConverterULong.lower(`expectedRevision`),FfiConverterString.lower(`text`),_status)
+}
+    }
+    )
+    }
 
 
 
@@ -2414,19 +2444,6 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
 
 
     companion object {
-
-    /**
-     * Открыть фасад над app-private файлом DB (файл создаётся лениво store).
-     */ fun `open`(`dbPath`: kotlin.String): DmsgClient {
-            return FfiConverterTypeDmsgClient.lift(
-    uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_constructor_dmsgclient_open(
-        FfiConverterString.lower(`dbPath`),_status)
-}
-    )
-    }
-
-
 
     /**
      * Android passes a random 32-byte key unwrapped by Keystore. Existing
@@ -2840,7 +2857,11 @@ data class HistoryMessage (
     var `localTimestampMs`: kotlin.Long,
     var `deliveryState`: DeliveryState?,
     var `serverSeq`: kotlin.Long?,
-    var `serverTimestampMs`: kotlin.Long?
+    var `serverTimestampMs`: kotlin.Long?,
+    var `revision`: kotlin.ULong,
+    var `hiddenSelf`: kotlin.Boolean,
+    var `deletedAll`: kotlin.Boolean,
+    var `changeDeliveryState`: DeliveryState?
 ) {
 
     companion object
@@ -2861,6 +2882,10 @@ public object FfiConverterTypeHistoryMessage: FfiConverterRustBuffer<HistoryMess
             FfiConverterOptionalTypeDeliveryState.read(buf),
             FfiConverterOptionalLong.read(buf),
             FfiConverterOptionalLong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalTypeDeliveryState.read(buf),
         )
     }
 
@@ -2873,7 +2898,11 @@ public object FfiConverterTypeHistoryMessage: FfiConverterRustBuffer<HistoryMess
             FfiConverterLong.allocationSize(value.`localTimestampMs`) +
             FfiConverterOptionalTypeDeliveryState.allocationSize(value.`deliveryState`) +
             FfiConverterOptionalLong.allocationSize(value.`serverSeq`) +
-            FfiConverterOptionalLong.allocationSize(value.`serverTimestampMs`)
+            FfiConverterOptionalLong.allocationSize(value.`serverTimestampMs`) +
+            FfiConverterULong.allocationSize(value.`revision`) +
+            FfiConverterBoolean.allocationSize(value.`hiddenSelf`) +
+            FfiConverterBoolean.allocationSize(value.`deletedAll`) +
+            FfiConverterOptionalTypeDeliveryState.allocationSize(value.`changeDeliveryState`)
     )
 
     override fun write(value: HistoryMessage, buf: ByteBuffer) {
@@ -2886,6 +2915,10 @@ public object FfiConverterTypeHistoryMessage: FfiConverterRustBuffer<HistoryMess
             FfiConverterOptionalTypeDeliveryState.write(value.`deliveryState`, buf)
             FfiConverterOptionalLong.write(value.`serverSeq`, buf)
             FfiConverterOptionalLong.write(value.`serverTimestampMs`, buf)
+            FfiConverterULong.write(value.`revision`, buf)
+            FfiConverterBoolean.write(value.`hiddenSelf`, buf)
+            FfiConverterBoolean.write(value.`deletedAll`, buf)
+            FfiConverterOptionalTypeDeliveryState.write(value.`changeDeliveryState`, buf)
     }
 }
 
@@ -3042,7 +3075,8 @@ public object FfiConverterTypeOutboxPage: FfiConverterRustBuffer<OutboxPage> {
 data class OutboxRow (
     var `messageIdHex`: kotlin.String,
     var `contactId`: kotlin.String,
-    var `status`: kotlin.String
+    var `status`: kotlin.String,
+    var `kind`: kotlin.String
 ) {
 
     companion object
@@ -3057,19 +3091,22 @@ public object FfiConverterTypeOutboxRow: FfiConverterRustBuffer<OutboxRow> {
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
         )
     }
 
     override fun allocationSize(value: OutboxRow) = (
             FfiConverterString.allocationSize(value.`messageIdHex`) +
             FfiConverterString.allocationSize(value.`contactId`) +
-            FfiConverterString.allocationSize(value.`status`)
+            FfiConverterString.allocationSize(value.`status`) +
+            FfiConverterString.allocationSize(value.`kind`)
     )
 
     override fun write(value: OutboxRow, buf: ByteBuffer) {
             FfiConverterString.write(value.`messageIdHex`, buf)
             FfiConverterString.write(value.`contactId`, buf)
             FfiConverterString.write(value.`status`, buf)
+            FfiConverterString.write(value.`kind`, buf)
     }
 }
 
@@ -3193,6 +3230,36 @@ public object FfiConverterTypeRetryReport: FfiConverterRustBuffer<RetryReport> {
             FfiConverterULong.write(value.`skipped`, buf)
     }
 }
+
+
+
+
+enum class DeleteScope {
+
+    SELF_ONLY,
+    EVERYONE;
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDeleteScope: FfiConverterRustBuffer<DeleteScope> {
+    override fun read(buf: ByteBuffer) = try {
+        DeleteScope.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: DeleteScope) = 4UL
+
+    override fun write(value: DeleteScope, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
 
 
 
@@ -3383,6 +3450,18 @@ sealed class FfiException: kotlin.Exception() {
             get() = ""
     }
 
+    class MessageChanged(
+        ) : FfiException() {
+        override val message
+            get() = ""
+    }
+
+    class MessageUnavailable(
+        ) : FfiException() {
+        override val message
+            get() = ""
+    }
+
     class Transport(
 
         val v1: kotlin.String
@@ -3467,19 +3546,21 @@ public object FfiConverterTypeFfiError : FfiConverterRustBuffer<FfiException> {
             22 -> FfiException.InvalidInput()
             23 -> FfiException.Busy()
             24 -> FfiException.BadText()
-            25 -> FfiException.Transport(
+            25 -> FfiException.MessageChanged()
+            26 -> FfiException.MessageUnavailable()
+            27 -> FfiException.Transport(
                 FfiConverterString.read(buf),
                 )
-            26 -> FfiException.Store(
+            28 -> FfiException.Store(
                 FfiConverterString.read(buf),
                 )
-            27 -> FfiException.Crypto(
+            29 -> FfiException.Crypto(
                 FfiConverterString.read(buf),
                 )
-            28 -> FfiException.Protocol(
+            30 -> FfiException.Protocol(
                 FfiConverterString.read(buf),
                 )
-            29 -> FfiException.Server(
+            31 -> FfiException.Server(
                 FfiConverterString.read(buf),
                 )
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
@@ -3583,6 +3664,14 @@ public object FfiConverterTypeFfiError : FfiConverterRustBuffer<FfiException> {
                 4UL
             )
             is FfiException.BadText -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
+            is FfiException.MessageChanged -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
+            is FfiException.MessageUnavailable -> (
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
             )
@@ -3714,28 +3803,36 @@ public object FfiConverterTypeFfiError : FfiConverterRustBuffer<FfiException> {
                 buf.putInt(24)
                 Unit
             }
-            is FfiException.Transport -> {
+            is FfiException.MessageChanged -> {
                 buf.putInt(25)
-                FfiConverterString.write(value.v1, buf)
                 Unit
             }
-            is FfiException.Store -> {
+            is FfiException.MessageUnavailable -> {
                 buf.putInt(26)
-                FfiConverterString.write(value.v1, buf)
                 Unit
             }
-            is FfiException.Crypto -> {
+            is FfiException.Transport -> {
                 buf.putInt(27)
                 FfiConverterString.write(value.v1, buf)
                 Unit
             }
-            is FfiException.Protocol -> {
+            is FfiException.Store -> {
                 buf.putInt(28)
                 FfiConverterString.write(value.v1, buf)
                 Unit
             }
-            is FfiException.Server -> {
+            is FfiException.Crypto -> {
                 buf.putInt(29)
+                FfiConverterString.write(value.v1, buf)
+                Unit
+            }
+            is FfiException.Protocol -> {
+                buf.putInt(30)
+                FfiConverterString.write(value.v1, buf)
+                Unit
+            }
+            is FfiException.Server -> {
+                buf.putInt(31)
                 FfiConverterString.write(value.v1, buf)
                 Unit
             }
@@ -3935,42 +4032,6 @@ public object FfiConverterTypeRegistrationPolicy: FfiConverterRustBuffer<Registr
     override fun allocationSize(value: RegistrationPolicy) = 4UL
 
     override fun write(value: RegistrationPolicy, buf: ByteBuffer) {
-        buf.putInt(value.ordinal + 1)
-    }
-}
-
-
-
-
-
-/**
- * Решение хранилища при старте (миграция — явный шаг, не молча).
- * FreshInstall без переноса sealed-копии = новая identity (потеря старой
- * честно показана UI-строкой, см. android SecureStore).
- */
-
-enum class StoragePlan {
-
-    FRESH_INSTALL,
-    MIGRATE_LEGACY,
-    READY_WRAPPED;
-    companion object
-}
-
-
-/**
- * @suppress
- */
-public object FfiConverterTypeStoragePlan: FfiConverterRustBuffer<StoragePlan> {
-    override fun read(buf: ByteBuffer) = try {
-        StoragePlan.values()[buf.getInt() - 1]
-    } catch (e: IndexOutOfBoundsException) {
-        throw RuntimeException("invalid enum value, something is very wrong!!", e)
-    }
-
-    override fun allocationSize(value: StoragePlan) = 4UL
-
-    override fun write(value: StoragePlan, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }
@@ -4321,20 +4382,6 @@ public object FfiConverterSequenceTypeReceivedMsg: FfiConverterRustBuffer<List<R
     uniffiRustCallWithError(FfiException) { _status ->
     UniffiLib.INSTANCE.uniffi_dmsg_core_fn_func_qr_kind(
         FfiConverterString.lower(`uri`),_status)
-}
-    )
-    }
-
-
-        /**
-         * Решение хранилища при старте по наличию файлов (чистая функция —
-         * покрытие unit-тестом здесь, зеркало в Kotlin вызывает фасад).
-         * MigrateLegacy means sealing a supported plain current-schema store, not schema/auth compatibility.
-         */ fun `storagePlan`(`hasLegacyDb`: kotlin.Boolean, `hasWrappedDb`: kotlin.Boolean): StoragePlan {
-            return FfiConverterTypeStoragePlan.lift(
-    uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_func_storage_plan(
-        FfiConverterBoolean.lower(`hasLegacyDb`),FfiConverterBoolean.lower(`hasWrappedDb`),_status)
 }
     )
     }

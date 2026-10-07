@@ -19,13 +19,13 @@ async fn two_cores_talk_e2e_through_live_msgd() {
     let srv = LiveMsgd::start("e2e", "e2e.test");
     let da = srv.dir.join("a.db");
     let db = srv.dir.join("b.db");
-    let ea = srv.signup(&da, "alice").await;
-    let eb = srv.signup(&db, "bobby").await;
-    let mut a = Core::open(&da).unwrap();
-    let mut b = Core::open(&db).unwrap();
+    let ea = srv.signup_keyed(&da, "alice", Some(&[19; 32])).await;
+    let eb = srv.signup_keyed(&db, "bobby", Some(&[20; 32])).await;
+    let mut a = Core::open_encrypted(&da, &[19; 32]).unwrap();
+    let mut b = Core::open_encrypted(&db, &[20; 32]).unwrap();
     link(&a, &b);
-    let mut ta = srv.connect(&da).await;
-    let mut tb = srv.connect(&db).await;
+    let mut ta = srv.connect_keyed(&da, Some(&[19; 32])).await;
+    let mut tb = srv.connect_keyed(&db, Some(&[20; 32])).await;
     assert_eq!(a.on_reconnect(&mut ta).await.unwrap(), 16);
     assert_eq!(b.on_reconnect(&mut tb).await.unwrap(), 16);
     let mid = a
@@ -122,8 +122,12 @@ async fn two_cores_talk_e2e_through_live_msgd() {
     let key = srv.server_pub.to_vec();
     let domain = srv.domain.clone();
     tokio::task::spawn_blocking(move || {
-        let a = dmsg_core::ffi::DmsgClient::open(da.to_string_lossy().into());
-        let b = dmsg_core::ffi::DmsgClient::open(db.to_string_lossy().into());
+        let a =
+            dmsg_core::ffi::DmsgClient::open_encrypted(da.to_string_lossy().into(), vec![19; 32])
+                .unwrap();
+        let b =
+            dmsg_core::ffi::DmsgClient::open_encrypted(db.to_string_lossy().into(), vec![20; 32])
+                .unwrap();
         let summary = a.dialogs_page(None, 100).unwrap().rows.remove(0);
         assert_eq!(summary.local_alias.as_deref(), Some("Local Bobby"));
         assert_eq!(summary.local_unread, 1);

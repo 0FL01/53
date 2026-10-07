@@ -15,8 +15,13 @@
         <Button android:id="@+id/btn_history_retry" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:text="@string/refresh_messages"/>
         <Button android:id="@+id/btn_retry" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:text="@string/retry_queue"/>
     </LinearLayout>
+    <LinearLayout android:id="@+id/edit_banner" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:paddingHorizontal="8dp" android:background="@color/accent_soft" android:visibility="gone">
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/editing_message" android:textSize="14sp" android:accessibilityHeading="true"/>
+    </LinearLayout>
     <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="bottom" android:padding="8dp">
         <EditText android:id="@+id/composer" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:minLines="1" android:maxLines="3" android:inputType="textMultiLine|textCapSentences" android:imeOptions="flagNoExtractUi" android:hint="@string/message_hint" android:saveEnabled="false" android:importantForAutofill="no"/>
+        <Button android:id="@+id/btn_cancel_edit" android:layout_width="wrap_content" android:layout_height="wrap_content" android:minWidth="48dp" android:text="@string/cancel" android:contentDescription="@string/cancel_edit" android:visibility="gone"/>
+        <Button android:id="@+id/btn_save_edit" android:layout_width="wrap_content" android:layout_height="wrap_content" android:minWidth="48dp" android:text="@string/save_edit" android:visibility="gone"/>
         <Button android:id="@+id/btn_send" style="@style/Widget.Dmsg.Icon" android:layout_width="48dp" android:layout_height="48dp" android:layout_marginStart="8dp" android:drawableTop="@drawable/ic_send" android:contentDescription="@string/send_message"/>
     </LinearLayout>
 </LinearLayout>

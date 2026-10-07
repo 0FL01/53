@@ -57,7 +57,7 @@
     <string name="error_profile_unsaved">The DNS profile has not been saved</string>
     <string name="error_connection_code_required">Add a connection code first</string>
     <string name="error_profile_save">Could not save the server information</string>
-    <string name="error_pending_send">Wait for the unfinished send in the previous chat to be checked first</string>
+    <string name="error_pending_send">Wait for the unfinished local write in the previous chat to be checked first</string>
     <string name="error_send_not_saved">The send was not saved. Your draft is preserved</string>
     <string name="error_contact_qr_required">A contact QR code is required to add a contact</string>
     <string name="error_server_qr_required">A public server QR code is required, not a contact QR code</string>

@@ -2,13 +2,13 @@
 //!
 //! Инварианты (ARCH §7, план K3):
 //! - ratchet и ciphertext-outbox — ОДНА TX: сессия читается после write-lock,
-//!   шифруется локально, затем `core_sessions`-пикл + `core_outbox`-строка
-//!   и sealed plaintext history коммитятся вместе; при ошибке TX локальная копия отбрасывается
+//!   шифруется локально, затем `core_sessions`-пикл + `core_messages`-событие
+//!   и sealed effective text коммитятся вместе; при ошибке TX локальная копия отбрасывается
 //!   (перешифровка — только несохранённого/нового; ретрай шлёт ТОЛЬКО
 //!   сохранённый ciphertext с тем же message_id — сервер дедуплицирует);
 //! - статусы outbox: queued → accepted (SEND_ACK ST_ACCEPTED) → delivered
 //!   (SEND_ACK ST_DELIVERED при повторе после доставки);
-//! - plaintext-конверт внутри Olm: `[sender_ed_identity 32][text UTF-8]`;
+//! - strict versioned TEXT/EDIT/DELETE inside Olm, including authenticated MID;
 //!   принятие сверяет ed с пином (подмена → seen + пропуск, отправка СТОП);
 //! - получение: FETCH → durable inbox dedup → decrypt → inbox INSERT OR IGNORE
 //!   → DELIVERY_ACK всеми seq (cursor двигает сервер;
@@ -222,7 +222,6 @@ impl Core {
         )
         .await?;
         self.push_contact_requests(t).await?;
-        self.sync_history_order(t).await?;
         Ok(count)
     }
 
@@ -328,49 +327,6 @@ impl Core {
             .await?;
         dmsg_protocol::chronology::parse_orders(&p, keys.len())
             .ok_or(OlmError::Protocol("metadata response"))
-    }
-
-    /// One bounded legacy batch per existing poll/reconnect, no new worker.
-    /// An absent/expired record is marked checked, so it cannot starve later rows.
-    async fn sync_history_order(&mut self, t: &mut impl Transport) -> Result<(), OlmError> {
-        let pending: Vec<(i64, Vec<u8>, Option<Vec<u8>>)> = {
-            let mut stmt=self.conn.prepare("SELECT local_id,message_id,sender_device FROM core_history WHERE order_checked=0 AND (direction='incoming' OR delivery_state!='queued') ORDER BY local_id LIMIT 32").map_err(|_|OlmError::Store("history order list".into()))?;
-            let rows = stmt
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-                .map_err(|_| OlmError::Store("history order list".into()))?;
-            rows.collect::<Result<_, _>>()
-                .map_err(|_| OlmError::Store("history order list".into()))?
-        };
-        if pending.is_empty() {
-            return Ok(());
-        }
-        let keys = pending
-            .iter()
-            .map(|(_, mid, sender)| {
-                Ok((
-                    match sender {
-                        Some(v) => v
-                            .as_slice()
-                            .try_into()
-                            .map_err(|_| OlmError::Protocol("history sender"))?,
-                        None => self.device_pub,
-                    },
-                    mid.as_slice()
-                        .try_into()
-                        .map_err(|_| OlmError::Protocol("history mid"))?,
-                ))
-            })
-            .collect::<Result<Vec<_>, OlmError>>()?;
-        let orders = self.message_orders(t, &keys).await?;
-        let tx = self
-            .conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(|_| OlmError::Store("history order tx".into()))?;
-        for ((id, _, _), order) in pending.iter().zip(orders) {
-            crate::history::set_order(&tx, *id, order).map_err(OlmError::Store)?;
-        }
-        tx.commit()
-            .map_err(|_| OlmError::Store("history order commit".into()))
     }
 
     /// Resume this connection using the Noise identity, without credentials.
@@ -484,9 +440,14 @@ impl Core {
         }
         let mut sessions = olm::unpickle_sessions(&pickle)?;
         let session = &mut sessions[0];
-        let mut plain = Vec::with_capacity(32 + text.len());
-        plain.extend_from_slice(&olm::ed_identity(&self.account));
-        plain.extend_from_slice(text.as_bytes());
+        let mut message_id = [0u8; 16];
+        getrandom::fill(&mut message_id).map_err(|_| OlmError::Crypto("rng"))?;
+        let event = dmsg_protocol::e2e::Event {
+            message_id,
+            sender_ed: olm::ed_identity(&self.account),
+            body: dmsg_protocol::e2e::Body::Text(text.into()),
+        };
+        let plain = dmsg_protocol::e2e::encode(&event).map_err(OlmError::Protocol)?;
         let msg = session
             .encrypt(&plain)
             .map_err(|_| OlmError::Crypto("encrypt"))?;
@@ -494,8 +455,6 @@ impl Core {
         if wire.len() > dmsg_protocol::CIPHERTEXT_MAX {
             return Err(OlmError::Protocol("ciphertext too long"));
         }
-        let mut message_id = [0u8; 16];
-        getrandom::fill(&mut message_id).map_err(|_| OlmError::Crypto("rng"))?;
         let spickle = olm::pickle_sessions(&sessions)?;
         tx.execute(
             "UPDATE core_sessions SET pickle=dmsg_seal('session_pickle',?2)
@@ -503,17 +462,187 @@ impl Core {
             rusqlite::params![contact_id, spickle],
         )
         .map_err(|e| OlmError::Store(format!("session: {e}")))?;
-        tx.execute(
-            "INSERT INTO core_outbox(message_id, contact_id, ciphertext, status)
-             VALUES(?1,?2,?3,'queued')",
-            rusqlite::params![message_id.as_slice(), contact_id, wire.as_slice()],
+        crate::store::insert_outgoing(
+            &tx,
+            contact_id,
+            &self.device_pub,
+            &recipient_binding(&c)?,
+            &event,
+            &wire,
         )
-        .map_err(|e| OlmError::Store(format!("outbox: {e}")))?;
-        crate::history::insert(&tx, &message_id, contact_id, None, text)
-            .map_err(OlmError::Store)?;
+        .map_err(OlmError::Store)?;
         tx.commit()
             .map_err(|e| OlmError::Store(format!("commit: {e}")))?;
         Ok(Some((message_id, user_id, wire)))
+    }
+
+    /// Local durable mutation only. All prerequisites and CAS are checked under
+    /// the write lock; no network/CLAIM and no fallible reads after commit.
+    pub fn edit_message(
+        &mut self,
+        contact_id: &str,
+        local_id: i64,
+        expected_revision: u64,
+        text: &str,
+    ) -> Result<crate::history::HistoryMessage, OlmError> {
+        if text.is_empty() || text.len() > TEXT_MAX {
+            return Err(OlmError::BadText);
+        }
+        self.mutate_message(
+            contact_id,
+            local_id,
+            Some((expected_revision, text)),
+            crate::history::DeleteScope::Everyone,
+        )
+    }
+
+    pub fn delete_message(
+        &mut self,
+        contact_id: &str,
+        local_id: i64,
+        scope: crate::history::DeleteScope,
+    ) -> Result<crate::history::HistoryMessage, OlmError> {
+        self.mutate_message(contact_id, local_id, None, scope)
+    }
+
+    fn mutate_message(
+        &mut self,
+        contact_id: &str,
+        local_id: i64,
+        edit: Option<(u64, &str)>,
+        scope: crate::history::DeleteScope,
+    ) -> Result<crate::history::HistoryMessage, OlmError> {
+        use crate::history::{DeleteScope, HistoryError, MessageDirection};
+        use dmsg_protocol::e2e::{Body, Event};
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|_| OlmError::Store("mutation transaction failed".into()))?;
+        let row = crate::history::message_row(&tx, contact_id, local_id).map_err(|e| match e {
+            HistoryError::Store => OlmError::Store("mutation target read failed".into()),
+            _ => OlmError::MessageUnavailable,
+        })?;
+        if row.direction != MessageDirection::Outgoing {
+            return Err(OlmError::MessageUnavailable);
+        }
+        let (mid, sender): (Vec<u8>, Vec<u8>) = tx
+            .query_row(
+                "SELECT message_id,sender_device FROM core_messages WHERE local_id=?1",
+                [local_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|_| OlmError::Store("mutation MID lookup failed".into()))?;
+        if sender.as_slice() != self.device_pub {
+            return Err(OlmError::MessageUnavailable);
+        }
+        let mid: [u8; 16] = mid
+            .try_into()
+            .map_err(|_| OlmError::Store("mutation MID corrupt".into()))?;
+        if edit.is_none() && scope == DeleteScope::SelfOnly {
+            tx.execute(
+                "UPDATE core_messages SET hidden_self=1,text=NULL WHERE local_id=?1",
+                [local_id],
+            )
+            .map_err(|_| OlmError::Store("self hide failed".into()))?;
+            crate::store::clear_controls(&tx, contact_id, &self.device_pub, &mid)
+                .map_err(OlmError::Store)?;
+        } else {
+            if row.deleted_all && edit.is_none() {
+                tx.commit()
+                    .map_err(|_| OlmError::Store("mutation commit failed".into()))?;
+                return Ok(row);
+            }
+            if row.hidden_self
+                || row.deleted_all
+                || row.delivery_state == Some(crate::history::DeliveryState::Queued)
+            {
+                return Err(OlmError::MessageUnavailable);
+            }
+            if edit.is_some_and(|(expected, _)| expected != row.revision) {
+                return Err(OlmError::MessageChanged);
+            }
+            let c = contacts::get(&tx, contact_id)?.ok_or(OlmError::UnknownContact)?;
+            contacts::sendable(&c)?;
+            let (_, _, peer_ed, peer_curve) = contact_keys(&c)?;
+            let binding = recipient_binding(&c)?;
+            if crate::store::outgoing_binding(&tx, &mid)
+                .map_err(OlmError::Store)?
+                .1
+                != binding
+            {
+                return Err(OlmError::MessageUnavailable);
+            }
+            let Some((pickle, ed, curve)) =
+                crate::store::load_session(&tx, contact_id).map_err(OlmError::Store)?
+            else {
+                return Err(OlmError::MessageUnavailable);
+            };
+            if ed != peer_ed || curve != peer_curve {
+                return Err(OlmError::MessageUnavailable);
+            }
+            if edit.is_some_and(|(_, text)| text == row.text) {
+                tx.commit()
+                    .map_err(|_| OlmError::Store("mutation commit failed".into()))?;
+                return Ok(row);
+            }
+            let revision = row
+                .revision
+                .checked_add(1)
+                .filter(|r| *r <= i64::MAX as u64)
+                .ok_or(OlmError::MessageUnavailable)?;
+            let mut control_mid = [0; 16];
+            getrandom::fill(&mut control_mid).map_err(|_| OlmError::Crypto("rng"))?;
+            let event = Event {
+                message_id: control_mid,
+                sender_ed: olm::ed_identity(&self.account),
+                body: match edit {
+                    Some((_, text)) => Body::Edit {
+                        target: mid,
+                        revision,
+                        text: text.into(),
+                    },
+                    None => Body::Delete {
+                        target: mid,
+                        revision,
+                    },
+                },
+            };
+            let mut sessions = olm::unpickle_sessions(&pickle)?;
+            let msg = sessions[0]
+                .encrypt(dmsg_protocol::e2e::encode(&event).map_err(OlmError::Protocol)?)
+                .map_err(|_| OlmError::Crypto("encrypt"))?;
+            let wire = olm::encode_wire(&msg);
+            if wire.len() > dmsg_protocol::CIPHERTEXT_MAX {
+                return Err(OlmError::Protocol("ciphertext too long"));
+            }
+            crate::store::save_session(
+                &tx,
+                contact_id,
+                &olm::pickle_sessions(&sessions)?,
+                &peer_ed,
+                &peer_curve,
+            )
+            .map_err(OlmError::Store)?;
+            if let Some((_, text)) = edit {
+                tx.execute("UPDATE core_messages SET text=dmsg_seal('message_text',?2),revision=?3 WHERE local_id=?1",rusqlite::params![local_id,text,revision]).map_err(|_|OlmError::Store("edit target update failed".into()))?;
+            } else {
+                tx.execute("UPDATE core_messages SET text=NULL,deleted_all=1,revision=?2 WHERE local_id=?1",rusqlite::params![local_id,revision]).map_err(|_|OlmError::Store("delete target update failed".into()))?;
+            }
+            crate::store::insert_outgoing(
+                &tx,
+                contact_id,
+                &self.device_pub,
+                &binding,
+                &event,
+                &wire,
+            )
+            .map_err(OlmError::Store)?;
+        }
+        let result = crate::history::message_row(&tx, contact_id, local_id)
+            .map_err(|_| OlmError::Store("mutation projection read failed".into()))?;
+        tx.commit()
+            .map_err(|_| OlmError::Store("mutation commit failed".into()))?;
+        Ok(result)
     }
 
     /// Ретрай недоставленного ТЕМ ЖЕ ciphertext (без перешифровки).
@@ -536,6 +665,12 @@ impl Core {
                     continue;
                 }
                 let (user_id, _, _, _) = contact_keys(&c)?;
+                let (_, frozen) =
+                    crate::store::outgoing_binding(&self.conn, mid).map_err(OlmError::Store)?;
+                if frozen != recipient_binding(&c)? {
+                    stats.skipped += 1;
+                    continue;
+                }
                 match self.refresh_binding(t, &c).await {
                     Ok(()) => (),
                     Err(OlmError::IdentityMismatch) => {
@@ -557,9 +692,17 @@ impl Core {
                         }
                     }
                     Err(OlmError::Transport(_)) => return Err(OlmError::Transport("retry".into())),
-                    Err(_) => {
+                    Err(
+                        OlmError::Quota
+                        | OlmError::Busy
+                        | OlmError::MessageUnavailable
+                        | OlmError::IdentityMismatch
+                        | OlmError::Blocked
+                        | OlmError::NotAccepted,
+                    ) => {
                         stats.skipped += 1;
                     }
+                    Err(e) => return Err(e),
                 }
             }
             match next {
@@ -575,7 +718,7 @@ impl Core {
     pub fn outbox_ciphertext(&self, message_id: &[u8; 16]) -> Result<Vec<u8>, OlmError> {
         self.conn
             .query_row(
-                "SELECT ciphertext FROM core_outbox WHERE message_id=?1",
+                "SELECT ciphertext FROM core_messages WHERE message_id=?1 AND direction='outgoing'",
                 [message_id.as_slice()],
                 |r| r.get(0),
             )
@@ -668,16 +811,19 @@ impl Core {
         )
         .await?;
         self.sync_contacts(t).await?;
-        self.sync_history_order(t).await?;
         let events = self.fetch_raw(t).await?;
         let mut orders = std::collections::HashMap::new();
-        for chunk in events.chunks(dmsg_protocol::chronology::MAX) {
+        let mut unseen = Vec::with_capacity(events.len());
+        for event in &events {
+            if !crate::store::durable_event(&self.conn, &event.sender, &event.message_id)
+                .map_err(OlmError::Store)?
+            {
+                unseen.push(event);
+            }
+        }
+        for chunk in unseen.chunks(dmsg_protocol::chronology::MAX) {
             let keys: Vec<_> = chunk.iter().map(|e| (e.sender, e.message_id)).collect();
             for (e, order) in chunk.iter().zip(self.message_orders(t, &keys).await?) {
-                let order = order.ok_or(OlmError::Protocol("missing event metadata"))?;
-                if u64::try_from(order.seq).ok() != Some(e.seq) {
-                    return Err(OlmError::Protocol("event metadata mismatch"));
-                }
                 orders.insert(e.seq, order);
             }
         }
@@ -685,7 +831,8 @@ impl Core {
         let mut seqs: Vec<u64> = Vec::with_capacity(events.len());
         for e in &events {
             // Durable replay is safe to ACK before looking up a newer binding.
-            let durable: bool = self.conn.query_row("SELECT EXISTS(SELECT 1 FROM core_inbox WHERE sender_device=?1 AND message_id=?2)",rusqlite::params![e.sender.as_slice(),e.message_id.as_slice()],|r| r.get(0)).map_err(|_| OlmError::Store("inbox dedup".into()))?;
+            let durable = crate::store::durable_event(&self.conn, &e.sender, &e.message_id)
+                .map_err(OlmError::Store)?;
             if durable {
                 seqs.push(e.seq);
                 continue;
@@ -707,7 +854,7 @@ impl Core {
                 }
             }
             match self
-                .decrypt_event_order(e, orders.get(&e.seq).copied())
+                .decrypt_event_order(e, orders.get(&e.seq).copied().flatten())
                 .await
             {
                 Ok(Some(r)) => {
@@ -729,6 +876,23 @@ impl Core {
                 Err(Fail::Err(e)) => return Err(e),
             }
         }
+        // A text and a later control can share one FETCH batch. Only expose the
+        // final effective projection, never its superseded/deleted transient body.
+        let snapshot = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Deferred,
+        )
+        .map_err(|_| OlmError::Store("receive report snapshot failed".into()))?;
+        let mut effective = Vec::with_capacity(res.received.len());
+        for mut received in res.received {
+            let text: Option<String>=snapshot.query_row("SELECT CASE WHEN hidden_self=1 OR deleted_all=1 THEN NULL ELSE CAST(dmsg_unseal('message_text',text) AS TEXT) END FROM core_messages WHERE direction='incoming' AND kind='text' AND contact_id=?1 AND message_id=?2",rusqlite::params![received.contact_id,received.message_id.as_slice()],|r|r.get(0)).map_err(|_|OlmError::Store("receive report projection failed".into()))?;
+            if let Some(text) = text {
+                received.text = text;
+                effective.push(received);
+            }
+        }
+        res.received = effective;
+        drop(snapshot);
         res.cursor = self.ack(t, &seqs).await?;
         Ok(res)
     }
@@ -739,7 +903,14 @@ impl Core {
     /// Fail::Err — жёсткая ошибка (store), прерывает пачку.
     #[cfg(test)]
     async fn decrypt_event(&mut self, e: &RawEvent) -> Result<Option<Received>, Fail> {
-        self.decrypt_event_order(e, None).await
+        self.decrypt_event_order(
+            e,
+            Some(dmsg_protocol::chronology::Order {
+                seq: i64::try_from(e.seq).unwrap(),
+                timestamp_ms: 1000,
+            }),
+        )
+        .await
     }
     async fn decrypt_event_order(
         &mut self,
@@ -749,14 +920,8 @@ impl Core {
         // At-least-once replay cannot be decrypted twice by an Olm ratchet.
         // Only a durable inbox row permits this early return; a lookup failure
         // aborts the batch before ACK, and unseen events still undergo checks.
-        let received: bool = self
-            .conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM core_inbox WHERE sender_device=?1 AND message_id=?2)",
-                rusqlite::params![e.sender.as_slice(), e.message_id.as_slice()],
-                |r| r.get(0),
-            )
-            .map_err(|e| OlmError::Store(format!("inbox dedup: {e}")))?;
+        let received = crate::store::durable_event(&self.conn, &e.sender, &e.message_id)
+            .map_err(OlmError::Store)?;
         if received {
             return Ok(None);
         }
@@ -773,6 +938,7 @@ impl Core {
             return Err(Fail::Skip(EventSkip::Unknown));
         }
         if c.device_key != Some(e.sender)
+            || c.seen_user.is_some()
             || c.seen_ed.is_some()
             || c.seen_curve.is_some()
             || c.seen_device.is_some()
@@ -795,13 +961,8 @@ impl Core {
         if current != c {
             return Err(Fail::Skip(EventSkip::Mismatch));
         }
-        let already: bool = tx
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM core_inbox WHERE sender_device=?1 AND message_id=?2)",
-                rusqlite::params![e.sender.as_slice(), e.message_id.as_slice()],
-                |r| r.get(0),
-            )
-            .map_err(|_| OlmError::Store("inbox dedup".into()))?;
+        let already =
+            crate::store::durable_event(&tx, &e.sender, &e.message_id).map_err(OlmError::Store)?;
         if already {
             return Ok(None);
         }
@@ -866,20 +1027,27 @@ impl Core {
                 decrypted.ok_or(Fail::Skip(EventSkip::Undecryptable))?
             }
         };
-        if plaintext.len() < 33 {
+        let event = dmsg_protocol::e2e::decode(&plaintext)
+            .map_err(|_| Fail::Skip(EventSkip::Undecryptable))?;
+        if event.message_id != e.message_id {
             return Err(Fail::Skip(EventSkip::Undecryptable));
         }
-        let mut sender_ed = [0u8; 32];
-        sender_ed.copy_from_slice(&plaintext[..32]);
-        if sender_ed != peer_ed {
-            contacts::note_presented_ed(&tx, &c.contact_id, &sender_ed)?;
+        if event.sender_ed != peer_ed {
+            contacts::note_presented_ed(&tx, &c.contact_id, &event.sender_ed)?;
             tx.commit()
                 .map_err(|_| OlmError::Store("warning commit".into()))?;
             return Err(Fail::Skip(EventSkip::Mismatch));
         }
-        let text = std::str::from_utf8(&plaintext[32..])
-            .map_err(|_| Fail::Skip(EventSkip::Undecryptable))?;
-        if text.is_empty() || text.len() > TEXT_MAX {
+        if event.kind() == dmsg_protocol::e2e::Kind::Text
+            && !order.is_some_and(|o| {
+                o.seq > 0 && o.timestamp_ms >= 0 && u64::try_from(o.seq).ok() == Some(e.seq)
+            })
+        {
+            return Err(Fail::Skip(EventSkip::Undecryptable));
+        }
+        if !crate::store::valid_control_target(&tx, &c.contact_id, &e.sender, &event)
+            .map_err(OlmError::Store)?
+        {
             return Err(Fail::Skip(EventSkip::Undecryptable));
         }
         // ОДНА TX: account (one-time consumed) + session + inbox dedup + history.
@@ -889,7 +1057,7 @@ impl Core {
         let apickle = serde_json::to_string(&account.pickle())
             .map_err(|_| OlmError::Store("pickle".into()))?;
         let spickle = olm::pickle_sessions(&sessions)?;
-        let inserted = (|| -> Result<bool, OlmError> {
+        let inserted = (|| -> Result<Option<Received>, OlmError> {
             tx.execute(
                 "INSERT INTO core_olm(id, pickle, next_key_id) VALUES(1,dmsg_seal('olm_pickle',?1),?2)
                  ON CONFLICT(id) DO UPDATE SET pickle=excluded.pickle",
@@ -908,49 +1076,33 @@ impl Core {
                 ],
             )
             .map_err(|e| OlmError::Store(format!("session: {e}")))?;
-            let n = tx
-                .execute(
-                    "INSERT INTO core_inbox(sender_device, message_id, contact_id, text, seq)
-                      VALUES(?1,?2,?3,dmsg_seal('inbox_text',?4),?5)
-                     ON CONFLICT(sender_device,message_id) DO NOTHING",
-                    rusqlite::params![
-                        e.sender.as_slice(),
-                        e.message_id.as_slice(),
-                        c.contact_id,
-                        text,
-                        i64::try_from(e.seq)
-                            .map_err(|_| OlmError::Protocol("sequence overflow"))?
-                    ],
-                )
-                .map_err(|e| OlmError::Store(format!("inbox: {e}")))?;
-            if n == 1 {
-                crate::history::insert(&tx, &e.message_id, &c.contact_id, Some(&e.sender), text)
-                    .map_err(OlmError::Store)?;
-                if let Some(order) = order {
-                    let id = tx.last_insert_rowid();
-                    crate::history::set_order(&tx, id, Some(order)).map_err(OlmError::Store)?;
+            let id = crate::store::receive_event(&tx, &c.contact_id, &e.sender, &event, order)
+                .map_err(OlmError::Store)?;
+            let received = if let Some(id) = id {
+                let row = crate::history::message_row(&tx, &c.contact_id, id)
+                    .map_err(|_| OlmError::Store("incoming projection read failed".into()))?;
+                if row.hidden_self || row.deleted_all {
+                    None
+                } else {
+                    Some(Received {
+                        contact_id: c.contact_id.clone(),
+                        text: row.text,
+                        message_id: e.message_id,
+                        seq: e.seq,
+                    })
                 }
-            }
+            } else {
+                None
+            };
             tx.commit()
                 .map_err(|e| OlmError::Store(format!("commit: {e}")))?;
-            Ok(n == 1)
+            Ok(received)
         })();
         if inserted.is_ok() {
             self.account = account;
             self.next_key_id = next_key_id;
         }
-        match inserted {
-            Err(e) => {
-                return Err(Fail::Err(e));
-            }
-            Ok(false) => Ok(None), // локальный дедуп: replay уже лежит
-            Ok(true) => Ok(Some(Received {
-                contact_id: c.contact_id.clone(),
-                text: text.to_string(),
-                message_id: e.message_id,
-                seq: e.seq,
-            })),
-        }
+        inserted.map_err(Fail::Err)
     }
 
     /// Query the bounded directory record without silently changing a trusted pin.
@@ -1029,6 +1181,31 @@ impl Core {
         message_id: &[u8; 16],
         wire: &[u8],
     ) -> Result<(), OlmError> {
+        let kind = {
+            let tx = rusqlite::Transaction::new_unchecked(
+                &self.conn,
+                rusqlite::TransactionBehavior::Deferred,
+            )
+            .map_err(|_| OlmError::Store("retry binding snapshot failed".into()))?;
+            let cid:String=tx.query_row("SELECT contact_id FROM core_messages WHERE direction='outgoing' AND message_id=?1",[message_id.as_slice()],|r|r.get(0)).map_err(|_|OlmError::Store("retry target missing".into()))?;
+            let c = contacts::get(&tx, &cid)?.ok_or(OlmError::UnknownContact)?;
+            contacts::sendable(&c)?;
+            let (user, _, ed, curve) = contact_keys(&c)?;
+            let (kind, frozen) =
+                crate::store::outgoing_binding(&tx, message_id).map_err(OlmError::Store)?;
+            if user != *user_id || frozen != recipient_binding(&c)? {
+                return Err(OlmError::MessageUnavailable);
+            }
+            let Some((_, session_ed, session_curve)) =
+                crate::store::load_session(&tx, &cid).map_err(OlmError::Store)?
+            else {
+                return Err(OlmError::MessageUnavailable);
+            };
+            if session_ed != ed || session_curve != curve {
+                return Err(OlmError::MessageUnavailable);
+            }
+            kind
+        };
         let mut payload = Vec::with_capacity(32 + wire.len());
         payload.extend_from_slice(user_id);
         payload.extend_from_slice(message_id);
@@ -1050,14 +1227,19 @@ impl Core {
                 ST_DELIVERED => crate::store::outbox_status::DELIVERED,
                 _ => return Err(OlmError::Protocol("bad send status")),
             };
-            let order = self
-                .message_orders(t, &[(self.device_pub, *message_id)])
-                .await?
-                .into_iter()
-                .next()
-                .flatten()
-                .ok_or(OlmError::Protocol("missing send metadata"))?;
-            crate::store::outbox_set_status_order(&self.conn, message_id, status, Some(order))
+            let order = if kind == "text" {
+                Some(
+                    self.message_orders(t, &[(self.device_pub, *message_id)])
+                        .await?
+                        .into_iter()
+                        .next()
+                        .flatten()
+                        .ok_or(OlmError::Protocol("missing send metadata"))?,
+                )
+            } else {
+                None
+            };
+            crate::store::outbox_set_status_order(&self.conn, message_id, status, order)
                 .map_err(OlmError::Store)?;
             return Ok(());
         }
@@ -1099,10 +1281,24 @@ fn contact_keys(c: &Contact) -> Result<([u8; 16], [u8; 32], [u8; 32], [u8; 32]),
     }
 }
 
+/// One compact epoch binding, fixed with ciphertext and never recomputed for
+/// an old event after explicit contact-identity confirmation.
+fn recipient_binding(c: &Contact) -> Result<[u8; 32], OlmError> {
+    use sha2::{Digest, Sha256};
+    let (user, device, ed, curve) = contact_keys(c)?;
+    let mut hash = Sha256::new();
+    hash.update(b"dmsg recipient binding v1\0");
+    hash.update(user);
+    hash.update(device);
+    hash.update(ed);
+    hash.update(curve);
+    Ok(hash.finalize().into())
+}
+
 /// Точечный статус outbox (для классификации ретрая).
 fn status_of(conn: &rusqlite::Connection, mid: &[u8; 16]) -> Result<String, OlmError> {
     conn.query_row(
-        "SELECT status FROM core_outbox WHERE message_id=?1",
+        "SELECT delivery_state FROM core_messages WHERE message_id=?1 AND direction='outgoing'",
         [mid.as_slice()],
         |r| r.get(0),
     )
@@ -1239,12 +1435,20 @@ mod tests {
     }
 
     fn tmp_core(name: &str) -> (Core, std::path::PathBuf) {
+        tmp_core_mode(name, None)
+    }
+
+    fn tmp_core_mode(name: &str, key: Option<&[u8; 32]>) -> (Core, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("dmsg-k3t-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("tmpdir");
         let db = dir.join("core.db");
         let _ = std::fs::remove_file(&db);
-        // Enrol-заглушка: device_priv напрямую (без сети — как K2 store).
-        let conn = crate::store::open(&db).expect("open");
+        // Fresh authenticated fixture; never initialize plain then convert.
+        let conn = match key {
+            Some(k) => crate::store::open_encrypted(&db, k),
+            None => crate::store::open(&db),
+        }
+        .expect("open");
         let privk = {
             let params: snow::params::NoiseParams =
                 crate::transport::PATTERN.parse().expect("pattern");
@@ -1257,7 +1461,14 @@ mod tests {
         crate::store::save_identity(&conn, &privk).expect("identity");
         crate::store::save_account(&conn, &[9u8; 16], "TESTC0NTACT1").expect("account");
         drop(conn);
-        (Core::open(&db).expect("core"), dir)
+        (
+            match key {
+                Some(k) => Core::open_encrypted(&db, k),
+                None => Core::open(&db),
+            }
+            .expect("core"),
+            dir,
+        )
     }
 
     /// Связать два ядра контактами через настоящий QR-путь (без сети).
@@ -1300,6 +1511,554 @@ mod tests {
         )
     }
 
+    fn action_pair(
+        name: &str,
+    ) -> (
+        Core,
+        Core,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        [u8; 16],
+        Vec<u8>,
+        i64,
+    ) {
+        let (mut a, da) = tmp_core_mode(&format!("{name}-a"), Some(&[17; 32]));
+        let (mut b, db) = tmp_core_mode(&format!("{name}-b"), Some(&[18; 32]));
+        link(&mut a, &mut b, "ALICE0000001", "BOBB00000002");
+        b.account.generate_one_time_keys(1);
+        olm::persist(&b.conn, &b.account, b.next_key_id).unwrap();
+        let ot = *b
+            .account
+            .one_time_keys()
+            .values()
+            .next()
+            .unwrap()
+            .as_bytes();
+        let (ed, curve) = b.identity_keys();
+        let session = olm::outbound(&a.account, &curve, &ot).unwrap();
+        crate::store::save_session(
+            &a.conn,
+            "BOBB00000002",
+            &olm::pickle_session(&session).unwrap(),
+            &ed,
+            &curve,
+        )
+        .unwrap();
+        let mid = a
+            .queue_text_existing_session("BOBB00000002", "original private text")
+            .unwrap()
+            .unwrap();
+        let wire = a.outbox_ciphertext(&mid).unwrap();
+        crate::store::outbox_set_status_order(
+            &a.conn,
+            &mid,
+            "accepted",
+            Some(dmsg_protocol::chronology::Order {
+                seq: 1,
+                timestamp_ms: 1000,
+            }),
+        )
+        .unwrap();
+        let id = a.history_page("BOBB00000002", None, 1).unwrap().rows[0].local_id;
+        (a, b, da, db, mid, wire, id)
+    }
+
+    fn latest_control(a: &Core, seq: u64) -> RawEvent {
+        let (mid,ct):(Vec<u8>,Vec<u8>)=a.conn.query_row("SELECT message_id,ciphertext FROM core_messages WHERE direction='outgoing' AND kind!='text' ORDER BY local_id DESC LIMIT 1",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+        RawEvent {
+            seq,
+            sender: a.device_pub(),
+            sender_user: a.my_account().unwrap().0,
+            message_id: mid.try_into().unwrap(),
+            ciphertext: ct,
+        }
+    }
+
+    fn exact(core: &Core, cid: &str, id: i64) -> crate::history::HistoryMessage {
+        crate::history::history_message(&core.conn, cid, id).unwrap()
+    }
+
+    #[tokio::test]
+    async fn editing_is_owned_cas_atomic_in_place_and_self_hide_is_local_even_blocked() {
+        use crate::history::{DeleteScope, DeliveryState, HistoryError};
+        let (mut a, mut b, da, db, mid, wire, id) = action_pair("actions-owned");
+        let original = exact(&a, "BOBB00000002", id);
+        b.decrypt_event(&RawEvent {
+            seq: 1,
+            sender: a.device_pub(),
+            sender_user: a.my_account().unwrap().0,
+            message_id: mid,
+            ciphertext: wire.clone(),
+        })
+        .await
+        .unwrap();
+        let incoming = b.history_page("ALICE0000001", None, 1).unwrap().rows[0].local_id;
+        assert_eq!(
+            b.edit_message("ALICE0000001", incoming, 0, "foreign"),
+            Err(OlmError::MessageUnavailable)
+        );
+        assert_eq!(
+            b.delete_message("ALICE0000001", incoming, DeleteScope::Everyone),
+            Err(OlmError::MessageUnavailable)
+        );
+        assert_eq!(
+            b.delete_message("ALICE0000001", incoming, DeleteScope::SelfOnly),
+            Err(OlmError::MessageUnavailable)
+        );
+        let edited = a
+            .edit_message("BOBB00000002", id, 0, "replacement private text")
+            .unwrap();
+        assert_eq!(
+            (
+                edited.local_id,
+                &edited.message_id_hex,
+                edited.local_timestamp_ms,
+                edited.server_seq,
+                edited.server_timestamp_ms
+            ),
+            (
+                original.local_id,
+                &original.message_id_hex,
+                original.local_timestamp_ms,
+                original.server_seq,
+                original.server_timestamp_ms
+            )
+        );
+        assert_eq!(edited.revision, 1);
+        assert_eq!(edited.delivery_state, Some(DeliveryState::Accepted));
+        assert_eq!(edited.change_delivery_state, Some(DeliveryState::Queued));
+        assert_eq!(a.outbox_ciphertext(&mid).unwrap(), wire);
+        assert_eq!(
+            a.edit_message("BOBB00000002", id, 0, "replacement private text"),
+            Err(OlmError::MessageChanged)
+        );
+        let count = crate::store::outbox_queued(&a.conn, 0, 100)
+            .unwrap()
+            .0
+            .len();
+        assert_eq!(
+            a.edit_message("BOBB00000002", id, 1, "replacement private text")
+                .unwrap()
+                .revision,
+            1
+        );
+        assert_eq!(
+            crate::store::outbox_queued(&a.conn, 0, 100)
+                .unwrap()
+                .0
+                .len(),
+            count
+        );
+        let control = latest_control(&a, 2);
+        assert!(b
+            .decrypt_event_order(&control, None)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            exact(&b, "ALICE0000001", incoming).text,
+            "replacement private text"
+        );
+        assert_eq!(crate::store::inbox_count(&b.conn).unwrap(), 1);
+        assert_eq!(b.dialogs_page(None, 10).unwrap().rows[0].local_unread, 1);
+        let queued = a
+            .queue_text_existing_session("BOBB00000002", "saved queued text")
+            .unwrap()
+            .unwrap();
+        let queued_row = a
+            .history_page("BOBB00000002", None, 1)
+            .unwrap()
+            .rows
+            .remove(0);
+        let queued_wire = a.outbox_ciphertext(&queued).unwrap();
+        assert_eq!(
+            a.edit_message("BOBB00000002", queued_row.local_id, 0, "not eligible"),
+            Err(OlmError::MessageUnavailable)
+        );
+        assert_eq!(
+            a.delete_message("BOBB00000002", queued_row.local_id, DeleteScope::Everyone),
+            Err(OlmError::MessageUnavailable)
+        );
+        assert!(
+            a.delete_message("BOBB00000002", queued_row.local_id, DeleteScope::SelfOnly)
+                .unwrap()
+                .hidden_self
+        );
+        assert_eq!(a.outbox_ciphertext(&queued).unwrap(), queued_wire);
+        assert!(crate::store::outbox_queued(&a.conn, 0, 100)
+            .unwrap()
+            .0
+            .iter()
+            .any(|(_, event, _, _, state)| *event == queued && state == "queued"));
+        let count = crate::store::outbox_queued(&a.conn, 0, 100)
+            .unwrap()
+            .0
+            .len();
+        a.block_contact("BOBB00000002").unwrap();
+        let hidden = a
+            .delete_message("BOBB00000002", id, DeleteScope::SelfOnly)
+            .unwrap();
+        assert!(hidden.hidden_self && !hidden.deleted_all && hidden.text.is_empty());
+        assert_eq!(hidden.revision, 1);
+        assert_eq!(
+            crate::store::outbox_queued(&a.conn, 0, 100)
+                .unwrap()
+                .0
+                .len(),
+            count
+        );
+        assert_eq!(
+            a.history_page("BOBB00000002", None, 100)
+                .unwrap()
+                .rows
+                .len(),
+            2
+        );
+        assert_eq!(
+            a.mark_read("BOBB00000002", id),
+            Err(HistoryError::InvalidInput)
+        );
+        assert!(
+            crate::history::timeline_page(&a.conn, "BOBB00000002", Some(id), 1)
+                .unwrap()
+                .rows
+                .is_empty()
+        );
+        assert!(a.dialogs_page(None, 10).unwrap().rows[0].preview.is_none());
+        assert_eq!(
+            crate::store::inbox_list(&b.conn, 0, 10).unwrap().0[0].2,
+            "replacement private text"
+        );
+        assert_eq!(a.outbox_ciphertext(&mid).unwrap(), wire);
+        drop(a);
+        drop(b);
+        std::fs::remove_dir_all(da).unwrap();
+        std::fs::remove_dir_all(db).unwrap();
+    }
+
+    #[tokio::test]
+    async fn control_before_original_reordered_edits_mid_binding_and_terminal_delete_survive_reopen(
+    ) {
+        use crate::history::DeleteScope;
+        let (mut a, mut b, da, db, mid, wire, id) = action_pair("actions-reordered");
+        a.edit_message("BOBB00000002", id, 0, "edit one").unwrap();
+        let first = latest_control(&a, 2);
+        a.edit_message("BOBB00000002", id, 1, "edit two").unwrap();
+        let second = latest_control(&a, 3);
+        b.decrypt_event_order(&second, None).await.unwrap();
+        let state = crate::store::load_session(&b.conn, "ALICE0000001").unwrap();
+        let wrong_mid = RawEvent {
+            seq: first.seq,
+            sender: first.sender,
+            sender_user: first.sender_user,
+            message_id: [99; 16],
+            ciphertext: first.ciphertext.clone(),
+        };
+        assert!(matches!(
+            b.decrypt_event_order(&wrong_mid, None).await,
+            Err(Fail::Skip(EventSkip::Undecryptable))
+        ));
+        assert_eq!(
+            crate::store::load_session(&b.conn, "ALICE0000001").unwrap(),
+            state
+        );
+        b.decrypt_event_order(&first, None).await.unwrap();
+        assert_eq!(
+            b.history_page("ALICE0000001", None, 100)
+                .unwrap()
+                .rows
+                .len(),
+            0
+        );
+        assert_eq!(
+            b.conn
+                .query_row::<i64, _, _>(
+                    "SELECT count(*) FROM core_messages WHERE kind='edit' AND text IS NOT NULL",
+                    [],
+                    |r| r.get(0)
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(b.conn.query_row::<String,_,_>("SELECT CAST(dmsg_unseal('message_text',text) AS TEXT) FROM core_messages WHERE text IS NOT NULL",[],|r|r.get(0)).unwrap(),"edit two");
+        let deleted = a
+            .delete_message("BOBB00000002", id, DeleteScope::Everyone)
+            .unwrap();
+        assert_eq!(deleted.revision, 3);
+        let deletion = latest_control(&a, 4);
+        b.decrypt_event_order(&deletion, None).await.unwrap();
+        assert_eq!(
+            b.conn
+                .query_row::<i64, _, _>(
+                    "SELECT count(*) FROM core_messages WHERE text IS NOT NULL",
+                    [],
+                    |r| r.get(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert!(b
+            .decrypt_event(&RawEvent {
+                seq: 1,
+                sender: a.device_pub(),
+                sender_user: a.my_account().unwrap().0,
+                message_id: mid,
+                ciphertext: wire
+            })
+            .await
+            .unwrap()
+            .is_none());
+        let row = b
+            .history_page("ALICE0000001", None, 100)
+            .unwrap()
+            .rows
+            .remove(0);
+        assert!(row.deleted_all && row.text.is_empty());
+        assert_eq!(row.server_seq, Some(1));
+        assert_eq!(row.server_timestamp_ms, Some(1000));
+        assert_eq!(crate::store::inbox_count(&b.conn).unwrap(), 1);
+        assert!(crate::store::inbox_list(&b.conn, 0, 100)
+            .unwrap()
+            .0
+            .is_empty());
+        assert_eq!(b.dialogs_page(None, 10).unwrap().rows[0].local_unread, 0);
+        assert!(b.dialogs_page(None, 10).unwrap().rows[0].preview.is_none());
+        assert_eq!(b.conn.query_row::<i64,_,_>("SELECT count(*) FROM core_messages WHERE kind!='text' AND (server_seq IS NOT NULL OR server_timestamp_ms IS NOT NULL)",[],|r|r.get(0)).unwrap(),0);
+        drop(b);
+        let mut b = Core::open_encrypted(&db.join("core.db"), &[18; 32]).unwrap();
+        assert!(b.decrypt_event_order(&first, None).await.unwrap().is_none());
+        assert!(b
+            .decrypt_event_order(&deletion, None)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(exact(&b, "ALICE0000001", row.local_id), row);
+        let count = crate::store::outbox_queued(&a.conn, 0, 100)
+            .unwrap()
+            .0
+            .len();
+        assert_eq!(
+            a.delete_message("BOBB00000002", id, DeleteScope::Everyone)
+                .unwrap()
+                .revision,
+            3
+        );
+        assert_eq!(
+            crate::store::outbox_queued(&a.conn, 0, 100)
+                .unwrap()
+                .0
+                .len(),
+            count
+        );
+        drop(a);
+        drop(b);
+        std::fs::remove_dir_all(da).unwrap();
+        std::fs::remove_dir_all(db).unwrap();
+    }
+
+    #[tokio::test]
+    async fn mutation_rollback_byte_identical_control_retry_and_frozen_recipient_epoch() {
+        let (mut a, b, da, db, mid, wire, id) = action_pair("actions-rollback");
+        let original = exact(&a, "BOBB00000002", id);
+        let state = crate::store::load_session(&a.conn, "BOBB00000002").unwrap();
+        a.conn.execute_batch("CREATE TRIGGER reject_control AFTER INSERT ON core_messages WHEN NEW.kind!='text' BEGIN SELECT RAISE(ABORT,'denied'); END;").unwrap();
+        assert!(matches!(
+            a.edit_message("BOBB00000002", id, 0, "must roll back"),
+            Err(OlmError::Store(_))
+        ));
+        assert_eq!(exact(&a, "BOBB00000002", id), original);
+        assert_eq!(
+            crate::store::load_session(&a.conn, "BOBB00000002").unwrap(),
+            state
+        );
+        assert_eq!(
+            crate::store::outbox_queued(&a.conn, 0, 100)
+                .unwrap()
+                .0
+                .len(),
+            1
+        );
+        a.conn.execute_batch("DROP TRIGGER reject_control").unwrap();
+        a.edit_message("BOBB00000002", id, 0, "durable edit")
+            .unwrap();
+        let control = latest_control(&a, 2);
+        crate::store::outbox_set_status(&a.conn, &mid, "delivered").unwrap();
+        drop(a);
+        let mut a = Core::open_encrypted(&da.join("core.db"), &[17; 32]).unwrap();
+        let mut t = Fake::new(vec![authenticated_resp(), binding_resp(&b)]);
+        t.echo_send_ack = true;
+        assert_eq!(a.retry_queued(&mut t).await.unwrap().resent, 1);
+        assert_eq!(
+            t.sent.iter().find(|(op, _)| *op == OP_SEND).unwrap().1[32..],
+            control.ciphertext
+        );
+        assert!(!t
+            .sent
+            .iter()
+            .any(|(op, _)| *op == dmsg_protocol::OP_MESSAGE_METADATA));
+        assert_eq!(
+            a.message_status(&crate::history::hex(&control.message_id))
+                .unwrap(),
+            Some(crate::history::DeliveryState::Accepted)
+        );
+        assert_eq!(a.outbox_ciphertext(&mid).unwrap(), wire);
+        let (ed, curve) = b.identity_keys();
+        let changed = contacts::build_qr(
+            "BOBB00000002",
+            &b.my_account().unwrap().0,
+            &[42; 32],
+            &ed,
+            &curve,
+        )
+        .unwrap();
+        assert_eq!(
+            a.add_contact_qr(&changed).unwrap(),
+            contacts::QrResult::IdentityChanged
+        );
+        a.confirm_contact("BOBB00000002").unwrap();
+        // Even a cached session matching the new pins cannot retarget old ciphertext.
+        crate::store::save_session(&a.conn, "BOBB00000002", &state.unwrap().0, &ed, &curve)
+            .unwrap();
+        let mut t = Fake::new(vec![authenticated_resp()]);
+        let stats = a.retry_queued(&mut t).await.unwrap();
+        assert_eq!((stats.skipped, stats.resent), (1, 0));
+        assert!(!t.sent.iter().any(|(op, _)| *op == OP_SEND));
+        assert_eq!(
+            a.edit_message("BOBB00000002", id, 1, "wrong recipient"),
+            Err(OlmError::MessageUnavailable)
+        );
+        assert_eq!(exact(&a, "BOBB00000002", id).text, "durable edit");
+        drop(a);
+        drop(b);
+        std::fs::remove_dir_all(da).unwrap();
+        std::fs::remove_dir_all(db).unwrap();
+    }
+
+    fn fetch_batch(events: &[&RawEvent]) -> Vec<u8> {
+        let mut body = (events.len() as u16).to_be_bytes().to_vec();
+        for event in events {
+            body.extend_from_slice(&event.seq.to_be_bytes());
+            body.extend_from_slice(&event.sender);
+            body.extend_from_slice(&event.sender_user);
+            body.extend_from_slice(&event.message_id);
+            body.extend_from_slice(&(event.ciphertext.len() as u16).to_be_bytes());
+            body.extend_from_slice(&event.ciphertext);
+        }
+        body
+    }
+
+    #[tokio::test]
+    async fn receive_control_projection_rolls_back_without_ack_and_final_batch_report_never_leaks_old_text(
+    ) {
+        let (mut a, mut b, da, db, mid, wire, id) = action_pair("actions-receive-rollback");
+        let original = RawEvent {
+            seq: 1,
+            sender: a.device_pub(),
+            sender_user: a.my_account().unwrap().0,
+            message_id: mid,
+            ciphertext: wire,
+        };
+        b.decrypt_event(&original).await.unwrap();
+        a.edit_message("BOBB00000002", id, 0, "new effective text")
+            .unwrap();
+        let edit = latest_control(&a, 2);
+        let batch = fetch_batch(&[&edit]);
+        let make = || {
+            Fake::new(vec![
+                authenticated_resp(),
+                count_resp(16),
+                (OP_FETCH_RESP, batch.clone()),
+                binding_resp(&a),
+                (OP_DELIVERY_ACK, 2u64.to_be_bytes().to_vec()),
+            ])
+        };
+        let before = b.history_page("ALICE0000001", None, 100).unwrap();
+        let crypto = crate::store::load_session(&b.conn, "ALICE0000001").unwrap();
+        b.conn.execute_batch("CREATE TRIGGER reject_projection BEFORE UPDATE OF revision ON core_messages WHEN OLD.kind='text' BEGIN SELECT RAISE(ABORT,'denied'); END;").unwrap();
+        let mut t = make();
+        assert!(matches!(
+            b.fetch_and_decrypt(&mut t).await,
+            Err(OlmError::Store(_))
+        ));
+        assert!(!t.sent.iter().any(|(op, _)| *op == OP_DELIVERY_ACK));
+        assert_eq!(b.history_page("ALICE0000001", None, 100).unwrap(), before);
+        assert_eq!(
+            crate::store::load_session(&b.conn, "ALICE0000001").unwrap(),
+            crypto
+        );
+        assert!(!crate::store::durable_event(&b.conn, &a.device_pub(), &edit.message_id).unwrap());
+        b.conn
+            .execute_batch("DROP TRIGGER reject_projection")
+            .unwrap();
+        assert!(b
+            .fetch_and_decrypt(&mut make())
+            .await
+            .unwrap()
+            .received
+            .is_empty());
+        assert_eq!(
+            b.history_page("ALICE0000001", None, 100).unwrap().rows[0].text,
+            "new effective text"
+        );
+        drop(a);
+        drop(b);
+        std::fs::remove_dir_all(da).unwrap();
+        std::fs::remove_dir_all(db).unwrap();
+
+        for delete in [false, true] {
+            let (mut a, mut b, da, db, mid, wire, id) = action_pair(if delete {
+                "actions-final-delete"
+            } else {
+                "actions-final-edit"
+            });
+            let original = RawEvent {
+                seq: 1,
+                sender: a.device_pub(),
+                sender_user: a.my_account().unwrap().0,
+                message_id: mid,
+                ciphertext: wire,
+            };
+            a.edit_message("BOBB00000002", id, 0, "final effective text")
+                .unwrap();
+            let edit = latest_control(&a, 2);
+            let deletion = if delete {
+                a.delete_message("BOBB00000002", id, crate::history::DeleteScope::Everyone)
+                    .unwrap();
+                Some(latest_control(&a, 3))
+            } else {
+                None
+            };
+            let mut events = vec![&original, &edit];
+            if let Some(event) = deletion.as_ref() {
+                events.push(event);
+            }
+            let mut replies = vec![
+                authenticated_resp(),
+                count_resp(16),
+                (OP_FETCH_RESP, fetch_batch(&events)),
+            ];
+            for _ in &events {
+                replies.push(binding_resp(&a));
+            }
+            replies.push((
+                OP_DELIVERY_ACK,
+                (events.len() as u64).to_be_bytes().to_vec(),
+            ));
+            let result = b.fetch_and_decrypt(&mut Fake::new(replies)).await.unwrap();
+            if delete {
+                assert!(result.received.is_empty());
+            } else {
+                assert_eq!(result.received.len(), 1);
+                assert_eq!(result.received[0].text, "final effective text");
+            }
+            assert_eq!(crate::store::inbox_count(&b.conn).unwrap(), 1);
+            drop(a);
+            drop(b);
+            std::fs::remove_dir_all(da).unwrap();
+            std::fs::remove_dir_all(db).unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn crypto_loop_through_doubles() {
         crypto_loop(false).await;
@@ -1312,14 +2071,14 @@ mod tests {
 
     async fn crypto_loop(encrypted: bool) {
         let suffix = if encrypted { "sealed" } else { "plain" };
-        let (mut a, da) = tmp_core(&format!("loop-a-{suffix}"));
-        let (mut b, db) = tmp_core(&format!("loop-b-{suffix}"));
-        if encrypted {
-            drop(a);
-            drop(b);
-            a = Core::open_encrypted(&da.join("core.db"), &[9; 32]).expect("sealed a");
-            b = Core::open_encrypted(&db.join("core.db"), &[8; 32]).expect("sealed b");
-        }
+        let (mut a, da) = tmp_core_mode(
+            &format!("loop-a-{suffix}"),
+            if encrypted { Some(&[9; 32]) } else { None },
+        );
+        let (mut b, db) = tmp_core_mode(
+            &format!("loop-b-{suffix}"),
+            if encrypted { Some(&[8; 32]) } else { None },
+        );
         link(&mut a, &mut b, "ALICE0000001", "BOBB00000002");
         // Настоящий one-time Боба для CLAIM-ответа (подписан его identity).
         b.account.generate_one_time_keys(1);
@@ -1513,7 +2272,7 @@ mod tests {
         }
 
         // A failed durable lookup must abort the batch without DELIVERY_ACK.
-        b.conn.execute("DROP TABLE core_inbox", []).unwrap();
+        b.conn.execute("DROP TABLE core_messages", []).unwrap();
         let mut fe3 = vec![0, 1];
         fe3.extend_from_slice(&1u64.to_be_bytes());
         fe3.extend_from_slice(&a_dev);
@@ -1822,8 +2581,12 @@ mod tests {
             .as_bytes();
         let mut outbound =
             olm::outbound(&a.account, &olm::curve_identity(&b.account), &ot).unwrap();
-        let mut plaintext = olm::ed_identity(&a.account).to_vec();
-        plaintext.extend_from_slice(b"integrity message");
+        let mut event = dmsg_protocol::e2e::Event {
+            message_id: [1; 16],
+            sender_ed: olm::ed_identity(&a.account),
+            body: dmsg_protocol::e2e::Body::Text("integrity message".into()),
+        };
+        let plaintext = dmsg_protocol::e2e::encode(&event).unwrap();
         let first = RawEvent {
             seq: 1,
             sender: a.device_pub(),
@@ -1836,7 +2599,12 @@ mod tests {
         let _ = outbound
             .decrypt(&olm::decode_wire(&reverse.2).unwrap())
             .unwrap();
-        let valid = olm::encode_wire(&outbound.encrypt(&plaintext).unwrap());
+        event.message_id = [2; 16];
+        let valid = olm::encode_wire(
+            &outbound
+                .encrypt(dmsg_protocol::e2e::encode(&event).unwrap())
+                .unwrap(),
+        );
         assert_eq!(valid[0], 1);
         let mut broken = valid.clone();
         *broken.last_mut().unwrap() ^= 1;
@@ -1902,12 +2670,8 @@ mod tests {
 
     #[tokio::test]
     async fn history_failure_rolls_back_ratchets_outbox_inbox_and_activity_without_ack() {
-        let (mut a, da) = tmp_core("history-rollback-a");
-        let (mut b, db) = tmp_core("history-rollback-b");
-        drop(a);
-        drop(b);
-        a = Core::open_encrypted(&da.join("core.db"), &[17; 32]).unwrap();
-        b = Core::open_encrypted(&db.join("core.db"), &[18; 32]).unwrap();
+        let (mut a, da) = tmp_core_mode("history-rollback-a", Some(&[17; 32]));
+        let (mut b, db) = tmp_core_mode("history-rollback-b", Some(&[18; 32]));
         link(&mut a, &mut b, "ALICE0000001", "BOBB00000002");
         b.account.generate_one_time_keys(1);
         olm::persist(&b.conn, &b.account, b.next_key_id).unwrap();
@@ -1973,7 +2737,7 @@ mod tests {
         batch.extend_from_slice(&wire);
         let account_before = crate::store::load_olm(&b.conn).unwrap();
         let dialog_before = b.dialogs_page(None, 100).unwrap();
-        b.conn.execute_batch("CREATE TRIGGER reject_history AFTER INSERT ON core_history BEGIN SELECT RAISE(ABORT,'denied'); END;").unwrap();
+        b.conn.execute_batch("CREATE TRIGGER reject_history AFTER INSERT ON core_messages BEGIN SELECT RAISE(ABORT,'denied'); END;").unwrap();
         let fake = || {
             Fake::new(vec![
                 authenticated_resp(),

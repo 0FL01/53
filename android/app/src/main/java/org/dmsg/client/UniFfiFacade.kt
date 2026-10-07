@@ -5,10 +5,9 @@ import uniffi.dmsg_core.DmsgClient
 import uniffi.dmsg_core.FfiException
 import uniffi.dmsg_core.QrKind
 import uniffi.dmsg_core.QrOutcome
-import uniffi.dmsg_core.StoragePlan
+import uniffi.dmsg_core.DeleteScope
 import uniffi.dmsg_core.pageLimit
 import uniffi.dmsg_core.qrKind
-import uniffi.dmsg_core.storagePlan
 import java.io.File
 
 /** Real facade over generated UniFFI bindings (commands/events only). */
@@ -98,7 +97,7 @@ class UniFfiFacade(private val dbPath: String, key: ByteArray, private val conte
 
     override fun outbox(cursor: Long, limit: Int): Pair<List<OutRow>, Long?> = wrap {
         val p = core.outboxPage(cursor, pageLimit(limit.toUInt()))
-        Pair(p.rows.map { OutRow(it.messageIdHex, it.contactId, it.status) }, p.nextCursor)
+        Pair(p.rows.map { OutRow(it.messageIdHex, it.contactId, it.status, it.kind) }, p.nextCursor)
     }
 
     /** Cancellation precedes the store lock, for foreground commands as well as FGS events. */
@@ -132,6 +131,13 @@ class UniFfiFacade(private val dbPath: String, key: ByteArray, private val conte
     }
 
     override fun send(id: String, text: String): String = dnsCommand { core.sendDns(id, text) }
+    // Local durable commands must work offline, before any DNS observation/application.
+    override fun editMessage(contactId: String, localId: Long, expectedRevision: ULong, text: String) = wrap {
+        core.editMessage(contactId, localId, expectedRevision, text)
+    }
+    override fun deleteMessage(contactId: String, localId: Long, scope: DeleteScope) = wrap {
+        core.deleteMessage(contactId, localId, scope)
+    }
 
     override fun retry(): LongArray = dnsCommand {
         val r = core.retryDns()
@@ -154,11 +160,4 @@ class UniFfiFacade(private val dbPath: String, key: ByteArray, private val conte
 
     override fun qrKind(uri: String): QrKind = wrap { uniffi.dmsg_core.qrKind(uri) }
 
-    override fun storagePlan(hasLegacy: Boolean, hasWrapped: Boolean): String = wrap {
-        when (uniffi.dmsg_core.storagePlan(hasLegacy, hasWrapped)) {
-            StoragePlan.FRESH_INSTALL -> "fresh"
-            StoragePlan.MIGRATE_LEGACY -> "migrate"
-            StoragePlan.READY_WRAPPED -> "ready"
-        }
-    }
 }

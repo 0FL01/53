@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="message_actions">Действия с сообщением</string>
+    <string name="edit_whole_message">Изменить всё сообщение</string>
+    <string name="delete_whole_message">Удалить всё сообщение…</string>
+    <string name="editing_message">Редактирование отправленного сообщения</string>
+    <string name="save_edit">Сохранить</string>
+    <string name="cancel_edit">Отменить правку</string>
+    <string name="saving_change">Сохраняем изменение локально…</string>
+    <string name="delete_title">Удалить это сообщение?</string>
+    <string name="delete_self">Только у меня</string>
+    <string name="delete_everyone">У всех</string>
+    <string name="delete_confirm">Удалить</string>
+    <string name="delete_warning">«Только у меня» скрывает сообщение здесь. «У всех» также сохраняет удаление в очереди; у собеседника оно применится после получения.</string>
+    <string name="self_hide_warning">Скрытие сообщения в очереди не отменяет отправку. Оно остаётся в очереди.</string>
+    <string name="self_hidden">Сообщение скрыто на этом устройстве.</string>
+    <string name="self_hidden_queued">Сообщение скрыто на этом устройстве. Его отправка из очереди не отменена.</string>
+    <string name="edit_saved">Правка сохранена локально · %1$s</string>
+    <string name="edit_unchanged">Сообщение не изменено. Текущая ревизия проверена; новая правка не добавлена в очередь.</string>
+    <string name="delete_saved">Сообщение удалено здесь. Удаление у всех сохранено · %1$s</string>
+    <string name="change_pending">Изменение сохранено. Попытка связи завершилась ошибкой; повторите очередь.</string>
+    <string name="change_not_saved">Изменение не сохранено. %1$s</string>
+    <string name="change_uncertain">Не удалось проверить локальное изменение. Черновик сохранён; новая отправка и действия приостановлены до проверки точного сообщения.</string>
+    <string name="error_message_changed">Сообщение изменилось. Черновик правки сохранён. Проверьте его и снова нажмите «Сохранить».</string>
+    <string name="error_message_unavailable">Сообщение недоступно для этого действия. Черновик правки сохранён и не будет отправлен как новое сообщение.</string>
+    <string name="original_delivery">Исходное: %1$s</string>
+    <string name="edit_delivery">Правка: %1$s</string>
+    <string name="message_edited">Изменено</string>
+    <string name="outbox_text">Сообщение</string>
+    <string name="outbox_edit">Правка сообщения</string>
+    <string name="outbox_delete">Удаление у всех</string>
+    <string name="outbox_event">Исходящее событие</string>
+    <string name="delete_queue_notice">Удалено локально. Удаление у собеседника имеет свой статус доставки; повтор использует сохранённое удаление.</string>
+</resources>

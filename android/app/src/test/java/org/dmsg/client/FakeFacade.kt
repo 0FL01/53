@@ -4,6 +4,7 @@ import uniffi.dmsg_core.AccountInfo
 import uniffi.dmsg_core.LoginOutcome
 import uniffi.dmsg_core.RegistrationPolicy
 import uniffi.dmsg_core.DeliveryState
+import uniffi.dmsg_core.DeleteScope
 import uniffi.dmsg_core.DialogSummary
 import uniffi.dmsg_core.DialogsPage
 import uniffi.dmsg_core.HistoryMessage
@@ -34,6 +35,13 @@ class FakeFacade : DmsgFacade {
     val readCursors = mutableMapOf<String, Long>()
     var sendFailure: DmsgError? = null
     var failAfterInsert = false
+    var mutationFailure: DmsgError? = null
+    var failAfterMutation = false
+    var retryFailure: DmsgError? = null
+    var mutationCalls = 0
+    var retryCalls = 0
+    val controls = mutableListOf<OutRow>()
+    val controlStates = mutableMapOf<String, DeliveryState>()
 
     override fun isReady() = true
     override fun dnsProfile() = profile
@@ -98,7 +106,7 @@ class FakeFacade : DmsgFacade {
         val page = all.take(limit.coerceIn(1, 100))
         return HistoryPage(page.map { it.copy() }, if (all.size > page.size) page.last().localId else null)
     }
-    override fun messageStatus(mid: String) = history.find { it.messageIdHex == mid && it.direction == MessageDirection.OUTGOING }?.deliveryState
+    override fun messageStatus(mid: String) = controlStates[mid] ?: history.find { it.messageIdHex == mid && it.direction == MessageDirection.OUTGOING }?.deliveryState
     override fun historyMessage(contactId: String, localId: Long) = history.single { it.contactId == contactId && it.localId == localId }.copy()
     override fun timelinePage(contactId: String, beforeLocalId: Long?, limit: Int): HistoryPage {
         val anchor = beforeLocalId?.let { historyMessage(contactId, it) }
@@ -108,10 +116,10 @@ class FakeFacade : DmsgFacade {
     }
     override fun dialogsPage(cursor: String?, limit: Int): DialogsPage {
         val summaries = dialogs.map { dialog ->
-            val last = history.filter { it.contactId == dialog.contactId }.maxByOrNull { it.localId }
+            val last = history.filter { it.contactId == dialog.contactId && messageVisible(it) }.maxByOrNull { it.localId }
             val read = readCursors[dialog.contactId] ?: 0L
             DialogSummary(dialog.contactId, aliases[dialog.contactId], last?.text, last?.localTimestampMs,
-                history.count { it.contactId == dialog.contactId && it.direction == MessageDirection.INCOMING && it.localId > read }.toULong(),
+                history.count { it.contactId == dialog.contactId && messageVisible(it) && it.direction == MessageDirection.INCOMING && it.localId > read }.toULong(),
                 read, dialog.hasKeys, dialog.identityMismatch, dialog.state)
         }.sortedWith(compareByDescending<DialogSummary> { it.lastLocalTimestampMs ?: 0L }.thenBy { it.contactId })
         val start = cursor?.toInt() ?: 0
@@ -125,23 +133,57 @@ class FakeFacade : DmsgFacade {
         readCursors[id] = cursor
         return cursor
     }
-    override fun outbox(cursor: Long, limit: Int) = Pair(emptyList<OutRow>(), null)
+    override fun outbox(cursor: Long, limit: Int): Pair<List<OutRow>, Long?> {
+        val page = controls.drop(cursor.toInt()).take(limit)
+        val next = (cursor + page.size).takeIf { it < controls.size }
+        return page to next
+    }
     override fun send(id: String, text: String): String {
         sendFailure?.let { throw it }
         lastSent = text
         val localId = (history.maxOfOrNull { it.localId } ?: 0L) + 1
         val mid = localId.toString(16).padStart(32, '0')
-        history.add(HistoryMessage(localId, mid, id, MessageDirection.OUTGOING, text, localId, DeliveryState.QUEUED, null, null))
+        history.add(HistoryMessage(localId, mid, id, MessageDirection.OUTGOING, text, localId, DeliveryState.QUEUED, null, null, 0uL, false, false, null))
         if (failAfterInsert) throw DmsgError("fixture post-commit failure", ErrorKind.Transport)
         return mid
     }
-    override fun retry() = longArrayOf(0, 0, 0, 0)
+    override fun editMessage(contactId: String, localId: Long, expectedRevision: ULong, text: String): HistoryMessage {
+        mutationCalls++
+        mutationFailure?.let { throw it }
+        val row = historyMessage(contactId, localId)
+        if (!canChangeMessage(row, get(contactId))) throw DmsgError(R.string.error_message_unavailable, ErrorKind.MessageUnavailable)
+        if (row.revision != expectedRevision) throw DmsgError(R.string.error_message_changed, ErrorKind.MessageChanged)
+        if (text.isEmpty() || text.toByteArray(Charsets.UTF_8).size > 4096) throw DmsgError(R.string.error_bad_text, ErrorKind.BadText)
+        if (text == row.text) return row
+        val updated = row.copy(text = text, revision = row.revision + 1uL, changeDeliveryState = DeliveryState.QUEUED)
+        history[history.indexOfFirst { it.localId == localId }] = updated
+        control(contactId, "edit")
+        if (failAfterMutation) throw DmsgError("fixture postcommit failure", ErrorKind.Store)
+        return updated.copy()
+    }
+    override fun deleteMessage(contactId: String, localId: Long, scope: DeleteScope): HistoryMessage {
+        mutationCalls++
+        mutationFailure?.let { throw it }
+        val row = historyMessage(contactId, localId)
+        if (!canHideMessage(row) || (scope == DeleteScope.EVERYONE && !canChangeMessage(row, get(contactId))))
+            throw DmsgError(R.string.error_message_unavailable, ErrorKind.MessageUnavailable)
+        val updated = if (scope == DeleteScope.SELF_ONLY) row.copy(text = "", hiddenSelf = true)
+            else row.copy(text = "", deletedAll = true, revision = row.revision + 1uL, changeDeliveryState = DeliveryState.QUEUED)
+        history[history.indexOfFirst { it.localId == localId }] = updated
+        if (scope == DeleteScope.EVERYONE) control(contactId, "delete")
+        if (failAfterMutation) throw DmsgError("fixture postcommit failure", ErrorKind.Store)
+        return updated.copy()
+    }
+    private fun control(contactId: String, kind: String) {
+        val mid = (100000L + controls.size).toString(16).padStart(32, '0')
+        controls.add(OutRow(mid, contactId, "queued", kind))
+        controlStates[mid] = DeliveryState.QUEUED
+    }
+    override fun retry(): LongArray { retryCalls++; retryFailure?.let { throw it }; return longArrayOf(0, 0, 0, 0) }
     override fun fetch() =
         FetchRes(emptyList(), longArrayOf(0, 0, 0, 0), 0)
     override fun reconnect() = 16L
     override fun qrKind(uri: String) = QrGate.route(uri).getOrThrow()
-    override fun storagePlan(hasLegacy: Boolean, hasWrapped: Boolean) =
-        if (hasWrapped) "ready" else if (hasLegacy) "migrate" else "fresh"
 
     private fun replace(id: String, state: String) {
         val i = dialogs.indexOfFirst { it.contactId == id }

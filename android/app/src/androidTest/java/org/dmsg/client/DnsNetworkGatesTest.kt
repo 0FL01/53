@@ -57,7 +57,7 @@ class DnsNetworkGatesTest {
     }
     private fun hash(app: Context, mid: String): String =
         SQLiteDatabase.openDatabase(Core.dbFile(app).absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { db ->
-            db.rawQuery("SELECT ciphertext FROM core_outbox WHERE lower(hex(message_id))=?", arrayOf(mid)).use { c ->
+            db.rawQuery("SELECT ciphertext FROM core_messages WHERE direction='outgoing' AND lower(hex(message_id))=?", arrayOf(mid)).use { c ->
                 assertTrue(c.moveToFirst())
                 MessageDigest.getInstance("SHA-256").digest(c.getBlob(0)).joinToString("") { "%02x".format(it.toInt() and 255) }
             }

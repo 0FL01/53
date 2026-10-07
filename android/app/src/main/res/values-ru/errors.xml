@@ -57,7 +57,7 @@
     <string name="error_profile_unsaved">DNS профиль не сохранён</string>
     <string name="error_connection_code_required">Сначала добавьте код подключения</string>
     <string name="error_profile_save">Не удалось сохранить сведения о сервере</string>
-    <string name="error_pending_send">Сначала дождитесь проверки незавершённой отправки в предыдущем чате</string>
+    <string name="error_pending_send">Сначала дождитесь проверки незавершённой локальной записи в предыдущем чате</string>
     <string name="error_send_not_saved">Отправка не была сохранена. Черновик сохранён</string>
     <string name="error_contact_qr_required">Для добавления контакта нужен QR контакта</string>
     <string name="error_server_qr_required">Нужен публичный QR сервера, а не контакта</string>

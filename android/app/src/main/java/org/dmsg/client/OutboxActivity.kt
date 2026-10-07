@@ -86,7 +86,8 @@ class OutboxActivity : DmsgActivity() {
                     val ids = rows.map { it.mid }.toMutableSet()
                     page.first.zip(states).filter { ids.add(it.first.mid) }.forEach { (row, state) ->
                         rows.add(row)
-                        labels.add(getString(R.string.outbox_row, row.contactId, deliveryLabel(resources, state.first), row.mid) +
+                        labels.add(getString(outboxKindRes(row.kind)) + "\n" + getString(R.string.outbox_row, row.contactId, deliveryLabel(resources, state.first), row.mid) +
+                            (if (row.kind == "delete") "\n" + getString(R.string.delete_queue_notice) else "") +
                             if (contactCta(state.second) != ContactCta.Chat) "\n" + trustLabel(resources, state.second) else "")
                     }
                     next = page.second

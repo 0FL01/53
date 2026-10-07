@@ -69,11 +69,11 @@ object Core {
         override fun inbox(cursor: Long, limit: Int): Pair<List<Msg>, Long?> = fail()
         override fun outbox(cursor: Long, limit: Int): Pair<List<OutRow>, Long?> = fail()
         override fun send(id: String, text: String): String = fail()
+        override fun editMessage(contactId: String, localId: Long, expectedRevision: ULong, text: String): uniffi.dmsg_core.HistoryMessage = fail()
+        override fun deleteMessage(contactId: String, localId: Long, scope: uniffi.dmsg_core.DeleteScope): uniffi.dmsg_core.HistoryMessage = fail()
         override fun retry(): LongArray = fail()
         override fun fetch(): FetchRes = fail()
         override fun reconnect(): Long = fail()
         override fun qrKind(uri: String): QrKind = fail()
-        override fun storagePlan(hasLegacy: Boolean, hasWrapped: Boolean): String =
-            if (hasWrapped) "ready" else if (hasLegacy) "migrate" else "fresh"
     }
 }

@@ -199,16 +199,18 @@ class DeviceGatesTest {
 
     private fun seedFixtureDb(name: String = "core.db", deviceByte: Byte = 7): File {
         val file = File(dir, name)
-        DmsgClient.open(file.absolutePath).use { client ->
-            client.accountInfo() // Current schema, plaintext only in this throwaway fixture.
+        val key = if (name == "core.db") SecureStore.key(context) else ByteArray(32) { 4 }
+        DmsgClient.openEncrypted(file.absolutePath, key).use { client ->
+            client.accountInfo()
             client.configureDns(syntheticServerCode(), listOf("127.0.0.1:1"))
         }
         SQLiteDatabase.openDatabase(file.absolutePath, null, SQLiteDatabase.OPEN_READWRITE).use { db ->
-            db.execSQL("INSERT INTO core_identity(id,device_priv) VALUES(1,?)", arrayOf(ByteArray(32) { deviceByte }))
+            db.execSQL("INSERT INTO core_identity(id,device_priv) VALUES(1,?)", arrayOf(sealedFixtureValue(key,"device_priv",ByteArray(32) { deviceByte })))
             db.execSQL("INSERT INTO core_account(id,user_id,contact_id) VALUES(1,?,?)", arrayOf(ByteArray(16) { 1 }, id))
-            db.execSQL("INSERT INTO core_inbox(sender_device,message_id,contact_id,text,seq) VALUES(?,?,?,?,1)",
-                arrayOf(ByteArray(32) { 2 }, ByteArray(16) { 3 }, id, "fixture private text"))
+            db.execSQL("INSERT INTO core_messages(sender_device,message_id,contact_id,direction,kind,text,local_timestamp_ms,server_seq,server_timestamp_ms) VALUES(?,?,?,'incoming','text',?,1,1,1)",
+                arrayOf(ByteArray(32) { 2 }, ByteArray(16) { 3 }, id, sealedFixtureValue(key,"message_text","fixture private text".toByteArray())))
         }
+        key.fill(0)
         return file
     }
 
@@ -219,7 +221,7 @@ class DeviceGatesTest {
         return "dmsg://server/" + android.util.Base64.encodeToString(raw, android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING)
     }
 
-    @Test fun migrateEncryptedReopenAndRestoreOnlyWithOriginalKey() {
+    @Test fun freshEncryptedReopenAndRestoreOnlyWithOriginalKey() {
         val db = seedFixtureDb()
         val f = Core.facade(context)
         assertEquals(AccountInfo(true, id), f.account())
@@ -229,7 +231,7 @@ class DeviceGatesTest {
                 assertTrue(it.moveToFirst()); assertEquals(FIELD_TYPE_BLOB, it.getType(0))
                 assertFalse(it.getBlob(0).contentEquals(ByteArray(32) { 7 }))
             }
-            sql.rawQuery("SELECT text FROM core_inbox", null).use {
+            sql.rawQuery("SELECT text FROM core_messages WHERE kind='text'", null).use {
                 assertTrue(it.moveToFirst()); assertEquals(FIELD_TYPE_BLOB, it.getType(0))
             }
         }
@@ -284,26 +286,26 @@ class DeviceGatesTest {
         assumeTrue(app.packageName.endsWith(".gate"))
         val dbFile = File(app.filesDir, "core.db")
         assertFalse("fixture package must be fresh", dbFile.exists())
-        DmsgClient.open(dbFile.absolutePath).use { it.accountInfo(); it.configureDns(syntheticServerCode(), listOf("127.0.0.1:1")) }
+        val key = SecureStore.key(app)
+        DmsgClient.openEncrypted(dbFile.absolutePath,key).use { it.accountInfo(); it.configureDns(syntheticServerCode(), listOf("127.0.0.1:1")) }
         val peer = "PEER1234ABCD"
         SQLiteDatabase.openDatabase(dbFile.absolutePath, null, SQLiteDatabase.OPEN_READWRITE).use { db ->
             db.beginTransaction()
             try {
-                db.execSQL("INSERT INTO core_identity(id,device_priv) VALUES(1,?)", arrayOf(ByteArray(32) { 7 }))
+                db.execSQL("INSERT INTO core_identity(id,device_priv) VALUES(1,?)", arrayOf(sealedFixtureValue(key,"device_priv",ByteArray(32) { 7 })))
                 db.execSQL("INSERT INTO core_account(id,user_id,contact_id) VALUES(1,?,?)", arrayOf(ByteArray(16) { 1 }, id))
                 db.execSQL("INSERT INTO core_contacts(contact_id,state) VALUES(?,'requested')", arrayOf(peer))
                 for (seq in 1..551) {
                     val mid = ByteArray(16)
                     mid[0] = (seq shr 8).toByte()
                     mid[1] = seq.toByte()
-                    db.execSQL("INSERT INTO core_inbox(sender_device,message_id,contact_id,text,seq) VALUES(?,?,?,?,?)",
-                        arrayOf(ByteArray(32) { 2 }, mid, peer, "fixture message $seq", seq))
-                    db.execSQL("INSERT INTO core_history(message_id,contact_id,direction,sender_device,text,local_timestamp_ms) VALUES(?,?,'incoming',?,?,?)",
-                        arrayOf(mid, peer, ByteArray(32) { 2 }, "fixture message $seq", seq.toLong()))
+                    db.execSQL("INSERT INTO core_messages(message_id,contact_id,direction,kind,sender_device,text,local_timestamp_ms,server_seq,server_timestamp_ms) VALUES(?,?,'incoming','text',?,?,?,?,?)",
+                        arrayOf(mid, peer, ByteArray(32) { 2 }, sealedFixtureValue(key,"message_text","fixture message $seq".toByteArray()), seq.toLong(),seq.toLong(),seq.toLong()))
                 }
                 db.setTransactionSuccessful()
             } finally { db.endTransaction() }
         }
+        key.fill(0)
         assertEquals(AccountInfo(true, id), Core.facade(app).account())
         assertEquals(50, Core.facade(app).inbox(0, 50).first.size)
         assertEquals(50, Core.facade(app).historyPage(peer, null, 50).rows.size)
@@ -487,7 +489,7 @@ class DeviceGatesTest {
             assertTrue(second.cursor >= first.cursor)
             assertEquals(AccountInfo(true, id), Core.facade(app).account())
             SQLiteDatabase.openDatabase(Core.dbFile(app).absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { sql ->
-                sql.rawQuery("PRAGMA user_version", null).use { row -> assertTrue(row.moveToFirst()); assertEquals(6, row.getInt(0)) }
+                sql.rawQuery("PRAGMA user_version", null).use { row -> assertTrue(row.moveToFirst()); assertEquals(8, row.getInt(0)) }
             }
             val output = File(app.filesDir, "gate-account.json")
             assertFalse("finish previous gate first", output.exists())
@@ -819,7 +821,7 @@ class DeviceGatesTest {
 
     private fun ciphertextHash(app: Context, mid: String): String {
         SQLiteDatabase.openDatabase(Core.dbFile(app).absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { db ->
-            db.rawQuery("SELECT ciphertext FROM core_outbox WHERE lower(hex(message_id))=?", arrayOf(mid)).use { c ->
+            db.rawQuery("SELECT ciphertext FROM core_messages WHERE direction='outgoing' AND lower(hex(message_id))=?", arrayOf(mid)).use { c ->
                 assertTrue("persisted ciphertext is required", c.moveToFirst())
                 return MessageDigest.getInstance("SHA-256").digest(c.getBlob(0))
                     .joinToString("") { "%02x".format(it.toInt() and 255) }

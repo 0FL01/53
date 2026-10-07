@@ -46,4 +46,13 @@ class FfiErrorsTest {
             assertEquals(resource, humanErrorRes(DmsgError(fixture, kind)))
         }
     }
+    @Test fun messageActionErrorsAreStaticAndDistinct() {
+        val changed = ffiError(FfiException.MessageChanged())
+        val unavailable = ffiError(FfiException.MessageUnavailable())
+        assertEquals(ErrorKind.MessageChanged, changed.kind)
+        assertEquals(ErrorKind.MessageUnavailable, unavailable.kind)
+        assertEquals(R.string.error_message_changed, humanErrorRes(changed))
+        assertEquals(R.string.error_message_unavailable, humanErrorRes(unavailable))
+        assertNotEquals(changed.uiMessageRes, unavailable.uiMessageRes)
+    }
 }

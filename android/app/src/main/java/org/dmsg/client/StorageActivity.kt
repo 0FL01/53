@@ -13,7 +13,7 @@ class StorageActivity : DmsgActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState); setContentView(R.layout.activity_storage)
         NativeUi.back(this, getString(R.string.title_storage))
-        findViewById<Button>(R.id.btn_migrate).setOnClickListener {
+        findViewById<Button>(R.id.btn_snapshot).setOnClickListener {
             work(getString(R.string.saving_copy), { SecureStore.seal(applicationContext) }) { getString(R.string.copy_saved) }
         }
         findViewById<Button>(R.id.btn_unseal).setOnClickListener {
@@ -32,7 +32,7 @@ class StorageActivity : DmsgActivity() {
     override fun onResume() { super.onResume(); active = true; showPlan() }
     override fun onPause() { active = false; guard.stop(); prompt?.dismiss(); prompt = null; super.onPause() }
     private fun controls() {
-        for (id in listOf(R.id.btn_migrate, R.id.btn_unseal, R.id.btn_wipe_cache)) findViewById<Button>(id).isEnabled = !guard.pending
+        for (id in listOf(R.id.btn_snapshot, R.id.btn_unseal, R.id.btn_wipe_cache)) findViewById<Button>(id).isEnabled = !guard.pending
     }
     private fun <T> work(message: String, task: () -> T, success: (T) -> String) {
         val stamp = guard.begin() ?: return
@@ -57,7 +57,7 @@ class StorageActivity : DmsgActivity() {
             findViewById<TextView>(R.id.plan).text = getString(when (plan) {
                 "ready" -> R.string.store_ready
                 "reinstall_loss" -> R.string.store_key_lost
-                "migrate" -> R.string.store_unwrapped
+                "key_missing" -> R.string.store_unwrapped
                 else -> R.string.store_new
             }) + getString(R.string.store_files, getString(if (live) R.string.file_present else R.string.file_absent), getString(if (copy) R.string.file_present else R.string.file_absent))
             }, { findViewById<TextView>(R.id.plan).text = humanError(resources, it) })

@@ -8,11 +8,16 @@ import android.graphics.Typeface
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.ActionMode
+import android.view.Menu
+import android.view.MenuItem
 import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.accessibility.AccessibilityNodeInfoCompat.AccessibilityActionCompat
 import uniffi.dmsg_core.DialogSummary
 import uniffi.dmsg_core.HistoryMessage
 import uniffi.dmsg_core.MessageDirection
@@ -58,14 +63,19 @@ internal object NativeUi {
 }
 
 /** Stable IDs and natural-height text make large fonts/long messages scroll instead of clipping. */
-internal class HistoryAdapter(private val context: Context, private val rows: List<HistoryMessage>) : BaseAdapter() {
-    override fun getCount() = rows.size
-    override fun getItem(position: Int) = rows[position]
-    override fun getItemId(position: Int) = rows[position].localId
+internal class HistoryAdapter(private val context: Context, private val rows: List<HistoryMessage>,
+    private val canEdit: (HistoryMessage) -> Boolean, private val onEdit: (Long) -> Unit,
+    private val onDelete: (Long) -> Unit, private val onMenu: (Long) -> Unit) : BaseAdapter() {
+    var visibleRows: List<HistoryMessage> = rows.filter(::messageVisible)
+        private set
+    override fun notifyDataSetChanged() { visibleRows = rows.filter(::messageVisible); super.notifyDataSetChanged() }
+    override fun getCount() = visibleRows.size
+    override fun getItem(position: Int) = visibleRows[position]
+    override fun getItemId(position: Int) = visibleRows[position].localId
     override fun hasStableIds() = true
     override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
         val c = context
-        val message = rows[position]
+        val message = visibleRows[position]
         val outgoing = message.direction == MessageDirection.OUTGOING
         val root = LinearLayout(c).apply {
             tag = message.localId
@@ -78,7 +88,26 @@ internal class HistoryAdapter(private val context: Context, private val rows: Li
             setBackgroundColor(ContextCompat.getColor(c, if (outgoing) R.color.accent_soft else R.color.incoming))
         }
         val width = ((parent.width.takeIf { it > 0 } ?: c.resources.displayMetrics.widthPixels) - NativeUi.dp(c, 32)) * .86
-        bubble.addView(NativeUi.text(c).apply { text = message.text; setTextIsSelectable(true) },
+        val body = NativeUi.text(c).apply {
+            text = message.text
+            setTextIsSelectable(true)
+            if (canHideMessage(message)) customSelectionActionModeCallback = object : ActionMode.Callback {
+                override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean { selectionActions(menu); return true }
+                override fun onPrepareActionMode(mode: ActionMode, menu: Menu): Boolean { selectionActions(menu); return true }
+                private fun selectionActions(menu: Menu) {
+                    menu.removeItem(R.id.action_edit); menu.removeItem(R.id.action_delete)
+                    if (canEdit(message)) menu.add(0, R.id.action_edit, 100, R.string.edit_whole_message)
+                    menu.add(0, R.id.action_delete, 101, R.string.delete_whole_message)
+                }
+                override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean = when (item.itemId) {
+                    R.id.action_edit -> { mode.finish(); onEdit(message.localId); true }
+                    R.id.action_delete -> { mode.finish(); onDelete(message.localId); true }
+                    else -> false // System Copy/Select all keep their normal behavior.
+                }
+                override fun onDestroyActionMode(mode: ActionMode) {}
+            }
+        }
+        bubble.addView(body,
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         bubble.addView(NativeUi.text(c, 12f, true).apply {
             val time = when {
@@ -86,8 +115,25 @@ internal class HistoryAdapter(private val context: Context, private val rows: Li
                 message.deliveryState == uniffi.dmsg_core.DeliveryState.QUEUED -> c.getString(R.string.pending_timestamp, localTime(message.localTimestampMs))
                 else -> c.getString(R.string.legacy_timestamp, localTime(message.localTimestampMs))
             }
-            text = listOf(if (outgoing) deliveryLabel(c.resources, message.deliveryState) else c.getString(R.string.message_incoming), time).joinToString(" · ")
+            val original = if (outgoing) c.getString(R.string.original_delivery, deliveryLabel(c.resources, message.deliveryState)) else c.getString(R.string.message_incoming)
+            val change = if (message.revision > 0uL) {
+                if (outgoing) c.getString(R.string.edit_delivery, deliveryLabel(c.resources, message.changeDeliveryState)) else c.getString(R.string.message_edited)
+            } else null
+            text = listOfNotNull(original, change, time).joinToString(" · ")
+            if (canHideMessage(message)) setOnLongClickListener { onMenu(message.localId); true }
         })
+        if (canHideMessage(message)) {
+            bubble.setOnLongClickListener { onMenu(message.localId); true }
+            root.setOnLongClickListener { onMenu(message.localId); true }
+            // Both actions refer to the whole stable-ID message, never the selected substring.
+            for (view in listOf(root, body)) {
+                ViewCompat.replaceAccessibilityAction(view, AccessibilityActionCompat(R.id.action_delete, c.getString(R.string.delete_whole_message)),
+                    c.getString(R.string.delete_whole_message)) { _, _ -> onDelete(message.localId); true }
+                if (canEdit(message)) ViewCompat.replaceAccessibilityAction(view,
+                    AccessibilityActionCompat(R.id.action_edit, c.getString(R.string.edit_whole_message)),
+                    c.getString(R.string.edit_whole_message)) { _, _ -> onEdit(message.localId); true }
+            }
+        }
         root.addView(bubble, LinearLayout.LayoutParams(width.toInt(), ViewGroup.LayoutParams.WRAP_CONTENT))
         return root
     }

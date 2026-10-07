@@ -55,13 +55,13 @@ async fn offline_pending_then_server_acceptance_late_receive_retry_and_restart()
     store::open(&da)
         .unwrap()
         .execute(
-            "UPDATE core_history SET local_timestamp_ms=9000000000000",
+            "UPDATE core_messages SET local_timestamp_ms=9000000000000",
             [],
         )
         .unwrap();
     store::open(&db)
         .unwrap()
-        .execute("UPDATE core_history SET local_timestamp_ms=1", [])
+        .execute("UPDATE core_messages SET local_timestamp_ms=1", [])
         .unwrap();
     drop(a);
     a = Core::open(&da).unwrap();

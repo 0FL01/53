@@ -20,6 +20,12 @@ pub enum DeliveryState {
     Delivered,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum DeleteScope {
+    SelfOnly,
+    Everyone,
+}
+
 /// Positive durable local ID identifies ingestion, not server presentation order.
 /// Incoming delivery_state is always None; outgoing status is a persisted
 /// server-ACK fact (or Queued).
@@ -34,6 +40,10 @@ pub struct HistoryMessage {
     pub delivery_state: Option<DeliveryState>,
     pub server_seq: Option<i64>,
     pub server_timestamp_ms: Option<i64>,
+    pub revision: u64,
+    pub hidden_self: bool,
+    pub deleted_all: bool,
+    pub change_delivery_state: Option<DeliveryState>,
 }
 
 impl std::fmt::Debug for HistoryMessage {
@@ -127,34 +137,12 @@ pub(crate) fn local_time_ms() -> Result<i64, String> {
     i64::try_from(elapsed.as_millis()).map_err(|_| "local clock overflow".into())
 }
 
-/// Requires the caller's ratchet/outbox/inbox transaction. Strict insertion:
-/// retries and durable incoming dedup must bypass this function entirely.
-pub(crate) fn insert(
-    tx: &Transaction<'_>,
-    message_id: &[u8; 16],
-    contact_id: &str,
-    sender_device: Option<&[u8; 32]>,
-    text: &str,
-) -> Result<(), String> {
-    let now = local_time_ms()?;
-    let incoming = sender_device.is_some();
-    tx.execute(
-        "INSERT INTO core_history(message_id,contact_id,direction,sender_device,text,local_timestamp_ms,delivery_state)
-         VALUES(?1,?2,?3,?4,dmsg_seal('history_text',?5),?6,?7)",
-        params![message_id.as_slice(), contact_id,
-            if incoming { "incoming" } else { "outgoing" },
-            sender_device.map(|s| s.as_slice()), text, now,
-            if incoming { None } else { Some("queued") }],
-    ).map_err(|_| "history insert failed")?;
-    let changed = tx.execute(
-        "UPDATE core_contacts SET local_activity_ms=max(local_activity_ms,?2) WHERE contact_id=?1",
-        params![contact_id, now],
-    ).map_err(|_| "dialog activity update failed")?;
-    if changed != 1 {
-        return Err("history contact missing".into());
-    }
-    Ok(())
-}
+const MESSAGE_COLUMNS: &str = "m.local_id,m.message_id,m.direction,
+ CASE WHEN m.text IS NULL THEN '' ELSE CAST(dmsg_unseal('message_text',m.text) AS TEXT) END,
+ m.local_timestamp_ms,m.delivery_state,m.server_seq,m.server_timestamp_ms,m.revision,m.hidden_self,m.deleted_all,
+ (SELECT c.delivery_state FROM core_messages c WHERE c.direction='outgoing' AND c.kind!='text'
+   AND c.contact_id=m.contact_id AND c.sender_device=m.sender_device AND c.target_mid=m.message_id
+   ORDER BY c.revision DESC,c.local_id DESC LIMIT 1)";
 
 fn require_contact(conn: &Connection, contact_id: &str) -> Result<(), HistoryError> {
     if !contacts::valid_contact_id(contact_id) {
@@ -176,7 +164,7 @@ fn require_anchor(conn: &Connection, contact_id: &str, local_id: i64) -> Result<
         return Err(HistoryError::InvalidInput);
     }
     let exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM core_history WHERE local_id=?1 AND contact_id=?2)",
+        "SELECT EXISTS(SELECT 1 FROM core_messages WHERE local_id=?1 AND contact_id=?2 AND kind='text')",
         params![local_id, contact_id],
         |r| r.get(0),
     )?;
@@ -205,8 +193,8 @@ pub fn history_page(
 }
 
 /// Presentation order, distinct from append-only IDs used by send reconciliation
-/// and local read cursors. Legacy unknown rows form an honest local-order prefix;
-/// confirmed rows follow server seq; pending rows form a local-order tail.
+/// and local read cursors. Confirmed rows follow server seq; pending rows form a
+/// local-order tail. Hidden text remains a valid exclusive paging anchor.
 pub fn timeline_page(
     conn: &Connection,
     contact_id: &str,
@@ -228,18 +216,19 @@ fn page(
         require_anchor(&tx, contact_id, anchor)?;
     }
     let limit = limit.clamp(1, 100) as usize;
-    let key =
-        "CASE WHEN server_seq IS NOT NULL THEN 1 WHEN delivery_state='queued' THEN 2 ELSE 0 END";
-    let mut sql="SELECT local_id,message_id,direction,CAST(dmsg_unseal('history_text',text) AS TEXT),local_timestamp_ms,delivery_state,server_seq,server_timestamp_ms FROM core_history WHERE contact_id=?1".to_string();
+    let key = "(m.server_seq IS NULL)";
+    let mut sql = format!(
+        "SELECT {MESSAGE_COLUMNS} FROM core_messages m WHERE m.contact_id=?1 AND m.kind='text'"
+    );
     let anchor: Option<(i64, i64)> = if timeline {
-        before_local_id.map(|id|tx.query_row(&format!("SELECT {key},coalesce(server_seq,local_id) FROM core_history WHERE local_id=?1"),[id],|r|Ok((r.get(0)?,r.get(1)?)))).transpose()?
+        before_local_id.map(|id|tx.query_row(&format!("SELECT {key},coalesce(m.server_seq,m.local_id) FROM core_messages m WHERE m.local_id=?1 AND m.kind='text'"),[id],|r|Ok((r.get(0)?,r.get(1)?)))).transpose()?
     } else {
         None
     };
     if timeline {
-        sql+=&format!(" AND (?2 IS NULL OR ({key},coalesce(server_seq,local_id)) < (?2,?3)) ORDER BY {key} DESC,coalesce(server_seq,local_id) DESC LIMIT ?4");
+        sql+=&format!(" AND (?2 IS NULL OR ({key},coalesce(m.server_seq,m.local_id)) < (?2,?3)) ORDER BY {key} DESC,coalesce(m.server_seq,m.local_id) DESC LIMIT ?4");
     } else {
-        sql += " AND local_id<=?2 ORDER BY local_id DESC LIMIT ?4";
+        sql += " AND m.local_id<=?2 ORDER BY m.local_id DESC LIMIT ?4";
     }
     let mut stmt = tx.prepare(&sql)?;
     // A validated positive anchor makes subtract-one safe and lets SQLite use
@@ -299,11 +288,20 @@ fn read_message(row: &rusqlite::Row<'_>, contact_id: &str) -> Result<HistoryMess
         delivery_state: delivery,
         server_seq: row.get(6)?,
         server_timestamp_ms: row.get(7)?,
+        revision: row.get(8)?,
+        hidden_self: row.get(9)?,
+        deleted_all: row.get(10)?,
+        change_delivery_state: row
+            .get::<_, Option<String>>(11)?
+            .as_deref()
+            .map(state)
+            .transpose()?,
     })
 }
 
 /// Monotonic authenticated metadata, never replace a known order with a retry's
-/// wall clock or fabricate TTL-expired legacy order. Caller owns transaction.
+/// wall clock. Caller owns transaction; fresh TEXT always has original order.
+#[cfg(test)]
 pub(crate) fn set_order(
     tx: &Transaction<'_>,
     id: i64,
@@ -313,17 +311,15 @@ pub(crate) fn set_order(
         if o.seq <= 0 || o.timestamp_ms < 0 {
             return Err("invalid server order".into());
         }
-        let old:Option<(i64,i64)>=tx.query_row("SELECT server_seq,server_timestamp_ms FROM core_history WHERE local_id=?1 AND server_seq IS NOT NULL",[id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|_|"history order lookup failed")?;
+        let old:Option<(i64,i64)>=tx.query_row("SELECT server_seq,server_timestamp_ms FROM core_messages WHERE local_id=?1 AND kind='text' AND server_seq IS NOT NULL",[id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|_|"history order lookup failed")?;
         if old.is_some_and(|v| v != (o.seq, o.timestamp_ms)) {
             return Err("server order changed".into());
         }
-        tx.execute("UPDATE core_history SET server_seq=?2,server_timestamp_ms=?3,order_checked=1 WHERE local_id=?1",params![id,o.seq,o.timestamp_ms]).map_err(|_|"history order update failed")?;
+        if tx.execute("UPDATE core_messages SET server_seq=?2,server_timestamp_ms=?3 WHERE local_id=?1 AND kind='text'",params![id,o.seq,o.timestamp_ms]).map_err(|_|"history order update failed")? != 1 {
+            return Err("history order row missing".into());
+        }
     } else {
-        tx.execute(
-            "UPDATE core_history SET order_checked=1 WHERE local_id=?1",
-            [id],
-        )
-        .map_err(|_| "history order check failed")?;
+        return Err("text metadata missing".into());
     }
     Ok(())
 }
@@ -338,7 +334,17 @@ pub fn history_message(
     if local_id <= 0 {
         return Err(HistoryError::InvalidInput);
     }
-    let mut stmt = tx.prepare("SELECT local_id,message_id,direction,CAST(dmsg_unseal('history_text',text) AS TEXT),local_timestamp_ms,delivery_state,server_seq,server_timestamp_ms FROM core_history WHERE contact_id=?1 AND local_id=?2")?;
+    message_row(&tx, contact_id, local_id)
+}
+
+/// Exact canonical read inside an existing crypto/mutation transaction. Success
+/// DTO is prepared here before commit, without attempting a nested transaction.
+pub(crate) fn message_row(
+    conn: &Connection,
+    contact_id: &str,
+    local_id: i64,
+) -> Result<HistoryMessage, HistoryError> {
+    let mut stmt = conn.prepare(&format!("SELECT {MESSAGE_COLUMNS} FROM core_messages m WHERE m.contact_id=?1 AND m.local_id=?2 AND m.kind='text'"))?;
     let mut rows = stmt.query(params![contact_id, local_id])?;
     let row = rows.next()?.ok_or(HistoryError::InvalidInput)?;
     read_message(row, contact_id)
@@ -353,7 +359,7 @@ pub fn message_status(
     let mid = parse_message_id(message_id_hex)?;
     let value: Option<String> = conn
         .query_row(
-            "SELECT delivery_state FROM core_history WHERE message_id=?1 AND direction='outgoing'",
+            "SELECT delivery_state FROM core_messages WHERE message_id=?1 AND direction='outgoing'",
             [mid.as_slice()],
             |r| r.get(0),
         )
@@ -400,6 +406,14 @@ pub fn mark_read(
     let tx = Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
     require_contact(&tx, contact_id)?;
     require_anchor(&tx, contact_id, through_local_id)?;
+    let visible: bool = tx.query_row(
+        "SELECT hidden_self=0 AND deleted_all=0 FROM core_messages WHERE local_id=?1",
+        [through_local_id],
+        |r| r.get(0),
+    )?;
+    if !visible {
+        return Err(HistoryError::InvalidInput);
+    }
     tx.execute(
         "UPDATE core_contacts SET read_cursor=max(read_cursor,?2) WHERE contact_id=?1",
         params![contact_id, through_local_id],
@@ -423,13 +437,13 @@ pub fn dialogs_page(
     let mut stmt = conn.prepare(
         "SELECT c.contact_id,
             CASE WHEN c.local_alias IS NULL THEN NULL ELSE CAST(dmsg_unseal('contact_alias',c.local_alias) AS TEXT) END,
-            CASE WHEN h.text IS NULL THEN NULL ELSE CAST(dmsg_unseal('history_text',h.text) AS TEXT) END,
+            CASE WHEN h.text IS NULL THEN NULL ELSE CAST(dmsg_unseal('message_text',h.text) AS TEXT) END,
             h.local_timestamp_ms,c.read_cursor,
-            (SELECT count(*) FROM core_history u WHERE u.contact_id=c.contact_id AND u.direction='incoming' AND u.local_id>c.read_cursor),
+            (SELECT count(*) FROM core_messages u WHERE u.contact_id=c.contact_id AND u.direction='incoming' AND u.kind='text' AND u.hidden_self=0 AND u.deleted_all=0 AND u.local_id>c.read_cursor),
             c.user_id IS NOT NULL AND c.device_key IS NOT NULL AND c.ed_identity IS NOT NULL AND c.curve_identity IS NOT NULL,
             c.seen_user IS NOT NULL OR c.seen_device IS NOT NULL OR c.seen_ed IS NOT NULL OR c.seen_curve IS NOT NULL,
             c.state,c.local_activity_ms
-         FROM core_contacts c LEFT JOIN core_history h ON h.local_id=(SELECT local_id FROM core_history WHERE contact_id=c.contact_id ORDER BY local_id DESC LIMIT 1)
+         FROM core_contacts c LEFT JOIN core_messages h ON h.local_id=(SELECT local_id FROM core_messages WHERE contact_id=c.contact_id AND kind='text' AND hidden_self=0 AND deleted_all=0 ORDER BY local_id DESC LIMIT 1)
          WHERE (?1 IS NULL OR c.local_activity_ms<?1 OR (c.local_activity_ms=?1 AND c.contact_id>?2))
          ORDER BY c.local_activity_ms DESC,c.contact_id ASC LIMIT ?3",
     )?;
@@ -537,22 +551,42 @@ mod tests {
     }
 
     fn append(conn: &Connection, id: &str, n: u32, incoming: bool, text: &str) -> i64 {
+        append_order(conn, id, n, incoming, text, n as i64)
+    }
+
+    fn append_order(
+        conn: &Connection,
+        id: &str,
+        n: u32,
+        incoming: bool,
+        text: &str,
+        seq: i64,
+    ) -> i64 {
         let mut mid = [0; 16];
         mid[..4].copy_from_slice(&n.to_be_bytes());
         let tx =
             Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate).unwrap();
-        if !incoming {
-            store::outbox_insert(&tx, &mid, id, b"ciphertext", "queued").unwrap();
-        }
-        insert(
-            &tx,
-            &mid,
-            id,
-            if incoming { Some(&[7; 32]) } else { None },
-            text,
-        )
-        .unwrap();
-        let local_id = tx.last_insert_rowid();
+        let event = dmsg_protocol::e2e::Event {
+            message_id: mid,
+            sender_ed: [0; 32],
+            body: dmsg_protocol::e2e::Body::Text(text.into()),
+        };
+        let local_id = if incoming {
+            store::receive_event(
+                &tx,
+                id,
+                &[7; 32],
+                &event,
+                Some(dmsg_protocol::chronology::Order {
+                    seq,
+                    timestamp_ms: 1000,
+                }),
+            )
+            .unwrap()
+            .unwrap()
+        } else {
+            store::insert_outgoing(&tx, id, &[8; 32], &[0; 32], &event, b"ciphertext").unwrap()
+        };
         tx.commit().unwrap();
         local_id
     }
@@ -561,19 +595,7 @@ mod tests {
     fn presentation_pages_follow_server_order_across_600_rows_not_local_ids_or_clocks() {
         let (conn, dir) = fixture("server-order");
         for n in 1..=601 {
-            let id = append(&conn, A, n, true, "fixture");
-            let tx = Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)
-                .unwrap();
-            set_order(
-                &tx,
-                id,
-                Some(dmsg_protocol::chronology::Order {
-                    seq: 602 - n as i64,
-                    timestamp_ms: 1000,
-                }),
-            )
-            .unwrap();
-            tx.commit().unwrap();
+            append_order(&conn, A, n, true, "fixture", 602 - n as i64);
         }
         let local = history_page(&conn, A, None, 2).unwrap();
         assert_eq!(
@@ -857,12 +879,21 @@ mod tests {
             message_status(&conn, &id).unwrap(),
             Some(DeliveryState::Queued)
         );
-        store::outbox_set_status(&conn, &mid, "accepted").unwrap();
+        store::outbox_set_status_order(
+            &conn,
+            &mid,
+            "accepted",
+            Some(dmsg_protocol::chronology::Order {
+                seq: 1,
+                timestamp_ms: 1000,
+            }),
+        )
+        .unwrap();
         assert_eq!(
             message_status(&conn, &id.to_uppercase()).unwrap(),
             Some(DeliveryState::Accepted)
         );
-        conn.execute_batch("CREATE TRIGGER reject_status BEFORE UPDATE OF delivery_state ON core_history BEGIN SELECT RAISE(ABORT,'denied'); END;").unwrap();
+        conn.execute_batch("CREATE TRIGGER reject_status BEFORE UPDATE OF delivery_state ON core_messages BEGIN SELECT RAISE(ABORT,'denied'); END;").unwrap();
         assert!(store::outbox_set_status(&conn, &mid, "delivered").is_err());
         assert_eq!(
             store::outbox_queued(&conn, 0, 100).unwrap().0[0].4,
@@ -882,7 +913,8 @@ mod tests {
             Some(DeliveryState::Delivered)
         );
         assert!(store::outbox_queued(&conn, 0, 100).unwrap().0.is_empty());
-        conn.execute("DELETE FROM core_outbox", []).unwrap();
+        // The queue is a projection: Delivered disappears there, not from the
+        // canonical row. Removing a second status table is no longer possible.
         assert_eq!(
             message_status(&conn, &id).unwrap(),
             Some(DeliveryState::Delivered)
@@ -922,7 +954,7 @@ mod tests {
         append(&conn, A, 1, true, "private history authentication sentinel");
         set_contact_alias(&conn, A, Some("private alias authentication sentinel")).unwrap();
         let sealed_text: Vec<u8> = conn
-            .query_row("SELECT text FROM core_history", [], |r| r.get(0))
+            .query_row("SELECT text FROM core_messages", [], |r| r.get(0))
             .unwrap();
         let sealed_alias: Vec<u8> = conn
             .query_row(
@@ -932,11 +964,11 @@ mod tests {
             )
             .unwrap();
         // Same format, different authenticated field domains: swapping fails.
-        conn.execute("UPDATE core_history SET text=?1", [&sealed_alias])
+        conn.execute("UPDATE core_messages SET text=?1", [&sealed_alias])
             .unwrap();
         assert_eq!(history_page(&conn, A, None, 100), Err(HistoryError::Store));
         assert_eq!(dialogs_page(&conn, None, 100), Err(HistoryError::Store));
-        conn.execute("UPDATE core_history SET text=?1", [&sealed_text])
+        conn.execute("UPDATE core_messages SET text=?1", [&sealed_text])
             .unwrap();
         let mut damaged = sealed_alias.clone();
         *damaged.last_mut().unwrap() ^= 1;

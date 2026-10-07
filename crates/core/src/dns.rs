@@ -395,12 +395,12 @@ mod tests {
         assert!(parse_resolvers(vec!["[::1]:53".into()]).is_ok());
     }
     #[test]
-    fn encrypted_profile_is_authenticated_and_same_schema_sealing_preserves_it() {
+    fn fresh_encrypted_profile_is_authenticated_and_survives_reopen() {
         let path = std::env::temp_dir().join(format!("dmsg-dns-profile-{}", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let uri = dmsg_protocol::profile::build(b"fixture.invalid", &[0x30, 0], &[8; 32]).unwrap();
         let profile = Profile::from_qr(&uri, vec!["127.0.0.1:53".into()]).unwrap();
-        let conn = crate::store::open(&path).unwrap();
+        let conn = crate::store::open_encrypted(&path, &[42; 32]).unwrap();
         save(&conn, &profile).unwrap();
         drop(conn);
         let conn = crate::store::open_encrypted(&path, &[42; 32]).unwrap();

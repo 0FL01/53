@@ -84,6 +84,10 @@ pub enum OlmError {
     WireVersion(u8),
     /// Пустой текст или длиннее TEXT_MAX.
     BadText,
+    /// The target revision changed since the editor opened it.
+    MessageChanged,
+    /// Foreign/hidden/queued target, changed recipient or missing cached session.
+    MessageUnavailable,
     /// Key-only resume failure, with safe typed account-auth errors.
     Auth(crate::auth::AuthError),
 }
@@ -98,6 +102,8 @@ impl std::fmt::Display for OlmError {
                 write!(f, "identity changed, sending stopped until confirm")
             }
             Self::NothingToConfirm => write!(f, "nothing to confirm"),
+            Self::MessageChanged => write!(f, "message changed"),
+            Self::MessageUnavailable => write!(f, "message unavailable"),
             Self::MissingKeys => write!(f, "contact has no keys (scan QR first)"),
             Self::NotEnrolled => write!(f, "not authenticated"),
             Self::NoPeerPrekeys => write!(f, "peer has no one-time keys"),

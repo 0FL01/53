@@ -8,18 +8,27 @@ import java.io.File
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.security.SecureRandom
+import java.security.KeyStore
 
 /** Keystore-sealed data key; Rust encrypts secrets, ratchets and inbox in the live DB. */
 object SecureStore {
-    fun legacyDb(c: Context): File = File(c.filesDir, "core.db")
+    fun liveDb(c: Context): File = File(c.filesDir, "core.db")
     /** Optional same-install snapshot. Not a transferable backup: Keystore key is device-bound. */
     fun sealedDb(c: Context): File = File(c.filesDir, "core.db.sealed")
     private fun wrappedKey(c: Context): File = File(c.filesDir, "core.key.sealed")
 
-    private fun sealed(c: Context, f: File): EncryptedFile = EncryptedFile.Builder(
-        f, c, MasterKeys.getOrCreate(MasterKeys.AES256_GCM_SPEC),
-        EncryptedFile.FileEncryptionScheme.AES256_GCM_HKDF_4KB
-    ).build()
+    private fun sealed(c: Context, f: File): EncryptedFile {
+        val existing = wrappedKey(c).exists() || liveDb(c).exists() || sealedDb(c).exists()
+        if (existing) {
+            val keys = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+            if (!keys.containsAlias(MasterKeys.AES256_GCM_SPEC.keystoreAlias))
+                throw DmsgError("existing store without Keystore master key", ErrorKind.StorageKeyLost)
+        }
+        return EncryptedFile.Builder(
+            f, c, MasterKeys.getOrCreate(MasterKeys.AES256_GCM_SPEC),
+            EncryptedFile.FileEncryptionScheme.AES256_GCM_HKDF_4KB
+        ).build()
+    }
 
     private fun checkpoint(f: File) {
         SQLiteDatabase.openDatabase(f.absolutePath, null, SQLiteDatabase.OPEN_READWRITE).use { db ->
@@ -44,20 +53,7 @@ object SecureStore {
             }
         }
         if (sealedDb(c).exists()) throw DmsgError("sealed copy without Keystore key: reinstall_loss", ErrorKind.StorageKeyLost)
-        val db = legacyDb(c)
-        if (db.exists()) {
-            try {
-                SQLiteDatabase.openDatabase(db.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { sql ->
-                    sql.rawQuery("SELECT name FROM sqlite_master WHERE type='table' AND name='core_storage'", null).use {
-                        if (it.moveToFirst()) throw DmsgError("Keystore key missing: reinstall_loss", ErrorKind.StorageKeyLost)
-                    }
-                }
-            } catch (e: DmsgError) {
-                throw e
-            } catch (_: Exception) {
-                throw DmsgError("storage cannot be inspected safely", ErrorKind.Store)
-            }
-        }
+        if (liveDb(c).exists()) throw DmsgError("existing database without wrapped key", ErrorKind.StorageKeyLost)
         val fresh = ByteArray(32).also { SecureRandom().nextBytes(it) }
         val staging = File(c.filesDir, "key-staging").also { it.mkdirs() }
         val tmp = File(staging, file.name) // same basename: EncryptedFile authenticates filename
@@ -75,13 +71,13 @@ object SecureStore {
         fresh
     }
 
-    /** Migrate legacy columns first, checkpoint WAL, then keep an encrypted same-install snapshot. */
+    /** Verify the current schema/key, checkpoint WAL, then keep a same-install snapshot. */
     fun seal(c: Context) = synchronized(Core.storeLock) {
-        val db = legacyDb(c)
+        val db = liveDb(c)
         if (!db.exists()) throw DmsgError("no live db", ErrorKind.LiveDatabaseMissing)
         val k = key(c)
         try {
-            // Opens/migrates the DB and verifies the key; never copy an unencrypted legacy file.
+            // Unsupported schemas and wrong keys fail before a snapshot is written.
             UniFfiFacade(db.absolutePath, k).account()
             checkpoint(db)
             val out = sealedDb(c)
@@ -107,7 +103,7 @@ object SecureStore {
     fun unseal(c: Context) = synchronized(Core.storeLock) {
         val src = sealedDb(c)
         if (!src.exists()) throw DmsgError("no sealed copy", ErrorKind.SnapshotMissing)
-        val live = legacyDb(c)
+        val live = liveDb(c)
         if (live.exists()) throw DmsgError("live db already exists; refusing to overwrite identity", ErrorKind.LiveDatabaseExists)
         val k = key(c)
         val staging = File(c.filesDir, "restore-staging").also { it.mkdirs() }
@@ -151,7 +147,7 @@ object SecureStore {
     fun plan(c: Context): String = when {
         wrappedKey(c).exists() -> "ready"
         sealedDb(c).exists() -> "reinstall_loss"
-        legacyDb(c).exists() -> "migrate"
+        liveDb(c).exists() -> "key_missing"
         else -> "fresh"
     }
 }

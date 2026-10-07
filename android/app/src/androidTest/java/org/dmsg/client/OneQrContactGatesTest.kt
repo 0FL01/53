@@ -40,7 +40,7 @@ class OneQrContactGatesTest {
     }
     private fun hash(app: Context, mid: String): String {
         SQLiteDatabase.openDatabase(File(app.filesDir, "core.db").path, null, SQLiteDatabase.OPEN_READONLY).use { db ->
-            db.rawQuery("SELECT ciphertext FROM core_outbox WHERE lower(hex(message_id))=?", arrayOf(mid)).use {
+            db.rawQuery("SELECT ciphertext FROM core_messages WHERE direction='outgoing' AND lower(hex(message_id))=?", arrayOf(mid)).use {
                 assertTrue(it.moveToFirst())
                 return MessageDigest.getInstance("SHA-256").digest(it.getBlob(0)).joinToString("") { b -> "%02x".format(b.toInt() and 255) }
             }

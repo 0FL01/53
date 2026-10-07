@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <item type="id" name="action_edit"/>
+    <item type="id" name="action_delete"/>
+    <string name="message_actions">Message actions</string>
+    <string name="edit_whole_message">Edit whole message</string>
+    <string name="delete_whole_message">Delete whole message…</string>
+    <string name="editing_message">Editing sent message</string>
+    <string name="save_edit">Save</string>
+    <string name="cancel_edit">Cancel edit</string>
+    <string name="saving_change">Saving change locally…</string>
+    <string name="delete_title">Delete this message?</string>
+    <string name="delete_self">Only for me</string>
+    <string name="delete_everyone">For everyone</string>
+    <string name="delete_confirm">Delete</string>
+    <string name="delete_warning">Only for me hides the message here. For everyone also saves a deletion to the outbox; the other side changes when it receives it.</string>
+    <string name="self_hide_warning">Hiding a queued message does not cancel its send. It remains in the outbox.</string>
+    <string name="self_hidden">Message hidden on this device.</string>
+    <string name="self_hidden_queued">Message hidden on this device. Its queued send is not cancelled.</string>
+    <string name="edit_saved">Edit saved locally · %1$s</string>
+    <string name="edit_unchanged">Message unchanged. Current revision checked; no new edit queued.</string>
+    <string name="delete_saved">Message removed here. Deletion for everyone saved · %1$s</string>
+    <string name="change_pending">Change saved. The connectivity attempt failed; retry the outbox.</string>
+    <string name="change_not_saved">Change not saved. %1$s</string>
+    <string name="change_uncertain">Unable to verify the local change. Draft retained; new sends and message actions paused until the exact message is checked.</string>
+    <string name="error_message_changed">The message changed. Your edit draft is retained. Review it and tap Save again.</string>
+    <string name="error_message_unavailable">This message is unavailable for this action. Your edit draft is retained; it will not be sent as a new message.</string>
+    <string name="original_delivery">Original: %1$s</string>
+    <string name="edit_delivery">Edit: %1$s</string>
+    <string name="message_edited">Edited</string>
+    <string name="outbox_text">Message</string>
+    <string name="outbox_edit">Message edit</string>
+    <string name="outbox_delete">Deletion for everyone</string>
+    <string name="outbox_event">Outgoing event</string>
+    <string name="delete_queue_notice">Removed locally. Remote deletion has its own delivery status; retry uses the saved deletion.</string>
+</resources>

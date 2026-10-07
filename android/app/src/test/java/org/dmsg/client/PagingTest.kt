@@ -8,7 +8,7 @@ import uniffi.dmsg_core.DeliveryState
 
 class PagingTest {
     private fun row(id: Long, peer: String = "P", direction: MessageDirection = MessageDirection.INCOMING) =
-        HistoryMessage(id, id.toString(16).padStart(32, '0'), peer, direction, "fixture", id, if (direction == MessageDirection.OUTGOING) DeliveryState.QUEUED else null, null, null)
+        HistoryMessage(id, id.toString(16).padStart(32, '0'), peer, direction, "fixture", id, if (direction == MessageDirection.OUTGOING) DeliveryState.QUEUED else null, null, null, 0uL, false, false, null)
 
     @Test fun boundedPerContactPagesPrependChronologicallyPast500() {
         val f = FakeFacade()
@@ -179,5 +179,129 @@ class PagingTest {
         window.latest(f.timelinePage("P", null, 50), appended, 203L)
         assertEquals(1, window.rows.count { it.localId == 202L })
         assertEquals(203L, window.latestLocalId)
+    }
+
+    @Test fun rawTombstonesKeepPagingAndWatermarkButNeverViewedOrProjectedEvenWithStaleChildIds() {
+        val f = FakeFacade()
+        (1L..6L).forEach { f.history.add(row(it)) }
+        f.history[4] = row(5).copy(text = "", hiddenSelf = true)
+        f.history[5] = row(6).copy(text = "", deletedAll = true)
+        val window = HistoryWindow()
+        window.latest(f.timelinePage("P", null, 2), localHead = f.historyPage("P", null, 1).rows.single().localId)
+        assertEquals(listOf(5L, 6L), window.rows.map { it.localId })
+        assertTrue(window.visibleRows.isEmpty())
+        assertNull(window.viewedAnchor(listOf(5L, 6L)))
+        assertEquals(6L, window.latestLocalId)
+        assertEquals(5L, window.hiddenBefore)
+        window.older(f.timelinePage("P", window.hiddenBefore, 2))
+        assertEquals(listOf(3L, 4L), window.visibleRows.map { it.localId })
+        assertEquals(4L, window.viewedAnchor(listOf(3L, 4L, 5L, 6L)))
+        assertNull(window.hiddenBefore)
+        assertEquals(6L, window.latestLocalId)
+        assertEquals(3L, window.nextBefore)
+    }
+
+    @Test fun hiddenOnlyChunksAreBoundedAndRetainContinuationAcrossEmptyVisibleWindows() {
+        val f = FakeFacade()
+        (1L..401L).forEach { f.history.add(row(it).copy(text = if (it > 1) "" else "fixture", hiddenSelf = it > 1)) }
+        val window = HistoryWindow()
+        val requested = mutableListOf<Long?>()
+        val first = timelineChunk(null) { before -> requested.add(before); f.timelinePage("P", before, 50) }
+        assertEquals(3, first.size)
+        first.forEachIndexed { index, page -> if (index == 0) window.latest(page, localHead = 401L) else window.older(page) }
+        assertEquals(listOf(null, 352L, 302L), requested)
+        assertTrue(window.visibleRows.isEmpty())
+        assertEquals(252L, window.hiddenBefore)
+        val resumed = window.hiddenBefore
+        requested.clear()
+        val second = timelineChunk(resumed) { before -> requested.add(before); f.timelinePage("P", before, 50) }
+        assertEquals(3, second.size)
+        assertEquals(resumed, requested.first())
+        assertFalse(requested.contains(null))
+        second.forEach(window::older)
+        assertTrue(window.visibleRows.isEmpty())
+        assertNotNull(window.hiddenBefore)
+        timelineChunk(window.hiddenBefore) { f.timelinePage("P", it, 50) }.forEach(window::older)
+        assertEquals(listOf(1L), window.visibleRows.map { it.localId })
+        assertEquals(401, window.rows.size)
+        assertNull(window.nextBefore); assertNull(window.hiddenBefore)
+        assertEquals(401L, window.latestLocalId)
+        assertEquals(0L, f.readCursors["P"] ?: 0L)
+    }
+
+    @Test fun stableVisiblePixelAnchorSurvivesHideInsertAndChoosesTimelineNeighborNotNumericId() {
+        val window = HistoryWindow()
+        val rows = listOf(row(40).copy(serverSeq = 1), row(10).copy(serverSeq = 2), row(30).copy(serverSeq = 3), row(20).copy(serverSeq = 4))
+        window.latest(uniffi.dmsg_core.HistoryPage(rows.reversed(), null))
+        val anchor = historyAnchor(window.visibleRows, 1, -17, false)!!
+        assertEquals(10L, anchor.localId); assertEquals(-17, anchor.offset)
+        window.replace(rows[1].copy(hiddenSelf = true, text = ""))
+        assertEquals(1, anchorPosition(window.visibleRows, anchor))
+        assertEquals(30L, window.visibleRows[anchorPosition(window.visibleRows, anchor)!!].localId)
+        window.replace(rows[2].copy(deletedAll = true, text = ""))
+        assertEquals(20L, window.visibleRows[anchorPosition(window.visibleRows, anchor)!!].localId)
+        val exact = historyAnchor(window.visibleRows, 1, -9, false)!!
+        window.latest(uniffi.dmsg_core.HistoryPage(listOf(row(50).copy(serverSeq = 0)), null))
+        assertEquals(20L, window.visibleRows[anchorPosition(window.visibleRows, exact)!!].localId)
+        assertEquals(-9, exact.offset)
+        val bottom = exact.copy(followBottom = true)
+        window.latest(uniffi.dmsg_core.HistoryPage(listOf(row(60).copy(serverSeq = 5)), null))
+        assertEquals(window.visibleRows.lastIndex, anchorPosition(window.visibleRows, bottom))
+        assertEquals(60L, window.visibleRows[anchorPosition(window.visibleRows, bottom)!!].localId)
+    }
+
+    @Test fun hiddenHighestIngestStillDiscoversLateVisibleReceiveAndBridgeKeepsWatermark() {
+        val f = FakeFacade()
+        (1L..100L).forEach { f.history.add(row(it).copy(serverSeq = it * 10)) }
+        val window = HistoryWindow()
+        window.latest(f.timelinePage("P", null, 50), localHead = 100L)
+        val late = row(101).copy(serverSeq = 1)
+        val hidden = row(102).copy(serverSeq = 2, hiddenSelf = true, text = "")
+        f.history.addAll(listOf(late, hidden))
+        val appended = f.historyPage("P", null, 50).rows.filter { it.localId > window.latestLocalId!! }
+        window.latest(f.timelinePage("P", null, 50), appended, f.historyPage("P", null, 1).rows.single().localId)
+        assertEquals(102L, window.latestLocalId)
+        assertTrue(window.visibleRows.any { it.localId == 101L })
+        assertTrue(window.rows.any { it.localId == 102L })
+        assertFalse(window.visibleRows.any { it.localId == 102L })
+        assertNull(window.viewedAnchor(listOf(102L)))
+    }
+
+    @Test fun removedQueuedAnchorUsesItsCurrentCanonicalOrderAfterOriginalAcceptance() {
+        val pending = row(100, direction = MessageDirection.OUTGOING)
+        val window = HistoryWindow()
+        window.latest(uniffi.dmsg_core.HistoryPage(listOf(pending, row(2).copy(serverSeq = 20), row(1).copy(serverSeq = 10)), null))
+        val anchor = historyAnchor(window.visibleRows, 2, -23, false)!!
+        assertEquals(100L, anchor.localId)
+        window.replace(pending.copy(text = "", hiddenSelf = true, deliveryState = DeliveryState.ACCEPTED, serverSeq = 15))
+        val position = anchorPosition(window.visibleRows, anchor, window.rows)!!
+        assertEquals(2L, window.visibleRows[position].localId)
+        assertEquals(-23, anchor.offset)
+        window.replace(row(2).copy(serverSeq = 20, deletedAll = true, text = ""))
+        assertEquals(1L, window.visibleRows[anchorPosition(window.visibleRows, anchor, window.rows)!!].localId)
+    }
+
+    @Test fun retainedWriteCompletionNeverResurrectsSupersededOrDeletedTextOrRegressesOriginalDelivery() {
+        val window = HistoryWindow()
+        val edited = row(1, direction = MessageDirection.OUTGOING).copy(text = "edited", revision = 1uL,
+            deliveryState = DeliveryState.ACCEPTED, changeDeliveryState = DeliveryState.QUEUED)
+        val newer = edited.copy(text = "newer", revision = 2uL, deliveryState = DeliveryState.DELIVERED,
+            serverSeq = 10, serverTimestampMs = 1000)
+        window.latest(uniffi.dmsg_core.HistoryPage(listOf(newer), null))
+        window.replace(edited)
+        assertEquals("newer", window.visibleRows.single().text)
+        assertEquals(DeliveryState.DELIVERED, window.rows.single().deliveryState)
+        val hidden = newer.copy(text = "", hiddenSelf = true, deliveryState = DeliveryState.ACCEPTED)
+        window.replace(hidden)
+        assertTrue(window.visibleRows.isEmpty())
+        assertEquals(DeliveryState.DELIVERED, window.rows.single().deliveryState)
+        window.replace(newer)
+        assertTrue(window.visibleRows.isEmpty())
+        val terminal = newer.copy(text = "", deletedAll = true, hiddenSelf = true, revision = 3uL)
+        window.replace(terminal)
+        window.replace(newer)
+        assertTrue(window.rows.single().deletedAll)
+        assertEquals("", window.rows.single().text)
+        assertEquals(10L, window.rows.single().serverSeq)
     }
 }

@@ -117,13 +117,21 @@ impl LiveMsgd {
         assert!(out.status.success());
     }
     pub async fn signup(&self, db: &Path, login: &str) -> dmsg_core::Account {
+        self.signup_keyed(db, login, None).await
+    }
+    pub async fn signup_keyed(
+        &self,
+        db: &Path,
+        login: &str,
+        key: Option<&[u8]>,
+    ) -> dmsg_core::Account {
         let invite = self.issue(&format!("{login}.invite"), "3600");
         dmsg_core::signup_direct(
             &self.code,
             &self.addr,
             db,
             Some(DER),
-            None,
+            key,
             login,
             PASSWORD,
             Some(&invite),
@@ -132,7 +140,14 @@ impl LiveMsgd {
         .unwrap()
     }
     pub async fn connect(&self, db: &Path) -> dmsg_core::DirectTcp {
-        let c = dmsg_core::store::open(db).unwrap();
+        self.connect_keyed(db, None).await
+    }
+    pub async fn connect_keyed(&self, db: &Path, key: Option<&[u8]>) -> dmsg_core::DirectTcp {
+        let c = match key {
+            Some(k) => dmsg_core::store::open_encrypted(db, k),
+            None => dmsg_core::store::open(db),
+        }
+        .unwrap();
         let key = dmsg_core::store::load_identity(&c).unwrap().unwrap();
         dmsg_core::initiate_with_key(&self.addr, &self.server_pub, self.domain.as_bytes(), &key)
             .await

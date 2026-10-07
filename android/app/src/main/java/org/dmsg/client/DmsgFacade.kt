@@ -7,6 +7,8 @@ import uniffi.dmsg_core.RegistrationPolicy
 import uniffi.dmsg_core.DeliveryState
 import uniffi.dmsg_core.DialogsPage
 import uniffi.dmsg_core.HistoryPage
+import uniffi.dmsg_core.HistoryMessage
+import uniffi.dmsg_core.DeleteScope
 import uniffi.dmsg_core.QrOutcome
 import androidx.annotation.StringRes
 
@@ -19,12 +21,13 @@ class DmsgError(msg: String, val kind: ErrorKind = ErrorKind.Other,
 enum class ErrorKind { Other, InvalidCredentials, LoginTaken, InviteRequired, InviteExpired, InviteRevoked,
     InviteUsed, AuthRateLimited, InvalidInput, Transport, PinMismatch, IdentityMismatch, NotAuthenticated,
     BadQr, UnknownContact, NotAccepted, Blocked, MissingKeys, Revoked, Busy, BadText, Store, Crypto, Protocol, NativeUnavailable,
-    StorageKeyLost, SnapshotMissing, LiveDatabaseExists, LiveDatabaseMissing, SnapshotRestoreRequired, SnapshotInvalid }
+    StorageKeyLost, SnapshotMissing, LiveDatabaseExists, LiveDatabaseMissing, SnapshotRestoreRequired, SnapshotInvalid,
+    MessageChanged, MessageUnavailable }
 
 data class Dialog(val contactId: String, val state: String, val identityMismatch: Boolean = false, val hasKeys: Boolean = false)
 data class DnsProfile(val domain: String, val pub: ByteArray, val fingerprint: String, val resolvers: List<String>)
 data class Msg(val seq: Long, val contactId: String, val text: String)
-data class OutRow(val mid: String, val contactId: String, val status: String)
+data class OutRow(val mid: String, val contactId: String, val status: String, val kind: String = "text")
 data class FetchRes(val received: List<Msg>, val skipped: LongArray, val cursor: Long)
 
 /**
@@ -63,9 +66,10 @@ interface DmsgFacade {
     fun inbox(cursor: Long, limit: Int): Pair<List<Msg>, Long?>
     fun outbox(cursor: Long, limit: Int): Pair<List<OutRow>, Long?>
     fun send(id: String, text: String): String
+    fun editMessage(contactId: String, localId: Long, expectedRevision: ULong, text: String): HistoryMessage
+    fun deleteMessage(contactId: String, localId: Long, scope: DeleteScope): HistoryMessage
     fun retry(): LongArray
     fun fetch(): FetchRes
     fun reconnect(): Long
     fun qrKind(uri: String): QrKind
-    fun storagePlan(hasLegacy: Boolean, hasWrapped: Boolean): String
 }

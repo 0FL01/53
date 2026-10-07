@@ -20,7 +20,8 @@ use std::sync::Arc;
 use crate::auth::AuthError;
 use crate::contacts::{self, Contact};
 pub use crate::history::{
-    DeliveryState, DialogSummary, DialogsPage, HistoryMessage, HistoryPage, MessageDirection,
+    DeleteScope, DeliveryState, DialogSummary, DialogsPage, HistoryMessage, HistoryPage,
+    MessageDirection,
 };
 use crate::olm::OlmError;
 use crate::transport::TransportError;
@@ -127,6 +128,7 @@ pub struct OutboxRow {
     pub message_id_hex: String,
     pub contact_id: String,
     pub status: String,
+    pub kind: String,
 }
 
 /// Страница outbox (queued + accepted): cursor — внутренний rowid.
@@ -191,16 +193,6 @@ pub struct RetryReport {
     pub skipped: u64,
 }
 
-/// Решение хранилища при старте (миграция — явный шаг, не молча).
-/// FreshInstall без переноса sealed-копии = новая identity (потеря старой
-/// честно показана UI-строкой, см. android SecureStore).
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
-pub enum StoragePlan {
-    FreshInstall,
-    MigrateLegacy,
-    ReadyWrapped,
-}
-
 /// Ошибка фасада. Строки — только статические причины/классы (секретов,
 /// private keys, plaintext or credentials never appear in these safe errors).
 #[derive(Debug, PartialEq, Eq, uniffi::Error)]
@@ -229,6 +221,8 @@ pub enum FfiError {
     InvalidInput,
     Busy,
     BadText,
+    MessageChanged,
+    MessageUnavailable,
     Transport(String),
     Store(String),
     Crypto(String),
@@ -265,6 +259,8 @@ impl std::fmt::Display for FfiError {
             Self::InvalidInput => write!(f, "invalid input"),
             Self::Busy => write!(f, "server busy, retry later"),
             Self::BadText => write!(f, "bad text (empty or over limit)"),
+            Self::MessageChanged => write!(f, "message changed"),
+            Self::MessageUnavailable => write!(f, "message unavailable"),
             Self::Transport(e) => write!(f, "transport: {e}"),
             Self::Store(e) => write!(f, "store: {e}"),
             Self::Crypto(e) => write!(f, "crypto: {e}"),
@@ -309,6 +305,8 @@ fn map_olm(e: OlmError) -> FfiError {
         OlmError::WireType(t) => FfiError::Protocol(format!("wire type {t}")),
         OlmError::WireVersion(v) => FfiError::Protocol(format!("wire version {v}")),
         OlmError::BadText => FfiError::BadText,
+        OlmError::MessageChanged => FfiError::MessageChanged,
+        OlmError::MessageUnavailable => FfiError::MessageUnavailable,
         OlmError::Auth(e) => map_auth(e),
     }
 }
@@ -391,20 +389,6 @@ pub fn qr_kind(uri: String) -> Result<QrKind, FfiError> {
 #[uniffi::export]
 pub fn page_limit(limit: u32) -> u32 {
     limit.clamp(1, 100)
-}
-
-/// Решение хранилища при старте по наличию файлов (чистая функция —
-/// покрытие unit-тестом здесь, зеркало в Kotlin вызывает фасад).
-/// MigrateLegacy means sealing a supported plain current-schema store, not schema/auth compatibility.
-#[uniffi::export]
-pub fn storage_plan(has_legacy_db: bool, has_wrapped_db: bool) -> StoragePlan {
-    if has_wrapped_db {
-        StoragePlan::ReadyWrapped
-    } else if has_legacy_db {
-        StoragePlan::MigrateLegacy
-    } else {
-        StoragePlan::FreshInstall
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -741,12 +725,6 @@ impl DmsgClient {
         }
     }
 
-    /// Открыть фасад над app-private файлом DB (файл создаётся лениво store).
-    #[uniffi::constructor]
-    pub fn open(db_path: String) -> Arc<Self> {
-        Arc::new(Self { db_path, key: None })
-    }
-
     /// Android passes a random 32-byte key unwrapped by Keystore. Existing
     /// encrypted DBs are verified immediately; no wrong-key fresh install.
     #[uniffi::constructor]
@@ -914,6 +892,35 @@ impl DmsgClient {
         crate::history::history_message(&self.conn()?, &contact_id, local_id).map_err(map_history)
     }
 
+    pub fn edit_message(
+        &self,
+        contact_id: String,
+        local_id: i64,
+        expected_revision: u64,
+        text: String,
+    ) -> Result<HistoryMessage, FfiError> {
+        if local_id <= 0 || !contacts::valid_contact_id(&contact_id) {
+            return Err(FfiError::InvalidInput);
+        }
+        self.core()?
+            .edit_message(&contact_id, local_id, expected_revision, &text)
+            .map_err(map_olm)
+    }
+
+    pub fn delete_message(
+        &self,
+        contact_id: String,
+        local_id: i64,
+        scope: DeleteScope,
+    ) -> Result<HistoryMessage, FfiError> {
+        if local_id <= 0 || !contacts::valid_contact_id(&contact_id) {
+            return Err(FfiError::InvalidInput);
+        }
+        self.core()?
+            .delete_message(&contact_id, local_id, scope)
+            .map_err(map_olm)
+    }
+
     /// Exact persisted outgoing state. None means unknown/incoming-only, never
     /// delivered. Both cases are distinct from malformed hex (InvalidInput).
     pub fn message_status(
@@ -974,12 +981,17 @@ impl DmsgClient {
         Ok(OutboxPage {
             rows: rows
                 .into_iter()
-                .map(|(_, mid, cid, _, st)| OutboxRow {
-                    message_id_hex: hex(&mid),
-                    contact_id: cid,
-                    status: st,
+                .map(|(_, mid, cid, _, st)| {
+                    Ok(OutboxRow {
+                        message_id_hex: hex(&mid),
+                        contact_id: cid,
+                        status: st,
+                        kind: crate::store::outgoing_binding(&conn, &mid)
+                            .map_err(FfiError::Store)?
+                            .0,
+                    })
                 })
-                .collect(),
+                .collect::<Result<Vec<_>, FfiError>>()?,
             next_cursor: next,
         })
     }
@@ -987,6 +999,11 @@ impl DmsgClient {
 
 // Direct network methods are Rust-only harness seams, never UniFFI endpoints.
 impl DmsgClient {
+    /// Plain Rust harness only. Android exposes only the authenticated keyed constructor.
+    pub fn open(db_path: String) -> Arc<Self> {
+        Arc::new(Self { db_path, key: None })
+    }
+
     /// Отправить текст (login + refill + claim + одна TX + SEND). Возвращает
     /// message_id hex. Блокирующий вызов для FGS/композера.
     pub fn send_text(
@@ -1177,7 +1194,8 @@ mod tests {
     }
 
     fn authenticated_client(name: &str) -> (DmsgClient, std::path::PathBuf) {
-        let (c, dir) = tmp_client(name);
+        let (mut c, dir) = tmp_client(name);
+        c.key = Some([19; 32]);
         let conn = c.conn().expect("db");
         crate::store::save_identity(&conn, &[3; 32]).expect("identity");
         crate::store::save_account(&conn, &[4; 16], "A11CE0000001").expect("account");
@@ -1441,7 +1459,7 @@ mod tests {
     }
 
     #[test]
-    fn limits_and_storage_plan() {
+    fn page_limits() {
         assert_eq!(
             (
                 page_limit(0),
@@ -1451,10 +1469,6 @@ mod tests {
             ),
             (1, 1, 50, 100)
         );
-        assert_eq!(storage_plan(false, false), StoragePlan::FreshInstall);
-        assert_eq!(storage_plan(true, false), StoragePlan::MigrateLegacy);
-        assert_eq!(storage_plan(true, true), StoragePlan::ReadyWrapped);
-        assert_eq!(storage_plan(false, true), StoragePlan::ReadyWrapped);
     }
 
     #[test]

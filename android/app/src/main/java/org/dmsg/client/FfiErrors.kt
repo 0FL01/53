@@ -30,6 +30,8 @@ internal fun ffiError(error: FfiException): DmsgError = when (error) {
     is FfiException.Revoked -> DmsgError(R.string.error_revoked, ErrorKind.Revoked)
     is FfiException.Busy -> DmsgError(R.string.error_busy, ErrorKind.Busy)
     is FfiException.BadText -> DmsgError(R.string.error_bad_text, ErrorKind.BadText)
+    is FfiException.MessageChanged -> DmsgError(R.string.error_message_changed, ErrorKind.MessageChanged)
+    is FfiException.MessageUnavailable -> DmsgError(R.string.error_message_unavailable, ErrorKind.MessageUnavailable)
     is FfiException.Transport -> DmsgError(R.string.error_transport, ErrorKind.Transport)
     is FfiException.Store -> DmsgError(R.string.error_store, ErrorKind.Store)
     is FfiException.Crypto -> DmsgError(R.string.error_crypto, ErrorKind.Crypto)
@@ -48,6 +50,8 @@ internal fun ffiError(error: FfiException): DmsgError = when (error) {
         ErrorKind.SnapshotRestoreRequired -> R.string.error_restore_required
         ErrorKind.SnapshotInvalid -> R.string.error_snapshot_invalid
         ErrorKind.Store -> R.string.error_store
+        ErrorKind.MessageChanged -> R.string.error_message_changed
+        ErrorKind.MessageUnavailable -> R.string.error_message_unavailable
         else -> error.uiMessageRes ?: R.string.error_operation
     }
 }

@@ -13,23 +13,26 @@ import android.widget.ListView
 import android.widget.TextView
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
-import uniffi.dmsg_core.MessageDirection
+import androidx.appcompat.app.AlertDialog
+import uniffi.dmsg_core.DeleteScope
 
 /** Retained only in memory: Rust owns durable history; drafts never enter Prefs or saved-state. */
 class ChatMemory : ViewModel() {
     internal val history = HistoryWindow()
-    internal val outgoing = OutgoingDraft()
+    internal val composition = MessageComposer()
+    internal val outgoing get() = composition.normal
     internal var draft: String
-        get() = outgoing.text
-        set(value) { outgoing.text = value }
-    internal var position = 0
-    internal var offset = 0
+        get() = composition.text
+        set(value) { composition.text = value }
+    internal var anchor: HistoryAnchor? = null
     internal var pending = false
     // Render after recreation with current resources; capture no Activity or Context.
     internal var action: (Resources) -> String = { "" }
     internal var contact: Dialog? = null
     internal var readThrough = 0L
     internal var uncertain: TextSendOutcome.Uncertain? = null
+    internal var uncertainAction: MessageActionAttempt? = null
+    internal var rebaseEdit = false
 }
 
 class ChatActivity : DmsgActivity() {
@@ -43,13 +46,18 @@ class ChatActivity : DmsgActivity() {
     @Volatile private var lifecycleStamp = 0L
     private var readPending = false
     private var pageError = ""
+    private var prompt: AlertDialog? = null
     private val id get() = intent.getStringExtra("peer").orEmpty()
     private val handler = Handler(Looper.getMainLooper())
     private val ticker = object : Runnable {
         override fun run() {
             if (!active) return
             if (!pageGuard.pending && !memory.pending) {
-                if (memory.uncertain != null) resolveUncertain() else loadPage()
+                when {
+                    memory.uncertain != null -> resolveUncertain()
+                    memory.uncertainAction != null -> resolveAction()
+                    else -> loadPage()
+                }
             }
             render()
             handler.postDelayed(this, 3_000)
@@ -71,7 +79,8 @@ class ChatActivity : DmsgActivity() {
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { memory.draft = s?.toString().orEmpty() }
             override fun afterTextChanged(s: android.text.Editable?) {}
         })
-        adapter = HistoryAdapter(this, memory.history.rows)
+        adapter = HistoryAdapter(this, memory.history.rows,
+            { canChangeMessage(it, memory.contact) }, ::startEdit, ::confirmDelete, ::messageMenu)
         list.adapter = adapter
         list.setOnScrollListener(object : AbsListView.OnScrollListener {
             override fun onScrollStateChanged(view: AbsListView?, state: Int) { if (state == AbsListView.OnScrollListener.SCROLL_STATE_IDLE) markViewed() }
@@ -83,6 +92,12 @@ class ChatActivity : DmsgActivity() {
             }
         })
         findViewById<Button>(R.id.btn_send).setOnClickListener { send() }
+        findViewById<Button>(R.id.btn_save_edit).setOnClickListener { saveEdit() }
+        findViewById<Button>(R.id.btn_cancel_edit).setOnClickListener {
+            if (!memory.pending && memory.uncertain == null && memory.uncertainAction == null) {
+                memory.composition.cancel(); memory.rebaseEdit = false; render()
+            }
+        }
         findViewById<Button>(R.id.btn_retry).setOnClickListener { retry() }
         findViewById<Button>(R.id.btn_history_retry).setOnClickListener {
             refreshReceived()
@@ -97,22 +112,26 @@ class ChatActivity : DmsgActivity() {
         active = true
         if (memory.uncertain == null) TextSendCoordinator.pendingFor(id)?.let {
             memory.uncertain = it
-            if (memory.draft.isEmpty()) memory.draft = it.text
+            if (memory.outgoing.text.isEmpty()) memory.outgoing.text = it.text
             memory.outgoing.begin()
         }
+        if (memory.uncertainAction == null) TextSendCoordinator.pendingActionFor(id)?.let {
+            memory.uncertainAction = it
+            memory.composition.restore(it)
+        }
         adapter.notifyDataSetChanged()
-        list.setSelectionFromTop(memory.position, memory.offset)
+        restoreAnchor(memory.anchor)
         render()
         handler.post(ticker)
     }
 
     override fun onPause() {
         memory.draft = composer.text.toString()
-        memory.position = list.firstVisiblePosition
-        memory.offset = list.getChildAt(0)?.top ?: 0
+        memory.anchor = captureAnchor()
         active = false; lifecycleStamp++
         pageGuard.stop(); readPending = false
         handler.removeCallbacks(ticker)
+        prompt?.dismiss(); prompt = null
         super.onPause()
     }
 
@@ -127,13 +146,26 @@ class ChatActivity : DmsgActivity() {
 
     private fun render() {
         if (!active) return
+        if (adapter.visibleRows != memory.history.visibleRows) {
+            val anchor = captureAnchor()
+            adapter.notifyDataSetChanged()
+            restoreAnchor(anchor)
+        }
         if (composer.text.toString() != memory.draft) composer.setText(memory.draft)
         val allowed = contactCta(memory.contact) == ContactCta.Chat
+        val editing = memory.composition.edit
+        val unresolved = memory.uncertain != null || memory.uncertainAction != null
         findViewById<TextView>(R.id.peer).text = intent.getStringExtra("alias") ?: id
         findViewById<Button>(R.id.btn_contact).contentDescription = getString(if (allowed) R.string.contact_card else R.string.check_contact)
-        findViewById<Button>(R.id.btn_send).isEnabled = allowed && !memory.pending && memory.uncertain == null
+        findViewById<Button>(R.id.btn_send).visibility = if (editing == null) View.VISIBLE else View.GONE
+        findViewById<View>(R.id.edit_banner).visibility = if (editing == null) View.GONE else View.VISIBLE
+        findViewById<Button>(R.id.btn_save_edit).visibility = if (editing == null) View.GONE else View.VISIBLE
+        findViewById<Button>(R.id.btn_cancel_edit).visibility = if (editing == null) View.GONE else View.VISIBLE
+        findViewById<Button>(R.id.btn_save_edit).isEnabled = editing != null && !editing.unavailable && !memory.rebaseEdit && allowed && !memory.pending && !unresolved && !pageGuard.pending
+        findViewById<Button>(R.id.btn_cancel_edit).isEnabled = !memory.pending && !unresolved
+        findViewById<Button>(R.id.btn_send).isEnabled = allowed && editing == null && !memory.pending && !unresolved
         findViewById<Button>(R.id.btn_retry).isEnabled = allowed && !memory.pending
-        composer.isEnabled = allowed && !memory.pending && memory.uncertain == null
+        composer.isEnabled = (allowed || editing != null) && !memory.pending && !unresolved
         findViewById<Button>(R.id.btn_history_retry).isEnabled = !pageGuard.pending && !memory.pending
         info.text = listOf(if (allowed) "" else trustLabel(resources, memory.contact), memory.action(resources), pageError).filter { it.isNotEmpty() }.joinToString("\n")
         findViewById<View>(R.id.chat_notice).visibility = if (info.text.isEmpty()) View.GONE else View.VISIBLE
@@ -141,24 +173,37 @@ class ChatActivity : DmsgActivity() {
             else if (allowed && pageError.isEmpty()) R.color.surface else R.color.warning_surface)
     }
 
+    private fun captureAnchor(): HistoryAnchor? = historyAnchor(adapter.visibleRows, list.firstVisiblePosition,
+        list.getChildAt(0)?.top ?: 0, adapter.count > 0 && list.lastVisiblePosition >= adapter.count - 2)
+        ?.also { memory.anchor = it } ?: memory.anchor
+    private fun restoreAnchor(anchor: HistoryAnchor?) {
+        if (anchor == null) return
+        anchorPosition(adapter.visibleRows, anchor, memory.history.rows)?.let {
+            if (anchor.followBottom) list.setSelection(it) else list.setSelectionFromTop(it, anchor.offset)
+        }
+    }
+
     private fun loadPage(older: Boolean = false) {
         if (!active || memory.pending) return
-        val before = memory.history.gapBefore ?: if (older) memory.history.nextBefore ?: return else null
-        val stamp = pageGuard.begin() ?: return
-        val firstId = memory.history.rows.getOrNull(list.firstVisiblePosition)?.localId
-        val offset = list.getChildAt(0)?.top ?: 0
-        val bottom = !memory.history.initialized || list.lastVisiblePosition >= adapter.count - 2
         val bridge = memory.history.gapBefore != null
-        val retainedIds = if (!older && !bridge) memory.history.rows.map { it.localId } else emptyList()
+        val continuing = !bridge && memory.history.hiddenBefore != null
+        val before = memory.history.gapBefore ?: memory.history.hiddenBefore ?: if (older) memory.history.nextBefore ?: return else null
+        val stamp = pageGuard.begin() ?: return
+        val anchor = captureAnchor()
+        val bottom = !memory.history.initialized || adapter.count == 0 || anchor?.followBottom == true
+        val normalRefresh = !older && !bridge && !continuing
+        val retainedIds = if (normalRefresh) memory.history.rows.map { it.localId }
+            else if (memory.rebaseEdit) listOfNotNull(memory.composition.edit?.localId) else emptyList()
         val ingestionThrough = memory.history.latestLocalId
         Core.dispatch {
             val result = runCatching {
                 synchronized(Core.storeLock) {
                     val f = Core.facade(applicationContext)
                     val contact = f.get(id)
-                    val page = f.timelinePage(id, before, 50)
+                    // Three raw pages per worker turn; continuation survives hidden-only results.
+                    val pages = timelineChunk(before) { f.timelinePage(id, it, 50) }
                     val refreshed = retainedIds.map { f.historyMessage(id, it) }.toMutableList()
-                    val head = if (!older && !bridge) f.historyPage(id, null, 1).rows.firstOrNull()?.localId else null
+                    val head = if (normalRefresh) f.historyPage(id, null, 1).rows.firstOrNull()?.localId else null
                     // Late receives can rank BELOW the newest server-order page.
                     // Discover them by append-only ingestion IDs, not timeline rank.
                     if (head != null && ingestionThrough != null && head > ingestionThrough) {
@@ -169,23 +214,34 @@ class ChatActivity : DmsgActivity() {
                             cursor = if (appended.rows.lastOrNull()?.localId?.let { it > ingestionThrough } == true) appended.nextBeforeLocalId else null
                         } while (cursor != null)
                     }
-                    Triple(contact, page, refreshed to head)
+                    Triple(contact, pages, refreshed to head)
                 }
             }
             runOnUiThread {
                 if (!active || !pageGuard.finish(stamp)) return@runOnUiThread
-                result.fold({ (contact, page, refresh) ->
+                result.fold({ (contact, pages, refresh) ->
                     memory.contact = contact
                     pageError = ""
-                    if (older && !bridge) memory.history.older(page) else memory.history.latest(page, refresh.first, refresh.second)
+                    pages.forEachIndexed { index, page ->
+                        if ((index == 0 && (older || continuing) && !bridge) || (index > 0 && memory.history.gapBefore == null)) memory.history.older(page)
+                        else memory.history.latest(page, if (index == 0) refresh.first else emptyList(), if (index == 0) refresh.second else null)
+                    }
+                    refresh.first.forEach(memory.history::replace)
+                    memory.composition.edit?.let { draft ->
+                        memory.history.rows.find { it.localId == draft.localId }?.let {
+                            val exact = refresh.first.any { row -> row.localId == draft.localId } ||
+                                pages.any { page -> page.rows.any { row -> row.localId == draft.localId } }
+                            if (!memory.rebaseEdit || exact) {
+                                memory.composition.refresh(it, memory.rebaseEdit)
+                                memory.rebaseEdit = false
+                            }
+                        }
+                    }
                     adapter.notifyDataSetChanged()
                     list.post {
                         if (!active) return@post
-                        if (!older && !bridge && bottom) list.setSelection(adapter.count - 1)
-                        else firstId?.let { anchor ->
-                            val index = memory.history.rows.indexOfFirst { it.localId == anchor }
-                            if (index >= 0) list.setSelectionFromTop(index, offset)
-                        }
+                        if (bottom && (!older || continuing) && !bridge) list.setSelection(adapter.count - 1)
+                        else restoreAnchor(anchor)
                         markViewed()
                         if (memory.history.gapBefore != null) loadPage()
                     }
@@ -217,8 +273,143 @@ class ChatActivity : DmsgActivity() {
         }
     }
 
+    private fun actionsReady() = active && !memory.pending && !pageGuard.pending && memory.uncertain == null && memory.uncertainAction == null
+    private fun ownRow(localId: Long) = memory.history.rows.find { it.localId == localId && canHideMessage(it) }
+
+    private fun messageMenu(localId: Long) {
+        if (!actionsReady()) return
+        val row = ownRow(localId) ?: return
+        val editable = canChangeMessage(row, memory.contact) && memory.composition.edit == null
+        val labels = if (editable) arrayOf(getString(R.string.edit_whole_message), getString(R.string.delete_whole_message))
+            else arrayOf(getString(R.string.delete_whole_message))
+        prompt = AlertDialog.Builder(this).setTitle(R.string.message_actions).setItems(labels) { _, which ->
+            if (editable && which == 0) startEdit(localId) else confirmDelete(localId)
+        }.setNegativeButton(R.string.cancel, null).show()
+    }
+
+    private fun startEdit(localId: Long) {
+        if (!actionsReady()) return
+        val row = ownRow(localId) ?: return
+        if (!canChangeMessage(row, memory.contact) || !memory.composition.start(row)) return
+        memory.rebaseEdit = false
+        render()
+        composer.requestFocus()
+        composer.setSelection(composer.text.length)
+    }
+
+    private fun saveEdit() {
+        if (!actionsReady() || memory.rebaseEdit) return
+        val draft = memory.composition.edit ?: return
+        val row = ownRow(draft.localId)
+        if (draft.unavailable || row == null || !canChangeMessage(row, memory.contact)) {
+            memory.composition.unavailable()
+            memory.action = { it.getString(R.string.error_message_unavailable) }; render(); return
+        }
+        memory.draft = composer.text.toString()
+        if (draft.text.isEmpty() || draft.text.toByteArray(Charsets.UTF_8).size > 4096) {
+            memory.action = { it.getString(R.string.message_bounds) }; render(); return
+        }
+        // Even unchanged text goes through native CAS validation.
+        mutate(draft.localId, MessageActionCommand.Edit(draft.expectedRevision, draft.text))
+    }
+
+    private fun confirmDelete(localId: Long) {
+        if (!actionsReady()) return
+        val row = ownRow(localId) ?: return
+        val scopes = deleteScopes(row, memory.contact)
+        var scope = scopes.first()
+        val content = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(NativeUi.dp(context, 20), NativeUi.dp(context, 8), NativeUi.dp(context, 20), 0)
+        }
+        content.addView(NativeUi.text(this, 14f).apply {
+            text = getString(R.string.delete_warning) + if (row.deliveryState == uniffi.dmsg_core.DeliveryState.QUEUED) "\n" + getString(R.string.self_hide_warning) else ""
+        })
+        val choices = android.widget.RadioGroup(this)
+        val selfId = View.generateViewId()
+        val everyoneId = View.generateViewId()
+        choices.addView(android.widget.RadioButton(this).apply {
+            this.id = selfId; setText(R.string.delete_self); minHeight = NativeUi.dp(context, 48)
+        })
+        if (DeleteScope.EVERYONE in scopes) choices.addView(android.widget.RadioButton(this).apply {
+            this.id = everyoneId; setText(R.string.delete_everyone); minHeight = NativeUi.dp(context, 48)
+        })
+        choices.check(selfId)
+        choices.setOnCheckedChangeListener { _, checked -> scope = if (checked == everyoneId) DeleteScope.EVERYONE else DeleteScope.SELF_ONLY }
+        content.addView(choices)
+        val scroll = android.widget.ScrollView(this).apply { addView(content) }
+        prompt = AlertDialog.Builder(this).setTitle(R.string.delete_title).setView(scroll)
+            .setNegativeButton(R.string.cancel, null).setPositiveButton(R.string.delete_confirm) { _, _ ->
+                if (!actionsReady()) return@setPositiveButton
+                val current = ownRow(localId) ?: return@setPositiveButton
+                if (scope == DeleteScope.EVERYONE && !canChangeMessage(current, memory.contact)) return@setPositiveButton
+                mutate(localId, MessageActionCommand.Delete(scope))
+            }.show()
+    }
+
+    private fun mutate(localId: Long, command: MessageActionCommand) {
+        memory.pending = true
+        memory.action = { it.getString(R.string.saving_change) }
+        render()
+        Core.dispatch {
+            val outcome = try { TextSendCoordinator.mutate(Core.facade(applicationContext), id, localId, command) }
+                catch (e: Exception) { MessageActionOutcome.NotSaved(e) } // facade acquisition failed before writer
+            runOnUiThread {
+                // Durable state belongs to the retained VM, even after pause/recreation.
+                memory.pending = false
+                completeAction(command, localId, outcome)
+                if (active) { render(); loadPage() }
+            }
+        }
+    }
+
+    private fun completeAction(command: MessageActionCommand, localId: Long, outcome: MessageActionOutcome) {
+        when (outcome) {
+            is MessageActionOutcome.Saved -> {
+                memory.uncertainAction = null
+                memory.history.replace(outcome.row)
+                if (command is MessageActionCommand.Edit) memory.composition.saved(localId)
+                else memory.composition.refresh(outcome.row)
+                memory.rebaseEdit = false
+                val messageRes = actionSavedRes(command, outcome.row)
+                val delivery = outcome.row.changeDeliveryState
+                val pendingNetwork = outcome.networkError != null
+                memory.action = { res ->
+                    res.getString(messageRes, deliveryLabel(res, delivery)) + if (pendingNetwork) "\n" + res.getString(R.string.change_pending) else ""
+                }
+            }
+            is MessageActionOutcome.NotSaved -> {
+                memory.uncertainAction = null
+                if ((outcome.error as? DmsgError)?.kind == ErrorKind.MessageChanged && command is MessageActionCommand.Edit) memory.rebaseEdit = true
+                if ((outcome.error as? DmsgError)?.kind == ErrorKind.MessageUnavailable && memory.composition.edit?.localId == localId) memory.composition.unavailable()
+                val messageRes = humanErrorRes(outcome.error)
+                memory.action = { it.getString(R.string.change_not_saved, it.getString(messageRes)) }
+            }
+            is MessageActionOutcome.Uncertain -> {
+                memory.uncertainAction = outcome.attempt
+                memory.action = { it.getString(R.string.change_uncertain) }
+            }
+        }
+    }
+
+    private fun resolveAction() {
+        val attempt = memory.uncertainAction ?: return
+        val stamp = pageGuard.begin() ?: return
+        Core.dispatch {
+            val outcome = try { TextSendCoordinator.reconcileAction(Core.facade(applicationContext), attempt) }
+                catch (_: Exception) { MessageActionOutcome.Uncertain(attempt) }
+            runOnUiThread {
+                if (memory.uncertainAction != attempt) return@runOnUiThread
+                completeAction(attempt.command, attempt.before.localId, outcome)
+                if (!active || !pageGuard.finish(stamp)) return@runOnUiThread
+                render()
+                if (memory.uncertainAction == null) loadPage()
+            }
+        }
+    }
+
     private fun send() {
-        if (memory.pending || memory.uncertain != null || contactCta(memory.contact) != ContactCta.Chat) { render(); return }
+        if (memory.composition.edit != null || memory.pending || memory.uncertain != null || memory.uncertainAction != null || contactCta(memory.contact) != ContactCta.Chat) { render(); return }
         val text = composer.text.toString()
         if (text.isEmpty() || text.toByteArray(Charsets.UTF_8).size > 4096) {
             memory.action = { it.getString(R.string.message_bounds) }; render(); return
