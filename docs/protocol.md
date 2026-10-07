@@ -1,6 +1,6 @@
 # dmsg wire v2: единая account-auth логика
 
-Реализованный пользовательский путь: **доверенный профиль сервера → Войти / Создать аккаунт → диалоги**. Серверная регистрация `invite_only` (default) или `open`; приглашение QR/файлом — только одноразовое разрешение signup, не credential входа. Server schema5/core schema7; единственное утверждённое исключение — authenticated transactional core6→7 без wipe. Прочие старые schema/wire/`dmsg://join` отвергаются; ENROL/token replay/credential attach/admin invite-rebind удалены. Contact requests и chronology metadata добавлены без изменения server SQL schema; сначала обновляется backend, затем клиенты.
+Реализованный путь: **доверенный профиль сервера → Войти / Создать аккаунт → диалоги**. Регистрация `invite_only` (default) или `open`; приглашение — только одноразовое разрешение signup. Wire2/server schema5 unchanged; core schema8 fresh-only, без old-schema/plain→sealed conversion и legacy E2E decode. Ошибка не вызывает wipe/новую identity; несовместимый клиентский cutover выполняется отдельно по явному разрешению. ENROL/token replay/credential attach/admin invite-rebind отсутствуют.
 
 ## Публичный профиль
 
@@ -44,7 +44,36 @@ Opcodes16–27: SEND16/ACK17, FETCH18/RESP19, DELIVERY_ACK20, UPLOAD_PREKEYS21, 
 - UPLOAD_PREKEYS: Ed25519 identity32 + Curve25519 identity32 + count2 + entries(key_id4 + one_time1 + pubkey32 + signature64). Подпись над device_key/key_id/pubkey; две identity immutable для устройства.
 - DEVICE_BINDING28: known user_id16 → RESP29 user_id16 + active device32 + Ed32 + Curve32. Только authenticated exact lookup, не directory/prefix search.
 
-Core обновляет binding известных контактов перед отправкой; смена Noise/Ed/Curve сохраняет warning и **STOP до explicit confirm**. Inbound event со сменившимся sender связывается с известным user_id, не ACK/discard до подтверждения; после confirm новая сессия и доставка один раз. Ratchet/outbox ciphertext одна TX, retry byte-identical. Undecryptable integrity failures также не продвигают ratchet/ACK.
+Core обновляет binding известных контактов перед отправкой; смена Noise/Ed/Curve сохраняет warning и **STOP до explicit confirm**. Outgoing event фиксирует SHA256 domain-separated binding полного user/device/Ed/Curve tuple; confirm не делает старый ciphertext пригодным для новой identity. Inbound event со сменившимся sender связывается с известным user_id, не ACK/discard до подтверждения. Ratchet/event ciphertext одна TX, retry byte-identical. Undecryptable integrity failures не продвигают ratchet/ACK.
+
+## E2E v1: текст и собственные изменения
+
+Olm type0/1 framing не меняется. Plaintext строго кодируется `crates/protocol/src/e2e.rs`:
+
+```text
+[version:u8=1][kind:u8][event_mid16][sender_ed32][body]
+TEXT   kind1: UTF-8 text1..4096 bytes
+EDIT   kind2: target_mid16 | revision:u64 BE | UTF-8 text1..4096
+DELETE kind3: target_mid16 | revision:u64 BE   (exact length)
+```
+
+Revision1..i64MAX, whole envelope≤4170; unknown version/kind, invalid UTF8/length,
+legacy plaintext и trailing DELETE bytes отвергаются. MID выбирается до encrypt,
+inner MID должен совпадать с outer FETCH MID; Ed сверяется с закреплённым sender.
+Target — TEXT того же contact/sender/MID, не чужое сообщение/control/self-target.
+
+EDIT с большей revision обновляет effective text; lower/equal не перезаписывает.
+DELETE терминален; поздний original/edit не воскрешает bubble. Control-before-base
+сохраняется в том же `core_messages`; только winning pending edit удерживает body,
+applied/superseded bodies очищаются. Crypto/event/projection commit до ACK. Controls
+не bubbles/received texts/unread и не меняют original seq/time/ciphertext. SelfOnly
+не wire event, queued send не отменяет. Remote actions — own Accepted/Delivered,
+локальная TX без network/CLAIM; доставка отдельным saved ciphertext/retry.
+
+Это logical live-history delete, не удаление ciphertext/SQLite pages/snapshots.
+TTL/quota/Olm bounds сохраняются; indefinite convergence и lost-original recovery
+не обещаются. Участвующие отправители должны перейти согласованно, old E2E decode
+не вводится; backend не обязан стирать accounts/mailbox для этого формата.
 
 ## Один contact QR → входящий запрос
 
@@ -62,7 +91,7 @@ Core повторяет `inviting` через существующий reconnect
 
 Unknown/unaccepted ciphertext остаётся без ACK в существующем TTL/quota mailbox до согласия; текст не расшифровывается/не появляется в истории заранее. Explicit blocked сохраняет drop/ACK policy, включая pre-block по ID без QR keys. ACK означает обработку события устройством, не прочтение; blocked drop не является сохранением текста. Pending события могут удерживать непрерывный cursor/пачку до решения или TTL. Уже ACKed прежним клиентом drop не восстанавливается сбросом cursor.
 
-При одновременных первых отправках нужны две независимые Olm sessions. Они ограничены двумя и хранятся в **существующем sealed session pickle**: legacy primary fields плюс optional `dmsg_receiving_sessions` (≤1). Используются vodozemac session IDs/decrypt; после успешной проверки deterministic session-ID ordering выбирает primary для новых отправок, второй ratchet сохраняет приём ранее отправленного ciphertext. Failed authentication работает с disposable copies; account/session/inbox/history commit атомарен. Это не новая криптография, SQL schema или повторное шифрование outbox.
+При одновременных первых отправках нужны две независимые Olm sessions. Они ограничены двумя и хранятся в **существующем sealed session pickle**: primary fields плюс optional `dmsg_receiving_sessions` (≤1). Используются vodozemac session IDs/decrypt; после успешной проверки deterministic session-ID ordering выбирает primary для новых отправок, второй ratchet сохраняет приём ранее отправленного ciphertext. Failed authentication работает с disposable copies; account/session/event/projection commit атомарен. Это не новая криптография или повторное шифрование outbox.
 
 ## Подтверждённый порядок и время
 
@@ -79,17 +108,19 @@ ciphertext/MID/bubble. SEND_ACK17 и FETCH_RESP19 сохраняют прежн�
 Lookup разрешён только владельцу sender account либо recipient account; не каталог
 чужих сообщений. Неизвестный и чужой key одинаково возвращают `(0,0)`. Positive
 seq, nonnegative seconds и checked seconds→milliseconds conversion валидируются; partial,
-trailing, oversized или неверное число записей — ошибка. Transport/auth и E2E
-body не меняются. Metadata не означает прочтение или наличие plaintext истории.
+trailing, oversized или неверное число записей — ошибка. Transport/auth layouts
+не меняются; E2E v1 выше отдельный строгий формат. Metadata не означает прочтение.
 
-Core проверяет metadata нового FETCH event до decrypt/ACK и фиксирует его вместе
-с history/account/session/inbox. После SEND_ACK metadata/status фиксируются одной
-TX; потеря ответа оставляет прежний durable queued ciphertext для dedup retry.
-Upgrade6→7 сохраняет старые IDs/local times/sealed content, добавляя nullable
-server seq/time и checked marker. Existing reconnect/fetch восстанавливает ≤32
-legacy rows за вызов; TTL-deleted/foreign rows остаются честным local-time fallback.
-Known seq/time immutable; partial unique index защищает историю от повторного seq.
+Core проверяет durable replay до optional metadata lookup вне write-lock, затем
+decrypt один раз в disposable crypto state под IMMEDIATE. Только unseen TEXT
+требует positive metadata с current FETCH seq; missing/stale TEXT не продвигает
+ratchet/ACK, malformed response остаётся Protocol error. Controls игнорируют order
+и ACK current seq после durable commit. SEND_ACK для TEXT сохраняет original order/
+status одной TX; control ACK сохраняет только его status. Нет backfill/checked
+marker/legacy prefix. Known seq/time immutable; unique index защищает TEXT order.
+Обычный TEXT после server TTL/manual GC не получает выдуманную старую chronology;
+более сильный race-free retry/retention contract не входит в эту фичу.
 
 ## Проверка и границы
 
-`cargo build -p msgd && cargo test --workspace`, core `accounts`/`e2e_olm`/`one_qr_contacts`/`chronology`, server `auth_probe`/`msgctl_probe`/backup fixtures проверяют schemas, policy/races/retry/replace/peer STOP, consent, simultaneous first sends, pre-block, authenticated metadata scope и delayed/offline chronology. Android acceptance/evidence limits: `android/AUTH_GATES.md`, goals `2026-10-07-one-qr-contacts.md` и `2026-10-07-message-chronology.md`. Реальные credentials/keys/invitations/deployment values не в Git/argv/logs; production secrets read-only файлами.
+`cargo build -p msgd && cargo test --workspace`, core `accounts/e2e_olm/one_qr_contacts/chronology/message_actions` и server fixtures проверяют schemas/auth/trust/consent/chronology/actions/atomicity. Current Android acceptance: `android/AUTH_GATES.md`, goal `2026-10-07-message-actions.md`; предыдущие pair/upgrade PASS исторические. Credentials/keys/invitations/deployment values не в Git/argv/logs; secrets read-only файлами.

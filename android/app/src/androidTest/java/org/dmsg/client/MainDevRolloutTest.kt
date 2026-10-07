@@ -15,6 +15,7 @@ import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ListView
+import android.widget.RadioButton
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
 import androidx.lifecycle.Lifecycle
@@ -25,6 +26,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import java.io.File
 import java.io.FileOutputStream
 import java.net.Inet4Address
+import java.security.MessageDigest
 import java.util.concurrent.Callable
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.FutureTask
@@ -67,33 +69,41 @@ class MainDevRolloutTest {
             for (key in listOf("serverCode", "login", "password", "invitation")) string(fixture, key)
             core(app) {
                 assertFalse("signup requires the externally reset, unauthenticated main app", account().authenticated)
-                assertNull("fresh main has no imported server", dnsProfile())
                 assertTrue("fresh main has no contacts", contacts(null, 100).first.isEmpty())
                 assertTrue("fresh main has no inbox", inbox(0, 100).first.isEmpty())
                 assertTrue("fresh main has no outbox", outbox(0, 100).first.isEmpty())
             }
             val preview = core(app) { QrGate.serverPreview(this, string(fixture, "serverCode")) }
+            val packagedProfile = TrustedServerProfile.ASSET in app.assets.list("").orEmpty()
             ActivityScenario.launch(MainActivity::class.java).use { scenario ->
-                awaitMain(scenario, LaunchState.Connection)
-                scenario.onActivity {
-                    it.findViewById<EditText>(R.id.connection_code).setText(string(fixture, "serverCode"))
-                    assertTrue("actual preview button clicked", it.findViewById<Button>(R.id.btn_preview).performClick())
+                if (!packagedProfile) {
+                    awaitMain(scenario, LaunchState.Connection)
+                    scenario.onActivity {
+                        it.findViewById<EditText>(R.id.connection_code).setText(string(fixture, "serverCode"))
+                        assertTrue("actual preview button clicked", it.findViewById<Button>(R.id.btn_preview).performClick())
+                    }
+                    await(scenario, "offline server confirmation ready") { prompt(it)?.isShowing == true && field(it, "busy") == false }
+                    scenario.onActivity {
+                        val message = prompt(it)!!.findViewById<TextView>(android.R.id.message)!!.text.toString()
+                        assertTrue("offline confirmation shows actual domain and full pin fingerprint",
+                            message.contains(preview.domain) && message.contains(preview.fingerprint))
+                    }
+                    core(app) {
+                        assertNull("preview stays offline and unimported", dnsProfile())
+                        assertFalse(account().authenticated)
+                        assertEquals("stopped", dnsStatus())
+                    }
+                    scenario.onActivity { prompt(it)!!.getButton(DialogInterface.BUTTON_POSITIVE).performClick() }
                 }
-                await(scenario, "offline server confirmation ready") { prompt(it)?.isShowing == true && field(it, "busy") == false }
-                scenario.onActivity {
-                    val message = prompt(it)!!.findViewById<TextView>(android.R.id.message)!!.text.toString()
-                    assertTrue("offline confirmation shows actual domain and full pin fingerprint",
-                        message.contains(preview.domain) && message.contains(preview.fingerprint))
-                }
-                core(app) {
-                    assertNull("preview stays offline and unimported", dnsProfile())
-                    assertFalse(account().authenticated)
-                    assertEquals("stopped", dnsStatus())
-                }
-                scenario.onActivity { prompt(it)!!.getButton(DialogInterface.BUTTON_POSITIVE).performClick() }
                 await(scenario, "actual DNS invitation policy ready") {
                     field(it, "state") == LaunchState.Authentication && field(it, "busy") == false &&
                         field(it, "policy") == RegistrationPolicy.INVITE_ONLY
+                }
+                core(app) {
+                    val profile = dnsProfile() ?: throw AssertionError("actual saved server profile required")
+                    assertEquals(preview.domain, profile.domain)
+                    assertEquals(preview.fingerprint, profile.fingerprint)
+                    assertEquals(activeResolvers(app), profile.resolvers)
                 }
                 core(app) { assertFalse(account().authenticated); assertEquals("stopped", dnsStatus()) }
                 scenario.onActivity {
@@ -139,7 +149,7 @@ class MainDevRolloutTest {
                 assertEquals(account, account())
                 writePrivate(app, "dev-main-contact.qr", myQr())
                 writePrivate(app, "dev-main-resolvers", resolvers.joinToString("\n") + "\n")
-                evidence(account).put("coreSchema", 6).put("policyInviteOnly", true)
+                evidence(account).put("coreSchema", 8).put("policyInviteOnly", true)
                     .put("secretsCleared", true).put("recreatedAndResumed", true)
                     .put("dnsReady", true).put("activeResolversMatch", true).put("resolverCount", resolvers.size)
                     .put("firstReceived", first.received.size).put("secondReceived", second.received.size)
@@ -321,13 +331,161 @@ class MainDevRolloutTest {
             assertEquals(DeliveryState.DELIVERED, messageStatus(mid))
             val durable = exactHistory(peer, incoming, outgoing)
             assertEquals(DeliveryState.DELIVERED, durable.single { it.direction == MessageDirection.OUTGOING }.deliveryState)
-            evidence(account).put("peerContactId", peer).put("messageId", mid).put("coreSchema", 6)
+            evidence(account).put("peerContactId", peer).put("messageId", mid).put("coreSchema", 8)
                 .put("historyCount", durable.size).put("incomingCount", 1).put("outgoingCount", 1)
                 .put("plaintextEqual", true).put("status", "delivered").put("skipped", 0)
                 .put("historyRowsVisible", true).put("recreated", true).put("mainDialogs", true).put("noStoreError", true)
         }
         assertNoService(app)
         writePrivate(app, "dev-main-delivered-proof.json", proof.toString())
+    }
+
+    /** Run only after the fresh native peer ACK and delivered main-history proof. */
+    @Test fun editOwnDeliveredMainMessageThroughUi() {
+        val app = mainApp()
+        unusedOutputs(app, "dev-main-edit-proof.json")
+        val peer = peerId(app)
+        val mid = readPrivate(File(app.filesDir, "dev-main-message-id"), 64).trim()
+        val replacement = syntheticText(app, "dev-edited.txt")
+        val before = core(app) {
+            establishedAccount(app); trustedPeer(peer)
+            historyPage(peer, null, 100).rows.single { it.messageIdHex == mid }.also {
+                assertEquals(DeliveryState.DELIVERED, it.deliveryState)
+                assertEquals(0uL, it.revision)
+            }
+        }
+        val cipher = mainCipherHash(app, mid)
+        ActivityScenario.launch<ChatActivity>(chatIntent(app, peer)).use { scenario ->
+            awaitRow(scenario, before, R.string.delivery_delivered)
+            scenario.onActivity { it.findViewById<EditText>(R.id.composer).setText("Main normal draft") }
+            wholeMessageAction(scenario, before.localId, R.id.action_edit)
+            await(scenario, "whole main message enters edit composer") {
+                it.findViewById<View>(R.id.edit_banner).isShown &&
+                    it.findViewById<EditText>(R.id.composer).text.toString() == before.text
+            }
+            scenario.onActivity {
+                it.findViewById<EditText>(R.id.composer).setText(replacement)
+                assertTrue(it.findViewById<Button>(R.id.btn_save_edit).performClick())
+            }
+            await(scenario, "main edit saved and normal draft restored") {
+                !chatMemory(it).pending && chatMemory(it).history.rows.any { row ->
+                    row.localId == before.localId && row.revision == 1uL && row.text == replacement
+                } && !it.findViewById<View>(R.id.edit_banner).isShown &&
+                    it.findViewById<EditText>(R.id.composer).text.toString() == "Main normal draft"
+            }
+        }
+        val after = core(app) { historyMessage(peer, before.localId) }
+        unchangedOriginal(before, after)
+        assertEquals(cipher, mainCipherHash(app, mid))
+        assertEquals(1uL, after.revision); assertEquals(replacement, after.text)
+        assertNotNull(after.changeDeliveryState)
+        writePrivate(app, "dev-main-edit-proof.json", evidence(core(app) { establishedAccount(app) })
+            .put("coreSchema", 8).put("localId", after.localId).put("revision", 1)
+            .put("originalCipherAndChronologyUnchanged", true).put("actualUiSaved", true).toString())
+    }
+
+    /** Coordinator verifies the edited peer projection before selecting this method. */
+    @Test fun deleteOwnMainMessageForEveryoneThroughUi() {
+        val app = mainApp()
+        unusedOutputs(app, "dev-main-delete-proof.json")
+        val peer = peerId(app)
+        val edit = json(readPrivate(File(app.filesDir, "dev-main-edit-proof.json"), 4096))
+        val before = core(app) { historyMessage(peer, edit.getLong("localId")) }
+        assertEquals(1uL, before.revision)
+        assertFalse(before.hiddenSelf); assertFalse(before.deletedAll)
+        val cipher = mainCipherHash(app, before.messageIdHex)
+        ActivityScenario.launch<ChatActivity>(chatIntent(app, peer)).use { scenario ->
+            awaitRow(scenario, before, R.string.delivery_delivered)
+            wholeMessageAction(scenario, before.localId, R.id.action_delete)
+            await(scenario, "actual main confirmation displayed") { chatPrompt(it)?.isShowing == true }
+            scenario.onActivity {
+                val prompt = chatPrompt(it)!!
+                val choices = descendants(prompt.window!!.decorView).filterIsInstance<RadioButton>()
+                assertTrue("self-only is the initial main selection", choices.single { v ->
+                    v.text.toString() == it.getString(R.string.delete_self)
+                }.isChecked)
+                choices.single { v -> v.text.toString() == it.getString(R.string.delete_everyone) }.performClick()
+                prompt.getButton(DialogInterface.BUTTON_POSITIVE).performClick()
+            }
+            await(scenario, "main terminal tombstone is saved and has no bubble") {
+                val list = it.findViewById<ListView>(R.id.messages)
+                !chatMemory(it).pending && chatMemory(it).history.rows.any { row ->
+                    row.localId == before.localId && row.deletedAll && row.text.isEmpty() && row.revision == 2uL
+                } && (0 until list.adapter.count).none { pos -> list.adapter.getItemId(pos) == before.localId }
+            }
+        }
+        val after = core(app) { historyMessage(peer, before.localId) }
+        unchangedOriginal(before, after)
+        assertEquals(cipher, mainCipherHash(app, before.messageIdHex))
+        assertTrue(after.deletedAll); assertTrue(after.text.isEmpty()); assertEquals(2uL, after.revision)
+        writePrivate(app, "dev-main-delete-proof.json", evidence(core(app) { establishedAccount(app) })
+            .put("coreSchema", 8).put("localId", after.localId).put("revision", 2)
+            .put("originalCipherAndChronologyUnchanged", true).put("actualUiDeleted", true).toString())
+    }
+
+    /** New process after the peer has durably received and ACKed the DELETE control. */
+    @Test fun reopenedMainRetainsDeliveredDeletion() {
+        val app = mainApp()
+        unusedOutputs(app, "dev-main-actions-delivered-proof.json")
+        val peer = peerId(app)
+        val proof = json(readPrivate(File(app.filesDir, "dev-main-delete-proof.json"), 4096))
+        val row = core(app) {
+            establishedAccount(app); trustedPeer(peer)
+            assertTrue(reconnect() > 0L)
+            assertEquals(0L, retry()[3]); assertEmptyFetch(fetch())
+            historyMessage(peer, proof.getLong("localId")).also {
+                assertTrue(it.deletedAll); assertFalse(it.hiddenSelf); assertTrue(it.text.isEmpty())
+                assertEquals(2uL, it.revision)
+                assertEquals(DeliveryState.DELIVERED, it.deliveryState)
+                assertEquals(DeliveryState.DELIVERED, it.changeDeliveryState)
+                assertTrue(outbox(0, 100).first.isEmpty())
+                assertEquals(2, historyPage(peer, null, 100).rows.size)
+                assertEquals(1, inbox(0, 100).first.size)
+            }
+        }
+        ActivityScenario.launch<ChatActivity>(chatIntent(app, peer)).use { scenario ->
+            await(scenario, "reopened main filters deleted bubble") {
+                val list = it.findViewById<ListView>(R.id.messages)
+                chatMemory(it).history.initialized && list.adapter.count == 1 &&
+                    (0 until list.adapter.count).none { pos -> list.adapter.getItemId(pos) == row.localId }
+            }
+        }
+        writePrivate(app, "dev-main-actions-delivered-proof.json", evidence(core(app) { establishedAccount(app) })
+            .put("coreSchema", 8).put("revision", 2).put("deletedAll", true)
+            .put("baseDelivered", true).put("deleteDelivered", true).put("skipped", 0)
+            .put("newProcess", true).put("noPlaceholder", true).toString())
+    }
+
+    private fun unchangedOriginal(before: HistoryMessage, after: HistoryMessage) {
+        assertEquals(before.localId, after.localId); assertEquals(before.messageIdHex, after.messageIdHex)
+        assertEquals(before.localTimestampMs, after.localTimestampMs)
+        assertEquals(before.serverSeq, after.serverSeq); assertEquals(before.serverTimestampMs, after.serverTimestampMs)
+        assertEquals(before.deliveryState, after.deliveryState)
+    }
+
+    private fun mainCipherHash(app: Context, mid: String): String = SQLiteDatabase.openDatabase(
+        Core.dbFile(app).absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { db ->
+        assertTrue(Regex("[0-9a-f]{32}").matches(mid))
+        db.rawQuery("SELECT ciphertext FROM core_messages WHERE direction='outgoing' AND kind='text' AND lower(hex(message_id))=?",
+            arrayOf(mid)).use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            MessageDigest.getInstance("SHA-256").digest(cursor.getBlob(0)).joinToString("") { "%02x".format(it) }
+        }
+    }
+
+    private fun descendants(view: View): List<View> = listOf(view) + if (view is ViewGroup)
+        (0 until view.childCount).flatMap { descendants(view.getChildAt(it)) } else emptyList()
+    private fun chatPrompt(activity: ChatActivity) = ChatActivity::class.java.getDeclaredField("prompt")
+        .also { it.isAccessible = true }.get(activity) as? AlertDialog
+    private fun wholeMessageAction(scenario: ActivityScenario<ChatActivity>, localId: Long, action: Int) {
+        await(scenario, "actual stable-ID main accessibility action") { activity ->
+            val memory = chatMemory(activity)
+            val guard = ChatActivity::class.java.getDeclaredField("pageGuard").also { it.isAccessible = true }.get(activity) as UiGuard
+            if (memory.pending || guard.pending || memory.uncertain != null || memory.uncertainAction != null) return@await false
+            val list = activity.findViewById<ListView>(R.id.messages)
+            val child = (0 until list.childCount).map { list.getChildAt(it) }.singleOrNull { it.tag == localId } ?: return@await false
+            child.performAccessibilityAction(action, null)
+        }
     }
 
     private fun mainApp(): Context {

@@ -69,7 +69,7 @@
 
 **Хранение.** Keystore-wrapped local key, encrypted secrets/ratchets/content в app-private storage, отключение небезопасного auto-backup для identity state. Локальная очистка кэша и истории; политика потери телефона и перевыпуска доступа. Полный cloud backup/перенос истории отложить.
 
-**Текстовый frontend R17–R21 реализован.** Light/Square на Kotlin/AppCompat/XML; Rust schema7 хранит защищённую историю обеих сторон, exact status, summaries/local aliases/time/unread/read cursor. Pages per-contact, TX с ratchet/outbox/inbox; confirmed timeline использует server seq/time, отдельный local-ingest API сохраняет reconciliation/read cursor, delivered не read receipt. Actual recursive phone↔native/UI/200% font/IME verified, полная M4 background/compatibility матрица ниже этим не закрыта.
+**Текстовый frontend R17–R21 и own-message actions реализованы.** Light/Square на Kotlin/AppCompat/XML; fresh-only Rust schema8 хранит text/edit/delete в одной `core_messages`, exact status, summaries/local aliases/time/unread/read cursor. Pages per-contact, TX с ratchet/event/projection; confirmed timeline использует original server seq/time, отдельный local-ingest API сохраняет reconciliation/read cursor, delivered не read receipt. Edit и Everyone — только own Accepted/Delivered; SelfOnly скрывает локально, queued не отменяет. Deleted placeholder нет; Copy, отдельные drafts/Save/Cancel и hidden paging сохранены. Moto+fresh native peer через recursive DNS/UI/200% font/IME/offline/reopen verified; это не закрывает полную M4 background/compatibility матрицу ниже. Контракт — `docs/goals/2026-10-07-message-actions.md`.
 
 **Проверки.** Forced Doze и App Standby; экран выключен продолжительное время; normal process death и force-stop отдельно; отсутствие Google Play Services; отказ разрешений; unreadable/oversized QR; очистка данных/переустановка; OEM battery restrictions. Измерить queries/s и батарею в обоих режимах. Проверить штатный выбор клавиатуры, clipboard, accessibility и большие списки сообщений.
 
@@ -123,7 +123,7 @@ docs/                    # архитектура, протокол, решен�
 
 ## Минимальная матрица приёмки
 
-Функциональность: подключение по публичному коду/QR через recursive DNS; неверный pin; login/register в обоих режимах; неверный пароль/занятый логин; one-time invitation race; unsupported schema/wire fail-closed (единственное утверждённое исключение: authenticated core6→7); подтверждённая замена единственного устройства; reconnect без пароля; encrypted history/status/alias/local unread; dedup; prekey depletion; revoked device; oversized frames; interrupted blob; missed-call expiry.
+Функциональность: подключение по публичному коду/QR через recursive DNS; неверный pin; login/register в обоих режимах; неверный пароль/занятый логин; one-time invitation race; fresh-only schema8 и unsupported schema/wire fail-closed без conversion/автовайпа; подтверждённая замена единственного устройства; reconnect без пароля; encrypted history/status/alias/local unread; own edit/delete/self-hide, CAS/terminal delete/control-before-base/byte-identical retry; dedup; prekey depletion; revoked device; oversized frames; interrupted blob; missed-call expiry.
 
 Надёжность: server/client restart; транспортный обрыв; обе стороны с низким upload; RAM/disk quota; неконсистентный backup не принимается; restore и schema update; цикл смены сети.
 

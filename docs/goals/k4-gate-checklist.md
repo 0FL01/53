@@ -3,13 +3,21 @@
 R4 пока не закрыта. Ниже сохранены исходные ожидания и отдельно записаны
 измерения; сборка и instrumented doubles не подменяют аппаратные gates.
 
-## Актуальный вход в приложение (обновлён, 2026-10-06)
+## Актуальные own-message actions (2026-10-07)
+
+- **Fresh core8**: одна `core_messages`, direct encrypted initialization, без old-schema/plain conversion/legacy E2E. Server5/wire2/carrier/pins/data сохранены. Unsupported/key errors не стирают данные.
+- **Edit / SelfOnly / Everyone**: собственные Accepted/Delivered для remote действий; SelfOnly queued не отменяет send. Original IDs/seq/time/ciphertext неизменны; delete терминален, controls невидимы, placeholder нет. Copy/accessibility, отдельные drafts/Save/Cancel и hidden paging сохранены.
+- **Проверено**: Rust/core55/protocol53/live actions, explicit codegen, NDKr28c, JVM74 без skips, debug/release/test APK и scoped lint. Moto `.gate` actual Copy/200% font/landscape IME/self-default/cancel/offline/reopen + fresh native DNS peer PASS; stale no-op refresh selection RED→GREEN.
+- **Main Moto only**: явно разрешённый reset/install, fresh8 onboarding и DNS обе стороны, UI edit→peer effective text, Everyone→peer tombstone, новый процесс/base+control Delivered: семь exact main methods PASS/zero skips. APK readback совпадает с `53.apk`; Pacman/его данные не затрагивались. Детали — `android/AUTH_GATES.md`, цель `2026-10-07-message-actions.md`.
+- Ниже pair/upgrade/core6–7 evidence **историческое**, не fresh8 acceptance. Длительный Doze/background/signing/media не объявлены закрытыми этой фичей.
+
+## Предыдущий вход в приложение (2026-10-06)
 
 Текущий scope 2026-10-06: independent crash/recovery топологии сервера закрыта (carrier/msgd crash + msgd-only recreate на паре, см. секцию ниже). Последовательный DNS fallback Яндекса проверен на обоих телефонах. Цель fallback/Network+DNS/wake **complete** — `2026-10-06-dns-fallback-handoff.md`: JVM/state/worker и physical USB Wi-Fi↔LTE в foreground/economy прошли; новые successful poll2713ms/4932ms вместо ожидания300s. Перед финальным gate пользователь разрешил включить данные выбранной SIM; APN/roaming/VPN не менялись. Same queued mid/ciphertext/account сохранены; native peer actual DNS receive1 then0/skips0/exact plaintext once→phone persistent Delivered, main identity/history/Keystore/install metadata сохранены; disposable fixtures очищены. Same-DNS/new-Network проверен JVM (в физическом gate DNS различались). R9 (длительный screen-off, Doze/Standby и фоновые измерения) **deferred по указанию пользователя**, не PASS; restricted egress непроверен.
 
 Deployment APK уже содержит доверенный публичный server profile; generic APK сохраняет server code/QR и явный trust preview. «Сканировать приглашение» / «Импортировать файл» → signup с логином/паролем → явное создание → диалоги. Приглашение остаётся «считанным», не проверенным до ответа сервера; это отдельный секрет, не browser URI или серверный profile. TTL/отзыв/одноразовость и key-only resume сохранены. `53-1` / `53` / `53ctl qr-invite` deployed с теми же volumes/pins/schema5, carrier не пересоздавался. JVM51/Rust170 и 4 USB onboarding метода PASS: parser, synthetic decoder-result lifecycle, file signup через actual DNS, новый процесс key resume. Optical camera scan user-owned; DocumentsUI picker не заявлен проверенным (проверен точный importer после SAF). Main identity/history сохранены. Goal/evidence — `2026-10-06-invite-onboarding.md`, `android/AUTH_GATES.md`.
 
-Account-auth wire2/server schema5/core schema6 и Light/Square Android UI реализованы, без legacy paths. Проверки прежнего ENROL ниже исторические. Полный контракт — `2026-09-29-client-track.md` R12–R21; runtime fixtures/methods — `android/AUTH_GATES.md`.
+Account-auth wire2/server schema5/core schema8 fresh-only и Light/Square Android UI реализованы, без legacy paths. Проверки прежних ENROL/core6–7 ниже исторические. Полный клиентский контракт — `2026-09-29-client-track.md` R12–R21; текущие fixtures/methods — `android/AUTH_GATES.md`.
 
 | Auth gate | Ожидание |
 |---|---|

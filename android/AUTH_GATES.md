@@ -3,7 +3,7 @@
 Compile only:
 
 ```sh
-env -i HOME="$HOME" PATH="$JAVA21_HOME/bin:/usr/local/bin:/usr/bin:/bin" \
+env -i HOME="$HOME" PATH="$JAVA_HOME/bin:/usr/local/bin:/usr/bin:/bin" JAVA_HOME="$JAVA_HOME" \
   ANDROID_HOME="$HOME/Android/Sdk" ANDROID_SDK_ROOT="$HOME/Android/Sdk" \
   ./gradlew --no-daemon testDebugUnitTest assembleDebug assembleRelease \
   assembleDebugAndroidTest -PgateInstall=true
@@ -12,12 +12,66 @@ env -i HOME="$HOME" PATH="$JAVA21_HOME/bin:/usr/local/bin:/usr/bin:/bin" \
 These commands do not install or run the APK. Native libraries must be rebuilt
 against the current generated bindings before runtime testing. Host/JVM success
 is not Android recursive-DNS acceptance.
-`JAVA21_HOME` is an operator-selected JDK 21 path; children receive only the
+`JAVA_HOME` is an operator-selected compatible JDK17/21 path; children receive only the
 listed environment. Do not print inherited environment or provider credentials.
 
 ## Operator fixtures
 
-### Confirmed server chronology (2026-10-07)
+### Fresh8 message actions: current acceptance (2026-10-07)
+
+Current core is fresh encrypted schema8/one `core_messages`, strict E2E v1;
+wire2/server5/carrier/auth/pins and existing backend data/policy are unchanged.
+No old-schema/plain conversion or legacy body decode. Reset is an explicitly
+authorized operation, never an open-error fallback. User limited this rollout
+to Moto `ZY22JFJ5LP`; Pacman, its identity/accounts/messages were not accessed.
+
+Rust workspace PASS (core55/protocol53; two pre-existing explicit native-host
+ignores unchanged), explicit host codegen and NDKr28c arm64 PASS. JVM74 with zero
+failures/skips, debug/release/gated-test APK and scoped localization lint PASS.
+Final main APK SHA256 `6259bb2fb34c14b75b60ab018de8d32c2e9f2dba9973ced1915ee18968a11e7a`;
+packaged native SHA256 `f4b742805446745543a006e5da2680bfcb2458efd4f4a49632d3bb98acc02a8d`.
+Installed main readback matches the artifact; trusted public profile present.
+
+Run one exact method per process, never `connectedDebugAndroidTest` on Main:
+
+```sh
+adb -s ZY22JFJ5LP shell am instrument -w -r -e class \
+  'org.dmsg.client.MessageActionsGatesTest#METHOD' \
+  org.dmsg.client.gate.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+| Isolated method | Actual evidence |
+|---|---|
+| `DeviceGatesTest#freshEncryptedReopenAndRestoreOnlyWithOriginalKey` | Original-key snapshot/reopen/restore, missing-key and existing-live-path refusal |
+| `ChronologyGatesTest#exactRowAndRetainedRefreshOnlyInFreshGatePackage` | Fresh encrypted601 rows, exact scope/paging and retained Queued→Delivered/recreation |
+| `MessageActionsGatesTest#seedThreeOwnTextsOverRecursiveDns` | Fresh account/only fresh host peer; actual active-network DNS/native three texts |
+| `editCopyCancelRecreateSaveAndLargeFontIme` | Actual touchscreen Copy+whole-message edit, accessible action, normal/edit drafts and Save/Cancel/recreation;200% font/landscape IME/reachable controls |
+| `selfDeleteDefaultsCancelThenHidesOnlyHere` | Default SelfOnly, Cancel no-op, invisible local row; peer copy unchanged |
+| `deleteEveryoneCommitsWithNoActiveNetwork` | Footer menu, Everyone, radios off, atomic local tombstone/controlQueued, original cipher/ID/order/time unchanged |
+| `retryAndVerifySavedActionsAfterNewProcess` | New process/network restored, same pending ciphertext delivered; peer terminal tombstone, no control counted as new text |
+| `selectionSurvivesUnchangedRetainedRefresh` | System selection survives ticker; no-op rows/contact no longer rebound |
+
+Also exact DeviceGates signup/export methods provisioned only own disposable
+fixtures. Final selected executions PASS/zero skips. One settle-after-radio-restore
+Transport failure was diagnosed/retried, not suppressed. Test touchscreen source
+and focused landscape layout fixed test preconditions; real ticker selection
+RED→GREEN fixed in production. Font1.0/radios restored to captured values.
+
+After capturing isolated proofs, authorized `dev-install.py --serial ZY22JFJ5LP
+--reset-data --no-build` installed main and removed gate duplicates. Fresh main
+onboarding uses packaged profile and real invitation/credentials in a one-shot
+0400 private file. Exactly selected MainDevRolloutTest methods with
+`-e allowMainDevReset true` and main `.test` runner: `freshMainOnboardingAndDnsSignup`,
+`acceptNativePeerAndReceive`, `sendAndVerifyMainHistory`,
+`reopenedMainHasDeliveredHistory`, `editOwnDeliveredMainMessageThroughUi`,
+`deleteOwnMainMessageForEveryoneThroughUi`, `reopenedMainRetainsDeliveredDeletion`:
+**seven PASS/zero skips**. Native fresh peer verifies both directions, edited text,
+terminal revision2 deletion, original chronology/ciphertext and persistent
+base/control Delivered after new process. FGS remains off; this is actual DNS,
+not USB/DirectTCP acceptance. Private credentials/proofs remain outside Git;
+contract: `docs/goals/2026-10-07-message-actions.md`.
+
+### Historical confirmed server chronology (2026-10-07, superseded core7)
 
 Use the current metadata-capable backend, generated bindings and arm64 native.
 Run the seven one-QR executions below on two fresh `.gate` accounts first, then
@@ -41,7 +95,7 @@ pending movement and receive-between-bridge-pages ingestion watermarks.
 
 After this pair sequence, on a **fresh `.gate` only**, select
 `ChronologyGatesTest#exactRowAndRetainedRefreshOnlyInFreshGatePackage`.
-It seeds synthetic current-schema history, seals it via the real store, checks
+It now seeds sensitive fields sealed directly in fresh schema8 and checks
 601 exact records and contact boundaries, then verifies the retained last row
 changes Queued→Delivered/server order without duplication and survives recreation.
 This final-native gate passed on the remaining API35 Moto, zero skips; it is local

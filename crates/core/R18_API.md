@@ -19,18 +19,23 @@ set_contact_alias(contact_id: String, alias: Option<String>)
     -> Result<(), FfiError>
 mark_read(contact_id: String, through_local_id: i64)
     -> Result<i64, FfiError>
+edit_message(contact_id: String, local_id: i64, expected_revision: u64, text: String)
+    -> Result<HistoryMessage, FfiError>
+delete_message(contact_id: String, local_id: i64, scope: DeleteScope)
+    -> Result<HistoryMessage, FfiError>
 ```
 
-All calls above are local synchronous storage operations. `Core` has equivalent
-methods using borrowed strings and `HistoryError`; the `history` module also
-provides connection-level functions. `HistoryError::{InvalidInput,UnknownContact,
-Store}` maps to the corresponding safe `FfiError` variants.
+All calls above are local synchronous storage operations. The `history` module
+provides connection-level read functions; `Core` owns the mutation transaction.
+History errors map to safe `InvalidInput/UnknownContact/Store`; mutations also
+expose typed `MessageChanged/MessageUnavailable` and existing contact/trust errors.
 
 ## Records
 
 ```rust
 MessageDirection { Incoming, Outgoing }
 DeliveryState { Queued, Accepted, Delivered }
+DeleteScope { SelfOnly, Everyone }
 
 HistoryMessage {
     local_id: i64,
@@ -42,6 +47,10 @@ HistoryMessage {
     delivery_state: Option<DeliveryState>,
     server_seq: Option<i64>,
     server_timestamp_ms: Option<i64>,
+    revision: u64,
+    hidden_self: bool,
+    deleted_all: bool,
+    change_delivery_state: Option<DeliveryState>,
 }
 HistoryPage {
     rows: Vec<HistoryMessage>,
@@ -70,7 +79,7 @@ DialogsPage {
 - `history_page` remains **local ID descending**: append-only ingestion order
   for exact send reconciliation, not presentation chronology.
 - `timeline_page` is newest first: queued local-ID tail, confirmed **original
-  server seq descending**, then unavailable legacy metadata by local ID.
+  server seq descending**. There is no legacy metadata/backfill prefix.
   Reverse for displayed bubbles. Start with `None`; exclusive
   `next_before_local_id` resolves the anchor's current timeline position, not
   numeric ID order. `None` next means exhausted. `history_message` refreshes an
@@ -80,8 +89,10 @@ DialogsPage {
   canonical gaps and preserves the visible local-ID/offset anchor. A bridge page
   must not advance ingestion past unseen late receives.
 - IDs are positive durable SQLite local IDs, shared across contacts. A supplied
-  history/read anchor must exist in the requested contact; zero, negatives,
-  nonexistent/future and cross-contact IDs return `InvalidInput`.
+  history/read anchor must be a TEXT row in the requested contact; zero, negatives,
+  control-event, nonexistent/future and cross-contact IDs return `InvalidInput`.
+  Both history APIs retain hidden/deleted TEXT anchors; UI filters them from the
+  visible projection. A read anchor must additionally be visible.
 - Dialogs include **all known contacts**, including empty/requested/blocked
   contacts. Order: local activity milliseconds **descending**, contact ID
   **ascending** for ties. Activity is the maximum of local creation/message
@@ -91,26 +102,29 @@ DialogsPage {
   paging at `None` after send/fetch/contact additions change activity. A history
   insert above an older-page anchor does not duplicate older rows.
 - `local_timestamp_ms` remains this device's queue/decrypt time, unchanged on
-  confirmation/upgrade. Dialog activity remains local. These are not server times
+  confirmation/edit/delete. Dialog activity remains local. These are not server times
   or read receipts; pre-epoch/overflow local clocks fail the write.
 - Paired `server_seq`/`server_timestamp_ms` come from the authenticated server's
   durable acceptance metadata (seconds represented as milliseconds). Dedup/retry
   cannot replace them. Confirmed bubbles show server time, queued bubbles local
-  queue time. Missing/TTL-expired legacy metadata gets an honest local-time label,
-  not a fabricated server timestamp or a restored missing message body.
-- Preview is the latest local history row, truncated to 160 Unicode scalar
+  queue time. Fresh incoming and Accepted/Delivered TEXT require real paired
+  metadata. Known order is immutable; lost TTL/GC chronology is not fabricated.
+- Preview is the latest visible local TEXT row, truncated to 160 Unicode scalar
   values. Empty dialogs have `None` preview/time. Alias is trimmed, 1..=128 UTF-8
   bytes, without control characters; `None` clears it, invalid values are errors.
-- `local_unread` counts incoming rows beyond this contact's `read_cursor`, which
+- `local_unread` counts visible incoming TEXT beyond this contact's `read_cursor`, which
   starts at zero. Call `mark_read` only through a row actually viewed. Both
   incoming and outgoing viewed anchors are accepted. The returned cursor is
   monotonic; older valid anchors are idempotent. No read receipt is transmitted.
 - Incoming rows have `delivery_state=None`. Outgoing status is exact, persistent
-  and monotonic: fresh Queued until valid SEND_ACK plus its original metadata, Accepted on ST_ACCEPTED,
-  Delivered on ST_DELIVERED. Transport errors retain the last known state.
+  and monotonic: Queued until valid SEND_ACK (TEXT also requires original metadata;
+  controls do not), Accepted on ST_ACCEPTED, Delivered on ST_DELIVERED.
+  Transport errors retain the last known state.
   `message_status` accepts exactly 32 ASCII hex characters (case-insensitive),
   returns `None` for unknown/incoming-only IDs, and never interprets absent
-  outbox rows as delivered. Delivered history survives outbox removal.
+  outbox rows as delivered. It accepts any outgoing event MID, including EDIT/
+  DELETE after outbox removal; original MID always returns the base status.
+  `change_delivery_state` is the latest outgoing control's separate status.
 - `has_keys` requires all four pinned routing/identity values. Any presented
   `seen_*` value sets `identity_mismatch`. `state` is a string: legacy
   `requested`/`accepted`/`blocked`, plus one-QR `inviting` (durable outgoing
@@ -124,27 +138,42 @@ DialogsPage {
 
 ## Storage and atomicity
 
-Core local schema is **7**. The explicitly approved **6→7** upgrade verifies the
-encrypted storage marker/key first, then atomically adds three ordering columns
-and indexes in an IMMEDIATE transaction. Identity/account, encrypted text,
-ratchets, local IDs/timestamps and read cursors are not rewritten. Wrong keys,
-nonempty/unversioned, all other older and future schemas fail before writes;
-no generic migration, aliases or wipe. An older core6 APK cannot reopen upgraded
-data; do not downgrade/reset it as rollback. Wire2/server schema5 stay unchanged;
-deploy metadata-capable backend before this client.
-Same-current-schema plain-to-sealed conversion remains supported for Rust
-harness storage; Android uses `open_encrypted` with its Keystore-wrapped key.
+Core schema **8** is fresh-only. One `core_messages` table holds base TEXT and
+internal EDIT/DELETE events, incoming dedup/pending controls and outgoing immutable
+ciphertext/status. No history/inbox/outbox aliases, schema upgrades, plain→sealed
+conversion or order backfill exist. Encrypted initialization creates marker and
+non-NULL sealed-value guards atomically from the first write. Wrong/missing key,
+unsupported schema and initialized unmarked plaintext fail without mutation/reset.
+Rust-only fresh plaintext harnesses remain separate; Android has only the keyed
+constructor and same-version snapshot restore with its original Keystore key.
 
-History text and aliases use `dmsg_seal`/`dmsg_unseal` with separate authenticated
-field domains; sealing cleanup and stale-plaintext-write guards cover both.
-Plaintext history/alias/preview are excluded from Rust Debug representations.
-Outgoing history is in the same transaction as ratchet and ciphertext outbox;
-incoming history is in the account/session/inbox-dedup transaction before ACK.
-Retry reuses ciphertext/message ID, bypasses history insertion, and cannot
-regress status. Status updates commit outbox/history together.
+Nullable sealed bodies are cleared logically; readers never unseal NULL. Text and
+aliases use separate authenticated field domains and are omitted from their Rust
+Debug views. This is not forensic erasure of SQLite/ciphertext/backups, nor snapshot
+rollback prevention. Wire2/server5/carrier are unchanged.
 
-New incoming history stores validated server order in its decrypt transaction
-before ACK; SEND promotion stores order/status together. Existing reconnect/fetch
-restores at most 32 unchecked legacy rows per call, records unavailable results
-without starving later batches, and never silently changes a known order. No
-extra worker or periodic full-history scan is introduced.
+Incoming crypto candidates, event/dedup and final projection commit together before
+ACK. Final FETCH report rereads the batch's visible effective TEXT; controls never
+count as new messages. Only unseen TEXT needs matching acceptance metadata;
+replays/controls use the current FETCH seq for ACK without persisting control order.
+Outgoing retry preserves MID/ciphertext and frozen full recipient binding, never
+re-encrypts for replacement pins, and progresses only that event's status.
+
+## Own-message mutations
+
+- Remote Edit/Everyone require visible own Accepted/Delivered TEXT, unchanged
+  recipient binding, sendable contact and cached session matching current pins.
+  No implicit CLAIM/network occurs in the local mutation. Edit CAS checks the
+  expected revision before the same-text no-op; conflict preserves the UI draft.
+- One IMMEDIATE transaction saves updated base, ratchet and separately identified
+  queued control; returned row is decoded before commit. Original MID/local ID/
+  timestamps/order/ciphertext remain unchanged; base delivery stays monotonic.
+- Higher edits win on receive; terminal delete dominates late edits/originals.
+  Unknown targets journal in the same table, retaining only the winning pending
+  edit body. Applied/superseded bodies clear; durable event keys remain.
+- SelfOnly is local/offline and leaves revision unchanged; no control is created.
+  It does not cancel a queued send. Deleted/hidden rows return empty text and flags,
+  stay canonical paging anchors, but never appear in bubbles/inbox/preview/unread.
+- Outbox exposes typed text/edit/delete events and their own exact status; delete
+  delivery remains inspectable when its base bubble is invisible. UI performs
+  existing retry after save; network failure means saved/pending, not not-saved.
