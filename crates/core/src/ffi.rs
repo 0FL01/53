@@ -809,6 +809,25 @@ impl DmsgClient {
         }
     }
 
+    /// User-confirmed QR Add: durable outgoing request, synchronized over DNS.
+    pub fn contact_qr_id(&self, uri: String) -> Result<String, FfiError> {
+        contacts::parse_qr(&uri)
+            .map(|q| q.contact_id)
+            .map_err(|_| FfiError::BadQr("invalid contact".into()))
+    }
+
+    /// User-confirmed QR Add: durable outgoing request, synchronized over DNS.
+    pub fn invite_contact_qr(&self, uri: String) -> Result<QrOutcome, FfiError> {
+        if uri.len() > QR_URI_MAX {
+            return Err(FfiError::BadQr("oversized".into()));
+        }
+        match contacts::invite_from_qr(&self.conn()?, &uri).map_err(map_olm)? {
+            contacts::QrResult::Added => Ok(QrOutcome::Added),
+            contacts::QrResult::Unchanged => Ok(QrOutcome::Unchanged),
+            contacts::QrResult::IdentityChanged => Ok(QrOutcome::IdentityChanged),
+        }
+    }
+
     /// Запрос на добавление по ID (без ключей). Возвращает state.
     pub fn contact_request(&self, contact_id: String) -> Result<String, FfiError> {
         let conn = self.conn()?;

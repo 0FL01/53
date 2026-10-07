@@ -63,6 +63,8 @@ class FakeFacade : DmsgFacade {
     override fun profilePreview(code: String): Pair<String, String> { previewCalls++; return Pair("test.example", "ab".repeat(32)) }
     override fun myQr() = "dmsg://contact/MOCK"
     override fun addQr(uri: String) = QrOutcome.ADDED
+    override fun contactQrId(uri: String) = "0123456789AB"
+    override fun inviteQr(uri: String) = QrOutcome.ADDED
     override fun request(id: String): String {
         dialogs.add(Dialog(id, "requested"))
         return "requested"

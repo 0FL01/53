@@ -1,6 +1,6 @@
 # dmsg wire v2: единая account-auth логика
 
-Реализованный пользовательский путь: **публичный код/QR сервера → Войти / Создать аккаунт → диалоги**. Серверная регистрация `invite_only` (default) или `open`; приглашение — только одноразовое разрешение signup, не credential входа. Server/core schema5, старые schema/wire/`dmsg://join` отвергаются; ENROL/token replay/credential attach/admin invite-rebind удалены. Работающий remote ещё не обновлён: wipe/rollout — отдельный последующий шаг.
+Реализованный пользовательский путь: **доверенный профиль сервера → Войти / Создать аккаунт → диалоги**. Серверная регистрация `invite_only` (default) или `open`; приглашение QR/файлом — только одноразовое разрешение signup, не credential входа. Server schema5/core schema6, старые schema/wire/`dmsg://join` отвергаются; ENROL/token replay/credential attach/admin invite-rebind удалены. Односторонние contact requests добавлены совместимо, без SQL migration/wipe; сначала обновляется backend, затем клиенты.
 
 ## Публичный профиль
 
@@ -46,6 +46,24 @@ Opcodes16–27: SEND16/ACK17, FETCH18/RESP19, DELIVERY_ACK20, UPLOAD_PREKEYS21, 
 
 Core обновляет binding известных контактов перед отправкой; смена Noise/Ed/Curve сохраняет warning и **STOP до explicit confirm**. Inbound event со сменившимся sender связывается с известным user_id, не ACK/discard до подтверждения; после confirm новая сессия и доставка один раз. Ratchet/outbox ciphertext одна TX, retry byte-identical. Undecryptable integrity failures также не продвигают ratchet/ACK.
 
+## Один contact QR → входящий запрос
+
+Contact QR v1: `dmsg://contact/<base64url>` от raw126 `[version1][cid_len12][contact_id12][user_id16][device32][Ed32][Curve32]`. Профиль сервера внутри него отсутствует. Preview/cancel не меняют контакты; Add закрепляет QR pins и durable `inviting`, без второго местного Accept.
+
+| Authenticated request | Exact payload | Response |
+|---|---|---|
+| CONTACT_REQUEST `30` | recipient user_id16 | CONTACT_OK `34`, empty, после durable записи |
+| CONTACT_REQUESTS `31` | empty | RESP `32`: count:u8, ≤32 records `[contact_id12][binding112]` |
+| CONTACT_DECIDE `33` | peer user_id16 + decision:u8 (`1` accepted, `2` blocked) | CONTACT_OK или ERROR |
+
+Sender определяется только authenticated session. Existing schema5 `contact_permissions` хранит directed recipient/peer requested/accepted/blocked; повтор не открывает accepted/blocked заново, pending cap32. List возвращает только собственные incoming requests и текущие active/unblocked public bindings, не каталог пользователей. SEND также создаёт отсутствующий request **в той же TX**, что новый ciphertext; dedup не создаёт новый request.
+
+Core повторяет `inviting` через существующий reconnect/fetch; ACK переводит его в `accepted`. Request не зависит от публикации prekeys получателем: это только routing/public metadata. SEND сохраняет строгие binding/claim gates, первая отправка без ключей/сессии не сохраняет plaintext. Перед FETCH core публикует свои prekeys и получает incoming requests. Новый receiver contact имеет `incoming`, после явного Accept — `accepted_server`: ключи получены через pinned server, **не проверены лично по QR**. Старые pins не перезаписываются; подмена остаётся STOP. Explicit consent/block отправляется DECIDE при следующем fetch, повтор идемпотентен; transient сеть не отменяет локально сохранённое согласие.
+
+Unknown/unaccepted ciphertext остаётся без ACK в существующем TTL/quota mailbox до согласия; текст не расшифровывается/не появляется в истории заранее. Explicit blocked сохраняет drop/ACK policy, включая pre-block по ID без QR keys. ACK означает обработку события устройством, не прочтение; blocked drop не является сохранением текста. Pending события могут удерживать непрерывный cursor/пачку до решения или TTL. Уже ACKed прежним клиентом drop не восстанавливается сбросом cursor.
+
+При одновременных первых отправках нужны две независимые Olm sessions. Они ограничены двумя и хранятся в **существующем sealed session pickle**: legacy primary fields плюс optional `dmsg_receiving_sessions` (≤1). Используются vodozemac session IDs/decrypt; после успешной проверки deterministic session-ID ordering выбирает primary для новых отправок, второй ratchet сохраняет приём ранее отправленного ciphertext. Failed authentication работает с disposable copies; account/session/inbox/history commit атомарен. Это не новая криптография, SQL schema или повторное шифрование outbox.
+
 ## Проверка и границы
 
-`cargo build -p msgd && cargo test --workspace`, core `accounts`/`e2e_olm`, server `auth_probe`/`msgctl_probe`/backup fixtures проверяют fresh schemas, fail-closed старых версий, policy/races/retry/replace/peer STOP. Android: `android/AUTH_GATES.md`, физический **локальный authoritative DNS** gate; это не recursive production rollout. Реальные credentials/keys/invitations/deployment values не в Git/argv/logs; production secrets read-only файлами.
+`cargo build -p msgd && cargo test --workspace`, core `accounts`/`e2e_olm`/`one_qr_contacts`, server `auth_probe`/`msgctl_probe`/backup fixtures проверяют schemas, policy/races/retry/replace/peer STOP, deferred consent, simultaneous first sends и pre-block. Android recursive-DNS one-QR acceptance и ограничения optical evidence: `android/AUTH_GATES.md`, `docs/goals/2026-10-07-one-qr-contacts.md`. Реальные credentials/keys/invitations/deployment values не в Git/argv/logs; production secrets read-only файлами.

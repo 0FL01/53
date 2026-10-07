@@ -784,6 +784,10 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is
 // rather `InterfaceTooLargeException`, caused by too many methods
@@ -819,6 +823,8 @@ fun uniffi_dmsg_core_checksum_method_dmsgclient_contact_confirm(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_contact_get(
 ): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_contact_qr_id(
+): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_contact_request(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_contacts_page(
@@ -838,6 +844,8 @@ fun uniffi_dmsg_core_checksum_method_dmsgclient_fetch_dns(
 fun uniffi_dmsg_core_checksum_method_dmsgclient_history_page(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_inbox_page(
+): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_invite_contact_qr(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_login_dns(
 ): Short
@@ -940,6 +948,8 @@ fun uniffi_dmsg_core_fn_method_dmsgclient_contact_confirm(`ptr`: Pointer,`contac
 ): Unit
 fun uniffi_dmsg_core_fn_method_dmsgclient_contact_get(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
+fun uniffi_dmsg_core_fn_method_dmsgclient_contact_qr_id(`ptr`: Pointer,`uri`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_contact_request(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_contacts_page(`ptr`: Pointer,`cursor`: RustBuffer.ByValue,`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
@@ -959,6 +969,8 @@ fun uniffi_dmsg_core_fn_method_dmsgclient_fetch_dns(`ptr`: Pointer,uniffi_out_er
 fun uniffi_dmsg_core_fn_method_dmsgclient_history_page(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,`beforeLocalId`: RustBuffer.ByValue,`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_inbox_page(`ptr`: Pointer,`cursor`: Long,`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+fun uniffi_dmsg_core_fn_method_dmsgclient_invite_contact_qr(`ptr`: Pointer,`uri`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_login_dns(`ptr`: Pointer,`login`: RustBuffer.ByValue,`password`: RustBuffer.ByValue,`expectedDevice`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
@@ -1148,6 +1160,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_contact_get() != 28523.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_contact_qr_id() != 13728.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_contact_request() != 23749.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1176,6 +1191,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_inbox_page() != 13764.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_invite_contact_qr() != 44484.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_login_dns() != 16754.toShort()) {
@@ -1674,6 +1692,11 @@ public interface DmsgClientInterface {
     fun `contactGet`(`contactId`: kotlin.String): ContactInfo
 
     /**
+     * User-confirmed QR Add: durable outgoing request, synchronized over DNS.
+     */
+    fun `contactQrId`(`uri`: kotlin.String): kotlin.String
+
+    /**
      * Запрос на добавление по ID (без ключей). Возвращает state.
      */
     fun `contactRequest`(`contactId`: kotlin.String): kotlin.String
@@ -1712,6 +1735,11 @@ public interface DmsgClientInterface {
      * Страница входящих (cursor — seq, 0 = сначала).
      */
     fun `inboxPage`(`cursor`: kotlin.Long, `limit`: kotlin.UInt): InboxPage
+
+    /**
+     * User-confirmed QR Add: durable outgoing request, synchronized over DNS.
+     */
+    fun `inviteContactQr`(`uri`: kotlin.String): QrOutcome
 
     fun `loginDns`(`login`: kotlin.String, `password`: kotlin.String, `expectedDevice`: kotlin.String?): LoginOutcome
 
@@ -1957,6 +1985,22 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
 
 
     /**
+     * User-confirmed QR Add: durable outgoing request, synchronized over DNS.
+     */
+    @Throws(FfiException::class)override fun `contactQrId`(`uri`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_contact_qr_id(
+        it, FfiConverterString.lower(`uri`),_status)
+}
+    }
+    )
+    }
+
+
+
+    /**
      * Запрос на добавление по ID (без ключей). Возвращает state.
      */
     @Throws(FfiException::class)override fun `contactRequest`(`contactId`: kotlin.String): kotlin.String {
@@ -2097,6 +2141,22 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
     uniffiRustCallWithError(FfiException) { _status ->
     UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_inbox_page(
         it, FfiConverterLong.lower(`cursor`),FfiConverterUInt.lower(`limit`),_status)
+}
+    }
+    )
+    }
+
+
+
+    /**
+     * User-confirmed QR Add: durable outgoing request, synchronized over DNS.
+     */
+    @Throws(FfiException::class)override fun `inviteContactQr`(`uri`: kotlin.String): QrOutcome {
+            return FfiConverterTypeQrOutcome.lift(
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_invite_contact_qr(
+        it, FfiConverterString.lower(`uri`),_status)
 }
     }
     )

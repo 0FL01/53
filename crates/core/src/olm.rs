@@ -176,6 +176,45 @@ pub fn unpickle_session(pickle: &str) -> Result<Session, OlmError> {
     Ok(Session::from_pickle(sp))
 }
 
+/// A simultaneous first send can establish a second inbound Olm session.
+/// Keep both ratchets (including queued ciphertext) in the same sealed row;
+/// the core chooses a deterministic primary. Legacy SessionPickle fields stay
+/// at the root; no SQL schema change or destructive session replacement.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredSessions {
+    #[serde(flatten)]
+    primary: vodozemac::olm::SessionPickle,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    dmsg_receiving_sessions: Vec<vodozemac::olm::SessionPickle>,
+}
+
+pub fn unpickle_sessions(pickle: &str) -> Result<Vec<Session>, OlmError> {
+    let stored: StoredSessions =
+        serde_json::from_str(pickle).map_err(|_| OlmError::Store("session pickle".into()))?;
+    if stored.dmsg_receiving_sessions.len() > 1 {
+        return Err(OlmError::Store("session bound".into()));
+    }
+    let mut sessions = vec![Session::from_pickle(stored.primary)];
+    sessions.extend(
+        stored
+            .dmsg_receiving_sessions
+            .into_iter()
+            .map(Session::from_pickle),
+    );
+    Ok(sessions)
+}
+
+pub fn pickle_sessions(sessions: &[Session]) -> Result<String, OlmError> {
+    if sessions.is_empty() || sessions.len() > 2 {
+        return Err(OlmError::Store("session bound".into()));
+    }
+    serde_json::to_string(&StoredSessions {
+        primary: sessions[0].pickle(),
+        dmsg_receiving_sessions: sessions[1..].iter().map(Session::pickle).collect(),
+    })
+    .map_err(|_| OlmError::Store("session pickle".into()))
+}
+
 /// Ed25519 identity-публичник Account (32 байта — то, что pin'ит сервер).
 pub fn ed_identity(acc: &Account) -> [u8; 32] {
     *acc.ed25519_key().as_bytes()

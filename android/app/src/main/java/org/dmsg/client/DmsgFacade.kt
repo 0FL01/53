@@ -45,6 +45,8 @@ interface DmsgFacade {
     fun profilePreview(code: String): Pair<String, String>
     fun myQr(): String
     fun addQr(uri: String): QrOutcome
+    fun contactQrId(uri: String): String
+    fun inviteQr(uri: String): QrOutcome
     fun request(id: String): String
     fun accept(id: String)
     fun block(id: String)

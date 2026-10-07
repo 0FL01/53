@@ -93,8 +93,15 @@ DialogsPage {
   returns `None` for unknown/incoming-only IDs, and never interprets absent
   outbox rows as delivered. Delivered history survives outbox removal.
 - `has_keys` requires all four pinned routing/identity values. Any presented
-  `seen_*` value sets `identity_mismatch`. `state` remains the existing
-  `requested`/`accepted`/`blocked` string; metadata never changes these gates.
+  `seen_*` value sets `identity_mismatch`. `state` is a string: legacy
+  `requested`/`accepted`/`blocked`, plus one-QR `inviting` (durable outgoing
+  request), `incoming` (awaiting local consent) and `accepted_server` (explicit
+  consent to server-sourced keys, not personally QR-verified). Metadata never
+  bypasses block/pin gates. Native UI and backend must be updated for one-QR
+  requests; this does not make an old client understand incoming consent.
+  `contact_qr_id` parses without mutation; `invite_contact_qr` persists the
+  QR-approved request for existing reconnect/fetch retry. Legacy local-only
+  `add_contact_qr` remains available to harnesses.
 
 ## Storage and atomicity
 

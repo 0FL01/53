@@ -58,6 +58,8 @@ class UniFfiFacade(private val dbPath: String, key: ByteArray, private val conte
     override fun myQr(): String = wrap { core.myContactQr() }
 
     override fun addQr(uri: String) = wrap { core.addContactQr(uri) }
+    override fun contactQrId(uri: String) = wrap { core.contactQrId(uri) }
+    override fun inviteQr(uri: String) = wrap { core.inviteContactQr(uri) }
 
     override fun request(id: String): String = wrap { core.contactRequest(id) }
     override fun accept(id: String) = wrap { core.contactAccept(id) }

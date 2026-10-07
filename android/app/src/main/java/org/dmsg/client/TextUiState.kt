@@ -53,18 +53,23 @@ internal fun contactCta(contact: Dialog?): ContactCta = when {
     contact.state == "blocked" -> ContactCta.Blocked
     contact.identityMismatch -> ContactCta.VerifyChanged
     !contact.hasKeys -> ContactCta.ScanKeys
-    contact.state == "requested" -> ContactCta.Accept
-    contact.state == "accepted" -> ContactCta.Chat
+    contact.state in setOf("requested", "incoming") -> ContactCta.Accept
+    contact.state in setOf("accepted", "accepted_server", "inviting") -> ContactCta.Chat
     else -> ContactCta.Loading
 }
 internal fun trustLabel(resources: Resources, contact: Dialog?): String = resources.getString(trustLabelRes(contact))
-@StringRes internal fun trustLabelRes(contact: Dialog?): Int = when (contactCta(contact)) {
+@StringRes internal fun trustLabelRes(contact: Dialog?): Int = when {
+    contactCta(contact) == ContactCta.Accept && contact?.state == "incoming" -> R.string.trust_incoming
+    contactCta(contact) == ContactCta.Chat && contact?.state == "accepted_server" -> R.string.trust_server_keys
+    contactCta(contact) == ContactCta.Chat && contact?.state == "inviting" -> R.string.trust_inviting
+    else -> when (contactCta(contact)) {
     ContactCta.VerifyChanged -> R.string.trust_changed
     ContactCta.Blocked -> R.string.trust_blocked
     ContactCta.ScanKeys -> R.string.trust_no_keys
     ContactCta.Accept -> R.string.trust_requested
     ContactCta.Chat -> R.string.trust_pinned
     ContactCta.Loading -> R.string.trust_loading
+    }
 }
 
 /** One local per-contact window; page reads themselves never move the read cursor. */

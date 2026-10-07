@@ -215,4 +215,11 @@
     <string name="qr_contact_unchanged">This contact is already added. Open it in dialogs.</string>
     <string name="qr_identity_changed">Contact key changed — sending STOPPED. Open the contact card, verify the QR through another channel and confirm the new key.</string>
     <string name="qr_failed">Invalid QR: %1$s</string>
+    <string name="contact_add_preview">Add contact %1$s and send a contact request? They can accept without scanning your QR.</string>
+    <string name="contact_add_confirm">Add</string>
+    <string name="contact_add_cancelled">Contact was not added</string>
+    <string name="trust_incoming">Incoming contact request. Accept only if you expect this person. Keys come from the server, not a scanned QR.</string>
+    <string name="trust_server_keys">Contact accepted · keys from the trusted server, not personally verified by QR</string>
+    <string name="trust_inviting">Contact added · request queued until the next connection</string>
+    <string name="pending_contacts">Messages waiting for contact acceptance: %1$d</string>
 </resources>

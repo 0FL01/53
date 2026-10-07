@@ -236,6 +236,7 @@ class DmsgService : Service() {
             if (!f.account().authenticated) throw DmsgError(R.string.error_sign_in_required, ErrorKind.NotAuthenticated)
             if (f.dnsProfile() == null) throw DmsgError(R.string.error_server_required, ErrorKind.InvalidInput)
             val rep = check(f) { worker.active }
+            Log.d(TAG, "receive pending=${rep.skipped.getOrElse(0) { 0 }} blocked=${rep.skipped.getOrElse(1) { 0 }} undecryptable=${rep.skipped.getOrElse(2) { 0 }} mismatch=${rep.skipped.getOrElse(3) { 0 }}")
             return rep.received.size
         }
     }

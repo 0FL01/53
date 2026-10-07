@@ -109,8 +109,30 @@ pub fn send(
             rusqlite::params![recipient, sender_device, message_id, ciphertext, now],
         )
         .map_err(|e| store("insert", e))?;
+    let inserted_seq = tx.last_insert_rowid();
+    // Legacy/local-only senders also create an incoming request. Commit it with
+    // the ciphertext so polling cannot observe the message without its request.
+    let sender_user: Option<Vec<u8>> = tx
+        .query_row(
+            "SELECT user_id FROM devices WHERE device_key=?1",
+            [sender_device],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| store("sender", e))?;
+    if let Some(sender) = sender_user.filter(|u| u.as_slice() != recipient) {
+        crate::contacts::request(&tx, &sender, recipient).map_err(|code| {
+            if code == ERR_QUOTA {
+                MboxError::Quota
+            } else if code == ERR_BUSY {
+                MboxError::Busy
+            } else {
+                MboxError::Bad
+            }
+        })?;
+    }
     let seq: i64 = if inserted == 1 {
-        tx.last_insert_rowid()
+        inserted_seq
     } else {
         tx.query_row(
             "SELECT seq FROM mailbox_events WHERE sender_device=?1 AND message_id=?2",

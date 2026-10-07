@@ -38,6 +38,12 @@ pub mod state {
     pub const REQUESTED: &str = "requested";
     /// Согласие дано, ключи закреплены — отправка разрешена.
     pub const ACCEPTED: &str = "accepted";
+    /// QR-approved outgoing request; retry until server ACK, across restarts.
+    pub const INVITING: &str = "inviting";
+    /// Incoming request. Keys authenticated by pinned server, not scanned QR.
+    pub const INCOMING: &str = "incoming";
+    /// Explicitly accepted server-sourced keys; do not label QR-verified.
+    pub const ACCEPTED_SERVER: &str = "accepted_server";
     /// Заблокирован — отправка/приём запрещены (терминально в v1).
     pub const BLOCKED: &str = "blocked";
 }
@@ -251,11 +257,96 @@ pub fn accept(conn: &rusqlite::Connection, contact_id: &str) -> Result<(), OlmEr
         return Err(OlmError::MissingKeys);
     }
     conn.execute(
-        "UPDATE core_contacts SET state='accepted' WHERE contact_id=?1",
+        "UPDATE core_contacts SET state=CASE WHEN state IN ('incoming','accepted_server') THEN 'accepted_server' ELSE 'accepted' END WHERE contact_id=?1",
         [contact_id],
     )
     .map_err(|e| OlmError::Store(format!("accept: {e}")))?;
     Ok(())
+}
+
+/// Explicit QR preview/Add action. Preserve existing pins, blocks and history.
+/// Store request intent atomically with the QR; the existing worker sends it.
+pub fn invite_from_qr(conn: &rusqlite::Connection, uri: &str) -> Result<QrResult, OlmError> {
+    let q = parse_qr(uri).map_err(|_| OlmError::Protocol("bad contact qr"))?;
+    if crate::store::load_account(conn)
+        .map_err(OlmError::Store)?
+        .is_some_and(|(u, _)| u == q.user_id)
+    {
+        return Err(OlmError::Protocol("self contact"));
+    }
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(|_| OlmError::Store("invite transaction".into()))?;
+    let outcome = add_from_qr(&tx, uri)?;
+    let c = get(&tx, &q.contact_id)?.ok_or(OlmError::UnknownContact)?;
+    if c.state == state::BLOCKED {
+        return Err(OlmError::Blocked);
+    }
+    if outcome != QrResult::IdentityChanged
+        && c.seen_ed.is_none()
+        && c.seen_curve.is_none()
+        && c.seen_device.is_none()
+        && c.seen_user.is_none()
+    {
+        tx.execute(
+            "UPDATE core_contacts SET state='inviting' WHERE contact_id=?1",
+            [&q.contact_id],
+        )
+        .map_err(|_| OlmError::Store("invite queue".into()))?;
+    }
+    tx.commit()
+        .map_err(|_| OlmError::Store("invite commit".into()))?;
+    Ok(outcome)
+}
+
+pub fn accepted(c: &Contact) -> bool {
+    matches!(
+        c.state.as_str(),
+        state::ACCEPTED | state::ACCEPTED_SERVER | state::INVITING
+    )
+}
+
+/// New incoming keys are server-authenticated candidates, never auto-approved.
+/// A known peer's pins are checked, not overwritten, including device rotation.
+pub fn receive_request(
+    conn: &rusqlite::Connection,
+    p: &dmsg_protocol::contacts::PeerProfile,
+) -> Result<Contact, OlmError> {
+    if crate::store::load_account(conn)
+        .map_err(OlmError::Store)?
+        .is_some_and(|(u, _)| u == p.binding.user_id)
+    {
+        return Err(OlmError::Protocol("self request"));
+    }
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(|_| OlmError::Store("request transaction".into()))?;
+    if let Some(existing) = get_by_user(&tx, &p.binding.user_id)? {
+        if existing.contact_id != p.contact_id {
+            return Err(OlmError::IdentityMismatch);
+        }
+    }
+    let old = get(&tx, &p.contact_id)?;
+    if old
+        .as_ref()
+        .is_some_and(|c| c.state == state::BLOCKED && c.user_id.is_none())
+    {
+        // A pre-block by public ID has no QR keys. Associate only routing from
+        // the authenticated directory so the existing blocked-drop policy also
+        // applies to this peer; never approve or populate its identity pins.
+        tx.execute("UPDATE core_contacts SET user_id=?2 WHERE contact_id=?1 AND state='blocked' AND user_id IS NULL",rusqlite::params![p.contact_id,p.binding.user_id.as_slice()]).map_err(|_|OlmError::Store("blocked request routing".into()))?;
+    }
+    if old
+        .as_ref()
+        .is_none_or(|c| c.user_id.is_none() && c.state != state::BLOCKED)
+    {
+        tx.execute("INSERT INTO core_contacts(contact_id,user_id,device_key,ed_identity,curve_identity,state,local_activity_ms) VALUES(?1,?2,?3,?4,?5,'incoming',?6) ON CONFLICT(contact_id) DO UPDATE SET user_id=excluded.user_id,device_key=excluded.device_key,ed_identity=excluded.ed_identity,curve_identity=excluded.curve_identity,state='incoming'",rusqlite::params![p.contact_id,p.binding.user_id.as_slice(),p.binding.device_key.as_slice(),p.binding.ed25519.as_slice(),p.binding.curve25519.as_slice(),crate::history::local_time_ms().map_err(OlmError::Store)?]).map_err(|_|OlmError::Store("incoming request".into()))?;
+    }
+    tx.commit()
+        .map_err(|_| OlmError::Store("incoming commit".into()))?;
+    let c = get(conn, &p.contact_id)?.ok_or(OlmError::UnknownContact)?;
+    if c.state != state::BLOCKED {
+        check_binding(conn, &p.contact_id, &p.binding)?;
+    }
+    get(conn, &p.contact_id)?.ok_or(OlmError::UnknownContact)
 }
 
 /// Блок: терминален в v1 (разблока нет). Строку создаёт при нужды (pre-block).
@@ -345,7 +436,7 @@ pub fn sendable(c: &Contact) -> Result<(), OlmError> {
     if c.state == state::BLOCKED {
         return Err(OlmError::Blocked);
     }
-    if c.state != state::ACCEPTED {
+    if !accepted(c) {
         return Err(OlmError::NotAccepted);
     }
     if c.seen_ed.is_some()

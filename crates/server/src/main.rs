@@ -11,6 +11,7 @@
 
 mod auth;
 mod blob;
+mod contacts;
 mod db;
 mod invite_qr;
 mod mbox;
@@ -436,6 +437,9 @@ async fn handle_conn(
                     OP_COUNT => count_reply(&st, &c, &device_key, &payload)?,
                     OP_BLOB_RESERVE => reserve_reply(&st, &c, &user, &device_key, &payload)?,
                     OP_DEVICE_BINDING => binding_reply(&st, &device_key, payload)?,
+                    OP_CONTACT_REQUEST | OP_CONTACT_REQUESTS | OP_CONTACT_DECIDE => {
+                        contact_reply(&st, &user, &device_key, op, payload)
+                    }
                     _ => {
                         c.proto_err.fetch_add(1, Ordering::Relaxed);
                         return Err(());
@@ -534,6 +538,37 @@ fn is_revoked(db: &rusqlite::Connection, device_key: &[u8]) -> bool {
 
 fn mbox_code(e: &mbox::MboxError) -> u8 {
     e.code()
+}
+
+fn contact_reply(
+    st: &State,
+    user: &[u8; 16],
+    device: &[u8; 32],
+    op: u8,
+    payload: &[u8],
+) -> Vec<u8> {
+    let db = st.db.lock().expect("db");
+    let result = if is_revoked(&db, device) {
+        Err(ERR_REVOKED)
+    } else {
+        match op {
+            OP_CONTACT_REQUEST if payload.len() == 16 => {
+                contacts::request(&db, user, payload).map(|()| (OP_CONTACT_OK, vec![]))
+            }
+            OP_CONTACT_REQUESTS if payload.is_empty() => contacts::pending(&db, user)
+                .and_then(|rows| dmsg_protocol::contacts::build_requests(&rows).ok_or(ERR_BAD))
+                .map(|p| (OP_CONTACT_REQUESTS_RESP, p)),
+            OP_CONTACT_DECIDE if payload.len() == 17 => {
+                contacts::decide(&db, user, &payload[..16], payload[16])
+                    .map(|()| (OP_CONTACT_OK, vec![]))
+            }
+            _ => Err(ERR_BAD),
+        }
+    };
+    match result {
+        Ok((op, p)) => encode_frame(op, &p).expect("bounded contacts"),
+        Err(e) => encode_frame(OP_ERROR, &[e]).expect("fits"),
+    }
 }
 
 /// SEND → re-check revoked → dedup-в-TX → quota → INSERT → commit → SEND_ACK.

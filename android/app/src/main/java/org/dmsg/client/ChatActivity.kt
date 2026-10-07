@@ -302,7 +302,11 @@ class ChatActivity : DmsgActivity() {
                 memory.pending = false
                 memory.action = result.fold({ report ->
                     val count = report.received.size
-                    val render: (Resources) -> String = { res -> res.getString(R.string.received_local, count) }
+                    val pending = report.skipped.getOrElse(0) { 0 }
+                    val render: (Resources) -> String = { res ->
+                        res.getString(R.string.received_local, count) +
+                            if (pending > 0) "\n" + res.getString(R.string.pending_contacts, pending) else ""
+                    }
                     render
                 }, { error ->
                     val messageRes = humanErrorRes(error)

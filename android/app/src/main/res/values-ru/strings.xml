@@ -213,4 +213,11 @@
     <string name="qr_contact_unchanged">Этот контакт уже добавлен. Откройте его в диалогах.</string>
     <string name="qr_identity_changed">Ключ контакта изменился — отправка СТОП. Откройте карточку, проверьте QR другим способом и подтвердите новый ключ.</string>
     <string name="qr_failed">Битый QR: %1$s</string>
+    <string name="contact_add_preview">Добавить контакт %1$s и отправить запрос? Собеседник сможет принять его без сканирования вашего QR.</string>
+    <string name="contact_add_confirm">Добавить</string>
+    <string name="contact_add_cancelled">Контакт не добавлен</string>
+    <string name="trust_incoming">Входящий запрос в контакты. Принимайте, только если ожидаете этого человека. Ключи получены от сервера, не из сканированного QR.</string>
+    <string name="trust_server_keys">Контакт принят · ключи от доверенного сервера, лично по QR не проверены</string>
+    <string name="trust_inviting">Контакт добавлен · запрос в очереди до следующего подключения</string>
+    <string name="pending_contacts">Сообщений, ожидающих принятия контакта: %1$d</string>
 </resources>

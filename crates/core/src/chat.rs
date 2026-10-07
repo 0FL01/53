@@ -213,14 +213,103 @@ impl Core {
     /// Зовёт шелл после переподключения (планировщика нет).
     pub async fn on_reconnect(&mut self, t: &mut impl Transport) -> Result<u32, OlmError> {
         self.login(t).await?;
-        olm::ensure_prekeys(
+        let count = olm::ensure_prekeys(
             &self.conn,
             &mut self.account,
             t,
             &self.device_pub,
             &mut self.next_key_id,
         )
-        .await
+        .await?;
+        self.push_contact_requests(t).await?;
+        Ok(count)
+    }
+
+    /// Same authenticated stream/poll as text; bounded durable request retry.
+    async fn push_contact_requests(&mut self, t: &mut impl Transport) -> Result<(), OlmError> {
+        use dmsg_protocol::{OP_CONTACT_OK, OP_CONTACT_REQUEST};
+        let ids: Vec<String> = {
+            let mut stmt=self.conn.prepare("SELECT contact_id FROM core_contacts WHERE state='inviting' ORDER BY contact_id LIMIT 32").map_err(|_|OlmError::Store("invite list".into()))?;
+            let rows = stmt
+                .query_map([], |r| r.get(0))
+                .map_err(|_| OlmError::Store("invite list".into()))?;
+            rows.collect::<Result<_, _>>()
+                .map_err(|_| OlmError::Store("invite list".into()))?
+        };
+        for id in ids {
+            let c = contacts::get(&self.conn, &id)?.ok_or(OlmError::UnknownContact)?;
+            if contacts::sendable(&c).is_err() {
+                continue;
+            }
+            match self.refresh_binding(t, &c).await {
+                Ok(()) => (),
+                Err(OlmError::IdentityMismatch) => continue,
+                // Requests contain only routing/public metadata. A fresh peer
+                // may show its QR before publishing prekeys; SEND still has
+                // the strict binding/claim gates before any text persistence.
+                Err(OlmError::NoPeerPrekeys) => (),
+                Err(e) => return Err(e),
+            }
+            let user = c.user_id.ok_or(OlmError::MissingKeys)?;
+            t.send_frame(OP_CONTACT_REQUEST, &user)
+                .await
+                .map_err(|e| OlmError::Transport(e.to_string()))?;
+            self.contact_reply(t, OP_CONTACT_OK).await?;
+            self.conn.execute("UPDATE core_contacts SET state='accepted' WHERE contact_id=?1 AND state='inviting'",[&id]).map_err(|_|OlmError::Store("invite ack".into()))?;
+        }
+        Ok(())
+    }
+
+    async fn sync_contacts(&mut self, t: &mut impl Transport) -> Result<(), OlmError> {
+        use dmsg_protocol::{
+            OP_CONTACT_DECIDE, OP_CONTACT_OK, OP_CONTACT_REQUESTS, OP_CONTACT_REQUESTS_RESP,
+        };
+        self.push_contact_requests(t).await?;
+        t.send_frame(OP_CONTACT_REQUESTS, &[])
+            .await
+            .map_err(|e| OlmError::Transport(e.to_string()))?;
+        let payload = self.contact_reply(t, OP_CONTACT_REQUESTS_RESP).await?;
+        let requests = dmsg_protocol::contacts::parse_requests(&payload)
+            .ok_or(OlmError::Protocol("bad contact requests"))?;
+        for profile in requests {
+            let c = match contacts::receive_request(&self.conn, &profile) {
+                Ok(c) => c,
+                Err(OlmError::IdentityMismatch) => continue,
+                Err(e) => return Err(e),
+            };
+            let decision = if c.state == contacts::state::BLOCKED {
+                2
+            } else if contacts::sendable(&c).is_ok() {
+                1
+            } else {
+                continue;
+            };
+            let mut p = profile.binding.user_id.to_vec();
+            p.push(decision);
+            t.send_frame(OP_CONTACT_DECIDE, &p)
+                .await
+                .map_err(|e| OlmError::Transport(e.to_string()))?;
+            self.contact_reply(t, OP_CONTACT_OK).await?;
+        }
+        Ok(())
+    }
+
+    async fn contact_reply(
+        &self,
+        t: &mut impl Transport,
+        expected: u8,
+    ) -> Result<Vec<u8>, OlmError> {
+        let (op, p) = t
+            .recv_frame()
+            .await
+            .map_err(|e| OlmError::Transport(e.to_string()))?;
+        if op == OP_ERROR && p.len() == 1 {
+            return Err(map_error(p[0]));
+        }
+        if op != expected || (expected == dmsg_protocol::OP_CONTACT_OK && !p.is_empty()) {
+            return Err(OlmError::Protocol("bad contact reply"));
+        }
+        Ok(p)
     }
 
     /// Resume this connection using the Noise identity, without credentials.
@@ -332,7 +421,8 @@ impl Core {
         if row_ed != peer_ed || row_curve != peer_curve {
             return Err(OlmError::IdentityMismatch);
         }
-        let mut session = olm::unpickle_session(&pickle)?;
+        let mut sessions = olm::unpickle_sessions(&pickle)?;
+        let session = &mut sessions[0];
         let mut plain = Vec::with_capacity(32 + text.len());
         plain.extend_from_slice(&olm::ed_identity(&self.account));
         plain.extend_from_slice(text.as_bytes());
@@ -345,7 +435,7 @@ impl Core {
         }
         let mut message_id = [0u8; 16];
         getrandom::fill(&mut message_id).map_err(|_| OlmError::Crypto("rng"))?;
-        let spickle = olm::pickle_session(&session)?;
+        let spickle = olm::pickle_sessions(&sessions)?;
         tx.execute(
             "UPDATE core_sessions SET pickle=dmsg_seal('session_pickle',?2)
              WHERE contact_id=?1",
@@ -516,6 +606,7 @@ impl Core {
             &mut self.next_key_id,
         )
         .await?;
+        self.sync_contacts(t).await?;
         let events = self.fetch_raw(t).await?;
         let mut res = FetchResult::default();
         let mut seqs: Vec<u64> = Vec::with_capacity(events.len());
@@ -552,7 +643,6 @@ impl Core {
                 }
                 Err(Fail::Skip(EventSkip::Unknown)) => {
                     res.skipped_unknown += 1;
-                    seqs.push(e.seq);
                 }
                 Err(Fail::Skip(EventSkip::Blocked)) => {
                     res.skipped_blocked += 1;
@@ -568,7 +658,8 @@ impl Core {
     }
 
     /// Расшифровать одно событие. Ok(None) — дедуп-повтор (уже лежит).
-    /// Unknown/blocked follow the drop policy; identity/integrity failures stay unacknowledged.
+    /// Unknown/unaccepted and identity/integrity failures stay unacknowledged.
+    /// Explicitly blocked senders follow the existing drop policy.
     /// Fail::Err — жёсткая ошибка (store), прерывает пачку.
     async fn decrypt_event(&mut self, e: &RawEvent) -> Result<Option<Received>, Fail> {
         // At-least-once replay cannot be decrypted twice by an Olm ratchet.
@@ -591,6 +682,11 @@ impl Core {
         };
         if c.state == contacts::state::BLOCKED {
             return Err(Fail::Skip(EventSkip::Blocked));
+        }
+        if !contacts::accepted(&c) {
+            // Consent is explicit. Keep ciphertext in the bounded server
+            // mailbox without consuming OTKs/ratchets or reporting Delivered.
+            return Err(Fail::Skip(EventSkip::Unknown));
         }
         if c.device_key != Some(e.sender)
             || c.seen_ed.is_some()
@@ -626,26 +722,35 @@ impl Core {
             return Ok(None);
         }
         let (mut account, next_key_id) = olm::load_or_create(&tx)?;
-        let mut session = if let Some((pickle, ed, curve)) =
+        let mut sessions = if let Some((pickle, ed, curve)) =
             crate::store::load_session(&tx, &c.contact_id).map_err(OlmError::Store)?
         {
             if ed != peer_ed || curve != peer_curve {
                 return Err(Fail::Skip(EventSkip::Mismatch));
             }
-            Some(olm::unpickle_session(&pickle)?)
+            olm::unpickle_sessions(&pickle)?
         } else {
-            None
+            vec![]
         };
         let plaintext: Vec<u8> = match msg {
             vodozemac::olm::OlmMessage::PreKey(ref pre) => {
-                if let Some(s) = session.as_mut() {
-                    s.decrypt(&msg)
+                if let Some(index) = sessions
+                    .iter()
+                    .position(|s| s.session_id() == pre.session_id())
+                {
+                    // Never try a prekey from another session against the
+                    // outgoing ratchet; crossed first sends are legitimate.
+                    sessions[index]
+                        .decrypt(&msg)
                         .map_err(|_| Fail::Skip(EventSkip::Undecryptable))?
                 } else {
+                    if sessions.len() >= 2 {
+                        return Err(Fail::Skip(EventSkip::Undecryptable));
+                    }
                     let presented = *pre.identity_key().as_bytes();
                     match olm::inbound(&mut account, &peer_curve, pre) {
                         Ok((s, _, pt)) => {
-                            session = Some(s);
+                            sessions.push(s);
                             pt
                         }
                         Err(OlmError::IdentityMismatch) => {
@@ -663,11 +768,18 @@ impl Core {
                 }
             }
             vodozemac::olm::OlmMessage::Normal(_) => {
-                let s = session
-                    .as_mut()
-                    .ok_or(Fail::Skip(EventSkip::Undecryptable))?;
-                s.decrypt(&msg)
-                    .map_err(|_| Fail::Skip(EventSkip::Undecryptable))?
+                let mut decrypted = None;
+                for s in &mut sessions {
+                    // Authentication failures discard candidate state; they
+                    // cannot advance any persisted ratchet or consumed OTK.
+                    let mut candidate = vodozemac::olm::Session::from_pickle(s.pickle());
+                    if let Ok(text) = candidate.decrypt(&msg) {
+                        *s = candidate;
+                        decrypted = Some(text);
+                        break;
+                    }
+                }
+                decrypted.ok_or(Fail::Skip(EventSkip::Undecryptable))?
             }
         };
         if plaintext.len() < 33 {
@@ -687,9 +799,12 @@ impl Core {
             return Err(Fail::Skip(EventSkip::Undecryptable));
         }
         // ОДНА TX: account (one-time consumed) + session + inbox dedup + history.
+        // Both peers choose the same sending session after crossed initiation,
+        // while retaining the other ratchet for already queued ciphertext.
+        sessions.sort_by_key(|s| s.session_id());
         let apickle = serde_json::to_string(&account.pickle())
             .map_err(|_| OlmError::Store("pickle".into()))?;
-        let spickle = olm::pickle_session(session.as_ref().expect("session"))?;
+        let spickle = olm::pickle_sessions(&sessions)?;
         let inserted = (|| -> Result<bool, OlmError> {
             tx.execute(
                 "INSERT INTO core_olm(id, pickle, next_key_id) VALUES(1,dmsg_seal('olm_pickle',?1),?2)
@@ -956,6 +1071,17 @@ mod tests {
         }
         async fn send_frame(&mut self, opcode: u8, payload: &[u8]) -> Result<(), TransportError> {
             self.sent.push((opcode, payload.to_vec()));
+            // Empty request list is the default directory state in these
+            // ratchet-focused doubles. Contact scenarios script a real list.
+            if opcode == dmsg_protocol::OP_CONTACT_REQUESTS
+                && self
+                    .replies
+                    .front()
+                    .is_none_or(|(op, _)| *op != dmsg_protocol::OP_CONTACT_REQUESTS_RESP)
+            {
+                self.replies
+                    .push_front((dmsg_protocol::OP_CONTACT_REQUESTS_RESP, vec![0]));
+            }
             if self.echo_send_ack && opcode == OP_SEND {
                 // SEND_ACK с тем же message_id, ST_ACCEPTED.
                 let mut p = Vec::with_capacity(17);

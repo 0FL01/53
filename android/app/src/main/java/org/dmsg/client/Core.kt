@@ -51,6 +51,8 @@ object Core {
         override fun profilePreview(code: String): Pair<String, String> = fail()
         override fun myQr(): String = fail()
         override fun addQr(uri: String): QrOutcome = fail()
+        override fun contactQrId(uri: String): String = fail()
+        override fun inviteQr(uri: String): QrOutcome = fail()
         override fun request(id: String): String = fail()
         override fun accept(id: String) = fail()
         override fun block(id: String) = fail()

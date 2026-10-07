@@ -137,6 +137,10 @@ Android: release ABI; 16 KB native loading; Doze; background permissions; force-
 
 English-локаль реализована по отдельному утверждённому scope: полные English default и русский перевод, язык из списка Android, English fallback; без ручного переключателя/locale prefs. В APK упакованы EN/RU ресурсы, чтобы переводы dependency не перехватывали первый неподдерживаемый язык. Ошибки разрешаются через resource IDs при показе, секреты и правила auth не меняются; locale refresh сохраняет тот же FGS worker/channel/count. Приёмка и compatible main install без reset — `docs/goals/2026-10-06-english-locale.md`, точные gates — `android/AUTH_GATES.md`.
 
+## Односторонние contact requests
+
+Одностороннее добавление контакта реализовано отдельным scope: **один QR → Add → incoming request → Accept → E2E в обе стороны**, без обратного QR/второго местного approve. Первые сообщения ждут согласия, simultaneous Olm initiation исправлена с bounded двумя ratchets в прежнем sealed pickle. Compatible backend/main rollout и приёмка — `docs/goals/2026-10-07-one-qr-contacts.md`; это не разрешение на новые auth/schema/transport изменения.
+
 ## Что оставляем после v1
 
 HA и несколько authoritative серверов; транспортная client authentication до прикладного handshake; настоящий unreliable media transport, если stream-based вариант не подходит; multi-device; перенос истории; группы; публичный каталог/поиск по логинам (логин для входа входит в текущий M2); iOS/desktop; большие вложения и видео.

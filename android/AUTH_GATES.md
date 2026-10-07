@@ -17,6 +17,46 @@ listed environment. Do not print inherited environment or provider credentials.
 
 ## Operator fixtures
 
+### One contact QR / incoming consent (2026-10-07)
+
+Build with current generated bindings/arm64 native and a trusted public profile,
+`-PgateInstall=true`. Two **disposable** `.gate` packages; FGS off, camera permission
+granted to `.gate` only. Never run `connectedDebugAndroidTest` against Main.
+Select one `org.dmsg.client.OneQrContactGatesTest#METHOD` with the exact-method
+`am instrument -w -r -e class` command below, changing only class/method/serial.
+
+Run in order, each as a new instrumentation process:
+
+| Phone | Method | Fixture/evidence |
+|---|---|---|
+| A and B | `bootstrapDisposableAccountThroughDns` | Owner0600 `files/one-qr-auth.json`: login/password/invitation. Explicit DNS signup/prekey publish; wipes auth, emits own public `one-qr-public.txt` |
+| A | `senderOneQrPreviewAddAndFirstText` | Copy **only B's public QR** to A `files/one-qr-peer.txt`. Real ScannerActivity decoder injection; preview/cancel no mutation; Add opens Chat without second Accept; first text accepted |
+| B | `receiverRequestAndFirstTextRemainPendingAcrossProcess` | Incoming/server provenance, no reverse QR; received0/pending1/cursor0, no history before consent |
+| B | `receiverAcceptFromDialogsAndReplyWithoutReverseQr` | Main incoming dialog → visible Profile Accept → Chat; deferred text once, server-sourced trust label; reply via composer/button |
+| A | `senderReceivesReplyAndOriginalCiphertextBecomesDelivered` | Exactly one stored reply/new receive or durable replay after host interruption, original MID/cipher hash unchanged, Delivered, next fetch0 |
+| B | `receiverReplyDeliveredAndHistorySurvivesReopen` | Original reply cipher unchanged, Delivered, history2/reopen/fetch0 |
+
+**Verified:** seven physical executions PASS/zero skips on API35 USB and API36
+Wi-Fi ADB using actual recursive DNS. This covers the real scanner Add dialog,
+request/consent Activities, composer and native E2E path, **not optical camera
+recognition**. Optical scanning remains user-owned. Live host tests additionally
+cover request before recipient prekey publication, no plaintext first-send queue,
+simultaneous initial Olm sessions/normal-message convergence/reopen, integrity
+rollback, and terminal pre-block without QR.
+
+Final JVM53/debug/release/test/native and targeted localization lint PASS; EN/RU
+283-key parity retained. Full lint's previously documented unrelated debt is not
+claimed fixed. Backend recreated alone with schema/data/pins/volumes and carrier
+ID/PID preserved. Main install-r on both phones retained encrypted identity,
+account, contacts/history, wrapped key, UID/first-install; installed APK hashes
+match `53.apk`, actual DNS saved-key resume PASS, prior FGS restored. Five existing
+pending messages recovered (not new test messages) and outgoing statuses became
+Delivered. An older already-ACKed/drop event is not backfilled. Aggregate private
+proofs: ignored `.local/one-qr/`; closure: goal document below. Own fixture apps,
+invitations and device access are removed/revoked after proof capture.
+
+`docs/goals/2026-10-07-one-qr-contacts.md` is the rollout contract.
+
 ### Invitation onboarding and trusted APK profile (2026-10-06)
 
 Package one trusted **public** server profile (full carrier DER pin + Noise key +

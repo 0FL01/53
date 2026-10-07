@@ -3,6 +3,7 @@
 //! Внутренние структуры не являются wire-контрактом: совместимость — тест-векторами ниже.
 
 pub mod auth;
+pub mod contacts;
 pub mod mailbox;
 pub mod profile;
 
@@ -87,6 +88,16 @@ pub const OP_BLOB_RESERVED: u8 = 27;
 pub const OP_DEVICE_BINDING: u8 = 28;
 /// DEVICE_BINDING_RESP: user_id 16 + device_key 32 + Ed25519 32 + Curve25519 32.
 pub const OP_DEVICE_BINDING_RESP: u8 = 29;
+/// CONTACT_REQUEST: recipient user_id16; sender comes from authenticated session.
+pub const OP_CONTACT_REQUEST: u8 = 30;
+/// CONTACT_REQUESTS: empty; only this account's incoming requests.
+pub const OP_CONTACT_REQUESTS: u8 = 31;
+/// CONTACT_REQUESTS_RESP: count u8 + (contact_id12 + DeviceBinding112)*.
+pub const OP_CONTACT_REQUESTS_RESP: u8 = 32;
+/// CONTACT_DECIDE: peer user_id16 + accepted1/blocked2.
+pub const OP_CONTACT_DECIDE: u8 = 33;
+/// CONTACT_OK: empty, after durable request/decision commit.
+pub const OP_CONTACT_OK: u8 = 34;
 /// Статусы доставки (без «прочитано» — read receipts отложены).
 pub const ST_ACCEPTED: u8 = 1;
 /// Статусы доставки (без «прочитано» — read receipts отложены).

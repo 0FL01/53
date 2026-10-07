@@ -4,6 +4,15 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class TextUiStateTest {
+    @Test fun oneQrRequestConsentAndKeyProvenance() {
+        assertEquals(ContactCta.Accept, contactCta(Dialog("P", "incoming", hasKeys = true)))
+        assertEquals(R.string.trust_incoming, trustLabelRes(Dialog("P", "incoming", hasKeys = true)))
+        assertEquals(ContactCta.Chat, contactCta(Dialog("P", "inviting", hasKeys = true)))
+        assertEquals(R.string.trust_inviting, trustLabelRes(Dialog("P", "inviting", hasKeys = true)))
+        assertEquals(ContactCta.Chat, contactCta(Dialog("P", "accepted_server", hasKeys = true)))
+        assertEquals(R.string.trust_server_keys, trustLabelRes(Dialog("P", "accepted_server", hasKeys = true)))
+        assertEquals(ContactCta.VerifyChanged, contactCta(Dialog("P", "accepted_server", identityMismatch = true, hasKeys = true)))
+    }
     @Test fun serviceOwnershipIsNotReachabilityAndFailuresRetainActualSuccess() {
         val facts = ConnectionFacts()
         facts.enabled(true)

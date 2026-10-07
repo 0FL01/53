@@ -43,7 +43,17 @@ class ProfileActivity : DmsgActivity() {
         }
         findViewById<Button>(R.id.btn_accept).setOnClickListener {
             val id = contact?.contactId ?: return@setOnClickListener
-            if (contactCta(contact) == ContactCta.Accept) act(getString(R.string.accepting_contact), { accept(id) }) { loadContact() }
+            if (contactCta(contact) == ContactCta.Accept) act(getString(R.string.accepting_contact), {
+                accept(id)
+                // Consent is durable and local. A temporary network failure
+                // must not trap an accepted contact behind the approval UI.
+                try { DmsgService.check(this) } catch (e: DmsgError) {
+                    if (e.kind != ErrorKind.Transport && e.kind != ErrorKind.Busy) throw e
+                }
+            }) {
+                startActivity(Intent(this, ChatActivity::class.java).putExtra("peer", id))
+                finish()
+            }
         }
         findViewById<Button>(R.id.btn_block).setOnClickListener {
             if (guard.pending || contact == null || contact?.state == "blocked") return@setOnClickListener

@@ -1,6 +1,7 @@
 package org.dmsg.client
 
 import android.Manifest
+import android.content.Intent
 import androidx.appcompat.app.AlertDialog
 import android.content.pm.PackageManager
 import android.os.Bundle
@@ -180,12 +181,17 @@ class ScannerActivity : DmsgActivity() {
                     QrKind.CONTACT -> {
                          if (serverOnly) throw DmsgError(R.string.error_server_qr_required, ErrorKind.BadQr)
                          if (!f.account().authenticated) throw DmsgError(R.string.error_sign_in_required, ErrorKind.NotAuthenticated)
-                         val out = when (f.addQr(code)) {
-                             QrOutcome.ADDED -> R.string.qr_contact_added
-                             QrOutcome.UNCHANGED -> R.string.qr_contact_unchanged
-                             QrOutcome.IDENTITY_CHANGED -> R.string.qr_identity_changed
-                         }
-                         runOnUiThread { if (active && guard.finish(stamp)) result.setText(out) }
+                          val id = f.contactQrId(code)
+                          runOnUiThread { if (active && guard.finish(stamp) && !isFinishing && !isDestroyed) {
+                              prompt = AlertDialog.Builder(this)
+                                  .setTitle(R.string.add_contact)
+                                  .setMessage(getString(R.string.contact_add_preview, id))
+                                  .setNegativeButton(R.string.cancel) { _, _ -> done = false; result.setText(R.string.contact_add_cancelled) }
+                                  .setOnCancelListener { done = false }
+                                  .setPositiveButton(R.string.contact_add_confirm) { _, _ -> inviteContact(code, id, f) }
+                                  .show()
+                              result.setText(R.string.contact_add_confirm)
+                          } }
                     }
                 }
             } catch (e: Exception) {
@@ -206,6 +212,30 @@ class ScannerActivity : DmsgActivity() {
             runOnUiThread { if (active && guard.finish(stamp)) outcome.fold(
                 { setResult(RESULT_OK); finish() },
                 { result.text = humanError(resources, it) }
+            ) }
+        }
+    }
+
+    private fun inviteContact(code: String, id: String, f: DmsgFacade) {
+        val stamp = guard.begin() ?: return
+        result.setText(R.string.adding_contact)
+        Core.dispatch {
+            val outcome = runCatching {
+                val added = f.inviteQr(code) // durable before the network attempt
+                if (added != QrOutcome.IDENTITY_CHANGED) {
+                    // A failed connection does not undo the saved request; the
+                    // existing DNS poll retries its durable state on reconnect.
+                    try { f.reconnect() } catch (e: DmsgError) {
+                        if (e.kind != ErrorKind.Transport && e.kind != ErrorKind.Busy) throw e
+                    }
+                }
+                added
+            }
+            runOnUiThread { if (active && guard.finish(stamp)) outcome.fold(
+                { added ->
+                    if (added == QrOutcome.IDENTITY_CHANGED) result.setText(R.string.qr_identity_changed)
+                    else { startActivity(Intent(this, ChatActivity::class.java).putExtra("peer", id)); finish() }
+                }, { result.text = humanError(resources, it) }
             ) }
         }
     }

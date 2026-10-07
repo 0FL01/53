@@ -419,5 +419,9 @@ class MainActivity : DmsgActivity() {
             }.setNegativeButton(R.string.cancel, null).show()
     }
 
-    private fun openChat(id: String) { startActivity(Intent(this, ChatActivity::class.java).putExtra("peer", id).putExtra("alias", rows.find { it.contactId == id }?.localAlias)) }
+    private fun openChat(id: String) {
+        val row = rows.find { it.contactId == id }
+        val target = if (row?.state in setOf("incoming", "requested")) ProfileActivity::class.java else ChatActivity::class.java
+        startActivity(Intent(this, target).putExtra("peer", id).putExtra("alias", row?.localAlias))
+    }
 }
