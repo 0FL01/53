@@ -5,6 +5,7 @@
 pub mod auth;
 pub mod chronology;
 pub mod contacts;
+pub mod e2e;
 pub mod mailbox;
 pub mod profile;
 

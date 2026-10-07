@@ -17,14 +17,14 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Source: user's fresh DB/refactoring instruction and approved plan step1.
   - Acceptance: no history/inbox/outbox tables or conversion paths; unsupported stores fail without mutation/reset; marker/guards protect sensitive values from first write; current-key/current-schema snapshot remains.
   - Primary evidence: storage unit tests and fresh encrypted integration fixtures.
-  - Status: pending
-  - Evidence:
+  - Status: in_progress
+  - Evidence: direct schema8 implementation compiles; fresh/encryption/unsupported-store unit proofs pass. Conversion-dependent fixtures are being ported, not disabled.
 - R2: authenticated TEXT/EDIT/DELETE and transactional mutations using existing delivery.
   - Source: initial feature request; approved plan steps2–3.
   - Acceptance: own Accepted/Delivered targets only for remote operations; revision CAS, terminal delete, durable dedup/pending controls, unchanged original MID/local ID/seq/time/ciphertext, byte-identical retry; self-hide sends nothing. Own event MID is inside E2E; recipient binding frozen; controls need no chronology. No superseded/deleted plaintext through projections/reports.
   - Primary evidence: core mutation/crypto tests and two fresh cores through live msgd.
-  - Status: pending
-  - Evidence:
+  - Status: in_progress
+  - Evidence: strict TEXT/EDIT/DELETE codec, 53 protocol tests PASS; core pipeline/mutations compile. Full core/live acceptance not yet claimed.
 - R3: Android message actions and correct visible history/state.
   - Source: approved plan step4 and approved schematic UI.
   - Acceptance: Edit/Save/Cancel with separate drafts; SelfOnly/Everyone modal defaults SelfOnly; no deleted placeholder; original and edit delivery distinct; static EN/RU errors; Copy/accessibility preserved; stable visible anchors, hidden-page continuation, filtered viewed/read anchors and existing ingestion watermark/reconciliation.
@@ -90,13 +90,13 @@ Complete isolated gates before main installer removes fixtures; stop old partici
 
 ## Current Checkpoint
 - Closes: R1–R2
-- Smallest next action: strict E2E codec and unified fresh storage with targeted host proofs; then port core send/receive/history consumers together.
+- Smallest next action: port remaining conversion/old-payload fixtures and prove transactional message actions and final projections.
 - Expected evidence: parser/storage/core targeted tests with no migrations and unchanged crypto transaction guarantees.
 - Stop or replan if: actual unresolved outcome cannot be satisfied in envelope; record concrete cause, not speculative hardening.
 
 ## Current State
 - Resolved: goal/approved plan frozen; Moto-only replaces previous two-phone rollout.
-- Last relevant evidence: baseline tracked clean `eecf7bf`.
+- Last relevant evidence: protocol53 PASS; core cargo check PASS; core unit44 PASS/7 fixture failures/1 pre-existing explicit native ignore, diagnosed old plaintext-conversion/table/body setup.
 - Blocker: none.
 - Next: implement R1–R2, then generated API/UI and verification.
 
@@ -106,6 +106,7 @@ Complete isolated gates before main installer removes fixtures; stop old partici
 
 ## Checkpoint History
 - 2026-10-07: plan copied/frozen, R5 started; implementation not yet performed.
+- 2026-10-07: strict codec checkpoint complete (53 protocol tests); core and Android source work underway. Native bindings/UI/device gates still pending.
 
 ## Completion
 - Pending R1–R4 implementation/evidence and R5 closure; no new PASS claimed.
