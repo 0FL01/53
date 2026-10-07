@@ -1,6 +1,6 @@
 # Goal: one-QR contact requests
 
-Status: active
+Status: complete
 Source: user approved «один QR → входящий запрос → принять → переписка в обе стороны», implementation, commit, deploy and APK update.
 Last updated: 2026-10-07
 
@@ -11,7 +11,7 @@ Complete the frozen outcomes with the smallest compatible change. No reset, sche
 - R1: Scan one contact QR, preview and press Add; persist/retry a real contact request without a second local approval. Receiver sees an incoming request without scanning back. Status: verified. Evidence: live `one_qr_contacts`, physical Scanner preview/cancel/Add and receiver pending gate; request also works before receiver prekey publication.
 - R2: Explicit receiver acceptance enables bidirectional E2E text. Server-sourced keys are not described as QR-verified; established pins never silently change; block remains terminal. Status: verified. Evidence: real Main→Profile Accept→Chat/reply without reverse QR; existing pin/integrity tests, simultaneous sends/reopen and pre-block live tests.
 - R3: First messages stay pending before acceptance, not ACK/drop as unknown; receive/retry is deduplicated and ciphertext unchanged. Status: verified. Evidence: pending received0/cursor0 before consent, exactly one receive afterward; original MIDs/cipher hashes unchanged, Delivered/reopen/fetch0 on both phones.
-- R4: Compatible backend deploy and main APK update on both phones, identity/history retained, intended commit. Status: in_progress (only commit remains). Evidence: schema5/all-table/pin/volume/carrier ID+PID equality at backend recreate; final Main install-r exact encrypted data/key/UID/first-install preservation, installed hashes equal root APK, actual DNS saved-key resume and restored FGS both. No reset.
+- R4: Compatible backend deploy and main APK update on both phones, identity/history retained, intended commit. Status: verified. Evidence: schema5/all-table/pin/volume/carrier ID+PID equality at backend recreate; final Main install-r exact encrypted data/key/UID/first-install preservation, installed hashes equal root APK, actual DNS saved-key resume and restored FGS both. No reset. Implementation commit: `d5362f0`.
 
 ## Change envelope / constraints
 Protocol additive authenticated bounded contact requests, existing server schema5 `contact_permissions`, existing core schema6 contact state strings; no new tables/migration or wire-version bump. Core/UniFFI/Android scanner/contact state/resources and targeted gates. EN/RU resource parity. Reuse existing DNS poll worker and pinned Noise transport. No new dependencies/services. Disposable `.gate` only for instrumentation; main databases/Keystore are preserved. Existing other tunnel and carrier unchanged.
@@ -22,7 +22,7 @@ Protocol additive authenticated bounded contact requests, existing server schema
 - Unknown/unaccepted text is not ACKed; it stays in the existing bounded/TTL mailbox. Blocked drop policy stays explicit. Previously dropped/ACKed messages are not silently replayed by resetting cursors.
 
 ## Current checkpoint
-All behavior/build/runtime/deployment checks are green; own disposable apps removed and fixture invitations revoked/device access blocked. Review/stage only intended source/tests/docs and create the requested commit. No implementation blocker remains.
+Closure passed: R1–R4 verified, intended implementation committed, deployed sources/artifact checked, all scoped fixtures cleaned. No blocker or further implementation work in this objective.
 
 ## Evidence-driven envelope adjustment
 - R2: both real phone contacts are now accepted; server has five pending events. Live reproduction `simultaneous_first_sends_and_reopen_preserve_both_ratchets` fails at received0. Include `olm.rs` pickle helpers and receive/session persistence so bidirectional first sends do not deadlock. Use vodozemac session IDs/decrypt, bounded two sessions, disposable ratchet copies on failed authentication.
@@ -38,4 +38,4 @@ All behavior/build/runtime/deployment checks are green; own disposable apps remo
 - Five previously pending real-phone messages delivered with original queues/keys retained: Moto incoming3 and Pacman incoming2, outgoing Delivered3 each. Earlier event already ACKed/drop is not backfilled. Server healthy, deployed intended sources match; other tunnel/carrier unchanged. Only scoped fixture devices/invitations/apps cleaned; no main credentials/private keys inspected or logged.
 
 ## Completion
-Behavior, verification, compatible rollout and cleanup complete. Awaiting intended commit only.
+R1–R4 complete; implementation `d5362f0`, compatible backend deployed and final Main APK installed/verified on both phones. Verification above is current to final production sources; no schema/data wipe, private-key inspection, carrier change or new dependency. Only intended source/tests/docs committed; user design image and ignored private evidence untouched. No push requested/performed.
