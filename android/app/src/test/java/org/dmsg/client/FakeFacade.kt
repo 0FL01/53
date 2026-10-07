@@ -10,6 +10,9 @@ import uniffi.dmsg_core.DialogsPage
 import uniffi.dmsg_core.HistoryMessage
 import uniffi.dmsg_core.HistoryPage
 import uniffi.dmsg_core.MessageDirection
+import uniffi.dmsg_core.MessageKind
+import uniffi.dmsg_core.VoiceInfo
+import uniffi.dmsg_core.VoiceTransferProgress
 import uniffi.dmsg_core.QrOutcome
 
 /** In-memory fake for JVM unit tests and UI previews (no native lib). */
@@ -40,6 +43,11 @@ class FakeFacade : DmsgFacade {
     var retryFailure: DmsgError? = null
     var mutationCalls = 0
     var retryCalls = 0
+    var sessionReady = true
+    var primeCalls = 0
+    var voiceQueueCalls = 0
+    var exactVoiceReadFailure = false
+    val voiceBytes = mutableMapOf<String, ByteArray>()
     val controls = mutableListOf<OutRow>()
     val controlStates = mutableMapOf<String, DeliveryState>()
 
@@ -118,9 +126,11 @@ class FakeFacade : DmsgFacade {
         val summaries = dialogs.map { dialog ->
             val last = history.filter { it.contactId == dialog.contactId && messageVisible(it) }.maxByOrNull { it.localId }
             val read = readCursors[dialog.contactId] ?: 0L
-            DialogSummary(dialog.contactId, aliases[dialog.contactId], last?.text, last?.localTimestampMs,
-                history.count { it.contactId == dialog.contactId && messageVisible(it) && it.direction == MessageDirection.INCOMING && it.localId > read }.toULong(),
-                read, dialog.hasKeys, dialog.identityMismatch, dialog.state)
+            DialogSummary(contactId = dialog.contactId, localAlias = aliases[dialog.contactId], preview = last?.text,
+                lastLocalTimestampMs = last?.localTimestampMs,
+                localUnread = history.count { it.contactId == dialog.contactId && messageVisible(it) && it.direction == MessageDirection.INCOMING && it.localId > read }.toULong(),
+                readCursor = read, hasKeys = dialog.hasKeys, identityMismatch = dialog.identityMismatch, state = dialog.state,
+                previewKind = last?.kind, voiceDurationMs = last?.voice?.sampleCount?.div(16u))
         }.sortedWith(compareByDescending<DialogSummary> { it.lastLocalTimestampMs ?: 0L }.thenBy { it.contactId })
         val start = cursor?.toInt() ?: 0
         val page = summaries.drop(start).take(limit.coerceIn(1, 100))
@@ -143,7 +153,10 @@ class FakeFacade : DmsgFacade {
         lastSent = text
         val localId = (history.maxOfOrNull { it.localId } ?: 0L) + 1
         val mid = localId.toString(16).padStart(32, '0')
-        history.add(HistoryMessage(localId, mid, id, MessageDirection.OUTGOING, text, localId, DeliveryState.QUEUED, null, null, 0uL, false, false, null))
+        history.add(HistoryMessage(localId = localId, messageIdHex = mid, contactId = id, direction = MessageDirection.OUTGOING,
+            text = text, localTimestampMs = localId, deliveryState = DeliveryState.QUEUED, serverSeq = null,
+            serverTimestampMs = null, revision = 0uL, hiddenSelf = false, deletedAll = false, changeDeliveryState = null,
+            kind = MessageKind.TEXT, voice = null))
         if (failAfterInsert) throw DmsgError("fixture post-commit failure", ErrorKind.Transport)
         return mid
     }
@@ -151,7 +164,7 @@ class FakeFacade : DmsgFacade {
         mutationCalls++
         mutationFailure?.let { throw it }
         val row = historyMessage(contactId, localId)
-        if (!canChangeMessage(row, get(contactId))) throw DmsgError(R.string.error_message_unavailable, ErrorKind.MessageUnavailable)
+        if (!canEditMessage(row, get(contactId))) throw DmsgError(R.string.error_message_unavailable, ErrorKind.MessageUnavailable)
         if (row.revision != expectedRevision) throw DmsgError(R.string.error_message_changed, ErrorKind.MessageChanged)
         if (text.isEmpty() || text.toByteArray(Charsets.UTF_8).size > 4096) throw DmsgError(R.string.error_bad_text, ErrorKind.BadText)
         if (text == row.text) return row
@@ -167,8 +180,8 @@ class FakeFacade : DmsgFacade {
         val row = historyMessage(contactId, localId)
         if (!canHideMessage(row) || (scope == DeleteScope.EVERYONE && !canChangeMessage(row, get(contactId))))
             throw DmsgError(R.string.error_message_unavailable, ErrorKind.MessageUnavailable)
-        val updated = if (scope == DeleteScope.SELF_ONLY) row.copy(text = "", hiddenSelf = true)
-            else row.copy(text = "", deletedAll = true, revision = row.revision + 1uL, changeDeliveryState = DeliveryState.QUEUED)
+        val updated = if (scope == DeleteScope.SELF_ONLY) row.copy(text = "", voice = null, hiddenSelf = true)
+            else row.copy(text = "", voice = null, deletedAll = true, revision = row.revision + 1uL, changeDeliveryState = DeliveryState.QUEUED)
         history[history.indexOfFirst { it.localId == localId }] = updated
         if (scope == DeleteScope.EVERYONE) control(contactId, "delete")
         if (failAfterMutation) throw DmsgError("fixture postcommit failure", ErrorKind.Store)
@@ -180,6 +193,36 @@ class FakeFacade : DmsgFacade {
         controlStates[mid] = DeliveryState.QUEUED
     }
     override fun retry(): LongArray { retryCalls++; retryFailure?.let { throw it }; return longArrayOf(0, 0, 0, 0) }
+    override fun voiceSessionReady(contactId: String) = sessionReady
+    override fun primeVoiceSession(contactId: String) { primeCalls++; sendFailure?.let { throw it }; sessionReady = true }
+    override fun queueVoice(contactId: String, midHex: String, encodedBytes: ByteArray): HistoryMessage {
+        voiceQueueCalls++; sendFailure?.let { throw it }
+        history.firstOrNull { it.contactId == contactId && it.messageIdHex == midHex }?.let { return it }
+        val localId = (history.maxOfOrNull { it.localId } ?: 0L) + 1
+        val row = HistoryMessage(localId = localId, messageIdHex = midHex, contactId = contactId,
+            direction = MessageDirection.OUTGOING, text = "", localTimestampMs = localId,
+            deliveryState = DeliveryState.QUEUED, serverSeq = null, serverTimestampMs = null, revision = 0uL,
+            hiddenSelf = false, deletedAll = false, changeDeliveryState = null, kind = MessageKind.VOICE,
+            voice = VoiceInfo(sampleCount = 16_000u, waveform = byteArrayOf(20, 80), byteLen = encodedBytes.size.toUInt(), downloaded = true))
+        history.add(row); voiceBytes[midHex] = encodedBytes.copyOf()
+        if (failAfterInsert) throw DmsgError(R.string.error_store, ErrorKind.Store)
+        return row
+    }
+    override fun historyMessageByMid(contactId: String, midHex: String): HistoryMessage? {
+        if (exactVoiceReadFailure) throw DmsgError(R.string.error_store, ErrorKind.Store)
+        return history.firstOrNull { it.contactId == contactId && it.messageIdHex == midHex }?.copy()
+    }
+    override fun voiceData(contactId: String, localId: Long) = voiceBytes.getValue(historyMessage(contactId, localId).messageIdHex).copyOf()
+    override fun pendingVoiceUpload() = history.firstOrNull { it.kind == MessageKind.VOICE && it.deliveryState == DeliveryState.QUEUED }
+    override fun prepareVoiceTransfer(contactId: String, localId: Long, download: Boolean) = object : VoiceTransferHandle {
+        private var canceled = false
+        override fun advance(): VoiceTransferProgress {
+            check(!canceled); return VoiceTransferProgress(transferred = 100u, total = 100u, complete = true)
+        }
+        override fun commit() = advance()
+        override fun cancel() { canceled = true }
+    }
+    override fun clearVoiceCache() { history.filter { it.deliveryState != DeliveryState.QUEUED }.forEach { voiceBytes.remove(it.messageIdHex) } }
     override fun fetch() =
         FetchRes(emptyList(), longArrayOf(0, 0, 0, 0), 0)
     override fun reconnect() = 16L

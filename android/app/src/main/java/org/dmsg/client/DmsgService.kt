@@ -182,6 +182,7 @@ class DmsgService : Service() {
         fun start(c: Context) {
             app = c.applicationContext
             facts.enabled(true)
+            VoiceTransferCoordinator.service(c, true)
             worker.start()
         }
 
@@ -209,6 +210,7 @@ class DmsgService : Service() {
 
         fun stop() {
             facts.enabled(false)
+            app?.let { VoiceTransferCoordinator.service(it, false) }
             worker.stop()
             try { facade?.dnsStop() } catch (_: Exception) { /* no secret diagnostics */ }
         }
@@ -228,7 +230,7 @@ class DmsgService : Service() {
             }
         }
 
-        fun wake() = worker.wake()
+        fun wake() { worker.wake(); VoiceTransferCoordinator.wake() }
 
         private fun pollOnce(app: Context): Int {
             val f = facade ?: Core.facade(app).also { facade = it }
@@ -236,6 +238,7 @@ class DmsgService : Service() {
             if (!f.account().authenticated) throw DmsgError(R.string.error_sign_in_required, ErrorKind.NotAuthenticated)
             if (f.dnsProfile() == null) throw DmsgError(R.string.error_server_required, ErrorKind.InvalidInput)
             val rep = check(f) { worker.active }
+            VoiceTransferCoordinator.wake()
             Log.d(TAG, "receive pending=${rep.skipped.getOrElse(0) { 0 }} blocked=${rep.skipped.getOrElse(1) { 0 }} undecryptable=${rep.skipped.getOrElse(2) { 0 }} mismatch=${rep.skipped.getOrElse(3) { 0 }}")
             return rep.received.size
         }

@@ -1,8 +1,8 @@
-//! Fresh-only schema8. One durable row per text or control event.
+//! Fresh-only schema9. One durable row per text, voice or control event.
 //! Production creates sealed storage directly; no schema or plaintext conversion.
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 const SCHEMA: &str = "
 CREATE TABLE core_identity(id INTEGER PRIMARY KEY CHECK(id=1),device_priv BLOB NOT NULL);
@@ -20,26 +20,39 @@ CREATE TABLE core_messages(
  local_id INTEGER PRIMARY KEY AUTOINCREMENT,
  message_id BLOB NOT NULL CHECK(length(message_id)=16),sender_device BLOB NOT NULL CHECK(length(sender_device)=32),
  contact_id TEXT NOT NULL,direction TEXT NOT NULL CHECK(direction IN ('incoming','outgoing')),
- kind TEXT NOT NULL CHECK(kind IN ('text','edit','delete')),target_mid BLOB,
- revision INTEGER NOT NULL DEFAULT 0 CHECK(revision>=0),text BLOB,ciphertext BLOB,recipient_binding BLOB,
+ kind TEXT NOT NULL CHECK(kind IN ('text','voice','edit','delete')),target_mid BLOB,
+ revision INTEGER NOT NULL DEFAULT 0 CHECK(revision>=0),text BLOB,media_manifest BLOB,ciphertext BLOB,recipient_binding BLOB,
  delivery_state TEXT,local_timestamp_ms INTEGER NOT NULL CHECK(local_timestamp_ms>=0),
  server_seq INTEGER CHECK(server_seq>0),server_timestamp_ms INTEGER CHECK(server_timestamp_ms>=0),
  hidden_self INTEGER NOT NULL DEFAULT 0 CHECK(hidden_self IN (0,1)),deleted_all INTEGER NOT NULL DEFAULT 0 CHECK(deleted_all IN (0,1)),
  UNIQUE(sender_device,message_id),
- CHECK((kind='text' AND target_mid IS NULL) OR (kind!='text' AND target_mid IS NOT NULL AND length(target_mid)=16 AND revision>0)),
+ CHECK((kind IN ('text','voice') AND target_mid IS NULL) OR (kind IN ('edit','delete') AND target_mid IS NOT NULL AND length(target_mid)=16 AND revision>0)),
  CHECK((direction='incoming' AND delivery_state IS NULL AND ciphertext IS NULL AND recipient_binding IS NULL)
     OR (direction='outgoing' AND delivery_state IS NOT NULL AND delivery_state IN ('queued','accepted','delivered') AND ciphertext IS NOT NULL AND recipient_binding IS NOT NULL AND length(recipient_binding)=32)),
  CHECK((server_seq IS NULL)=(server_timestamp_ms IS NULL)),
- CHECK(kind='text' OR (server_seq IS NULL AND hidden_self=0 AND deleted_all=0)),
- CHECK(kind!='text' OR ((direction='outgoing' AND delivery_state='queued') OR server_seq IS NOT NULL)),
+ CHECK(kind IN ('text','voice') OR (server_seq IS NULL AND hidden_self=0 AND deleted_all=0)),
+ CHECK(kind NOT IN ('text','voice') OR ((direction='outgoing' AND delivery_state='queued') OR server_seq IS NOT NULL)),
  CHECK(kind!='delete' OR text IS NULL),
- CHECK(kind!='text' OR ((hidden_self=0 AND deleted_all=0 AND text IS NOT NULL) OR ((hidden_self=1 OR deleted_all=1) AND text IS NULL))));
+ CHECK(kind!='text' OR ((hidden_self=0 AND deleted_all=0 AND text IS NOT NULL) OR ((hidden_self=1 OR deleted_all=1) AND text IS NULL))),
+ CHECK(kind='voice' OR media_manifest IS NULL),
+ CHECK(kind!='voice' OR (text IS NULL AND (media_manifest IS NOT NULL OR hidden_self=1 OR deleted_all=1))),
+ CHECK(deleted_all=0 OR media_manifest IS NULL));
 CREATE UNIQUE INDEX core_messages_outgoing ON core_messages(message_id) WHERE direction='outgoing';
 CREATE UNIQUE INDEX core_messages_server_seq ON core_messages(server_seq) WHERE server_seq IS NOT NULL;
-CREATE INDEX core_messages_contact ON core_messages(contact_id,local_id DESC) WHERE kind='text';
-CREATE INDEX core_messages_timeline ON core_messages(contact_id,(server_seq IS NULL),coalesce(server_seq,local_id)) WHERE kind='text';
-CREATE INDEX core_messages_pending ON core_messages(contact_id,sender_device,target_mid,revision DESC) WHERE kind!='text';
+CREATE INDEX core_messages_contact ON core_messages(contact_id,local_id DESC) WHERE kind IN ('text','voice');
+CREATE INDEX core_messages_timeline ON core_messages(contact_id,(server_seq IS NULL),coalesce(server_seq,local_id)) WHERE kind IN ('text','voice');
+CREATE INDEX core_messages_pending ON core_messages(contact_id,sender_device,target_mid,revision DESC) WHERE kind IN ('edit','delete');
 CREATE INDEX core_messages_queue ON core_messages(local_id) WHERE direction='outgoing' AND delivery_state IN ('queued','accepted');
+CREATE TABLE core_blob_transfers(
+ local_id INTEGER PRIMARY KEY REFERENCES core_messages(local_id),blob_id BLOB NOT NULL UNIQUE CHECK(length(blob_id)=16),
+ recipient_device BLOB NOT NULL CHECK(length(recipient_device)=32),
+ byte_len INTEGER NOT NULL CHECK(byte_len>0 AND byte_len<=131072),chunk_count INTEGER NOT NULL CHECK(chunk_count>0 AND chunk_count<=17),
+ upload_complete INTEGER NOT NULL DEFAULT 0 CHECK(upload_complete IN (0,1)),downloaded INTEGER NOT NULL DEFAULT 0 CHECK(downloaded IN (0,1)),
+ last_used_ms INTEGER NOT NULL CHECK(last_used_ms>=0),active_until_ms INTEGER NOT NULL DEFAULT 0 CHECK(active_until_ms>=0));
+CREATE TABLE core_blob_chunks(
+ local_id INTEGER NOT NULL REFERENCES core_blob_transfers(local_id),chunk_index INTEGER NOT NULL CHECK(chunk_index>=0 AND chunk_index<17),
+ ciphertext BLOB NOT NULL CHECK(length(ciphertext)>16 AND length(ciphertext)<=8192),
+ confirmed INTEGER NOT NULL DEFAULT 0 CHECK(confirmed IN (0,1)),PRIMARY KEY(local_id,chunk_index));
 ";
 
 /// Plain mode exists only for Rust-only isolated harnesses. It cannot open a
@@ -107,20 +120,29 @@ fn validate(conn: &Connection, key: &Option<[u8; 32]>) -> Result<bool, String> {
             }
         }
     }
-    conn.prepare("SELECT local_id,message_id,sender_device,kind,target_mid,revision,text,ciphertext,recipient_binding,hidden_self,deleted_all,server_seq FROM core_messages LIMIT 0").map_err(|_| "invalid current message schema")?;
+    conn.prepare("SELECT local_id,message_id,sender_device,kind,target_mid,revision,text,media_manifest,ciphertext,recipient_binding,hidden_self,deleted_all,server_seq FROM core_messages LIMIT 0").map_err(|_| "invalid current message schema")?;
+    conn.prepare("SELECT blob_id,recipient_device,byte_len,chunk_count,upload_complete,downloaded,last_used_ms,active_until_ms FROM core_blob_transfers LIMIT 0").map_err(|_| "invalid current blob schema")?;
+    conn.prepare("SELECT local_id,chunk_index,ciphertext,confirmed FROM core_blob_chunks LIMIT 0")
+        .map_err(|_| "invalid current chunk schema")?;
     Ok(false)
 }
 
-const SEALED_FIELDS: [(&str, &str); 6] = [
+const SEALED_FIELDS: [(&str, &str); 7] = [
     ("core_identity", "device_priv"),
     ("core_olm", "pickle"),
     ("core_sessions", "pickle"),
     ("core_messages", "text"),
+    ("core_messages", "media_manifest"),
     ("core_dns_profile", "profile"),
     ("core_contacts", "local_alias"),
 ];
 
 fn open_mode(path: &std::path::Path, key: Option<[u8; 32]>) -> Result<Connection, String> {
+    if path.exists() {
+        let probe = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|_| "storage compatibility probe failed")?;
+        validate(&probe, &key)?;
+    }
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent).map_err(|_| "storage directory failed")?;
     }
@@ -137,7 +159,7 @@ fn open_mode(path: &std::path::Path, key: Option<[u8; 32]>) -> Result<Connection
             .map_err(|_| "schema transaction failed")?;
         if validate(&tx, &key)? {
             tx.execute_batch(SCHEMA)
-                .map_err(|_| "create schema8 failed")?;
+                .map_err(|_| "create schema9 failed")?;
             if let Some(k) = key {
                 tx.execute_batch("CREATE TABLE core_storage(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL,verifier BLOB NOT NULL);").map_err(|_| "storage marker creation failed")?;
                 tx.execute(
@@ -147,13 +169,13 @@ fn open_mode(path: &std::path::Path, key: Option<[u8; 32]>) -> Result<Connection
                 .map_err(|_| "storage marker creation failed")?;
                 for (table, column) in SEALED_FIELDS {
                     for action in ["INSERT", "UPDATE"] {
-                        tx.execute_batch(&format!("CREATE TRIGGER {table}_sealed_{action} BEFORE {action} ON {table}
+                        tx.execute_batch(&format!("CREATE TRIGGER {table}_{column}_sealed_{action} BEFORE {action} ON {table}
                          WHEN NEW.{column} IS NOT NULL AND (typeof(NEW.{column})!='blob' OR substr(NEW.{column},1,7)!=x'444d53472d5331')
                          BEGIN SELECT RAISE(ABORT,'unencrypted storage write'); END;")).map_err(|_| "storage guard creation failed")?;
                     }
                 }
             }
-            tx.execute_batch("PRAGMA user_version=8;")
+            tx.execute_batch("PRAGMA user_version=9;")
                 .map_err(|_| "schema version update failed")?;
         }
         tx.commit().map_err(|_| "schema commit failed")?;
@@ -290,16 +312,22 @@ pub(crate) fn insert_outgoing(
     use dmsg_protocol::e2e::Body;
     let (kind, target, revision, text) = match &event.body {
         Body::Text(text) => ("text", None, 0, Some(text.as_str())),
+        Body::Voice(_) => ("voice", None, 0, None),
         Body::Edit {
             target, revision, ..
         } => ("edit", Some(target.as_slice()), *revision, None),
         Body::Delete { target, revision } => ("delete", Some(target.as_slice()), *revision, None),
     };
+    let manifest = if kind == "voice" {
+        Some(dmsg_protocol::e2e::encode(event).map_err(str::to_owned)?)
+    } else {
+        None
+    };
     let now = crate::history::local_time_ms()?;
-    tx.execute("INSERT INTO core_messages(message_id,sender_device,contact_id,direction,kind,target_mid,revision,text,ciphertext,recipient_binding,delivery_state,local_timestamp_ms)
-      VALUES(?1,?2,?3,'outgoing',?4,?5,?6,CASE WHEN ?7 IS NULL THEN NULL ELSE dmsg_seal('message_text',?7) END,?8,?9,'queued',?10)",params![event.message_id.as_slice(),sender.as_slice(),contact_id,kind,target,revision,text,wire,binding.as_slice(),now]).map_err(|_| "outgoing event insert failed")?;
+    tx.execute("INSERT INTO core_messages(message_id,sender_device,contact_id,direction,kind,target_mid,revision,text,ciphertext,recipient_binding,delivery_state,local_timestamp_ms,media_manifest)
+      VALUES(?1,?2,?3,'outgoing',?4,?5,?6,CASE WHEN ?7 IS NULL THEN NULL ELSE dmsg_seal('message_text',?7) END,?8,?9,'queued',?10,CASE WHEN ?11 IS NULL THEN NULL ELSE dmsg_seal('voice_manifest',?11) END)",params![event.message_id.as_slice(),sender.as_slice(),contact_id,kind,target,revision,text,wire,binding.as_slice(),now,manifest]).map_err(|_| "outgoing event insert failed")?;
     let id = tx.last_insert_rowid();
-    if kind == "text" {
+    if matches!(kind, "text" | "voice") {
         activity(tx, contact_id, now)?;
     }
     Ok(id)
@@ -346,14 +374,17 @@ pub(crate) fn valid_control_target(
 ) -> Result<bool, String> {
     use dmsg_protocol::e2e::Body;
     let target = match &event.body {
-        Body::Text(_) => return Ok(true),
+        Body::Text(_) | Body::Voice(_) => return Ok(true),
         Body::Edit { target, .. } | Body::Delete { target, .. } => target,
     };
     if target == &event.message_id {
         return Ok(false);
     }
     let known: Option<(String,String,String)> = conn.query_row("SELECT contact_id,direction,kind FROM core_messages WHERE sender_device=?1 AND message_id=?2",params![sender.as_slice(),target.as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(|_| "control target lookup failed")?;
-    Ok(known.is_none_or(|(c, d, k)| c == cid && d == "incoming" && k == "text"))
+    // EDIT against a voice is journaled as an ignored control, retaining dedup.
+    Ok(known.is_none_or(|(c, d, k)| {
+        c == cid && d == "incoming" && matches!(k.as_str(), "text" | "voice")
+    }))
 }
 
 /// Journal the event and project it under the caller's crypto transaction.
@@ -371,7 +402,7 @@ pub(crate) fn receive_event(
         Body::Text(original) => {
             let order = order.ok_or("text metadata missing")?;
             let deleted: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM core_messages WHERE contact_id=?1 AND sender_device=?2 AND target_mid=?3 AND kind='delete')",params![cid,sender.as_slice(),event.message_id.as_slice()],|r|r.get(0)).map_err(|_| "pending delete lookup failed")?;
-            let winning: Option<(u64,Option<String>)> = tx.query_row("SELECT revision,CASE WHEN text IS NULL THEN NULL ELSE CAST(dmsg_unseal('message_text',text) AS TEXT) END FROM core_messages WHERE contact_id=?1 AND sender_device=?2 AND target_mid=?3 AND kind!='text' ORDER BY revision DESC,local_id ASC LIMIT 1",params![cid,sender.as_slice(),event.message_id.as_slice()],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|_| "pending edit lookup failed")?;
+            let winning: Option<(u64,Option<String>)> = tx.query_row("SELECT revision,CASE WHEN text IS NULL THEN NULL ELSE CAST(dmsg_unseal('message_text',text) AS TEXT) END FROM core_messages WHERE contact_id=?1 AND sender_device=?2 AND target_mid=?3 AND kind IN ('edit','delete') ORDER BY revision DESC,local_id ASC LIMIT 1",params![cid,sender.as_slice(),event.message_id.as_slice()],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|_| "pending edit lookup failed")?;
             let revision = winning.as_ref().map_or(0, |r| r.0);
             let text = if deleted {
                 None
@@ -390,12 +421,37 @@ pub(crate) fn receive_event(
             activity(tx, cid, now)?;
             Ok(Some(id))
         }
+        Body::Voice(manifest) => {
+            let order = order.ok_or("voice metadata missing")?;
+            let revision: u64 = tx.query_row("SELECT coalesce(max(revision),0) FROM core_messages WHERE contact_id=?1 AND sender_device=?2 AND target_mid=?3 AND kind='delete'",params![cid,sender.as_slice(),event.message_id.as_slice()],|r|r.get(0)).map_err(|_| "pending delete lookup failed")?;
+            let deleted = revision > 0;
+            let sealed = if deleted {
+                None
+            } else {
+                Some(dmsg_protocol::e2e::encode(event).map_err(str::to_owned)?)
+            };
+            tx.execute("INSERT INTO core_messages(message_id,sender_device,contact_id,direction,kind,revision,media_manifest,local_timestamp_ms,server_seq,server_timestamp_ms,deleted_all) VALUES(?1,?2,?3,'incoming','voice',?4,CASE WHEN ?5 IS NULL THEN NULL ELSE dmsg_seal('voice_manifest',?5) END,?6,?7,?8,?9)",params![event.message_id.as_slice(),sender.as_slice(),cid,revision,sealed,now,order.seq,order.timestamp_ms,deleted]).map_err(|_| "incoming voice insert failed")?;
+            let id = tx.last_insert_rowid();
+            if !deleted {
+                let device_priv = load_identity(tx)?.ok_or("voice recipient identity missing")?;
+                crate::voice::insert_transfer(
+                    tx,
+                    id,
+                    manifest,
+                    &crate::olm::device_pubkey(&device_priv),
+                    false,
+                )?;
+            }
+            clear_controls(tx, cid, sender, &event.message_id)?;
+            activity(tx, cid, now)?;
+            Ok(Some(id))
+        }
         Body::Edit {
             target,
             revision,
             text,
         } => {
-            let terminal: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM core_messages WHERE contact_id=?1 AND sender_device=?2 AND ((message_id=?3 AND kind='text' AND (deleted_all=1 OR hidden_self=1)) OR (target_mid=?3 AND kind='delete')))",params![cid,sender.as_slice(),target.as_slice()],|r|r.get(0)).map_err(|_| "terminal target lookup failed")?;
+            let terminal: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM core_messages WHERE contact_id=?1 AND sender_device=?2 AND ((message_id=?3 AND (kind='voice' OR (kind='text' AND (deleted_all=1 OR hidden_self=1)))) OR (target_mid=?3 AND kind='delete')))",params![cid,sender.as_slice(),target.as_slice()],|r|r.get(0)).map_err(|_| "terminal target lookup failed")?;
             let current: u64 = tx.query_row("SELECT coalesce(max(revision),0) FROM core_messages WHERE contact_id=?1 AND sender_device=?2 AND (message_id=?3 OR target_mid=?3)",params![cid,sender.as_slice(),target.as_slice()],|r|r.get(0)).map_err(|_| "target revision lookup failed")?;
             let winning = *revision > current && !terminal;
             tx.execute("INSERT INTO core_messages(message_id,sender_device,contact_id,direction,kind,target_mid,revision,text,local_timestamp_ms)
@@ -412,7 +468,9 @@ pub(crate) fn receive_event(
         }
         Body::Delete { target, revision } => {
             tx.execute("INSERT INTO core_messages(message_id,sender_device,contact_id,direction,kind,target_mid,revision,local_timestamp_ms) VALUES(?1,?2,?3,'incoming','delete',?4,?5,?6)",params![event.message_id.as_slice(),sender.as_slice(),cid,target.as_slice(),revision,now]).map_err(|_| "incoming delete insert failed")?;
-            tx.execute("UPDATE core_messages SET deleted_all=1,text=NULL,revision=max(revision,?4) WHERE contact_id=?1 AND sender_device=?2 AND message_id=?3 AND kind='text'",params![cid,sender.as_slice(),target.as_slice(),revision]).map_err(|_| "delete projection failed")?;
+            tx.execute("UPDATE core_messages SET deleted_all=1,text=NULL,media_manifest=NULL,revision=max(revision,?4) WHERE contact_id=?1 AND sender_device=?2 AND message_id=?3 AND kind IN ('text','voice')",params![cid,sender.as_slice(),target.as_slice(),revision]).map_err(|_| "delete projection failed")?;
+            tx.execute("DELETE FROM core_blob_chunks WHERE local_id IN (SELECT local_id FROM core_messages WHERE contact_id=?1 AND sender_device=?2 AND message_id=?3 AND kind='voice')",params![cid,sender.as_slice(),target.as_slice()]).map_err(|_| "deleted voice cache cleanup failed")?;
+            tx.execute("DELETE FROM core_blob_transfers WHERE local_id IN (SELECT local_id FROM core_messages WHERE contact_id=?1 AND sender_device=?2 AND message_id=?3 AND kind='voice')",params![cid,sender.as_slice(),target.as_slice()]).map_err(|_| "deleted voice transfer cleanup failed")?;
             clear_controls(tx, cid, sender, target)?;
             Ok(None)
         }
@@ -445,7 +503,7 @@ pub(crate) fn outbox_set_status_order(
     let tx = Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
         .map_err(|_| "delivery transaction failed")?;
     let (kind,seq,time): (String,Option<i64>,Option<i64>) = tx.query_row("SELECT kind,server_seq,server_timestamp_ms FROM core_messages WHERE message_id=?1 AND direction='outgoing'",[mid.as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(|_| "outgoing event missing")?;
-    let (seq, time) = if kind == "text" {
+    let (seq, time) = if matches!(kind.as_str(), "text" | "voice") {
         if let Some(o) = order {
             if o.seq <= 0
                 || o.timestamp_ms < 0
@@ -465,6 +523,7 @@ pub(crate) fn outbox_set_status_order(
         (None, None)
     };
     tx.execute("UPDATE core_messages SET delivery_state=CASE WHEN delivery_state='delivered' OR ?2='delivered' THEN 'delivered' WHEN delivery_state='accepted' OR ?2='accepted' THEN 'accepted' ELSE 'queued' END,server_seq=?3,server_timestamp_ms=?4 WHERE message_id=?1 AND direction='outgoing'",params![mid.as_slice(),status,seq,time]).map_err(|_| "delivery update failed")?;
+    crate::voice::purge_hidden_sent(&tx)?;
     tx.commit().map_err(|_| "delivery commit failed".into())
 }
 
@@ -508,7 +567,7 @@ pub fn outbox_queued(
 
 pub fn inbox_count(conn: &Connection) -> Result<i64, String> {
     conn.query_row(
-        "SELECT count(*) FROM core_messages WHERE direction='incoming' AND kind='text'",
+        "SELECT count(*) FROM core_messages WHERE direction='incoming' AND kind IN ('text','voice')",
         [],
         |r| r.get(0),
     )
@@ -544,7 +603,7 @@ mod tests {
     use super::*;
     const KEY: [u8; 32] = [63; 32];
     fn path(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("dmsg-store8-{}-{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("dmsg-store9-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("core.db")
@@ -555,7 +614,7 @@ mod tests {
 
     #[test]
     fn unsupported_old_future_and_nonempty_unversioned_stores_are_unchanged() {
-        for version in [0, 1, 5, 6, 7, 9, 100] {
+        for version in [0, 1, 5, 6, 7, 8, 10, 100] {
             let p = path(&format!("reject-{version}"));
             let c = Connection::open(&p).unwrap();
             c.execute_batch(&format!("CREATE TABLE sentinel(v TEXT); INSERT INTO sentinel VALUES('preserve'); PRAGMA user_version={version};")).unwrap();
@@ -575,7 +634,7 @@ mod tests {
         assert_eq!(
             c.query_row::<i64, _, _>("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap(),
-            8
+            9
         );
         for table in ["core_history", "core_inbox", "core_outbox"] {
             assert_eq!(

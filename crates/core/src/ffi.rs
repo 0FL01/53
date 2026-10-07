@@ -21,10 +21,11 @@ use crate::auth::AuthError;
 use crate::contacts::{self, Contact};
 pub use crate::history::{
     DeleteScope, DeliveryState, DialogSummary, DialogsPage, HistoryMessage, HistoryPage,
-    MessageDirection,
+    MessageDirection, MessageKind, VoiceInfo,
 };
 use crate::olm::OlmError;
 use crate::transport::TransportError;
+pub use crate::voice::{VoiceTransfer, VoiceTransferProgress};
 
 enum ConnectFailure {
     Local(FfiError),
@@ -105,6 +106,8 @@ pub struct InboxRow {
     pub seq: i64,
     pub contact_id: String,
     pub text: String,
+    pub kind: MessageKind,
+    pub voice: Option<VoiceInfo>,
 }
 
 impl std::fmt::Debug for InboxRow {
@@ -161,6 +164,8 @@ pub enum LoginOutcome {
 pub struct ReceivedMsg {
     pub contact_id: String,
     pub text: String,
+    pub kind: MessageKind,
+    pub voice: Option<VoiceInfo>,
     pub message_id_hex: String,
     pub seq: u64,
 }
@@ -223,6 +228,8 @@ pub enum FfiError {
     BadText,
     MessageChanged,
     MessageUnavailable,
+    VoiceSessionRequired,
+    BadVoice,
     Transport(String),
     Store(String),
     Crypto(String),
@@ -261,6 +268,8 @@ impl std::fmt::Display for FfiError {
             Self::BadText => write!(f, "bad text (empty or over limit)"),
             Self::MessageChanged => write!(f, "message changed"),
             Self::MessageUnavailable => write!(f, "message unavailable"),
+            Self::VoiceSessionRequired => write!(f, "voice session needs connection"),
+            Self::BadVoice => write!(f, "invalid voice note"),
             Self::Transport(e) => write!(f, "transport: {e}"),
             Self::Store(e) => write!(f, "store: {e}"),
             Self::Crypto(e) => write!(f, "crypto: {e}"),
@@ -282,7 +291,7 @@ fn map_history(e: crate::history::HistoryError) -> FfiError {
     }
 }
 
-fn map_olm(e: OlmError) -> FfiError {
+pub(crate) fn map_olm(e: OlmError) -> FfiError {
     match e {
         OlmError::UnknownContact => FfiError::UnknownContact,
         OlmError::NotAccepted => FfiError::NotAccepted,
@@ -307,6 +316,8 @@ fn map_olm(e: OlmError) -> FfiError {
         OlmError::BadText => FfiError::BadText,
         OlmError::MessageChanged => FfiError::MessageChanged,
         OlmError::MessageUnavailable => FfiError::MessageUnavailable,
+        OlmError::VoiceSessionRequired => FfiError::VoiceSessionRequired,
+        OlmError::BadVoice => FfiError::BadVoice,
         OlmError::Auth(e) => map_auth(e),
     }
 }
@@ -892,6 +903,88 @@ impl DmsgClient {
         crate::history::history_message(&self.conn()?, &contact_id, local_id).map_err(map_history)
     }
 
+    pub fn history_message_by_mid(
+        &self,
+        contact_id: String,
+        message_id_hex: String,
+    ) -> Result<Option<HistoryMessage>, FfiError> {
+        crate::history::history_message_by_mid(&self.conn()?, &contact_id, &message_id_hex)
+            .map_err(map_history)
+    }
+
+    pub fn voice_session_ready(&self, contact_id: String) -> Result<bool, FfiError> {
+        self.core()?
+            .voice_session_ready(&contact_id)
+            .map_err(map_olm)
+    }
+
+    pub fn prime_voice_session_dns(&self, contact_id: String) -> Result<(), FfiError> {
+        let p = self.dns_profile()?;
+        self.prime_voice_session(
+            self.dns_endpoint(&p)?,
+            p.noise_pubkey.to_vec(),
+            p.domain,
+            contact_id,
+        )
+    }
+
+    /// Local-only commit. A first offline note returns VoiceSessionRequired;
+    /// caller keeps its memory-only preview and explicitly primes when online.
+    pub fn queue_voice(
+        &self,
+        contact_id: String,
+        message_id_hex: String,
+        encoded_note: Vec<u8>,
+    ) -> Result<HistoryMessage, FfiError> {
+        let mid = crate::history::parse_message_id(&message_id_hex).map_err(map_history)?;
+        self.core()?
+            .queue_voice(&contact_id, &mid, &encoded_note)
+            .map_err(map_olm)
+    }
+
+    pub fn voice_data(&self, contact_id: String, local_id: i64) -> Result<Vec<u8>, FfiError> {
+        crate::voice::data(&self.conn()?, &contact_id, local_id)
+            .map_err(|_| FfiError::MessageUnavailable)
+    }
+
+    pub fn pending_voice_upload(&self) -> Result<Option<HistoryMessage>, FfiError> {
+        crate::voice::pending_upload(&self.conn()?).map_err(FfiError::Store)
+    }
+
+    pub fn clear_voice_cache(&self) -> Result<(), FfiError> {
+        crate::voice::clear_cache(&self.conn()?).map_err(FfiError::Store)
+    }
+
+    /// Captures public DNS profile and encrypted chunks without starting DNS or
+    /// holding a connection in the returned opaque network object.
+    pub fn prepare_voice_transfer(
+        &self,
+        contact_id: String,
+        local_id: i64,
+        download: bool,
+    ) -> Result<Arc<VoiceTransfer>, FfiError> {
+        let p = self.dns_profile()?;
+        crate::voice::prepare(
+            &self.conn()?,
+            &self.db_path,
+            &contact_id,
+            local_id,
+            download,
+            crate::voice::Endpoint::Dns {
+                owner: self.db_path.clone(),
+                profile: p,
+            },
+        )
+        .map_err(map_olm)
+    }
+
+    pub fn commit_voice_transfer(
+        &self,
+        transfer: Arc<VoiceTransfer>,
+    ) -> Result<VoiceTransferProgress, FfiError> {
+        crate::voice::commit(&self.conn()?, &self.db_path, &transfer).map_err(map_olm)
+    }
+
     pub fn edit_message(
         &self,
         contact_id: String,
@@ -958,15 +1051,19 @@ impl DmsgClient {
     /// Страница входящих (cursor — seq, 0 = сначала).
     pub fn inbox_page(&self, cursor: i64, limit: u32) -> Result<InboxPage, FfiError> {
         let conn = self.conn()?;
-        let (rows, next) = crate::store::inbox_list(&conn, cursor, page_limit(limit) as usize)
-            .map_err(FfiError::Store)?;
+        let (rows, next) = crate::history::inbox_rows(&conn, cursor, page_limit(limit) as usize)
+            .map_err(map_history)?;
         Ok(InboxPage {
             rows: rows
                 .into_iter()
-                .map(|(seq, cid, text)| InboxRow {
-                    seq,
-                    contact_id: cid,
-                    text,
+                .map(|row| InboxRow {
+                    seq: row
+                        .server_seq
+                        .expect("incoming base always has server order"),
+                    contact_id: row.contact_id,
+                    text: row.text,
+                    kind: row.kind,
+                    voice: row.voice,
                 })
                 .collect(),
             next_cursor: next,
@@ -999,6 +1096,59 @@ impl DmsgClient {
 
 // Direct network methods are Rust-only harness seams, never UniFFI endpoints.
 impl DmsgClient {
+    pub fn prime_voice_session(
+        &self,
+        addr: String,
+        server_pub: Vec<u8>,
+        domain: String,
+        contact_id: String,
+    ) -> Result<(), FfiError> {
+        use crate::transport::Transport;
+        let (sp, dom) = parse_transport_args(server_pub, domain)?;
+        runtime()?.block_on(async {
+            let mut core = self.core()?;
+            let mut t = self
+                .connect(&addr, &sp, &dom)
+                .await
+                .map_err(ConnectFailure::into_ffi)?;
+            let result = core
+                .prime_voice_session(&mut t, &contact_id)
+                .await
+                .map_err(map_olm);
+            t.close().await;
+            result
+        })
+    }
+
+    /// Rust-only direct/live harness seam; Android has no endpoint override.
+    pub fn prepare_voice_transfer_direct(
+        &self,
+        addr: String,
+        server_pub: Vec<u8>,
+        domain: String,
+        contact_id: String,
+        local_id: i64,
+        download: bool,
+    ) -> Result<Arc<VoiceTransfer>, FfiError> {
+        let (sp, dom) = parse_transport_args(server_pub, domain)?;
+        if addr.is_empty() {
+            return Err(FfiError::InvalidInput);
+        }
+        crate::voice::prepare(
+            &self.conn()?,
+            &self.db_path,
+            &contact_id,
+            local_id,
+            download,
+            crate::voice::Endpoint::Direct {
+                addr,
+                server_pub: sp,
+                domain: dom,
+            },
+        )
+        .map_err(map_olm)
+    }
+
     /// Plain Rust harness only. Android exposes only the authenticated keyed constructor.
     pub fn open(db_path: String) -> Arc<Self> {
         Arc::new(Self { db_path, key: None })
@@ -1113,6 +1263,8 @@ impl DmsgClient {
                     .map(|m| ReceivedMsg {
                         contact_id: m.contact_id,
                         text: m.text,
+                        kind: m.kind,
+                        voice: m.voice,
                         message_id_hex: hex(&m.message_id),
                         seq: m.seq,
                     })

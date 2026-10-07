@@ -1,0 +1,10 @@
+[package]
+name = "dmsg-opus-sys"
+version = "0.1.0"
+edition = "2021"
+links = "opus"
+description = "Bundled libopus 1.6.1 with inline OSCE models for dmsg voice notes"
+license = "BSD-3-Clause"
+
+[build-dependencies]
+cmake = "0.1"

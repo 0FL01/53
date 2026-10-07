@@ -1,11 +1,16 @@
 package org.dmsg.client
 
 import android.content.Intent
+import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
+import android.animation.ValueAnimator
 import android.content.res.Resources
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.View
+import android.view.MotionEvent
 import android.widget.AbsListView
 import android.widget.Button
 import android.widget.EditText
@@ -14,6 +19,8 @@ import android.widget.TextView
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.appcompat.app.AlertDialog
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import uniffi.dmsg_core.DeleteScope
 
 /** Retained only in memory: Rust owns durable history; drafts never enter Prefs or saved-state. */
@@ -33,6 +40,29 @@ class ChatMemory : ViewModel() {
     internal var uncertain: TextSendOutcome.Uncertain? = null
     internal var uncertainAction: MessageActionAttempt? = null
     internal var rebaseEdit = false
+    internal val voice = VoiceUiState()
+    internal var audio: VoiceNoteAudio? = null
+    internal var uncertainVoice: VoiceSendOutcome.Uncertain? = null
+    internal var voiceAttempt: VoiceSendAttempt? = null
+    internal fun audio(context: Context): VoiceNoteAudio = audio ?: VoiceNoteAudio(context).also { engine ->
+        audio = engine
+        engine.onMeter = { samples, rms -> voice.samples = samples; voice.rms = rms; voice.changed() }
+        engine.onNote = { bytes, samples, bars, paused ->
+            if (voice.mode == VoiceMode.Idle) bytes.fill(0)
+            else if (paused && voice.mode == VoiceMode.Finishing) { bytes.fill(0); engine.finishRecording() }
+            else {
+                voice.preview(bytes, samples, bars)
+                if (paused) { voice.mode = VoiceMode.Paused; voice.changed() }
+            }
+        }
+        engine.onError = {
+            voice.sendOnFinish = false
+            if (voice.bytes == null) voice.discard() else { voice.mode = VoiceMode.Preview; voice.changed() }
+            action = { it.getString(R.string.voice_error) }; voice.changed()
+        }
+        engine.onInterrupted = { voice.background(); voice.changed() }
+    }
+    override fun onCleared() { voice.observer = null; audio?.close(); voice.discard(); super.onCleared() }
 }
 
 class ChatActivity : DmsgActivity() {
@@ -47,6 +77,15 @@ class ChatActivity : DmsgActivity() {
     private var readPending = false
     private var pageError = ""
     private var prompt: AlertDialog? = null
+    private val transferOwner = Any()
+    private var lastVoiceMode = VoiceMode.Idle
+    private var playerRequest = 0L
+    private var micX = 0f
+    private var micY = 0f
+    private val microphonePermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        // Grant is never a continuation of the gesture that opened the dialog.
+        memory.action = { it.getString(if (granted) R.string.voice_ready else R.string.voice_permission) }; render()
+    }
     private val id get() = intent.getStringExtra("peer").orEmpty()
     private val handler = Handler(Looper.getMainLooper())
     private val ticker = object : Runnable {
@@ -56,6 +95,7 @@ class ChatActivity : DmsgActivity() {
                 when {
                     memory.uncertain != null -> resolveUncertain()
                     memory.uncertainAction != null -> resolveAction()
+                    memory.uncertainVoice != null -> resolveVoice()
                     else -> loadPage()
                 }
             }
@@ -76,11 +116,11 @@ class ChatActivity : DmsgActivity() {
         composer.isSaveEnabled = false
         composer.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { memory.draft = s?.toString().orEmpty() }
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { memory.draft = s?.toString().orEmpty(); if (active) renderVoice() }
             override fun afterTextChanged(s: android.text.Editable?) {}
         })
         adapter = HistoryAdapter(this, memory.history.rows,
-            { canChangeMessage(it, memory.contact) }, ::startEdit, ::confirmDelete, ::messageMenu)
+            { canEditMessage(it, memory.contact) }, ::startEdit, ::confirmDelete, ::messageMenu, ::bindVoice)
         list.adapter = adapter
         list.setOnScrollListener(object : AbsListView.OnScrollListener {
             override fun onScrollStateChanged(view: AbsListView?, state: Int) { if (state == AbsListView.OnScrollListener.SCROLL_STATE_IDLE) markViewed() }
@@ -94,7 +134,7 @@ class ChatActivity : DmsgActivity() {
         findViewById<Button>(R.id.btn_send).setOnClickListener { send() }
         findViewById<Button>(R.id.btn_save_edit).setOnClickListener { saveEdit() }
         findViewById<Button>(R.id.btn_cancel_edit).setOnClickListener {
-            if (!memory.pending && memory.uncertain == null && memory.uncertainAction == null) {
+            if (!memory.pending && memory.uncertain == null && memory.uncertainAction == null && memory.uncertainVoice == null) {
                 memory.composition.cancel(); memory.rebaseEdit = false; render()
             }
         }
@@ -105,11 +145,28 @@ class ChatActivity : DmsgActivity() {
         findViewById<Button>(R.id.btn_contact).setOnClickListener {
             startActivity(Intent(this, ProfileActivity::class.java).putExtra("peer", id))
         }
+        setupVoice()
     }
 
     override fun onResume() {
         super.onResume()
         active = true
+        memory.uncertainVoice = memory.uncertainVoice ?: TextSendCoordinator.pendingVoiceFor(id)
+        memory.voice.observer = {
+            if (active) {
+                if (lastVoiceMode != memory.voice.mode) { lastVoiceMode = memory.voice.mode; render() } else renderVoice()
+                if (memory.voice.mode == VoiceMode.Preview && memory.voice.sendOnFinish) {
+                    memory.voice.sendOnFinish = false; queueVoice()
+                }
+            }
+        }
+        memory.audio(applicationContext).onPlayback = { playback ->
+            if (active) {
+                playback.key?.let { key -> visibleVoice(key)?.playback(playback) }
+                renderVoice()
+            }
+        }
+        VoiceTransferCoordinator.foreground(this, transferOwner, true, ::transferChanged)
         if (memory.uncertain == null) TextSendCoordinator.pendingFor(id)?.let {
             memory.uncertain = it
             if (memory.outgoing.text.isEmpty()) memory.outgoing.text = it.text
@@ -129,6 +186,12 @@ class ChatActivity : DmsgActivity() {
         memory.draft = composer.text.toString()
         memory.anchor = captureAnchor()
         active = false; lifecycleStamp++
+        playerRequest++
+        memory.voice.observer = null
+        memory.voice.background()
+        memory.audio?.onPlayback = null
+        memory.audio?.background()
+        VoiceTransferCoordinator.foreground(this, transferOwner, false)
         pageGuard.stop(); readPending = false
         handler.removeCallbacks(ticker)
         prompt?.dismiss(); prompt = null
@@ -146,31 +209,36 @@ class ChatActivity : DmsgActivity() {
 
     private fun render() {
         if (!active) return
-        if (adapter.visibleRows != memory.history.visibleRows) {
-            val anchor = captureAnchor()
-            adapter.notifyDataSetChanged()
-            restoreAnchor(anchor)
+        val visible = memory.history.visibleRows
+        if (!sameHistoryRows(adapter.visibleRows, visible)) {
+            if (adapter.replaceVoicePayloads(visible)) {
+                visible.filter { it.kind == uniffi.dmsg_core.MessageKind.VOICE }.forEach { row -> visibleVoice(VoiceKey(row))?.let { bindVoice(it, row) } }
+            } else {
+                val anchor = captureAnchor()
+                adapter.notifyDataSetChanged()
+                restoreAnchor(anchor)
+            }
         }
         if (composer.text.toString() != memory.draft) composer.setText(memory.draft)
         val allowed = contactCta(memory.contact) == ContactCta.Chat
         val editing = memory.composition.edit
-        val unresolved = memory.uncertain != null || memory.uncertainAction != null
+        val unresolved = memory.uncertain != null || memory.uncertainAction != null || memory.uncertainVoice != null
         findViewById<TextView>(R.id.peer).text = intent.getStringExtra("alias") ?: id
         findViewById<Button>(R.id.btn_contact).contentDescription = getString(if (allowed) R.string.contact_card else R.string.check_contact)
-        findViewById<Button>(R.id.btn_send).visibility = if (editing == null) View.VISIBLE else View.GONE
         findViewById<View>(R.id.edit_banner).visibility = if (editing == null) View.GONE else View.VISIBLE
         findViewById<Button>(R.id.btn_save_edit).visibility = if (editing == null) View.GONE else View.VISIBLE
         findViewById<Button>(R.id.btn_cancel_edit).visibility = if (editing == null) View.GONE else View.VISIBLE
         findViewById<Button>(R.id.btn_save_edit).isEnabled = editing != null && !editing.unavailable && !memory.rebaseEdit && allowed && !memory.pending && !unresolved && !pageGuard.pending
         findViewById<Button>(R.id.btn_cancel_edit).isEnabled = !memory.pending && !unresolved
-        findViewById<Button>(R.id.btn_send).isEnabled = allowed && editing == null && !memory.pending && !unresolved
+        findViewById<Button>(R.id.btn_send).isEnabled = allowed && editing == null && !memory.pending && !unresolved && !memory.voice.busy
         findViewById<Button>(R.id.btn_retry).isEnabled = allowed && !memory.pending
-        composer.isEnabled = (allowed || editing != null) && !memory.pending && !unresolved
+        composer.isEnabled = (allowed || editing != null) && !memory.pending && !unresolved && !memory.voice.busy
         findViewById<Button>(R.id.btn_history_retry).isEnabled = !pageGuard.pending && !memory.pending
         info.text = listOf(if (allowed) "" else trustLabel(resources, memory.contact), memory.action(resources), pageError).filter { it.isNotEmpty() }.joinToString("\n")
         findViewById<View>(R.id.chat_notice).visibility = if (info.text.isEmpty()) View.GONE else View.VISIBLE
         info.setBackgroundResource(if (memory.contact?.identityMismatch == true || memory.contact?.state == "blocked") R.color.error_surface
             else if (allowed && pageError.isEmpty()) R.color.surface else R.color.warning_surface)
+        renderVoice()
     }
 
     private fun captureAnchor(): HistoryAnchor? = historyAnchor(adapter.visibleRows, list.firstVisiblePosition,
@@ -228,6 +296,7 @@ class ChatActivity : DmsgActivity() {
                         else memory.history.latest(page, if (index == 0) refresh.first else emptyList(), if (index == 0) refresh.second else null)
                     }
                     refresh.first.forEach(memory.history::replace)
+                    stopDeletedVoice()
                     memory.composition.edit?.let { draft ->
                         memory.history.rows.find { it.localId == draft.localId }?.let {
                             val exact = refresh.first.any { row -> row.localId == draft.localId } ||
@@ -239,7 +308,13 @@ class ChatActivity : DmsgActivity() {
                         }
                     }
                     // A no-op ticker must not destroy the system text-selection action mode.
-                    val rebind = contactChanged || adapter.visibleRows != memory.history.visibleRows
+                    val visible = memory.history.visibleRows
+                    val changed = !sameHistoryRows(adapter.visibleRows, visible)
+                    val voiceOnly = changed && !contactChanged && adapter.replaceVoicePayloads(visible)
+                    if (voiceOnly) visible.filter { it.kind == uniffi.dmsg_core.MessageKind.VOICE }.forEach { row ->
+                        visibleVoice(VoiceKey(row))?.let { bindVoice(it, row) }
+                    }
+                    val rebind = contactChanged || (changed && !voiceOnly)
                     if (rebind) adapter.notifyDataSetChanged()
                     list.post {
                         if (!active) return@post
@@ -278,13 +353,13 @@ class ChatActivity : DmsgActivity() {
         }
     }
 
-    private fun actionsReady() = active && !memory.pending && !pageGuard.pending && memory.uncertain == null && memory.uncertainAction == null
+    private fun actionsReady() = active && !memory.pending && !pageGuard.pending && memory.uncertain == null && memory.uncertainAction == null && memory.uncertainVoice == null
     private fun ownRow(localId: Long) = memory.history.rows.find { it.localId == localId && canHideMessage(it) }
 
     private fun messageMenu(localId: Long) {
         if (!actionsReady()) return
         val row = ownRow(localId) ?: return
-        val editable = canChangeMessage(row, memory.contact) && memory.composition.edit == null
+        val editable = canEditMessage(row, memory.contact) && memory.composition.edit == null && !memory.voice.busy
         val labels = if (editable) arrayOf(getString(R.string.edit_whole_message), getString(R.string.delete_whole_message))
             else arrayOf(getString(R.string.delete_whole_message))
         prompt = AlertDialog.Builder(this).setTitle(R.string.message_actions).setItems(labels) { _, which ->
@@ -295,7 +370,7 @@ class ChatActivity : DmsgActivity() {
     private fun startEdit(localId: Long) {
         if (!actionsReady()) return
         val row = ownRow(localId) ?: return
-        if (!canChangeMessage(row, memory.contact) || !memory.composition.start(row)) return
+        if (memory.voice.busy || !canEditMessage(row, memory.contact) || !memory.composition.start(row)) return
         memory.rebaseEdit = false
         render()
         composer.requestFocus()
@@ -306,7 +381,7 @@ class ChatActivity : DmsgActivity() {
         if (!actionsReady() || memory.rebaseEdit) return
         val draft = memory.composition.edit ?: return
         val row = ownRow(draft.localId)
-        if (draft.unavailable || row == null || !canChangeMessage(row, memory.contact)) {
+        if (draft.unavailable || row == null || !canEditMessage(row, memory.contact)) {
             memory.composition.unavailable()
             memory.action = { it.getString(R.string.error_message_unavailable) }; render(); return
         }
@@ -373,6 +448,11 @@ class ChatActivity : DmsgActivity() {
             is MessageActionOutcome.Saved -> {
                 memory.uncertainAction = null
                 memory.history.replace(outcome.row)
+                if (command is MessageActionCommand.Delete) {
+                    val key = VoiceKey(outcome.row)
+                    VoiceTransferCoordinator.deleted(key)
+                    if (memory.audio?.playback?.key == key) { playerRequest++; memory.audio?.stopPlayer() }
+                }
                 if (command is MessageActionCommand.Edit) memory.composition.saved(localId)
                 else memory.composition.refresh(outcome.row)
                 memory.rebaseEdit = false
@@ -414,7 +494,7 @@ class ChatActivity : DmsgActivity() {
     }
 
     private fun send() {
-        if (memory.composition.edit != null || memory.pending || memory.uncertain != null || memory.uncertainAction != null || contactCta(memory.contact) != ContactCta.Chat) { render(); return }
+        if (memory.voice.busy || memory.composition.edit != null || memory.pending || memory.uncertain != null || memory.uncertainAction != null || memory.uncertainVoice != null || contactCta(memory.contact) != ContactCta.Chat) { render(); return }
         val text = composer.text.toString()
         if (text.isEmpty() || text.toByteArray(Charsets.UTF_8).size > 4096) {
             memory.action = { it.getString(R.string.message_bounds) }; render(); return
@@ -479,6 +559,7 @@ class ChatActivity : DmsgActivity() {
     private fun retry() {
         if (memory.pending || contactCta(memory.contact) != ContactCta.Chat) return
         memory.pending = true; memory.action = { it.getString(R.string.retrying_saved_queue) }; render()
+        VoiceTransferCoordinator.wake()
         Core.dispatch {
             val result = runCatching { Core.facade(applicationContext).retry() }
             runOnUiThread {
@@ -495,6 +576,7 @@ class ChatActivity : DmsgActivity() {
         memory.pending = true; memory.action = { it.getString(R.string.refreshing_dns) }; render()
         Core.dispatch {
             val result = runCatching { DmsgService.check(Core.facade(applicationContext)) }
+            VoiceTransferCoordinator.wake()
             runOnUiThread {
                 memory.pending = false
                 memory.action = result.fold({ report ->
@@ -513,6 +595,239 @@ class ChatActivity : DmsgActivity() {
                 pageError = ""
                 if (active) { render(); loadPage() }
             }
+        }
+    }
+
+    private fun setupVoice() {
+        val mic = findViewById<VoiceMicView>(R.id.btn_mic)
+        mic.setOnClickListener { startVoice(true) } // Accessibility/keyboard equivalent of lock.
+        mic.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> { micX = event.rawX; micY = event.rawY; startVoice(false); true }
+                MotionEvent.ACTION_MOVE -> {
+                    when (memory.voice.move(event.rawX - micX, event.rawY - micY, NativeUi.dp(this, 64).toFloat())) {
+                        VoiceGesture.Cancel -> discardVoice()
+                        VoiceGesture.Lock -> renderVoice()
+                        VoiceGesture.None -> Unit
+                    }; true
+                }
+                MotionEvent.ACTION_UP -> { if (memory.voice.mode == VoiceMode.Holding) finishVoice(true); true }
+                MotionEvent.ACTION_CANCEL -> { if (memory.voice.mode == VoiceMode.Holding) finishVoice(false); true }
+                else -> false
+            }
+        }
+        findViewById<Button>(R.id.voice_discard).setOnClickListener { discardVoice() }
+        findViewById<Button>(R.id.voice_pause).setOnClickListener {
+            when (memory.voice.mode) {
+                VoiceMode.Locked -> {
+                    memory.voice.mode = VoiceMode.Pausing; memory.voice.changed(); memory.audio?.pauseRecording()
+                }
+                VoiceMode.Paused -> {
+                    if (memory.audio(applicationContext).start(true)) {
+                        memory.voice.bytes?.fill(0); memory.voice.bytes = null
+                        memory.voice.mode = VoiceMode.Locked; memory.voice.changed()
+                    }
+                }
+                else -> Unit
+            }
+        }
+        findViewById<Button>(R.id.voice_preview).setOnClickListener {
+            when (memory.voice.mode) {
+                VoiceMode.Locked -> finishVoice(false)
+                VoiceMode.Paused, VoiceMode.Preview -> previewVoice()
+                else -> Unit
+            }
+        }
+        findViewById<Button>(R.id.voice_send).setOnClickListener {
+            when (memory.voice.mode) {
+                VoiceMode.Locked, VoiceMode.Paused -> finishVoice(true)
+                VoiceMode.Preview -> queueVoice()
+                else -> Unit
+            }
+        }
+        findViewById<VoiceWaveformView>(R.id.voice_waveform).onSeek = { sample ->
+            memory.voice.bytes?.let { memory.audio?.seek(sample, it, preview = true) }
+        }
+    }
+    private fun startVoice(locked: Boolean) {
+        if (!actionsReady() || memory.composition.edit != null || memory.draft.isNotEmpty() || contactCta(memory.contact) != ContactCta.Chat || memory.voice.busy) return
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            memory.action = { it.getString(R.string.voice_permission) }; render(); microphonePermission.launch(Manifest.permission.RECORD_AUDIO); return
+        }
+        if (!memory.voice.begin(locked)) return
+        playerRequest++
+        if (!memory.audio(applicationContext).start()) {
+            memory.voice.discard(); memory.action = { it.getString(R.string.voice_error) }; render()
+        }
+    }
+    private fun finishVoice(send: Boolean) {
+        memory.voice.finish(send); memory.audio?.finishRecording()
+    }
+    private fun discardVoice() {
+        if (memory.pending || memory.uncertainVoice != null) return
+        playerRequest++; memory.audio?.cancelRecording(); memory.audio?.stopPlayer()
+        memory.voice.discard(); memory.voiceAttempt = null; render()
+    }
+    private fun previewVoice() {
+        val bytes = memory.voice.bytes ?: return
+        val audio = memory.audio(applicationContext)
+        if (audio.playback.preview && audio.playback.playing) audio.stopPlayer()
+        else audio.play(bytes, preview = true, from = if (audio.playback.preview && audio.playback.sample < memory.voice.samples) audio.playback.sample else 0)
+    }
+    private fun transition(view: View, visible: Boolean) {
+        val visibility = if (visible) View.VISIBLE else View.GONE
+        if (view.visibility == visibility) return
+        view.animate().cancel(); view.visibility = visibility
+        if (visible && ValueAnimator.areAnimatorsEnabled()) {
+            view.alpha = 0f; view.scaleX = .8f; view.scaleY = .8f
+            view.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(200).start()
+        } else { view.alpha = 1f; view.scaleX = 1f; view.scaleY = 1f }
+    }
+    private fun renderVoice() {
+        if (!active) return
+        val voice = memory.voice
+        val mic = findViewById<VoiceMicView>(R.id.btn_mic)
+        val editing = memory.composition.edit != null
+        transition(findViewById(R.id.btn_send), !editing && !voice.busy && memory.draft.isNotEmpty())
+        transition(mic, !editing && (memory.draft.isEmpty() || voice.busy))
+        mic.isEnabled = contactCta(memory.contact) == ContactCta.Chat && !memory.pending && memory.uncertain == null && memory.uncertainAction == null && memory.uncertainVoice == null
+        mic.meter(voice.rms, voice.mode in setOf(VoiceMode.Holding, VoiceMode.Locked))
+        findViewById<View>(R.id.voice_panel).visibility = if (voice.busy) View.VISIBLE else View.GONE
+        findViewById<TextView>(R.id.voice_timer).text = voiceTime(voice.samples)
+        findViewById<TextView>(R.id.voice_hint).setText(when (voice.mode) {
+            VoiceMode.Holding -> R.string.voice_hold_hint
+            VoiceMode.Locked -> R.string.voice_locked
+            VoiceMode.Queueing -> R.string.voice_saving
+            else -> R.string.voice_unsent
+        })
+        val waveform = findViewById<VoiceWaveformView>(R.id.voice_waveform)
+        waveform.visibility = if (voice.bytes == null) View.GONE else View.VISIBLE
+        waveform.bars = voice.waveform; waveform.totalSamples = voice.samples
+        val playback = memory.audio?.playback
+        waveform.sample = if (playback?.preview == true) playback.sample else 0
+        waveform.isEnabled = voice.bytes != null && voice.mode != VoiceMode.Queueing
+        val locked = voice.mode in setOf(VoiceMode.Locked, VoiceMode.Paused)
+        findViewById<Button>(R.id.voice_pause).apply {
+            visibility = if (locked) View.VISIBLE else View.GONE
+            setText(if (voice.mode == VoiceMode.Paused) R.string.voice_resume else R.string.voice_pause)
+        }
+        findViewById<Button>(R.id.voice_preview).apply {
+            visibility = if (voice.mode in setOf(VoiceMode.Locked, VoiceMode.Paused, VoiceMode.Preview)) View.VISIBLE else View.GONE
+            setText(if (playback?.preview == true && playback.playing) R.string.voice_pause else R.string.voice_preview)
+        }
+        val mutable = !memory.pending && memory.uncertainVoice == null && voice.mode !in setOf(VoiceMode.Finishing, VoiceMode.Pausing)
+        findViewById<Button>(R.id.voice_discard).isEnabled = mutable
+        findViewById<Button>(R.id.voice_send).isEnabled = mutable && voice.mode in setOf(VoiceMode.Locked, VoiceMode.Paused, VoiceMode.Preview) && contactCta(memory.contact) == ContactCta.Chat
+    }
+    private fun queueVoice() {
+        if (!active || memory.pending || memory.uncertain != null || memory.uncertainAction != null || memory.uncertainVoice != null || contactCta(memory.contact) != ContactCta.Chat) return
+        val bytes = memory.voice.bytes?.copyOf() ?: return
+        val attempt = memory.voiceAttempt ?: VoiceSendAttempt(id).also { memory.voiceAttempt = it }
+        memory.audio?.stopPlayer()
+        memory.pending = true; memory.voice.mode = VoiceMode.Queueing
+        memory.action = { it.getString(R.string.voice_saving) }; render()
+        Core.dispatch {
+            val outcome = try { TextSendCoordinator.queueVoice(Core.facade(applicationContext), attempt, bytes) }
+                catch (e: Exception) { VoiceSendOutcome.NotSaved(e) }
+                finally { bytes.fill(0) }
+            runOnUiThread { completeVoice(outcome); if (active) { render(); loadPage() } }
+        }
+    }
+    private fun completeVoice(outcome: VoiceSendOutcome) {
+        memory.pending = false
+        when (outcome) {
+            is VoiceSendOutcome.Saved -> {
+                memory.uncertainVoice = null; memory.voiceAttempt = null; memory.voice.discard()
+                memory.action = { it.getString(R.string.voice_saved) }; VoiceTransferCoordinator.wake()
+            }
+            is VoiceSendOutcome.NotSaved -> {
+                memory.uncertainVoice = null; memory.voice.mode = if (memory.voice.bytes == null) VoiceMode.Idle else VoiceMode.Preview
+                val error = humanErrorRes(outcome.error)
+                memory.action = { it.getString(R.string.message_not_sent, it.getString(error)) }
+            }
+            is VoiceSendOutcome.Uncertain -> {
+                memory.uncertainVoice = outcome; memory.voice.mode = VoiceMode.Queueing
+                memory.action = { it.getString(R.string.voice_uncertain) }
+            }
+        }
+    }
+    private fun resolveVoice() {
+        val attempt = memory.uncertainVoice ?: return
+        val stamp = pageGuard.begin() ?: return
+        Core.dispatch {
+            val outcome = try { TextSendCoordinator.reconcileVoice(Core.facade(applicationContext), attempt) }
+                catch (_: Exception) { attempt }
+            runOnUiThread {
+                if (memory.uncertainVoice != attempt) return@runOnUiThread
+                completeVoice(outcome)
+                if (!active || !pageGuard.finish(stamp)) return@runOnUiThread
+                render(); if (memory.uncertainVoice == null) loadPage()
+            }
+        }
+    }
+    private fun bindVoice(view: VoiceBubbleView, row: uniffi.dmsg_core.HistoryMessage) {
+        view.bind(row, VoiceTransferCoordinator.state(VoiceKey(row)), memory.audio?.playback ?: VoicePlayback(), ::voiceAction, ::seekVoice)
+    }
+    private fun visibleVoice(key: VoiceKey): VoiceBubbleView? {
+        if (memory.history.rows.none(key::matches)) return null
+        for (i in 0 until list.childCount) voiceView(list.getChildAt(i), key)?.let { return it }
+        return null
+    }
+    private fun voiceAction(row: uniffi.dmsg_core.HistoryMessage) {
+        if (!active || memory.voice.mode in setOf(VoiceMode.Holding, VoiceMode.Locked, VoiceMode.Pausing, VoiceMode.Finishing)) return
+        val key = VoiceKey(row)
+        val current = memory.history.rows.firstOrNull(key::matches) ?: return
+        if (current.voice?.downloaded != true) { VoiceTransferCoordinator.download(current); return }
+        val playback = memory.audio?.playback
+        if (playback?.key == key && playback.playing) memory.audio?.stopPlayer()
+        else playStored(key, if (playback?.key == key && playback.sample < (current.voice?.sampleCount?.toInt() ?: 0)) playback.sample else 0)
+    }
+    private fun seekVoice(row: uniffi.dmsg_core.HistoryMessage, sample: Int) {
+        val key = VoiceKey(row)
+        if (!active || memory.history.rows.none(key::matches)) return
+        if (memory.audio?.playback?.playing == true && memory.audio?.playback?.key == key) playStored(key, sample)
+        else memory.audio?.seek(sample, byteArrayOf(), key)
+    }
+    private fun playStored(key: VoiceKey, sample: Int) {
+        val request = ++playerRequest
+        val stamp = lifecycleStamp
+        Core.dispatch {
+            val result = runCatching {
+                val f = Core.facade(applicationContext)
+                val row = f.historyMessage(key.contactId, key.localId)
+                check(key.matches(row)); f.voiceData(key.contactId, key.localId)
+            }
+            runOnUiThread {
+                result.fold({ bytes ->
+                    if (active && stamp == lifecycleStamp && request == playerRequest && memory.history.rows.any(key::matches)) memory.audio(applicationContext).play(bytes, key, from = sample)
+                    bytes.fill(0)
+                }, { if (active && stamp == lifecycleStamp && request == playerRequest) { memory.action = { it.getString(R.string.voice_error) }; render() } })
+            }
+        }
+    }
+    private fun transferChanged(key: VoiceKey) {
+        if (!active || memory.history.rows.none(key::matches)) return
+        val row = memory.history.rows.first(key::matches)
+        visibleVoice(key)?.let { bindVoice(it, row) }
+        val state = VoiceTransferCoordinator.state(key)
+        if (state.complete || state.errorRes != null) {
+            val stamp = lifecycleStamp
+            Core.dispatch {
+                val result = runCatching { Core.facade(applicationContext).historyMessage(key.contactId, key.localId) }
+                runOnUiThread {
+                    if (!active || stamp != lifecycleStamp || memory.history.rows.none(key::matches)) return@runOnUiThread
+                    result.onSuccess { updated ->
+                        memory.history.replace(updated); stopDeletedVoice()
+                        if (key.matches(updated) && adapter.replaceVoicePayload(updated)) visibleVoice(key)?.let { bindVoice(it, updated) } else render()
+                    }
+                }
+            }
+        }
+    }
+    private fun stopDeletedVoice() {
+        memory.history.rows.filter { it.kind == uniffi.dmsg_core.MessageKind.VOICE && !messageVisible(it) }.forEach {
+            val key = VoiceKey(it); VoiceTransferCoordinator.deleted(key)
+            if (memory.audio?.playback?.key == key) { playerRequest++; memory.audio?.stopPlayer() }
         }
     }
 }

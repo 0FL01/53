@@ -8,12 +8,98 @@ const HEADER_LEN: usize = 1 + 1 + 16 + 32;
 const CONTROL_LEN: usize = 16 + 8;
 const ENVELOPE_MAX: usize = HEADER_LEN + CONTROL_LEN + TEXT_MAX;
 
+pub const VOICE_MANIFEST_LEN: usize = 166;
+pub const VOICE_SAMPLE_MAX: u32 = 960_000;
+/// Version1/profile1 = fixed mono16k,20ms,Opus10k speech container.
+/// Keys are E2E-only and must never be sent to msgd outside Olm.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VoiceManifest {
+    pub blob_id: [u8; 16],
+    pub key: [u8; 32],
+    pub nonce_prefix: [u8; 8],
+    pub recipient_binding: [u8; 32],
+    pub plain_len: u32,
+    pub byte_len: u32,
+    pub sample_count: u32,
+    pub waveform: Vec<u8>,
+}
+
+impl VoiceManifest {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.sample_count == 0
+            || self.sample_count > VOICE_SAMPLE_MAX
+            || self.waveform.len() != 64
+        {
+            return Err("invalid voice samples/waveform");
+        }
+        if self.plain_len == 0 || self.byte_len as usize > crate::blob::VOICE_MAX {
+            return Err("invalid voice length");
+        }
+        let count = self.plain_len.div_ceil(crate::blob::CHUNK_PLAIN_MAX as u32);
+        if self
+            .plain_len
+            .checked_add(count.checked_mul(16).ok_or("invalid voice geometry")?)
+            != Some(self.byte_len)
+        {
+            return Err("invalid voice geometry");
+        }
+        if crate::blob::chunk_count(self.byte_len) != u16::try_from(count).ok() {
+            return Err("invalid voice geometry");
+        }
+        Ok(())
+    }
+    pub fn chunk_count(&self) -> Result<u16, &'static str> {
+        self.validate()?;
+        crate::blob::chunk_count(self.byte_len).ok_or("invalid voice geometry")
+    }
+    pub fn encode(&self) -> Result<Vec<u8>, &'static str> {
+        self.validate()?;
+        let mut out = Vec::with_capacity(VOICE_MANIFEST_LEN);
+        out.extend_from_slice(&[1, 1]);
+        out.extend_from_slice(&self.blob_id);
+        out.extend_from_slice(&self.key);
+        out.extend_from_slice(&self.nonce_prefix);
+        out.extend_from_slice(&self.recipient_binding);
+        out.extend_from_slice(&self.plain_len.to_be_bytes());
+        out.extend_from_slice(&self.byte_len.to_be_bytes());
+        out.extend_from_slice(&self.sample_count.to_be_bytes());
+        out.extend_from_slice(&self.waveform);
+        Ok(out)
+    }
+    pub fn decode(p: &[u8]) -> Result<Self, &'static str> {
+        if p.len() != VOICE_MANIFEST_LEN || p[..2] != [1, 1] {
+            return Err("invalid voice manifest version/profile/length");
+        }
+        let m = Self {
+            blob_id: p[2..18].try_into().map_err(|_| "invalid voice manifest")?,
+            key: p[18..50].try_into().map_err(|_| "invalid voice manifest")?,
+            nonce_prefix: p[50..58].try_into().map_err(|_| "invalid voice manifest")?,
+            recipient_binding: p[58..90].try_into().map_err(|_| "invalid voice manifest")?,
+            plain_len: u32::from_be_bytes(
+                p[90..94].try_into().map_err(|_| "invalid voice manifest")?,
+            ),
+            byte_len: u32::from_be_bytes(
+                p[94..98].try_into().map_err(|_| "invalid voice manifest")?,
+            ),
+            sample_count: u32::from_be_bytes(
+                p[98..102]
+                    .try_into()
+                    .map_err(|_| "invalid voice manifest")?,
+            ),
+            waveform: p[102..].to_vec(),
+        };
+        m.validate()?;
+        Ok(m)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Kind {
     Text = 1,
     Edit = 2,
     Delete = 3,
+    Voice = 4,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,6 +112,7 @@ pub struct Event {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Body {
     Text(String),
+    Voice(VoiceManifest),
     Edit {
         target: [u8; 16],
         revision: u64,
@@ -41,6 +128,7 @@ impl Event {
     pub fn kind(&self) -> Kind {
         match &self.body {
             Body::Text(_) => Kind::Text,
+            Body::Voice(_) => Kind::Voice,
             Body::Edit { .. } => Kind::Edit,
             Body::Delete { .. } => Kind::Delete,
         }
@@ -53,6 +141,10 @@ pub fn encode(event: &Event) -> Result<Vec<u8>, &'static str> {
         Body::Text(text) => {
             validate_text_len(text.len())?;
             text.len()
+        }
+        Body::Voice(manifest) => {
+            manifest.validate()?;
+            VOICE_MANIFEST_LEN
         }
         Body::Edit { revision, text, .. } => {
             validate_revision(*revision)?;
@@ -73,6 +165,7 @@ pub fn encode(event: &Event) -> Result<Vec<u8>, &'static str> {
     out.extend_from_slice(&event.sender_ed);
     match &event.body {
         Body::Text(text) => out.extend_from_slice(text.as_bytes()),
+        Body::Voice(manifest) => out.extend_from_slice(&manifest.encode()?),
         Body::Edit {
             target,
             revision,
@@ -99,6 +192,7 @@ pub fn decode(bytes: &[u8]) -> Result<Event, &'static str> {
     let body_bytes = &bytes[HEADER_LEN..];
     let body = match bytes[1] {
         1 => Body::Text(decode_text(body_bytes)?),
+        4 => Body::Voice(VoiceManifest::decode(body_bytes)?),
         2 => {
             let (target, revision) = decode_control(body_bytes)?;
             Body::Edit {
@@ -356,7 +450,7 @@ mod tests {
                 bytes[0] = version;
                 assert_eq!(decode(&bytes), Err("unknown E2E version"));
             }
-            for kind in [0, 4, u8::MAX] {
+            for kind in [0, 5, u8::MAX] {
                 let mut bytes = vector.to_vec();
                 bytes[1] = kind;
                 assert_eq!(decode(&bytes), Err("unknown E2E kind"));
@@ -418,6 +512,60 @@ mod tests {
             let mut bytes = EDIT_VECTOR.to_vec();
             bytes.resize(len, b'x');
             assert_eq!(decode(&bytes), Err("E2E envelope too large"));
+        }
+    }
+
+    #[test]
+    fn voice_fixed_layout_and_geometry() {
+        let mut m = VoiceManifest {
+            blob_id: [1; 16],
+            key: [2; 32],
+            nonce_prefix: [3; 8],
+            recipient_binding: [4; 32],
+            plain_len: 8177,
+            byte_len: 8209,
+            sample_count: 960000,
+            waveform: vec![5; 64],
+        };
+        let e = event(Body::Voice(m.clone()));
+        let p = encode(&e).unwrap();
+        assert_eq!(p.len(), HEADER_LEN + 166);
+        assert_eq!(&p[HEADER_LEN..HEADER_LEN + 2], &[1, 1]);
+        assert_eq!(p[1], 4);
+        assert_eq!(decode(&p).unwrap(), e);
+        for n in 0..166 {
+            assert!(VoiceManifest::decode(&p[HEADER_LEN..HEADER_LEN + n]).is_err());
+        }
+        let mut bad = m.encode().unwrap();
+        bad.push(0);
+        assert!(VoiceManifest::decode(&bad).is_err());
+        for field in [0, 1] {
+            let mut bad = m.encode().unwrap();
+            bad[field] = 2;
+            assert!(VoiceManifest::decode(&bad).is_err());
+        }
+        m.waveform.pop();
+        assert!(m.validate().is_err());
+        m.waveform.push(5);
+        for sample in [0, 960001, u32::MAX] {
+            m.sample_count = sample;
+            assert!(m.validate().is_err());
+        }
+        m.sample_count = 1;
+        for (plain, cipher) in [(1, 17), (8176, 8192), (8177, 8209), (130816, 131072)] {
+            m.plain_len = plain;
+            m.byte_len = cipher;
+            assert!(m.validate().is_ok());
+        }
+        for (plain, cipher) in [
+            (0, 16),
+            (8177, 8193),
+            (130817, 131089),
+            (u32::MAX, u32::MAX),
+        ] {
+            m.plain_len = plain;
+            m.byte_len = cipher;
+            assert!(m.validate().is_err());
         }
     }
 }

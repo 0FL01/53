@@ -32,6 +32,8 @@ internal fun ffiError(error: FfiException): DmsgError = when (error) {
     is FfiException.BadText -> DmsgError(R.string.error_bad_text, ErrorKind.BadText)
     is FfiException.MessageChanged -> DmsgError(R.string.error_message_changed, ErrorKind.MessageChanged)
     is FfiException.MessageUnavailable -> DmsgError(R.string.error_message_unavailable, ErrorKind.MessageUnavailable)
+    is FfiException.VoiceSessionRequired -> DmsgError(R.string.voice_session_required, ErrorKind.VoiceSessionRequired)
+    is FfiException.BadVoice -> DmsgError(R.string.voice_error, ErrorKind.BadVoice)
     is FfiException.Transport -> DmsgError(R.string.error_transport, ErrorKind.Transport)
     is FfiException.Store -> DmsgError(R.string.error_store, ErrorKind.Store)
     is FfiException.Crypto -> DmsgError(R.string.error_crypto, ErrorKind.Crypto)

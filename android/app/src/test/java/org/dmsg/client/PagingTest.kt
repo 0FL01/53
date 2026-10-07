@@ -8,7 +8,10 @@ import uniffi.dmsg_core.DeliveryState
 
 class PagingTest {
     private fun row(id: Long, peer: String = "P", direction: MessageDirection = MessageDirection.INCOMING) =
-        HistoryMessage(id, id.toString(16).padStart(32, '0'), peer, direction, "fixture", id, if (direction == MessageDirection.OUTGOING) DeliveryState.QUEUED else null, null, null, 0uL, false, false, null)
+        HistoryMessage(localId = id, messageIdHex = id.toString(16).padStart(32, '0'), contactId = peer, direction = direction,
+            text = "fixture", localTimestampMs = id, deliveryState = if (direction == MessageDirection.OUTGOING) DeliveryState.QUEUED else null,
+            serverSeq = null, serverTimestampMs = null, revision = 0uL, hiddenSelf = false, deletedAll = false,
+            changeDeliveryState = null, kind = uniffi.dmsg_core.MessageKind.TEXT, voice = null)
 
     @Test fun boundedPerContactPagesPrependChronologicallyPast500() {
         val f = FakeFacade()

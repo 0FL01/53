@@ -26,6 +26,20 @@ pub enum DeleteScope {
     Everyone,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum MessageKind {
+    Text,
+    Voice,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct VoiceInfo {
+    pub sample_count: u32,
+    pub waveform: Vec<u8>,
+    pub byte_len: u32,
+    pub downloaded: bool,
+}
+
 /// Positive durable local ID identifies ingestion, not server presentation order.
 /// Incoming delivery_state is always None; outgoing status is a persisted
 /// server-ACK fact (or Queued).
@@ -35,6 +49,8 @@ pub struct HistoryMessage {
     pub message_id_hex: String,
     pub contact_id: String,
     pub direction: MessageDirection,
+    pub kind: MessageKind,
+    pub voice: Option<VoiceInfo>,
     pub text: String,
     pub local_timestamp_ms: i64,
     pub delivery_state: Option<DeliveryState>,
@@ -72,6 +88,8 @@ pub struct DialogSummary {
     pub contact_id: String,
     pub local_alias: Option<String>,
     pub preview: Option<String>,
+    pub preview_kind: Option<MessageKind>,
+    pub voice_duration_ms: Option<u32>,
     pub last_local_timestamp_ms: Option<i64>,
     pub local_unread: u64,
     pub read_cursor: i64,
@@ -140,9 +158,11 @@ pub(crate) fn local_time_ms() -> Result<i64, String> {
 const MESSAGE_COLUMNS: &str = "m.local_id,m.message_id,m.direction,
  CASE WHEN m.text IS NULL THEN '' ELSE CAST(dmsg_unseal('message_text',m.text) AS TEXT) END,
  m.local_timestamp_ms,m.delivery_state,m.server_seq,m.server_timestamp_ms,m.revision,m.hidden_self,m.deleted_all,
- (SELECT c.delivery_state FROM core_messages c WHERE c.direction='outgoing' AND c.kind!='text'
+  (SELECT c.delivery_state FROM core_messages c WHERE c.direction='outgoing' AND c.kind IN ('edit','delete')
    AND c.contact_id=m.contact_id AND c.sender_device=m.sender_device AND c.target_mid=m.message_id
-   ORDER BY c.revision DESC,c.local_id DESC LIMIT 1)";
+    ORDER BY c.revision DESC,c.local_id DESC LIMIT 1),m.kind,
+  CASE WHEN m.media_manifest IS NULL THEN NULL ELSE dmsg_unseal('voice_manifest',m.media_manifest) END,
+  coalesce((SELECT downloaded FROM core_blob_transfers b WHERE b.local_id=m.local_id),0)";
 
 fn require_contact(conn: &Connection, contact_id: &str) -> Result<(), HistoryError> {
     if !contacts::valid_contact_id(contact_id) {
@@ -164,7 +184,7 @@ fn require_anchor(conn: &Connection, contact_id: &str, local_id: i64) -> Result<
         return Err(HistoryError::InvalidInput);
     }
     let exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM core_messages WHERE local_id=?1 AND contact_id=?2 AND kind='text')",
+        "SELECT EXISTS(SELECT 1 FROM core_messages WHERE local_id=?1 AND contact_id=?2 AND kind IN ('text','voice'))",
         params![local_id, contact_id],
         |r| r.get(0),
     )?;
@@ -218,10 +238,10 @@ fn page(
     let limit = limit.clamp(1, 100) as usize;
     let key = "(m.server_seq IS NULL)";
     let mut sql = format!(
-        "SELECT {MESSAGE_COLUMNS} FROM core_messages m WHERE m.contact_id=?1 AND m.kind='text'"
+        "SELECT {MESSAGE_COLUMNS} FROM core_messages m WHERE m.contact_id=?1 AND m.kind IN ('text','voice')"
     );
     let anchor: Option<(i64, i64)> = if timeline {
-        before_local_id.map(|id|tx.query_row(&format!("SELECT {key},coalesce(m.server_seq,m.local_id) FROM core_messages m WHERE m.local_id=?1 AND m.kind='text'"),[id],|r|Ok((r.get(0)?,r.get(1)?)))).transpose()?
+        before_local_id.map(|id|tx.query_row(&format!("SELECT {key},coalesce(m.server_seq,m.local_id) FROM core_messages m WHERE m.local_id=?1 AND m.kind IN ('text','voice')"),[id],|r|Ok((r.get(0)?,r.get(1)?)))).transpose()?
     } else {
         None
     };
@@ -278,11 +298,30 @@ fn read_message(row: &rusqlite::Row<'_>, contact_id: &str) -> Result<HistoryMess
     if (direction == MessageDirection::Outgoing) != delivery.is_some() {
         return Err(HistoryError::Store);
     }
+    let kind = message_kind(&row.get::<_, String>(12)?)?;
+    let voice = row
+        .get::<_, Option<Vec<u8>>>(13)?
+        .map(|bytes| {
+            let (_, manifest) =
+                crate::voice::decode_manifest(&bytes).map_err(|_| HistoryError::Store)?;
+            Ok::<_, HistoryError>(VoiceInfo {
+                sample_count: manifest.sample_count,
+                waveform: manifest.waveform,
+                byte_len: manifest.byte_len,
+                downloaded: row.get(14)?,
+            })
+        })
+        .transpose()?;
+    if kind == MessageKind::Text && voice.is_some() {
+        return Err(HistoryError::Store);
+    }
     Ok(HistoryMessage {
         local_id: row.get(0)?,
         message_id_hex: hex(&message_id),
         contact_id: contact_id.into(),
         direction,
+        kind,
+        voice,
         text: row.get(3)?,
         local_timestamp_ms: row.get(4)?,
         delivery_state: delivery,
@@ -299,6 +338,14 @@ fn read_message(row: &rusqlite::Row<'_>, contact_id: &str) -> Result<HistoryMess
     })
 }
 
+fn message_kind(value: &str) -> Result<MessageKind, HistoryError> {
+    match value {
+        "text" => Ok(MessageKind::Text),
+        "voice" => Ok(MessageKind::Voice),
+        _ => Err(HistoryError::Store),
+    }
+}
+
 /// Monotonic authenticated metadata, never replace a known order with a retry's
 /// wall clock. Caller owns transaction; fresh TEXT always has original order.
 #[cfg(test)]
@@ -311,11 +358,11 @@ pub(crate) fn set_order(
         if o.seq <= 0 || o.timestamp_ms < 0 {
             return Err("invalid server order".into());
         }
-        let old:Option<(i64,i64)>=tx.query_row("SELECT server_seq,server_timestamp_ms FROM core_messages WHERE local_id=?1 AND kind='text' AND server_seq IS NOT NULL",[id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|_|"history order lookup failed")?;
+        let old:Option<(i64,i64)>=tx.query_row("SELECT server_seq,server_timestamp_ms FROM core_messages WHERE local_id=?1 AND kind IN ('text','voice') AND server_seq IS NOT NULL",[id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|_|"history order lookup failed")?;
         if old.is_some_and(|v| v != (o.seq, o.timestamp_ms)) {
             return Err("server order changed".into());
         }
-        if tx.execute("UPDATE core_messages SET server_seq=?2,server_timestamp_ms=?3 WHERE local_id=?1 AND kind='text'",params![id,o.seq,o.timestamp_ms]).map_err(|_|"history order update failed")? != 1 {
+        if tx.execute("UPDATE core_messages SET server_seq=?2,server_timestamp_ms=?3 WHERE local_id=?1 AND kind IN ('text','voice')",params![id,o.seq,o.timestamp_ms]).map_err(|_|"history order update failed")? != 1 {
             return Err("history order row missing".into());
         }
     } else {
@@ -344,10 +391,48 @@ pub(crate) fn message_row(
     contact_id: &str,
     local_id: i64,
 ) -> Result<HistoryMessage, HistoryError> {
-    let mut stmt = conn.prepare(&format!("SELECT {MESSAGE_COLUMNS} FROM core_messages m WHERE m.contact_id=?1 AND m.local_id=?2 AND m.kind='text'"))?;
+    let mut stmt = conn.prepare(&format!("SELECT {MESSAGE_COLUMNS} FROM core_messages m WHERE m.contact_id=?1 AND m.local_id=?2 AND m.kind IN ('text','voice')"))?;
     let mut rows = stmt.query(params![contact_id, local_id])?;
     let row = rows.next()?.ok_or(HistoryError::InvalidInput)?;
     read_message(row, contact_id)
+}
+
+/// Stable attempt reconciliation includes hidden/tombstoned base messages.
+pub fn history_message_by_mid(
+    conn: &Connection,
+    contact_id: &str,
+    message_id_hex: &str,
+) -> Result<Option<HistoryMessage>, HistoryError> {
+    require_contact(conn, contact_id)?;
+    let mid = parse_message_id(message_id_hex)?;
+    let id: Option<i64> = conn.query_row("SELECT local_id FROM core_messages WHERE contact_id=?1 AND message_id=?2 AND kind IN ('text','voice') ORDER BY direction='outgoing' DESC LIMIT 1",params![contact_id,mid.as_slice()],|r|r.get(0)).optional()?;
+    id.map(|id| message_row(conn, contact_id, id)).transpose()
+}
+
+pub(crate) fn inbox_rows(
+    conn: &Connection,
+    cursor: i64,
+    limit: usize,
+) -> Result<(Vec<HistoryMessage>, Option<i64>), HistoryError> {
+    let tx = Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Deferred)?;
+    let limit = limit.clamp(1, 100);
+    let mut stmt = tx.prepare("SELECT local_id,contact_id FROM core_messages WHERE direction='incoming' AND kind IN ('text','voice') AND hidden_self=0 AND deleted_all=0 AND server_seq>?1 ORDER BY server_seq LIMIT ?2")?;
+    let ids = stmt
+        .query_map(params![cursor, (limit + 1) as i64], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut rows = ids
+        .into_iter()
+        .map(|(id, cid)| message_row(&tx, &cid, id))
+        .collect::<Result<Vec<_>, _>>()?;
+    let next = if rows.len() > limit {
+        rows.pop();
+        rows.last().and_then(|r| r.server_seq)
+    } else {
+        None
+    };
+    Ok((rows, next))
 }
 
 /// Exact outgoing status; None for an unknown ID or incoming-only ID. Never
@@ -439,11 +524,12 @@ pub fn dialogs_page(
             CASE WHEN c.local_alias IS NULL THEN NULL ELSE CAST(dmsg_unseal('contact_alias',c.local_alias) AS TEXT) END,
             CASE WHEN h.text IS NULL THEN NULL ELSE CAST(dmsg_unseal('message_text',h.text) AS TEXT) END,
             h.local_timestamp_ms,c.read_cursor,
-            (SELECT count(*) FROM core_messages u WHERE u.contact_id=c.contact_id AND u.direction='incoming' AND u.kind='text' AND u.hidden_self=0 AND u.deleted_all=0 AND u.local_id>c.read_cursor),
+             (SELECT count(*) FROM core_messages u WHERE u.contact_id=c.contact_id AND u.direction='incoming' AND u.kind IN ('text','voice') AND u.hidden_self=0 AND u.deleted_all=0 AND u.local_id>c.read_cursor),
             c.user_id IS NOT NULL AND c.device_key IS NOT NULL AND c.ed_identity IS NOT NULL AND c.curve_identity IS NOT NULL,
             c.seen_user IS NOT NULL OR c.seen_device IS NOT NULL OR c.seen_ed IS NOT NULL OR c.seen_curve IS NOT NULL,
-            c.state,c.local_activity_ms
-         FROM core_contacts c LEFT JOIN core_messages h ON h.local_id=(SELECT local_id FROM core_messages WHERE contact_id=c.contact_id AND kind='text' AND hidden_self=0 AND deleted_all=0 ORDER BY local_id DESC LIMIT 1)
+             c.state,c.local_activity_ms,h.kind,
+             CASE WHEN h.media_manifest IS NULL THEN NULL ELSE dmsg_unseal('voice_manifest',h.media_manifest) END
+          FROM core_contacts c LEFT JOIN core_messages h ON h.local_id=(SELECT local_id FROM core_messages WHERE contact_id=c.contact_id AND kind IN ('text','voice') AND hidden_self=0 AND deleted_all=0 ORDER BY local_id DESC LIMIT 1)
          WHERE (?1 IS NULL OR c.local_activity_ms<?1 OR (c.local_activity_ms=?1 AND c.contact_id>?2))
          ORDER BY c.local_activity_ms DESC,c.contact_id ASC LIMIT ?3",
     )?;
@@ -456,11 +542,26 @@ pub fn dialogs_page(
     while let Some(row) = rows.next()? {
         let unread: i64 = row.get(5)?;
         let preview: Option<String> = row.get(2)?;
+        let preview_kind = row
+            .get::<_, Option<String>>(10)?
+            .as_deref()
+            .map(message_kind)
+            .transpose()?;
+        let voice_duration_ms = row
+            .get::<_, Option<Vec<u8>>>(11)?
+            .map(|bytes| {
+                crate::voice::decode_manifest(&bytes)
+                    .map(|(_, m)| m.sample_count.div_ceil(16))
+                    .map_err(|_| HistoryError::Store)
+            })
+            .transpose()?;
         out.push((
             DialogSummary {
                 contact_id: row.get(0)?,
                 local_alias: row.get(1)?,
                 preview: preview.map(|s| s.chars().take(160).collect()),
+                preview_kind,
+                voice_duration_ms,
                 last_local_timestamp_ms: row.get(3)?,
                 read_cursor: row.get(4)?,
                 local_unread: u64::try_from(unread).map_err(|_| HistoryError::Store)?,
@@ -517,7 +618,7 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn parse_message_id(value: &str) -> Result<[u8; 16], HistoryError> {
+pub(crate) fn parse_message_id(value: &str) -> Result<[u8; 16], HistoryError> {
     if value.len() != 32 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(HistoryError::InvalidInput);
     }

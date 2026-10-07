@@ -83,6 +83,7 @@ internal fun messageVisible(row: HistoryMessage) = !row.hiddenSelf && !row.delet
 internal fun canHideMessage(row: HistoryMessage) = messageVisible(row) && row.direction == MessageDirection.OUTGOING
 internal fun canChangeMessage(row: HistoryMessage, contact: Dialog?) = canHideMessage(row) &&
     row.deliveryState in setOf(DeliveryState.ACCEPTED, DeliveryState.DELIVERED) && contactCta(contact) == ContactCta.Chat
+internal fun canEditMessage(row: HistoryMessage, contact: Dialog?) = row.kind == uniffi.dmsg_core.MessageKind.TEXT && canChangeMessage(row, contact)
 internal fun deleteScopes(row: HistoryMessage, contact: Dialog?): List<uniffi.dmsg_core.DeleteScope> =
     if (!canHideMessage(row)) emptyList() else listOf(uniffi.dmsg_core.DeleteScope.SELF_ONLY) +
         if (canChangeMessage(row, contact)) listOf(uniffi.dmsg_core.DeleteScope.EVERYONE) else emptyList()
@@ -136,8 +137,8 @@ internal class HistoryWindow {
         val oldById = rows.associateBy { it.localId }
         val bridging = gapBefore != null
         val byId = rows.associateBy { it.localId }.toMutableMap()
-        refreshed.forEach { byId[it.localId] = it }
-        page.rows.forEach { byId[it.localId] = it }
+        refreshed.forEach { byId[it.localId] = mergeProjection(byId[it.localId], it) }
+        page.rows.forEach { byId[it.localId] = mergeProjection(byId[it.localId], it) }
         val metadataMoved = refreshed.any { oldById[it.localId]?.let { old -> historyOrder(old) != historyOrder(it) } == true }
         // A bridge may see a new high ID without seeing every earlier ingest.
         // Only a normal refresh/discovery may advance that watermark.
@@ -161,33 +162,37 @@ internal class HistoryWindow {
     }
     fun older(page: HistoryPage) {
         val byId = rows.associateBy { it.localId }.toMutableMap()
-        page.rows.forEach { byId[it.localId] = it }
+        page.rows.forEach { byId[it.localId] = mergeProjection(byId[it.localId], it) }
         rows.clear(); rows.addAll(byId.values.sortedWith(historyComparator))
         nextBefore = page.nextBeforeLocalId
         continuation(page)
     }
     fun replace(row: HistoryMessage) {
         val index = rows.indexOfFirst { it.localId == row.localId }
-        if (index >= 0) {
-            val current = rows[index]
+        if (index >= 0) rows[index] = mergeProjection(rows[index], row)
+        rows.sortWith(historyComparator)
+    }
+    private fun mergeProjection(current: HistoryMessage?, row: HistoryMessage): HistoryMessage {
+        if (current != null) {
             // A retained completion proves the write, but must not resurrect an older projection.
-            if (current.revision > row.revision) return
+            if (current.revision > row.revision) return current
             fun stateRank(state: DeliveryState?) = when (state) {
                 null -> 0
                 DeliveryState.QUEUED -> 1
                 DeliveryState.ACCEPTED -> 2
                 DeliveryState.DELIVERED -> 3
             }
-            rows[index] = row.copy(
+            return row.copy(
                 hiddenSelf = current.hiddenSelf || row.hiddenSelf,
                 deletedAll = current.deletedAll || row.deletedAll,
                 text = if (current.hiddenSelf || row.hiddenSelf || current.deletedAll || row.deletedAll) "" else row.text,
+                voice = if (current.hiddenSelf || row.hiddenSelf || current.deletedAll || row.deletedAll) null else row.voice,
                 deliveryState = if (stateRank(current.deliveryState) > stateRank(row.deliveryState)) current.deliveryState else row.deliveryState,
                 changeDeliveryState = if (current.revision == row.revision && stateRank(current.changeDeliveryState) > stateRank(row.changeDeliveryState)) current.changeDeliveryState else row.changeDeliveryState,
                 serverSeq = current.serverSeq ?: row.serverSeq,
                 serverTimestampMs = current.serverTimestampMs ?: row.serverTimestampMs)
         }
-        rows.sortWith(historyComparator)
+        return row
     }
     fun viewedAnchor(renderedIds: Collection<Long>): Long? = renderedIds.filter { id ->
         rows.any { it.localId == id && messageVisible(it) }
@@ -206,7 +211,7 @@ internal class MessageComposer {
         get() = edit?.text ?: normal.text
         set(value) { edit?.let { it.text = value } ?: run { normal.text = value } }
     fun start(row: HistoryMessage): Boolean {
-        if (edit != null || !canHideMessage(row) || row.deliveryState !in setOf(DeliveryState.ACCEPTED, DeliveryState.DELIVERED)) return false
+        if (edit != null || row.kind != uniffi.dmsg_core.MessageKind.TEXT || !canHideMessage(row) || row.deliveryState !in setOf(DeliveryState.ACCEPTED, DeliveryState.DELIVERED)) return false
         edit = EditDraft(row.localId, row.revision, row.text, row.text)
         return true
     }
@@ -232,6 +237,7 @@ internal class MessageComposer {
     "text" -> R.string.outbox_text
     "edit" -> R.string.outbox_edit
     "delete" -> R.string.outbox_delete
+    "voice" -> R.string.voice_note
     else -> R.string.outbox_event
 }
 @StringRes internal fun actionSavedRes(command: MessageActionCommand, row: HistoryMessage): Int = when (command) {

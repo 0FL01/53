@@ -33,17 +33,40 @@ internal object TextSendCoordinator {
     private val completed = WeakHashMap<TextSendOutcome.Uncertain, TextSendOutcome>()
     @Volatile private var unresolvedAction: MessageActionAttempt? = null
     private val completedActions = WeakHashMap<MessageActionAttempt, MessageActionOutcome>()
+    @Volatile private var unresolvedVoice: VoiceSendOutcome.Uncertain? = null
+    private val completedVoices = WeakHashMap<VoiceSendAttempt, VoiceSendOutcome>()
+    fun pendingVoiceFor(contactId: String) = unresolvedVoice?.takeIf { it.attempt.contactId == contactId }
     fun pendingFor(contactId: String) = unresolved?.takeIf { it.first == contactId }?.second
     fun pendingActionFor(contactId: String) = unresolvedAction?.takeIf { it.before.contactId == contactId }
     /** Only the existing single Core.dispatch worker calls writers and reconciliation. */
     private fun blocked(f: DmsgFacade): Boolean {
         unresolved?.let { (peer, attempt) -> if (reconcile(f, peer, attempt) is TextSendOutcome.Uncertain) return true }
         unresolvedAction?.let { if (reconcileAction(f, it) is MessageActionOutcome.Uncertain) return true }
+        unresolvedVoice?.let { if (reconcileVoice(f, it) is VoiceSendOutcome.Uncertain) return true }
         return false
     }
     fun send(f: DmsgFacade, contactId: String, text: String): TextSendOutcome {
         if (blocked(f)) return TextSendOutcome.NotSaved(DmsgError(R.string.error_pending_send))
         return sendTextSafely(f, contactId, text).also { if (it is TextSendOutcome.Uncertain) unresolved = contactId to it }
+    }
+    fun queueVoice(f: DmsgFacade, attempt: VoiceSendAttempt, bytes: ByteArray): VoiceSendOutcome {
+        if (blocked(f)) return VoiceSendOutcome.NotSaved(DmsgError(R.string.error_pending_send))
+        // Session bootstrap is conditional: an existing session can queue entirely offline.
+        try { if (!f.voiceSessionReady(attempt.contactId)) f.primeVoiceSession(attempt.contactId) }
+        catch (e: Exception) { return VoiceSendOutcome.NotSaved(e) }
+        val result = try { VoiceSendOutcome.Saved(f.queueVoice(attempt.contactId, attempt.mid, bytes)) }
+            catch (e: Exception) { reconcileVoiceSend(f, attempt, e) }
+        if (result is VoiceSendOutcome.Uncertain) unresolvedVoice = result
+        return result
+    }
+    fun reconcileVoice(f: DmsgFacade, attempt: VoiceSendOutcome.Uncertain): VoiceSendOutcome {
+        completedVoices[attempt.attempt]?.let { return it }
+        val result = reconcileVoiceSend(f, attempt.attempt, attempt.error)
+        if (result !is VoiceSendOutcome.Uncertain) {
+            completedVoices[attempt.attempt] = result
+            if (unresolvedVoice?.attempt == attempt.attempt) unresolvedVoice = null
+        }
+        return result
     }
     fun reconcile(f: DmsgFacade, contactId: String, attempt: TextSendOutcome.Uncertain): TextSendOutcome {
         completed[attempt]?.let { return it }
@@ -131,7 +154,7 @@ internal fun reconcileTextSend(f: DmsgFacade, contactId: String, baseline: Long,
         do {
             val page = f.historyPage(contactId, before, 100)
             val fresh = page.rows.filter { it.localId > baseline }
-            val saved = fresh.firstOrNull { it.direction == MessageDirection.OUTGOING && it.text == text }
+            val saved = fresh.firstOrNull { it.direction == MessageDirection.OUTGOING && it.kind == uniffi.dmsg_core.MessageKind.TEXT && it.text == text }
             if (saved != null) return TextSendOutcome.Saved(saved.messageIdHex, recoveredAfterError = true)
             if (page.rows.any { it.localId <= baseline }) break
             before = page.nextBeforeLocalId

@@ -45,6 +45,8 @@ pub struct RawEvent {
 #[derive(Clone, PartialEq, Eq)]
 pub struct Received {
     pub contact_id: String,
+    pub kind: crate::history::MessageKind,
+    pub voice: Option<crate::history::VoiceInfo>,
     pub text: String,
     pub message_id: [u8; 16],
     pub seq: u64,
@@ -86,8 +88,8 @@ pub struct RetryStats {
 /// Core: SQLite connection, Olm account and stable device identity.
 /// Одно на процесс (как Supervisor); `Connection` не Sync — не шарить.
 pub struct Core {
-    conn: rusqlite::Connection,
-    account: vodozemac::olm::Account,
+    pub(crate) conn: rusqlite::Connection,
+    pub(crate) account: vodozemac::olm::Account,
     next_key_id: u32,
     device_pub: [u8; 32],
 }
@@ -364,7 +366,23 @@ impl Core {
         text: &str,
     ) -> Result<[u8; 16], OlmError> {
         self.preflight_text(contact_id, text)?;
+        self.prime_voice_session(t, contact_id).await?;
+        let (message_id, user_id, wire) = self
+            .persist_text(contact_id, text)?
+            .ok_or(OlmError::Protocol("session disappeared"))?;
+        self.send_stored(t, &user_id, &message_id, &wire).await?;
+        Ok(message_id)
+    }
+
+    /// The same authenticated bootstrap serves the first TEXT or VOICE. It
+    /// does not emit a dummy text or consume a ratchet message.
+    pub async fn prime_voice_session(
+        &mut self,
+        t: &mut impl Transport,
+        contact_id: &str,
+    ) -> Result<(), OlmError> {
         let c = contacts::get(&self.conn, contact_id)?.ok_or(OlmError::UnknownContact)?;
+        contacts::sendable(&c)?;
         let (_, device_key, peer_ed, peer_curve) = contact_keys(&c)?;
         self.login(t).await?;
         self.refresh_binding(t, &c).await?;
@@ -376,13 +394,14 @@ impl Core {
             &mut self.next_key_id,
         )
         .await?;
-        self.session_for(&c, &peer_ed, &peer_curve, t, &device_key)
+        self.push_contact_requests(t).await?;
+        let current = contacts::get(&self.conn, contact_id)?.ok_or(OlmError::UnknownContact)?;
+        if recipient_binding(&current)? != recipient_binding(&c)? {
+            return Err(OlmError::MessageUnavailable);
+        }
+        self.session_for(&current, &peer_ed, &peer_curve, t, &device_key)
             .await?;
-        let (message_id, user_id, wire) = self
-            .persist_text(contact_id, text)?
-            .ok_or(OlmError::Protocol("session disappeared"))?;
-        self.send_stored(t, &user_id, &message_id, &wire).await?;
-        Ok(message_id)
+        Ok(())
     }
 
     /// Проверить локальные гейты до попытки подключиться: подмена не должна
@@ -522,6 +541,9 @@ impl Core {
             HistoryError::Store => OlmError::Store("mutation target read failed".into()),
             _ => OlmError::MessageUnavailable,
         })?;
+        if edit.is_some() && row.kind != crate::history::MessageKind::Text {
+            return Err(OlmError::MessageUnavailable);
+        }
         if row.direction != MessageDirection::Outgoing {
             return Err(OlmError::MessageUnavailable);
         }
@@ -544,6 +566,7 @@ impl Core {
                 [local_id],
             )
             .map_err(|_| OlmError::Store("self hide failed".into()))?;
+            crate::voice::purge_hidden_sent(&tx).map_err(OlmError::Store)?;
             crate::store::clear_controls(&tx, contact_id, &self.device_pub, &mid)
                 .map_err(OlmError::Store)?;
         } else {
@@ -626,7 +649,8 @@ impl Core {
             if let Some((_, text)) = edit {
                 tx.execute("UPDATE core_messages SET text=dmsg_seal('message_text',?2),revision=?3 WHERE local_id=?1",rusqlite::params![local_id,text,revision]).map_err(|_|OlmError::Store("edit target update failed".into()))?;
             } else {
-                tx.execute("UPDATE core_messages SET text=NULL,deleted_all=1,revision=?2 WHERE local_id=?1",rusqlite::params![local_id,revision]).map_err(|_|OlmError::Store("delete target update failed".into()))?;
+                tx.execute("UPDATE core_messages SET text=NULL,media_manifest=NULL,deleted_all=1,revision=?2 WHERE local_id=?1",rusqlite::params![local_id,revision]).map_err(|_|OlmError::Store("delete target update failed".into()))?;
+                crate::voice::purge_deleted(&tx, local_id).map_err(OlmError::Store)?;
             }
             crate::store::insert_outgoing(
                 &tx,
@@ -665,8 +689,14 @@ impl Core {
                     continue;
                 }
                 let (user_id, _, _, _) = contact_keys(&c)?;
-                let (_, frozen) =
+                let (kind, frozen) =
                     crate::store::outgoing_binding(&self.conn, mid).map_err(OlmError::Store)?;
+                if kind == "voice"
+                    && !crate::voice::upload_complete(&self.conn, mid).map_err(OlmError::Store)?
+                {
+                    stats.skipped += 1;
+                    continue;
+                }
                 if frozen != recipient_binding(&c)? {
                     stats.skipped += 1;
                     continue;
@@ -885,9 +915,13 @@ impl Core {
         .map_err(|_| OlmError::Store("receive report snapshot failed".into()))?;
         let mut effective = Vec::with_capacity(res.received.len());
         for mut received in res.received {
-            let text: Option<String>=snapshot.query_row("SELECT CASE WHEN hidden_self=1 OR deleted_all=1 THEN NULL ELSE CAST(dmsg_unseal('message_text',text) AS TEXT) END FROM core_messages WHERE direction='incoming' AND kind='text' AND contact_id=?1 AND message_id=?2",rusqlite::params![received.contact_id,received.message_id.as_slice()],|r|r.get(0)).map_err(|_|OlmError::Store("receive report projection failed".into()))?;
-            if let Some(text) = text {
-                received.text = text;
+            let id: i64=snapshot.query_row("SELECT local_id FROM core_messages WHERE direction='incoming' AND kind IN ('text','voice') AND contact_id=?1 AND message_id=?2",rusqlite::params![received.contact_id,received.message_id.as_slice()],|r|r.get(0)).map_err(|_|OlmError::Store("receive report projection failed".into()))?;
+            let row = crate::history::message_row(&snapshot, &received.contact_id, id)
+                .map_err(|_| OlmError::Store("receive report projection failed".into()))?;
+            if !row.hidden_self && !row.deleted_all {
+                received.text = row.text;
+                received.kind = row.kind;
+                received.voice = row.voice;
                 effective.push(received);
             }
         }
@@ -1038,12 +1072,20 @@ impl Core {
                 .map_err(|_| OlmError::Store("warning commit".into()))?;
             return Err(Fail::Skip(EventSkip::Mismatch));
         }
-        if event.kind() == dmsg_protocol::e2e::Kind::Text
-            && !order.is_some_and(|o| {
-                o.seq > 0 && o.timestamp_ms >= 0 && u64::try_from(o.seq).ok() == Some(e.seq)
-            })
-        {
+        if matches!(
+            event.kind(),
+            dmsg_protocol::e2e::Kind::Text | dmsg_protocol::e2e::Kind::Voice
+        ) && !order.is_some_and(|o| {
+            o.seq > 0 && o.timestamp_ms >= 0 && u64::try_from(o.seq).ok() == Some(e.seq)
+        }) {
             return Err(Fail::Skip(EventSkip::Undecryptable));
+        }
+        if let dmsg_protocol::e2e::Body::Voice(manifest) = &event.body {
+            if manifest.recipient_binding
+                != crate::voice::own_binding(&tx).map_err(OlmError::Store)?
+            {
+                return Err(Fail::Skip(EventSkip::Undecryptable));
+            }
         }
         if !crate::store::valid_control_target(&tx, &c.contact_id, &e.sender, &event)
             .map_err(OlmError::Store)?
@@ -1086,6 +1128,8 @@ impl Core {
                 } else {
                     Some(Received {
                         contact_id: c.contact_id.clone(),
+                        kind: row.kind,
+                        voice: row.voice,
                         text: row.text,
                         message_id: e.message_id,
                         seq: e.seq,
@@ -1210,7 +1254,17 @@ impl Core {
         payload.extend_from_slice(user_id);
         payload.extend_from_slice(message_id);
         payload.extend_from_slice(wire);
-        t.send_frame(OP_SEND, &payload)
+        let opcode = if kind == "voice" {
+            let (blob, device) = crate::voice::send_media_binding(&self.conn, message_id)
+                .map_err(OlmError::Store)?;
+            payload =
+                dmsg_protocol::blob::build_send_media(user_id, &device, message_id, &blob, wire)
+                    .ok_or(OlmError::Protocol("invalid send media"))?;
+            dmsg_protocol::OP_SEND_MEDIA
+        } else {
+            OP_SEND
+        };
+        t.send_frame(opcode, &payload)
             .await
             .map_err(|e| OlmError::Transport(e.to_string()))?;
         let (op, p) = t
@@ -1227,7 +1281,7 @@ impl Core {
                 ST_DELIVERED => crate::store::outbox_status::DELIVERED,
                 _ => return Err(OlmError::Protocol("bad send status")),
             };
-            let order = if kind == "text" {
+            let order = if matches!(kind.as_str(), "text" | "voice") {
                 Some(
                     self.message_orders(t, &[(self.device_pub, *message_id)])
                         .await?
@@ -1274,7 +1328,9 @@ impl From<OlmError> for Fail {
 }
 
 /// Ключи контакта для отправки (всё обязательно — иначе MissingKeys).
-fn contact_keys(c: &Contact) -> Result<([u8; 16], [u8; 32], [u8; 32], [u8; 32]), OlmError> {
+pub(crate) fn contact_keys(
+    c: &Contact,
+) -> Result<([u8; 16], [u8; 32], [u8; 32], [u8; 32]), OlmError> {
     match (c.user_id, c.device_key, c.ed_identity, c.curve_identity) {
         (Some(u), Some(d), Some(e), Some(cv)) => Ok((u, d, e, cv)),
         _ => Err(OlmError::MissingKeys),
@@ -1283,7 +1339,7 @@ fn contact_keys(c: &Contact) -> Result<([u8; 16], [u8; 32], [u8; 32], [u8; 32]),
 
 /// One compact epoch binding, fixed with ciphertext and never recomputed for
 /// an old event after explicit contact-identity confirmation.
-fn recipient_binding(c: &Contact) -> Result<[u8; 32], OlmError> {
+pub(crate) fn recipient_binding(c: &Contact) -> Result<[u8; 32], OlmError> {
     use sha2::{Digest, Sha256};
     let (user, device, ed, curve) = contact_keys(c)?;
     let mut hash = Sha256::new();

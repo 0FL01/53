@@ -55,4 +55,13 @@ class FfiErrorsTest {
         assertEquals(R.string.error_message_unavailable, humanErrorRes(unavailable))
         assertNotEquals(changed.uiMessageRes, unavailable.uiMessageRes)
     }
+    @Test fun voiceErrorsKeepPreviewAndCodecFailuresTypedAndStatic() {
+        val session = ffiError(FfiException.VoiceSessionRequired())
+        val invalid = ffiError(FfiException.BadVoice())
+        assertEquals(ErrorKind.VoiceSessionRequired, session.kind)
+        assertEquals(ErrorKind.BadVoice, invalid.kind)
+        assertEquals(R.string.voice_session_required, humanErrorRes(session))
+        assertEquals(R.string.voice_error, humanErrorRes(invalid))
+        assertEquals(R.string.error_operation, humanErrorRes(IllegalArgumentException("private PCM or codec diagnostics")))
+    }
 }

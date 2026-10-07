@@ -529,7 +529,7 @@ class MainDevRolloutTest {
         assertTrue("main account authenticated", account.authenticated && account.contactId != null)
         SQLiteDatabase.openDatabase(Core.dbFile(app).absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { db ->
             db.rawQuery("PRAGMA user_version", null).use { cursor ->
-                assertTrue(cursor.moveToFirst()); assertEquals("actual core schema", 8, cursor.getInt(0))
+                assertTrue(cursor.moveToFirst()); assertEquals("actual core schema", 9, cursor.getInt(0))
             }
         }
         return account

@@ -792,6 +792,30 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is
 // rather `InterfaceTooLargeException`, caused by too many methods
@@ -814,6 +838,10 @@ fun uniffi_dmsg_core_checksum_func_qr_kind(
 fun uniffi_dmsg_core_checksum_method_dmsgclient_account_info(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_add_contact_qr(
+): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_clear_voice_cache(
+): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_commit_voice_transfer(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_configure_dns(
 ): Short
@@ -849,6 +877,8 @@ fun uniffi_dmsg_core_checksum_method_dmsgclient_fetch_dns(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_history_message(
 ): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_history_message_by_mid(
+): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_history_page(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_inbox_page(
@@ -865,7 +895,15 @@ fun uniffi_dmsg_core_checksum_method_dmsgclient_my_contact_qr(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_outbox_page(
 ): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_pending_voice_upload(
+): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_prepare_voice_transfer(
+): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_prime_voice_session_dns(
+): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_profile_preview(
+): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_queue_voice(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_reconnect_dns(
 ): Short
@@ -882,6 +920,14 @@ fun uniffi_dmsg_core_checksum_method_dmsgclient_signup_dns(
 fun uniffi_dmsg_core_checksum_method_dmsgclient_stop_dns(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_timeline_page(
+): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_voice_data(
+): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_voice_session_ready(
+): Short
+fun uniffi_dmsg_core_checksum_method_voicetransfer_advance(
+): Short
+fun uniffi_dmsg_core_checksum_method_voicetransfer_cancel(
 ): Short
 fun uniffi_dmsg_core_checksum_constructor_dmsgclient_open_encrypted(
 ): Short
@@ -944,6 +990,10 @@ fun uniffi_dmsg_core_fn_method_dmsgclient_account_info(`ptr`: Pointer,uniffi_out
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_add_contact_qr(`ptr`: Pointer,`uri`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
+fun uniffi_dmsg_core_fn_method_dmsgclient_clear_voice_cache(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
+): Unit
+fun uniffi_dmsg_core_fn_method_dmsgclient_commit_voice_transfer(`ptr`: Pointer,`transfer`: Pointer,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_configure_dns(`ptr`: Pointer,`qr`: RustBuffer.ByValue,`resolvers`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): Unit
 fun uniffi_dmsg_core_fn_method_dmsgclient_contact_accept(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
@@ -978,6 +1028,8 @@ fun uniffi_dmsg_core_fn_method_dmsgclient_fetch_dns(`ptr`: Pointer,uniffi_out_er
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_history_message(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,`localId`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
+fun uniffi_dmsg_core_fn_method_dmsgclient_history_message_by_mid(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,`messageIdHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_history_page(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,`beforeLocalId`: RustBuffer.ByValue,`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_inbox_page(`ptr`: Pointer,`cursor`: Long,`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
@@ -994,7 +1046,15 @@ fun uniffi_dmsg_core_fn_method_dmsgclient_my_contact_qr(`ptr`: Pointer,uniffi_ou
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_outbox_page(`ptr`: Pointer,`cursor`: Long,`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
+fun uniffi_dmsg_core_fn_method_dmsgclient_pending_voice_upload(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+fun uniffi_dmsg_core_fn_method_dmsgclient_prepare_voice_transfer(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,`localId`: Long,`download`: Byte,uniffi_out_err: UniffiRustCallStatus,
+): Pointer
+fun uniffi_dmsg_core_fn_method_dmsgclient_prime_voice_session_dns(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): Unit
 fun uniffi_dmsg_core_fn_method_dmsgclient_profile_preview(`ptr`: Pointer,`qr`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+fun uniffi_dmsg_core_fn_method_dmsgclient_queue_voice(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,`messageIdHex`: RustBuffer.ByValue,`encodedNote`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_reconnect_dns(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
 ): Int
@@ -1012,6 +1072,18 @@ fun uniffi_dmsg_core_fn_method_dmsgclient_stop_dns(`ptr`: Pointer,uniffi_out_err
 ): Unit
 fun uniffi_dmsg_core_fn_method_dmsgclient_timeline_page(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,`beforeLocalId`: RustBuffer.ByValue,`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
+fun uniffi_dmsg_core_fn_method_dmsgclient_voice_data(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,`localId`: Long,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+fun uniffi_dmsg_core_fn_method_dmsgclient_voice_session_ready(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): Byte
+fun uniffi_dmsg_core_fn_clone_voicetransfer(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
+): Pointer
+fun uniffi_dmsg_core_fn_free_voicetransfer(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
+): Unit
+fun uniffi_dmsg_core_fn_method_voicetransfer_advance(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+fun uniffi_dmsg_core_fn_method_voicetransfer_cancel(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
+): Unit
 fun uniffi_dmsg_core_fn_func_page_limit(`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
 ): Int
 fun uniffi_dmsg_core_fn_func_qr_kind(`uri`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
@@ -1154,6 +1226,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_add_contact_qr() != 40071.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_clear_voice_cache() != 10703.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_commit_voice_transfer() != 44210.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_configure_dns() != 45066.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1205,6 +1283,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_history_message() != 13294.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_history_message_by_mid() != 2410.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_history_page() != 17501.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1229,7 +1310,19 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_outbox_page() != 58697.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_pending_voice_upload() != 43784.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_prepare_voice_transfer() != 25478.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_prime_voice_session_dns() != 59293.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_profile_preview() != 65288.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_queue_voice() != 64320.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_reconnect_dns() != 35785.toShort()) {
@@ -1254,6 +1347,18 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_timeline_page() != 11414.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_voice_data() != 23494.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_voice_session_ready() != 10959.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dmsg_core_checksum_method_voicetransfer_advance() != 25132.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dmsg_core_checksum_method_voicetransfer_cancel() != 33564.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dmsg_core_checksum_constructor_dmsgclient_open_encrypted() != 11807.toShort()) {
@@ -1684,6 +1789,10 @@ public interface DmsgClientInterface {
      */
     fun `addContactQr`(`uri`: kotlin.String): QrOutcome
 
+    fun `clearVoiceCache`()
+
+    fun `commitVoiceTransfer`(`transfer`: VoiceTransfer): VoiceTransferProgress
+
     /**
      * Offline import after QR preview confirmation. Saved pins are immutable.
      */
@@ -1752,6 +1861,8 @@ public interface DmsgClientInterface {
      */
     fun `historyMessage`(`contactId`: kotlin.String, `localId`: kotlin.Long): HistoryMessage
 
+    fun `historyMessageByMid`(`contactId`: kotlin.String, `messageIdHex`: kotlin.String): HistoryMessage?
+
     /**
      * Newest-first bounded local timeline; cursor is exclusive and must belong
      * to this contact. Limits clamp to 1..=100. This call does not mark read.
@@ -1792,10 +1903,26 @@ public interface DmsgClientInterface {
      */
     fun `outboxPage`(`cursor`: kotlin.Long, `limit`: kotlin.UInt): OutboxPage
 
+    fun `pendingVoiceUpload`(): HistoryMessage?
+
+    /**
+     * Captures public DNS profile and encrypted chunks without starting DNS or
+     * holding a connection in the returned opaque network object.
+     */
+    fun `prepareVoiceTransfer`(`contactId`: kotlin.String, `localId`: kotlin.Long, `download`: kotlin.Boolean): VoiceTransfer
+
+    fun `primeVoiceSessionDns`(`contactId`: kotlin.String)
+
     /**
      * Offline public-profile preview: domain + pin fingerprint, without secrets/network.
      */
     fun `profilePreview`(`qr`: kotlin.String): Preview
+
+    /**
+     * Local-only commit. A first offline note returns VoiceSessionRequired;
+     * caller keeps its memory-only preview and explicitly primes when online.
+     */
+    fun `queueVoice`(`contactId`: kotlin.String, `messageIdHex`: kotlin.String, `encodedNote`: kotlin.ByteArray): HistoryMessage
 
     fun `reconnectDns`(): kotlin.UInt
 
@@ -1818,6 +1945,10 @@ public interface DmsgClientInterface {
      * Server-ordered presentation page; local IDs remain stable anchors.
      */
     fun `timelinePage`(`contactId`: kotlin.String, `beforeLocalId`: kotlin.Long?, `limit`: kotlin.UInt): HistoryPage
+
+    fun `voiceData`(`contactId`: kotlin.String, `localId`: kotlin.Long): kotlin.ByteArray
+
+    fun `voiceSessionReady`(`contactId`: kotlin.String): kotlin.Boolean
 
     companion object
 }
@@ -1933,6 +2064,31 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
     uniffiRustCallWithError(FfiException) { _status ->
     UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_add_contact_qr(
         it, FfiConverterString.lower(`uri`),_status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(FfiException::class)override fun `clearVoiceCache`()
+        =
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_clear_voice_cache(
+        it, _status)
+}
+    }
+
+
+
+
+    @Throws(FfiException::class)override fun `commitVoiceTransfer`(`transfer`: VoiceTransfer): VoiceTransferProgress {
+            return FfiConverterTypeVoiceTransferProgress.lift(
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_commit_voice_transfer(
+        it, FfiConverterTypeVoiceTransfer.lower(`transfer`),_status)
 }
     }
     )
@@ -2189,6 +2345,19 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
 
 
 
+    @Throws(FfiException::class)override fun `historyMessageByMid`(`contactId`: kotlin.String, `messageIdHex`: kotlin.String): HistoryMessage? {
+            return FfiConverterOptionalTypeHistoryMessage.lift(
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_history_message_by_mid(
+        it, FfiConverterString.lower(`contactId`),FfiConverterString.lower(`messageIdHex`),_status)
+}
+    }
+    )
+    }
+
+
+
     /**
      * Newest-first bounded local timeline; cursor is exclusive and must belong
      * to this contact. Limits clamp to 1..=100. This call does not mark read.
@@ -2317,6 +2486,48 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
 
 
 
+    @Throws(FfiException::class)override fun `pendingVoiceUpload`(): HistoryMessage? {
+            return FfiConverterOptionalTypeHistoryMessage.lift(
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_pending_voice_upload(
+        it, _status)
+}
+    }
+    )
+    }
+
+
+
+    /**
+     * Captures public DNS profile and encrypted chunks without starting DNS or
+     * holding a connection in the returned opaque network object.
+     */
+    @Throws(FfiException::class)override fun `prepareVoiceTransfer`(`contactId`: kotlin.String, `localId`: kotlin.Long, `download`: kotlin.Boolean): VoiceTransfer {
+            return FfiConverterTypeVoiceTransfer.lift(
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_prepare_voice_transfer(
+        it, FfiConverterString.lower(`contactId`),FfiConverterLong.lower(`localId`),FfiConverterBoolean.lower(`download`),_status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(FfiException::class)override fun `primeVoiceSessionDns`(`contactId`: kotlin.String)
+        =
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_prime_voice_session_dns(
+        it, FfiConverterString.lower(`contactId`),_status)
+}
+    }
+
+
+
+
     /**
      * Offline public-profile preview: domain + pin fingerprint, without secrets/network.
      */
@@ -2326,6 +2537,23 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
     uniffiRustCallWithError(FfiException) { _status ->
     UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_profile_preview(
         it, FfiConverterString.lower(`qr`),_status)
+}
+    }
+    )
+    }
+
+
+
+    /**
+     * Local-only commit. A first offline note returns VoiceSessionRequired;
+     * caller keeps its memory-only preview and explicitly primes when online.
+     */
+    @Throws(FfiException::class)override fun `queueVoice`(`contactId`: kotlin.String, `messageIdHex`: kotlin.String, `encodedNote`: kotlin.ByteArray): HistoryMessage {
+            return FfiConverterTypeHistoryMessage.lift(
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_queue_voice(
+        it, FfiConverterString.lower(`contactId`),FfiConverterString.lower(`messageIdHex`),FfiConverterByteArray.lower(`encodedNote`),_status)
 }
     }
     )
@@ -2441,6 +2669,32 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
 
 
 
+    @Throws(FfiException::class)override fun `voiceData`(`contactId`: kotlin.String, `localId`: kotlin.Long): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_voice_data(
+        it, FfiConverterString.lower(`contactId`),FfiConverterLong.lower(`localId`),_status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(FfiException::class)override fun `voiceSessionReady`(`contactId`: kotlin.String): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_voice_session_ready(
+        it, FfiConverterString.lower(`contactId`),_status)
+}
+    }
+    )
+    }
+
+
+
 
 
     companion object {
@@ -2486,6 +2740,264 @@ public object FfiConverterTypeDmsgClient: FfiConverter<DmsgClient, Pointer> {
     override fun allocationSize(value: DmsgClient) = 8UL
 
     override fun write(value: DmsgClient, buf: ByteBuffer) {
+        // The Rust code always expects pointers written as 8 bytes,
+        // and will fail to compile if they don't fit.
+        buf.putLong(Pointer.nativeValue(lower(value)))
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a Pointer/Arc<T>
+// to the live Rust struct on the other side of the FFI.
+//
+// Each instance implements core operations for working with the Rust `Arc<T>` and the
+// Kotlin Pointer to work with the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque pointer to the underlying Rust struct.
+//     Method calls need to read this pointer from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its pointer should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the pointer, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the pointer, but is interrupted
+//      before it can pass the pointer over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read pointer value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
+public interface VoiceTransferInterface {
+
+    /**
+     * Exactly one blob request/receipt. The same runtime/Noise stream survives
+     * all steps. Commit is required before issuing another network operation.
+     */
+    fun `advance`(): VoiceTransferProgress
+
+    fun `cancel`()
+
+    companion object
+}
+
+open class VoiceTransfer: Disposable, AutoCloseable, VoiceTransferInterface
+{
+
+    constructor(pointer: Pointer) {
+        this.pointer = pointer
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(pointer))
+    }
+
+    /**
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noPointer: NoPointer) {
+        this.pointer = null
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(pointer))
+    }
+
+    protected val pointer: Pointer?
+    protected val cleanable: UniffiCleaner.Cleanable
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithPointer(block: (ptr: Pointer) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the pointer being freed concurrently.
+        try {
+            return block(this.uniffiClonePointer())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val pointer: Pointer?) : Runnable {
+        override fun run() {
+            pointer?.let { ptr ->
+                uniffiRustCall { status ->
+                    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_free_voicetransfer(ptr, status)
+                }
+            }
+        }
+    }
+
+    fun uniffiClonePointer(): Pointer {
+        return uniffiRustCall() { status ->
+            UniffiLib.INSTANCE.uniffi_dmsg_core_fn_clone_voicetransfer(pointer!!, status)
+        }
+    }
+
+
+    /**
+     * Exactly one blob request/receipt. The same runtime/Noise stream survives
+     * all steps. Commit is required before issuing another network operation.
+     */
+    @Throws(FfiException::class)override fun `advance`(): VoiceTransferProgress {
+            return FfiConverterTypeVoiceTransferProgress.lift(
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_voicetransfer_advance(
+        it, _status)
+}
+    }
+    )
+    }
+
+
+    override fun `cancel`()
+        =
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_voicetransfer_cancel(
+        it, _status)
+}
+    }
+
+
+
+
+
+
+
+    companion object
+
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeVoiceTransfer: FfiConverter<VoiceTransfer, Pointer> {
+
+    override fun lower(value: VoiceTransfer): Pointer {
+        return value.uniffiClonePointer()
+    }
+
+    override fun lift(value: Pointer): VoiceTransfer {
+        return VoiceTransfer(value)
+    }
+
+    override fun read(buf: ByteBuffer): VoiceTransfer {
+        // The Rust code always writes pointers as 8 bytes, and will
+        // fail to compile if they don't fit.
+        return lift(Pointer(buf.getLong()))
+    }
+
+    override fun allocationSize(value: VoiceTransfer) = 8UL
+
+    override fun write(value: VoiceTransfer, buf: ByteBuffer) {
         // The Rust code always expects pointers written as 8 bytes,
         // and will fail to compile if they don't fit.
         buf.putLong(Pointer.nativeValue(lower(value)))
@@ -2654,6 +3166,8 @@ data class DialogSummary (
     var `contactId`: kotlin.String,
     var `localAlias`: kotlin.String?,
     var `preview`: kotlin.String?,
+    var `previewKind`: MessageKind?,
+    var `voiceDurationMs`: kotlin.UInt?,
     var `lastLocalTimestampMs`: kotlin.Long?,
     var `localUnread`: kotlin.ULong,
     var `readCursor`: kotlin.Long,
@@ -2674,6 +3188,8 @@ public object FfiConverterTypeDialogSummary: FfiConverterRustBuffer<DialogSummar
             FfiConverterString.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalTypeMessageKind.read(buf),
+            FfiConverterOptionalUInt.read(buf),
             FfiConverterOptionalLong.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterLong.read(buf),
@@ -2687,6 +3203,8 @@ public object FfiConverterTypeDialogSummary: FfiConverterRustBuffer<DialogSummar
             FfiConverterString.allocationSize(value.`contactId`) +
             FfiConverterOptionalString.allocationSize(value.`localAlias`) +
             FfiConverterOptionalString.allocationSize(value.`preview`) +
+            FfiConverterOptionalTypeMessageKind.allocationSize(value.`previewKind`) +
+            FfiConverterOptionalUInt.allocationSize(value.`voiceDurationMs`) +
             FfiConverterOptionalLong.allocationSize(value.`lastLocalTimestampMs`) +
             FfiConverterULong.allocationSize(value.`localUnread`) +
             FfiConverterLong.allocationSize(value.`readCursor`) +
@@ -2699,6 +3217,8 @@ public object FfiConverterTypeDialogSummary: FfiConverterRustBuffer<DialogSummar
             FfiConverterString.write(value.`contactId`, buf)
             FfiConverterOptionalString.write(value.`localAlias`, buf)
             FfiConverterOptionalString.write(value.`preview`, buf)
+            FfiConverterOptionalTypeMessageKind.write(value.`previewKind`, buf)
+            FfiConverterOptionalUInt.write(value.`voiceDurationMs`, buf)
             FfiConverterOptionalLong.write(value.`lastLocalTimestampMs`, buf)
             FfiConverterULong.write(value.`localUnread`, buf)
             FfiConverterLong.write(value.`readCursor`, buf)
@@ -2853,6 +3373,8 @@ data class HistoryMessage (
     var `messageIdHex`: kotlin.String,
     var `contactId`: kotlin.String,
     var `direction`: MessageDirection,
+    var `kind`: MessageKind,
+    var `voice`: VoiceInfo?,
     var `text`: kotlin.String,
     var `localTimestampMs`: kotlin.Long,
     var `deliveryState`: DeliveryState?,
@@ -2877,6 +3399,8 @@ public object FfiConverterTypeHistoryMessage: FfiConverterRustBuffer<HistoryMess
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterTypeMessageDirection.read(buf),
+            FfiConverterTypeMessageKind.read(buf),
+            FfiConverterOptionalTypeVoiceInfo.read(buf),
             FfiConverterString.read(buf),
             FfiConverterLong.read(buf),
             FfiConverterOptionalTypeDeliveryState.read(buf),
@@ -2894,6 +3418,8 @@ public object FfiConverterTypeHistoryMessage: FfiConverterRustBuffer<HistoryMess
             FfiConverterString.allocationSize(value.`messageIdHex`) +
             FfiConverterString.allocationSize(value.`contactId`) +
             FfiConverterTypeMessageDirection.allocationSize(value.`direction`) +
+            FfiConverterTypeMessageKind.allocationSize(value.`kind`) +
+            FfiConverterOptionalTypeVoiceInfo.allocationSize(value.`voice`) +
             FfiConverterString.allocationSize(value.`text`) +
             FfiConverterLong.allocationSize(value.`localTimestampMs`) +
             FfiConverterOptionalTypeDeliveryState.allocationSize(value.`deliveryState`) +
@@ -2910,6 +3436,8 @@ public object FfiConverterTypeHistoryMessage: FfiConverterRustBuffer<HistoryMess
             FfiConverterString.write(value.`messageIdHex`, buf)
             FfiConverterString.write(value.`contactId`, buf)
             FfiConverterTypeMessageDirection.write(value.`direction`, buf)
+            FfiConverterTypeMessageKind.write(value.`kind`, buf)
+            FfiConverterOptionalTypeVoiceInfo.write(value.`voice`, buf)
             FfiConverterString.write(value.`text`, buf)
             FfiConverterLong.write(value.`localTimestampMs`, buf)
             FfiConverterOptionalTypeDeliveryState.write(value.`deliveryState`, buf)
@@ -3001,7 +3529,9 @@ public object FfiConverterTypeInboxPage: FfiConverterRustBuffer<InboxPage> {
 data class InboxRow (
     var `seq`: kotlin.Long,
     var `contactId`: kotlin.String,
-    var `text`: kotlin.String
+    var `text`: kotlin.String,
+    var `kind`: MessageKind,
+    var `voice`: VoiceInfo?
 ) {
 
     companion object
@@ -3016,19 +3546,25 @@ public object FfiConverterTypeInboxRow: FfiConverterRustBuffer<InboxRow> {
             FfiConverterLong.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterTypeMessageKind.read(buf),
+            FfiConverterOptionalTypeVoiceInfo.read(buf),
         )
     }
 
     override fun allocationSize(value: InboxRow) = (
             FfiConverterLong.allocationSize(value.`seq`) +
             FfiConverterString.allocationSize(value.`contactId`) +
-            FfiConverterString.allocationSize(value.`text`)
+            FfiConverterString.allocationSize(value.`text`) +
+            FfiConverterTypeMessageKind.allocationSize(value.`kind`) +
+            FfiConverterOptionalTypeVoiceInfo.allocationSize(value.`voice`)
     )
 
     override fun write(value: InboxRow, buf: ByteBuffer) {
             FfiConverterLong.write(value.`seq`, buf)
             FfiConverterString.write(value.`contactId`, buf)
             FfiConverterString.write(value.`text`, buf)
+            FfiConverterTypeMessageKind.write(value.`kind`, buf)
+            FfiConverterOptionalTypeVoiceInfo.write(value.`voice`, buf)
     }
 }
 
@@ -3153,6 +3689,8 @@ public object FfiConverterTypePreview: FfiConverterRustBuffer<Preview> {
 data class ReceivedMsg (
     var `contactId`: kotlin.String,
     var `text`: kotlin.String,
+    var `kind`: MessageKind,
+    var `voice`: VoiceInfo?,
     var `messageIdHex`: kotlin.String,
     var `seq`: kotlin.ULong
 ) {
@@ -3168,6 +3706,8 @@ public object FfiConverterTypeReceivedMsg: FfiConverterRustBuffer<ReceivedMsg> {
         return ReceivedMsg(
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterTypeMessageKind.read(buf),
+            FfiConverterOptionalTypeVoiceInfo.read(buf),
             FfiConverterString.read(buf),
             FfiConverterULong.read(buf),
         )
@@ -3176,6 +3716,8 @@ public object FfiConverterTypeReceivedMsg: FfiConverterRustBuffer<ReceivedMsg> {
     override fun allocationSize(value: ReceivedMsg) = (
             FfiConverterString.allocationSize(value.`contactId`) +
             FfiConverterString.allocationSize(value.`text`) +
+            FfiConverterTypeMessageKind.allocationSize(value.`kind`) +
+            FfiConverterOptionalTypeVoiceInfo.allocationSize(value.`voice`) +
             FfiConverterString.allocationSize(value.`messageIdHex`) +
             FfiConverterULong.allocationSize(value.`seq`)
     )
@@ -3183,6 +3725,8 @@ public object FfiConverterTypeReceivedMsg: FfiConverterRustBuffer<ReceivedMsg> {
     override fun write(value: ReceivedMsg, buf: ByteBuffer) {
             FfiConverterString.write(value.`contactId`, buf)
             FfiConverterString.write(value.`text`, buf)
+            FfiConverterTypeMessageKind.write(value.`kind`, buf)
+            FfiConverterOptionalTypeVoiceInfo.write(value.`voice`, buf)
             FfiConverterString.write(value.`messageIdHex`, buf)
             FfiConverterULong.write(value.`seq`, buf)
     }
@@ -3228,6 +3772,82 @@ public object FfiConverterTypeRetryReport: FfiConverterRustBuffer<RetryReport> {
             FfiConverterULong.write(value.`accepted`, buf)
             FfiConverterULong.write(value.`delivered`, buf)
             FfiConverterULong.write(value.`skipped`, buf)
+    }
+}
+
+
+
+data class VoiceInfo (
+    var `sampleCount`: kotlin.UInt,
+    var `waveform`: kotlin.ByteArray,
+    var `byteLen`: kotlin.UInt,
+    var `downloaded`: kotlin.Boolean
+) {
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeVoiceInfo: FfiConverterRustBuffer<VoiceInfo> {
+    override fun read(buf: ByteBuffer): VoiceInfo {
+        return VoiceInfo(
+            FfiConverterUInt.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: VoiceInfo) = (
+            FfiConverterUInt.allocationSize(value.`sampleCount`) +
+            FfiConverterByteArray.allocationSize(value.`waveform`) +
+            FfiConverterUInt.allocationSize(value.`byteLen`) +
+            FfiConverterBoolean.allocationSize(value.`downloaded`)
+    )
+
+    override fun write(value: VoiceInfo, buf: ByteBuffer) {
+            FfiConverterUInt.write(value.`sampleCount`, buf)
+            FfiConverterByteArray.write(value.`waveform`, buf)
+            FfiConverterUInt.write(value.`byteLen`, buf)
+            FfiConverterBoolean.write(value.`downloaded`, buf)
+    }
+}
+
+
+
+data class VoiceTransferProgress (
+    var `transferred`: kotlin.UInt,
+    var `total`: kotlin.UInt,
+    var `complete`: kotlin.Boolean
+) {
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeVoiceTransferProgress: FfiConverterRustBuffer<VoiceTransferProgress> {
+    override fun read(buf: ByteBuffer): VoiceTransferProgress {
+        return VoiceTransferProgress(
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: VoiceTransferProgress) = (
+            FfiConverterUInt.allocationSize(value.`transferred`) +
+            FfiConverterUInt.allocationSize(value.`total`) +
+            FfiConverterBoolean.allocationSize(value.`complete`)
+    )
+
+    override fun write(value: VoiceTransferProgress, buf: ByteBuffer) {
+            FfiConverterUInt.write(value.`transferred`, buf)
+            FfiConverterUInt.write(value.`total`, buf)
+            FfiConverterBoolean.write(value.`complete`, buf)
     }
 }
 
@@ -3462,6 +4082,18 @@ sealed class FfiException: kotlin.Exception() {
             get() = ""
     }
 
+    class VoiceSessionRequired(
+        ) : FfiException() {
+        override val message
+            get() = ""
+    }
+
+    class BadVoice(
+        ) : FfiException() {
+        override val message
+            get() = ""
+    }
+
     class Transport(
 
         val v1: kotlin.String
@@ -3548,19 +4180,21 @@ public object FfiConverterTypeFfiError : FfiConverterRustBuffer<FfiException> {
             24 -> FfiException.BadText()
             25 -> FfiException.MessageChanged()
             26 -> FfiException.MessageUnavailable()
-            27 -> FfiException.Transport(
+            27 -> FfiException.VoiceSessionRequired()
+            28 -> FfiException.BadVoice()
+            29 -> FfiException.Transport(
                 FfiConverterString.read(buf),
                 )
-            28 -> FfiException.Store(
+            30 -> FfiException.Store(
                 FfiConverterString.read(buf),
                 )
-            29 -> FfiException.Crypto(
+            31 -> FfiException.Crypto(
                 FfiConverterString.read(buf),
                 )
-            30 -> FfiException.Protocol(
+            32 -> FfiException.Protocol(
                 FfiConverterString.read(buf),
                 )
-            31 -> FfiException.Server(
+            33 -> FfiException.Server(
                 FfiConverterString.read(buf),
                 )
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
@@ -3672,6 +4306,14 @@ public object FfiConverterTypeFfiError : FfiConverterRustBuffer<FfiException> {
                 4UL
             )
             is FfiException.MessageUnavailable -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
+            is FfiException.VoiceSessionRequired -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
+            is FfiException.BadVoice -> (
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
             )
@@ -3811,28 +4453,36 @@ public object FfiConverterTypeFfiError : FfiConverterRustBuffer<FfiException> {
                 buf.putInt(26)
                 Unit
             }
-            is FfiException.Transport -> {
+            is FfiException.VoiceSessionRequired -> {
                 buf.putInt(27)
-                FfiConverterString.write(value.v1, buf)
                 Unit
             }
-            is FfiException.Store -> {
+            is FfiException.BadVoice -> {
                 buf.putInt(28)
-                FfiConverterString.write(value.v1, buf)
                 Unit
             }
-            is FfiException.Crypto -> {
+            is FfiException.Transport -> {
                 buf.putInt(29)
                 FfiConverterString.write(value.v1, buf)
                 Unit
             }
-            is FfiException.Protocol -> {
+            is FfiException.Store -> {
                 buf.putInt(30)
                 FfiConverterString.write(value.v1, buf)
                 Unit
             }
-            is FfiException.Server -> {
+            is FfiException.Crypto -> {
                 buf.putInt(31)
+                FfiConverterString.write(value.v1, buf)
+                Unit
+            }
+            is FfiException.Protocol -> {
+                buf.putInt(32)
+                FfiConverterString.write(value.v1, buf)
+                Unit
+            }
+            is FfiException.Server -> {
+                buf.putInt(33)
                 FfiConverterString.write(value.v1, buf)
                 Unit
             }
@@ -3943,6 +4593,36 @@ public object FfiConverterTypeMessageDirection: FfiConverterRustBuffer<MessageDi
 
 
 
+
+enum class MessageKind {
+
+    TEXT,
+    VOICE;
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMessageKind: FfiConverterRustBuffer<MessageKind> {
+    override fun read(buf: ByteBuffer) = try {
+        MessageKind.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: MessageKind) = 4UL
+
+    override fun write(value: MessageKind, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
 /**
  * QR types understood by the scanner: public server profile or contact.
  */
@@ -4037,6 +4717,38 @@ public object FfiConverterTypeRegistrationPolicy: FfiConverterRustBuffer<Registr
 }
 
 
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalUInt: FfiConverterRustBuffer<kotlin.UInt?> {
+    override fun read(buf: ByteBuffer): kotlin.UInt? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterUInt.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.UInt?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterUInt.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.UInt?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterUInt.write(value, buf)
+        }
+    }
+}
 
 
 
@@ -4140,6 +4852,70 @@ public object FfiConverterOptionalTypeDnsProfileInfo: FfiConverterRustBuffer<Dns
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeHistoryMessage: FfiConverterRustBuffer<HistoryMessage?> {
+    override fun read(buf: ByteBuffer): HistoryMessage? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeHistoryMessage.read(buf)
+    }
+
+    override fun allocationSize(value: HistoryMessage?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeHistoryMessage.allocationSize(value)
+        }
+    }
+
+    override fun write(value: HistoryMessage?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeHistoryMessage.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeVoiceInfo: FfiConverterRustBuffer<VoiceInfo?> {
+    override fun read(buf: ByteBuffer): VoiceInfo? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeVoiceInfo.read(buf)
+    }
+
+    override fun allocationSize(value: VoiceInfo?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeVoiceInfo.allocationSize(value)
+        }
+    }
+
+    override fun write(value: VoiceInfo?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeVoiceInfo.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeDeliveryState: FfiConverterRustBuffer<DeliveryState?> {
     override fun read(buf: ByteBuffer): DeliveryState? {
         if (buf.get().toInt() == 0) {
@@ -4162,6 +4938,38 @@ public object FfiConverterOptionalTypeDeliveryState: FfiConverterRustBuffer<Deli
         } else {
             buf.put(1)
             FfiConverterTypeDeliveryState.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeMessageKind: FfiConverterRustBuffer<MessageKind?> {
+    override fun read(buf: ByteBuffer): MessageKind? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeMessageKind.read(buf)
+    }
+
+    override fun allocationSize(value: MessageKind?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeMessageKind.allocationSize(value)
+        }
+    }
+
+    override fun write(value: MessageKind?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeMessageKind.write(value, buf)
         }
     }
 }

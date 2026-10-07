@@ -489,7 +489,7 @@ class DeviceGatesTest {
             assertTrue(second.cursor >= first.cursor)
             assertEquals(AccountInfo(true, id), Core.facade(app).account())
             SQLiteDatabase.openDatabase(Core.dbFile(app).absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { sql ->
-                sql.rawQuery("PRAGMA user_version", null).use { row -> assertTrue(row.moveToFirst()); assertEquals(8, row.getInt(0)) }
+                sql.rawQuery("PRAGMA user_version", null).use { row -> assertTrue(row.moveToFirst()); assertEquals(9, row.getInt(0)) }
             }
             val output = File(app.filesDir, "gate-account.json")
             assertFalse("finish previous gate first", output.exists())

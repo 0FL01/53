@@ -65,10 +65,26 @@ internal object NativeUi {
 /** Stable IDs and natural-height text make large fonts/long messages scroll instead of clipping. */
 internal class HistoryAdapter(private val context: Context, private val rows: List<HistoryMessage>,
     private val canEdit: (HistoryMessage) -> Boolean, private val onEdit: (Long) -> Unit,
-    private val onDelete: (Long) -> Unit, private val onMenu: (Long) -> Unit) : BaseAdapter() {
+    private val onDelete: (Long) -> Unit, private val onMenu: (Long) -> Unit,
+    private val bindVoice: (VoiceBubbleView, HistoryMessage) -> Unit) : BaseAdapter() {
     var visibleRows: List<HistoryMessage> = rows.filter(::messageVisible)
         private set
     override fun notifyDataSetChanged() { visibleRows = rows.filter(::messageVisible); super.notifyDataSetChanged() }
+    /** Cache/download metadata doesn't reorder a row: leave neighbouring text selection intact. */
+    fun replaceVoicePayload(row: HistoryMessage): Boolean {
+        val index = visibleRows.indexOfFirst { it.localId == row.localId && it.messageIdHex == row.messageIdHex }
+        if (index < 0 || row.kind != uniffi.dmsg_core.MessageKind.VOICE || !messageVisible(row)) return false
+        if (visibleRows[index].copy(voice = row.voice) != row) return false
+        visibleRows = visibleRows.toMutableList().also { it[index] = row }
+        return true
+    }
+    fun replaceVoicePayloads(updated: List<HistoryMessage>): Boolean {
+        if (visibleRows.size != updated.size || visibleRows.indices.any {
+                visibleRows[it].copy(voice = null) != updated[it].copy(voice = null)
+            }) return false
+        visibleRows = updated
+        return true
+    }
     override fun getCount() = visibleRows.size
     override fun getItem(position: Int) = visibleRows[position]
     override fun getItemId(position: Int) = visibleRows[position].localId
@@ -88,7 +104,8 @@ internal class HistoryAdapter(private val context: Context, private val rows: Li
             setBackgroundColor(ContextCompat.getColor(c, if (outgoing) R.color.accent_soft else R.color.incoming))
         }
         val width = ((parent.width.takeIf { it > 0 } ?: c.resources.displayMetrics.widthPixels) - NativeUi.dp(c, 32)) * .86
-        val body = NativeUi.text(c).apply {
+        val body: View = if (message.kind == uniffi.dmsg_core.MessageKind.VOICE) VoiceBubbleView(c).also { bindVoice(it, message) }
+        else NativeUi.text(c).apply {
             text = message.text
             setTextIsSelectable(true)
             if (canHideMessage(message)) customSelectionActionModeCallback = object : ActionMode.Callback {
@@ -159,7 +176,11 @@ internal class DialogAdapter(private val context: Context, private val rows: Lis
         val body = LinearLayout(c).apply { orientation = LinearLayout.VERTICAL }
         body.addView(NativeUi.text(c).apply { text = row.localAlias ?: row.contactId; typeface = Typeface.DEFAULT_BOLD })
         if (row.localAlias != null) body.addView(NativeUi.text(c, 12f, true).apply { text = row.contactId })
-        body.addView(NativeUi.text(c, 14f, true).apply { text = row.preview ?: c.getString(R.string.no_messages); maxLines = 2 })
+        body.addView(NativeUi.text(c, 14f, true).apply {
+            text = if (row.previewKind == uniffi.dmsg_core.MessageKind.VOICE) c.getString(R.string.voice_dialog_preview,
+                voiceTime(((row.voiceDurationMs ?: 0u).toLong() * 16).toInt())) else row.preview ?: c.getString(R.string.no_messages)
+            maxLines = 2
+        })
         body.addView(NativeUi.text(c, 12f, true).apply {
             text = listOfNotNull(row.lastLocalTimestampMs?.let { c.getString(R.string.local_timestamp, localTime(it)) },
                 if (row.localUnread > 0uL) c.getString(R.string.local_unread, row.localUnread.toString()) else null).joinToString(" · ")

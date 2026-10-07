@@ -1,11 +1,11 @@
-//! Fresh schema 5 only. Compatibility is checked before writable open/WAL.
+//! Fresh schema 6 only. Compatibility is checked before writable open/WAL.
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::path::Path;
 
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 const SCHEMA: &str = "
 CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
-INSERT INTO meta VALUES('schema_version','5'),('registration_mode','invite_only');
+INSERT INTO meta VALUES('schema_version','6'),('registration_mode','invite_only');
 CREATE TABLE users(
   user_id BLOB PRIMARY KEY NOT NULL CHECK(length(user_id)=16),
   contact_id TEXT UNIQUE NOT NULL CHECK(length(contact_id)=12),
@@ -40,11 +40,28 @@ CREATE TABLE mailbox_events(
   seq INTEGER PRIMARY KEY AUTOINCREMENT, recipient_user_id BLOB NOT NULL,
   sender_device BLOB NOT NULL, message_id BLOB NOT NULL, ciphertext BLOB NOT NULL,
   created_at INTEGER NOT NULL, delivered INTEGER NOT NULL DEFAULT 0,
+  recipient_device BLOB, blob_id BLOB,
   UNIQUE(sender_device,message_id)
 );
 CREATE TABLE blob_meta(
-  blob_id BLOB PRIMARY KEY, owner_user_id BLOB NOT NULL, size INTEGER NOT NULL,
-  created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, state TEXT NOT NULL
+  blob_id BLOB PRIMARY KEY CHECK(length(blob_id)=16), owner_user_id BLOB NOT NULL,
+  owner_device BLOB NOT NULL CHECK(length(owner_device)=32),
+  size INTEGER NOT NULL CHECK(size>0 AND size<=524288),
+  created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('reserved','complete'))
+);
+CREATE INDEX blob_owner ON blob_meta(owner_user_id);
+CREATE TABLE blob_chunks(
+  blob_id BLOB NOT NULL REFERENCES blob_meta(blob_id) ON DELETE CASCADE,
+  chunk_index INTEGER NOT NULL CHECK(chunk_index>=0 AND chunk_index<64),
+  byte_len INTEGER NOT NULL CHECK(byte_len>0 AND byte_len<=8192),
+  PRIMARY KEY(blob_id,chunk_index)
+);
+CREATE TABLE blob_acl(
+  blob_id BLOB NOT NULL REFERENCES blob_meta(blob_id) ON DELETE CASCADE,
+  recipient_user BLOB NOT NULL CHECK(length(recipient_user)=16),
+  recipient_device BLOB NOT NULL CHECK(length(recipient_device)=32),
+  PRIMARY KEY(blob_id,recipient_device)
 );
 CREATE TABLE cursors(
   recipient_user_id BLOB NOT NULL, device_key BLOB NOT NULL,
@@ -78,7 +95,7 @@ fn version(conn: &Connection) -> rusqlite::Result<i64> {
             |r| r.get(0),
         )
         .optional()?;
-    if value.as_deref() != Some("5") {
+    if value.as_deref() != Some("6") {
         return Err(rusqlite::Error::InvalidQuery);
     }
     let mode: String = conn.query_row(
@@ -99,7 +116,9 @@ pub fn connect<P: AsRef<Path>>(path: P) -> rusqlite::Result<Connection> {
     }
     let conn = Connection::open(path)?;
     version(&conn)?;
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
+    conn.execute_batch(
+        "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
+    )?;
     Ok(conn)
 }
 
@@ -126,8 +145,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("fresh.db");
         let conn = connect(&path).unwrap();
-        assert_eq!(migrate(&conn).unwrap(), 5);
-        assert_eq!(migrate(&conn).unwrap(), 5);
+        assert_eq!(migrate(&conn).unwrap(), 6);
+        assert_eq!(migrate(&conn).unwrap(), 6);
         assert_eq!(
             conn.query_row("PRAGMA synchronous", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
@@ -155,7 +174,7 @@ mod tests {
             )
             .is_err());
         drop(conn);
-        assert_eq!(migrate(&connect(&path).unwrap()).unwrap(), 5);
+        assert_eq!(migrate(&connect(&path).unwrap()).unwrap(), 6);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -163,7 +182,7 @@ mod tests {
     fn incompatible_versions_rejected_before_wal_without_mutation() {
         let dir = std::env::temp_dir().join(format!("msgd-legacy-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        for v in [0, 1, 2, 3, 4, 6, 99] {
+        for v in [0, 1, 2, 3, 4, 5, 7, 99] {
             let path = dir.join(format!("v{v}.db"));
             let conn = Connection::open(&path).unwrap();
             conn.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT); CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES('preserve');").unwrap();
@@ -206,7 +225,7 @@ mod tests {
 
         let path = dir.join("legacy-live.db");
         let writer = Connection::open(&path).unwrap();
-        writer.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT); INSERT INTO meta VALUES('schema_version','4'); CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES('retain uncheckpointed data');").unwrap();
+        writer.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT); INSERT INTO meta VALUES('schema_version','5'); CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES('retain uncheckpointed data');").unwrap();
         let main_before = std::fs::read(&path).unwrap();
         let wal = path.with_extension("db-wal");
         let wal_before = std::fs::read(&wal).unwrap();

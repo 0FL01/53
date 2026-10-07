@@ -20,6 +20,8 @@
 //! полные невыгружаемые списки запрещены. Списки [`contacts::list`],
 //! [`store::inbox_list`], [`store::outbox_queued`] уже следуют этой форме.
 
+#[cfg(target_os = "android")]
+mod android_audio_jni;
 pub mod auth;
 pub mod chat;
 pub mod contacts;
@@ -31,6 +33,8 @@ mod secure;
 pub mod store;
 pub mod supervisor;
 pub mod transport;
+pub mod voice;
+pub mod voice_codec;
 
 uniffi::setup_scaffolding!();
 

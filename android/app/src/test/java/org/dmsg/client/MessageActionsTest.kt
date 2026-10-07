@@ -10,8 +10,10 @@ import uniffi.dmsg_core.MessageDirection
 class MessageActionsTest {
     private val contact = Dialog("P", "accepted", hasKeys = true)
     private fun row(id: Long = 1, state: DeliveryState = DeliveryState.ACCEPTED) = HistoryMessage(
-        id, id.toString(16).padStart(32, '0'), "P", MessageDirection.OUTGOING, "original", 1000,
-        state, 10, 2000, 0uL, false, false, null)
+        localId = id, messageIdHex = id.toString(16).padStart(32, '0'), contactId = "P", direction = MessageDirection.OUTGOING,
+        text = "original", localTimestampMs = 1000, deliveryState = state, serverSeq = 10, serverTimestampMs = 2000,
+        revision = 0uL, hiddenSelf = false, deletedAll = false, changeDeliveryState = null,
+        kind = uniffi.dmsg_core.MessageKind.TEXT, voice = null)
     private fun facade() = FakeFacade().apply { dialogs.add(contact); history.add(row()) }
 
     @Test fun onlyVisibleOwnConfirmedMessagesOfferRemoteActionsAndSelfIsDefault() {

@@ -78,15 +78,18 @@ pub fn send(
     // Existing accepts do not consume quota again, including when the mailbox
     // filled after the first commit. The dedup key and original row win even
     // if a retry supplies different ciphertext, as before.
-    let existing: Option<(i64, bool)> = tx
+    let existing: Option<(i64, bool, bool)> = tx
         .query_row(
-            "SELECT seq,delivered FROM mailbox_events WHERE sender_device=?1 AND message_id=?2",
+            "SELECT seq,delivered,blob_id IS NOT NULL FROM mailbox_events WHERE sender_device=?1 AND message_id=?2",
             rusqlite::params![sender_device, message_id],
-            |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0)),
+            |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0, r.get(2)?)),
         )
         .optional()
         .map_err(|e| store("dedup", e))?;
-    if let Some((seq, delivered)) = existing {
+    if let Some((seq, delivered, media)) = existing {
+        if media {
+            return Err(MboxError::Bad);
+        }
         tx.commit().map_err(|e| store("commit", e))?;
         return Ok(SendOutcome::Exists(seq, delivered));
     }
@@ -183,12 +186,12 @@ pub fn fetch(
     let mut stmt = conn
         .prepare(
             "SELECT m.seq,m.sender_device,m.message_id,m.ciphertext,d.user_id FROM mailbox_events m JOIN devices d ON d.device_key=m.sender_device
-             WHERE m.recipient_user_id=?1 AND m.seq>?2 ORDER BY m.seq LIMIT ?3",
+             WHERE m.recipient_user_id=?1 AND m.seq>?2 AND (m.recipient_device IS NULL OR m.recipient_device=?4) ORDER BY m.seq LIMIT ?3",
         )
         .map_err(|e| store("prepare", e))?;
     let rows = stmt
         .query_map(
-            rusqlite::params![recipient, cursor, FETCH_BATCH_MAX as i64],
+            rusqlite::params![recipient, cursor, FETCH_BATCH_MAX as i64, device],
             |r| {
                 Ok(Fetched {
                     seq: r.get(0)?,
@@ -253,8 +256,8 @@ pub fn ack(
     let tx = conn.transaction().map_err(|e| store("begin", e))?;
     for seq in seqs {
         tx.execute(
-            "UPDATE mailbox_events SET delivered=1 WHERE recipient_user_id=?1 AND seq=?2",
-            rusqlite::params![recipient, seq],
+            "UPDATE mailbox_events SET delivered=1 WHERE recipient_user_id=?1 AND seq=?2 AND (recipient_device IS NULL OR recipient_device=?3)",
+            rusqlite::params![recipient, seq, device],
         )
         .map_err(|e| store("mark", e))?;
     }
@@ -274,8 +277,8 @@ pub fn ack(
         let next: Option<(i64, bool)> = tx
             .query_row(
                 "SELECT seq,delivered FROM mailbox_events
-                 WHERE recipient_user_id=?1 AND seq>?2 ORDER BY seq LIMIT 1",
-                rusqlite::params![recipient, cursor],
+                 WHERE recipient_user_id=?1 AND seq>?2 AND (recipient_device IS NULL OR recipient_device=?3) ORDER BY seq LIMIT 1",
+                rusqlite::params![recipient, cursor, device],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()

@@ -24,7 +24,7 @@ class StorageActivity : DmsgActivity() {
                 }.show()
         }
         findViewById<Button>(R.id.btn_wipe_cache).setOnClickListener {
-            work(getString(R.string.clearing_cache), { cacheDir.deleteRecursively() }) {
+            work(getString(R.string.clearing_cache), { Core.facade(applicationContext).clearVoiceCache(); cacheDir.deleteRecursively() }) {
                 getString(if (it) R.string.cache_cleared else R.string.cache_partial)
             }
         }

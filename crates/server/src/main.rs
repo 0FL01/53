@@ -71,6 +71,8 @@ struct State {
     cfg: Arc<Config>,
     counters: Arc<Counters>,
     db: Arc<Mutex<rusqlite::Connection>>,
+    /// One bounded bulk IO job; backup and GC use the same exclusion permit.
+    blob_io: Arc<Semaphore>,
     live: Arc<Mutex<HashMap<Vec<u8>, Vec<Arc<Notify>>>>>,
     /// Pre-auth реестр device_key→Notify: handshake пройден, account ещё нет.
     /// Только живые pending сессии, ограничены 10s чтением + Drop cleanup.
@@ -436,7 +438,10 @@ async fn handle_conn(
                     OP_UPLOAD_PREKEYS => upload_reply(&st, &c, &user, &device_key, &payload)?,
                     OP_CLAIM => claim_reply(&st, &c, &device_key, &payload)?,
                     OP_COUNT => count_reply(&st, &c, &device_key, &payload)?,
-                    OP_BLOB_RESERVE => reserve_reply(&st, &c, &user, &device_key, &payload)?,
+                    OP_BLOB_RESERVE | OP_BLOB_STATUS | OP_BLOB_PUT | OP_BLOB_FINISH
+                    | OP_BLOB_GET | OP_SEND_MEDIA => {
+                        blob_reply(&st, &user, &device_key, op, payload).await
+                    }
                     OP_DEVICE_BINDING => binding_reply(&st, &device_key, payload)?,
                     OP_CONTACT_REQUEST | OP_CONTACT_REQUESTS | OP_CONTACT_DECIDE => {
                         contact_reply(&st, &user, &device_key, op, payload)
@@ -803,34 +808,31 @@ fn count_reply(
     Ok(encode_frame(OP_COUNT_RESP, &(n as u32).to_be_bytes()).expect("fits"))
 }
 
-fn blob_code(e: &blob::BlobError) -> u8 {
-    e.code()
-}
-
-/// BLOB_RESERVE → per-op re-check revoked вызывателя → BLOB_RESERVED или ERROR quota.
-fn reserve_reply(
+/// Blocking disk IO is bounded to one worker, outside both the reactor and DB
+/// lock. The permit is owned by the job even if its session gets revoked.
+async fn blob_reply(
     st: &State,
-    c: &Counters,
     user: &[u8; 16],
     device_key: &[u8; 32],
+    op: u8,
     payload: &[u8],
-) -> Result<Vec<u8>, ()> {
-    let (blob_id, size) = mp::parse_reserve(payload).ok_or_else(|| {
-        c.proto_err.fetch_add(1, Ordering::Relaxed);
-    })?;
-    let now = now_secs();
-    let mut db = st.db.lock().expect("db");
-    if is_revoked(&db, device_key) {
-        c.mbox_err.fetch_add(1, Ordering::Relaxed);
-        return Ok(encode_frame(OP_ERROR, &[ERR_REVOKED]).expect("fits"));
-    }
-    let res = blob::reserve(&mut db, user, blob_id, size as i64, now);
-    match res {
-        Ok(()) => Ok(encode_frame(OP_BLOB_RESERVED, blob_id).expect("fits")),
-        Err(e) => {
-            c.mbox_err.fetch_add(1, Ordering::Relaxed);
-            Ok(encode_frame(OP_ERROR, &[blob_code(&e)]).expect("fits"))
-        }
+) -> Vec<u8> {
+    let permit = match st.blob_io.clone().try_acquire_owned() {
+        Ok(p) => p,
+        Err(_) => return encode_frame(OP_ERROR, &[ERR_BUSY]).expect("fits"),
+    };
+    let db = st.db.clone();
+    let root = st.cfg.blobs_dir.clone();
+    let (user, device, payload) = (*user, *device_key, payload.to_vec());
+    let result = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        blob::process(&db, &root, &user, &device, op, &payload, now_secs())
+    })
+    .await;
+    match result {
+        Ok(Ok((op, p))) => encode_frame(op, &p).expect("bounded blob reply"),
+        Ok(Err(e)) => encode_frame(OP_ERROR, &[e.code()]).expect("fits"),
+        Err(_) => encode_frame(OP_ERROR, &[ERR_BAD]).expect("fits"),
     }
 }
 
@@ -1041,12 +1043,12 @@ fn handle_msgctl(st: &State, line: &[u8]) -> String {
             if !msgctl_no_more(&mut parts) {
                 return "err\n".into();
             }
-            let now = now_secs();
-            let t0 = std::time::Instant::now();
-            let mut db = st.db.lock().expect("db");
-            match blob::gc(&mut db, now) {
+            let _permit = match st.blob_io.clone().try_acquire_owned() {
+                Ok(p) => p,
+                Err(_) => return "err busy\n".into(),
+            };
+            match blob::gc(&st.db, &st.cfg.blobs_dir, now_secs()) {
                 Ok((b, e)) => {
-                    eprintln!("msgd: gc lock_hold_ms={}", t0.elapsed().as_millis());
                     format!("gc blobs={b} events={e}\n")
                 }
                 Err(_) => "err\n".into(),
@@ -1065,18 +1067,22 @@ fn handle_msgctl(st: &State, line: &[u8]) -> String {
     }
 }
 
-/// Backup-минимум: VACUUM INTO (атомарный снапшот без остановки записи) +
-/// копия дерева blobs + integrity_check копии. Ротация «держать 3» — ДО записи
-/// нового снапшота (старых остаётся ≤2, новый не становится 4-м и не упирается
-/// в место рядом со старыми). Любая ошибка после mkdir чистит недоснапшот
-/// (remove_dir_all), мусора snap-* не копится.
-/// Секреты НЕ входят (статичны; оператор архивирует secrets/ отдельно, см. runbook).
-/// Файловый кросс-чек blob_meta↔файлы станет осмысленным в M5, когда чанки
-/// лягут на диск; сейчас отчёт содержит оба счётчика без гейта.
+/// Consistent SQLite snapshot + exactly its referenced immutable chunks, under
+/// shared blob/GC exclusion. Control writes continue via their own connection.
+/// Keep three snapshots; reject missing/incorrect chunk references. Secrets
+/// remain separately backed up by the operator.
 fn msgctl_backup(st: &State) -> Result<String, String> {
+    let _permit = st.blob_io.clone().try_acquire_owned().map_err(|_| "busy")?;
     prune_snaps(st, 2);
-    let ts = now_secs();
-    let snap = st.cfg.data_dir.join("backup").join(format!("snap-{ts}"));
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| "clock")?
+        .as_nanos();
+    let parent = st.cfg.data_dir.join("backup");
+    std::fs::create_dir_all(&parent).map_err(|e| format!("mkdir: {e}"))?;
+    let snap = parent.join(format!("snap-{ts:030}"));
+    // Never merge into an existing snapshot or remove it on an error.
+    std::fs::create_dir(&snap).map_err(|e| format!("mkdir: {e}"))?;
     match backup_inner(st, &snap) {
         Ok(rep) => Ok(rep),
         Err(e) => {
@@ -1110,52 +1116,23 @@ fn prune_snaps(st: &State, keep: usize) {
 }
 
 fn backup_inner(st: &State, snap: &std::path::Path) -> Result<String, String> {
-    std::fs::create_dir_all(snap.join("blobs")).map_err(|e| format!("mkdir: {e}"))?;
+    std::fs::create_dir(snap.join("blobs")).map_err(|e| format!("mkdir: {e}"))?;
     let db_path = snap.join("msgd.db");
     {
-        let t0 = std::time::Instant::now();
-        let db = st.db.lock().expect("db");
+        // A separate read-only SQLite snapshot leaves the control connection
+        // unlocked while VACUUM INTO copies the live WAL-backed database.
+        let db = rusqlite::Connection::open_with_flags(
+            st.cfg.data_dir.join("msgd.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(|e| format!("source: {e}"))?;
         let lit = db_path.to_string_lossy().replace('\'', "''");
         db.execute_batch(&format!("VACUUM INTO '{lit}'"))
             .map_err(|e| format!("vacuum: {e}"))?;
-        eprintln!(
-            "msgd: backup vacuum lock_hold_ms={}",
-            t0.elapsed().as_millis()
-        );
     }
-    // Копия blobs обычным копированием: blobs-data — отдельный FS, хардлинки (EXDEV) невозможны.
-    let (mut files, mut bytes) = (0usize, 0u64);
-    let mut stack = vec![st.cfg.blobs_dir.clone()];
-    while let Some(dir) = stack.pop() {
-        let rd = match std::fs::read_dir(&dir) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        for ent in rd.flatten() {
-            let p = ent.path();
-            if p.is_dir() {
-                stack.push(p);
-                continue;
-            }
-            let rel = p
-                .strip_prefix(&st.cfg.blobs_dir)
-                .map_err(|e| format!("rel: {e}"))?;
-            let dst = snap.join("blobs").join(rel);
-            if let Some(parent) = dst.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
-            }
-            match std::fs::copy(&p, &dst) {
-                Ok(n) => {
-                    files += 1;
-                    bytes += n;
-                }
-                Err(e) => {
-                    // Гонка с GC/записью: файл ушёл из-под ног — честно прерываем.
-                    return Err(format!("copy: {e}"));
-                }
-            }
-        }
-    }
+    let copy = rusqlite::Connection::open(&db_path).map_err(|e| format!("open: {e}"))?;
+    let (files, bytes) = blob::copy_references(&copy, &st.cfg.blobs_dir, &snap.join("blobs"))
+        .map_err(|e| format!("blob references: {e:?}"))?;
     // Verify копии: integrity_check обязан вернуть ровно 'ok'.
     {
         let copy = rusqlite::Connection::open(&db_path).map_err(|e| format!("open: {e}"))?;
@@ -1167,15 +1144,15 @@ fn backup_inner(st: &State, snap: &std::path::Path) -> Result<String, String> {
         }
     }
     let db_bytes = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
-    // Счётчики для отчёта (без гейта до M5).
-    let (rows, _) = {
-        let db = st.db.lock().expect("db");
-        let rows: i64 = db
-            .query_row("SELECT COUNT(*) FROM blob_meta", [], |r| r.get(0))
-            .unwrap_or(0);
-        (rows, 0)
-    };
-    let _ = rows;
+    for path in [
+        &db_path,
+        &snap.to_path_buf(),
+        &st.cfg.data_dir.join("backup"),
+    ] {
+        std::fs::File::open(path)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| format!("sync: {e}"))?;
+    }
     eprintln!("msgd: backup done");
     Ok(format!(
         "backup path={} db={db_bytes} blobs={files} blobs_bytes={bytes}",
@@ -1514,7 +1491,9 @@ async fn serve_msgctl(st: Arc<State>) -> std::io::Result<()> {
             let reply = if too_long {
                 "err line-too-long\n".to_string()
             } else {
-                handle_msgctl(&st, &line)
+                tokio::task::spawn_blocking(move || handle_msgctl(&st, &line))
+                    .await
+                    .unwrap_or_else(|_| "err\n".into())
             };
             let _ = sock.write_all(reply.as_bytes()).await;
         });
@@ -1545,6 +1524,7 @@ async fn run(cfg: Config) -> std::io::Result<()> {
             .await
             .map_err(|_| std::io::Error::other("auth initialization"))?,
         db: Arc::new(Mutex::new(conn)),
+        blob_io: Arc::new(Semaphore::new(1)),
         live: Arc::new(Mutex::new(HashMap::new())),
         pre: Arc::new(Mutex::new(HashMap::new())),
         counters: Arc::new(Counters::default()),
@@ -1935,6 +1915,7 @@ mod revocation_session_tests {
                 carrier_cert_file: PathBuf::new(),
             }),
             db: Arc::new(Mutex::new(rusqlite::Connection::open_in_memory().unwrap())),
+            blob_io: Arc::new(Semaphore::new(1)),
             counters: Arc::new(Counters::default()),
             live: Arc::new(Mutex::new(HashMap::from([(
                 key.clone(),

@@ -1,0 +1,25 @@
+<resources>
+    <string name="voice_note">Голосовое сообщение</string>
+    <string name="voice_record">Удерживайте для записи. Влево — отмена, вверх — блокировка. Двойное касание — запись без удерживания.</string>
+    <string name="voice_permission">Нужен доступ к микрофону. После разрешения нажмите запись ещё раз.</string>
+    <string name="voice_ready">Доступ к микрофону разрешён. Нажмите запись для начала.</string>
+    <string name="voice_error">Не удалось записать или воспроизвести голосовое сообщение.</string>
+    <string name="voice_session_required">Подключитесь для создания защищённой голосовой сессии. Неотправленная запись сохранена для прослушивания.</string>
+    <string name="voice_hold_hint">← Отмена · ↑ Блокировка</string>
+    <string name="voice_locked">Запись без удерживания</string>
+    <string name="voice_unsent">Неотправленное голосовое</string>
+    <string name="voice_pause">Пауза</string>
+    <string name="voice_resume">Продолжить запись</string>
+    <string name="voice_preview">Прослушать</string>
+    <string name="voice_play">Воспроизвести</string>
+    <string name="voice_discard">Удалить запись</string>
+    <string name="voice_send">Отправить голосовое</string>
+    <string name="voice_download">Скачать</string>
+    <string name="voice_seek">Перемотка голосового</string>
+    <string name="voice_saving">Сохранение голосового в очередь…</string>
+    <string name="voice_saved">Голосовое сохранено в очередь.</string>
+    <string name="voice_uncertain">Проверяем сохранение голосового. Не отправляйте повторно.</string>
+    <string name="voice_byte_progress">%1$s / %2$s байт</string>
+    <string name="voice_duration_bytes">%1$s · %2$s байт</string>
+    <string name="voice_dialog_preview">Голосовое · %1$s</string>
+</resources>

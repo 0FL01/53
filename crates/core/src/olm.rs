@@ -88,6 +88,9 @@ pub enum OlmError {
     MessageChanged,
     /// Foreign/hidden/queued target, changed recipient or missing cached session.
     MessageUnavailable,
+    /// A first voice needs an authenticated prekey claim; retain the draft.
+    VoiceSessionRequired,
+    BadVoice,
     /// Key-only resume failure, with safe typed account-auth errors.
     Auth(crate::auth::AuthError),
 }
@@ -104,6 +107,8 @@ impl std::fmt::Display for OlmError {
             Self::NothingToConfirm => write!(f, "nothing to confirm"),
             Self::MessageChanged => write!(f, "message changed"),
             Self::MessageUnavailable => write!(f, "message unavailable"),
+            Self::VoiceSessionRequired => write!(f, "voice session needs connection"),
+            Self::BadVoice => write!(f, "invalid voice note"),
             Self::MissingKeys => write!(f, "contact has no keys (scan QR first)"),
             Self::NotEnrolled => write!(f, "not authenticated"),
             Self::NoPeerPrekeys => write!(f, "peer has no one-time keys"),

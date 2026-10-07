@@ -3,6 +3,7 @@
 //! Внутренние структуры не являются wire-контрактом: совместимость — тест-векторами ниже.
 
 pub mod auth;
+pub mod blob;
 pub mod chronology;
 pub mod contacts;
 pub mod e2e;
@@ -105,6 +106,16 @@ pub const OP_MESSAGE_METADATA: u8 = 35;
 /// MESSAGE_METADATA_RESP: count u8 + (seq u64 + accepted_seconds u64)*.
 /// All-zero record means missing/not owned; no directory information is exposed.
 pub const OP_MESSAGE_METADATA_RESP: u8 = 36;
+pub const OP_BLOB_STATUS: u8 = 37;
+pub const OP_BLOB_STATUS_RESP: u8 = 38;
+pub const OP_BLOB_PUT: u8 = 39;
+pub const OP_BLOB_PUT_ACK: u8 = 40;
+pub const OP_BLOB_FINISH: u8 = 41;
+pub const OP_BLOB_FINISH_ACK: u8 = 42;
+pub const OP_BLOB_GET: u8 = 43;
+pub const OP_BLOB_DATA: u8 = 44;
+/// Exact recipient device + completed blob; response is the existing SEND_ACK.
+pub const OP_SEND_MEDIA: u8 = 45;
 /// Статусы доставки (без «прочитано» — read receipts отложены).
 pub const ST_ACCEPTED: u8 = 1;
 /// Статусы доставки (без «прочитано» — read receipts отложены).

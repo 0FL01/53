@@ -92,7 +92,7 @@ class UniFfiFacade(private val dbPath: String, key: ByteArray, private val conte
 
     override fun inbox(cursor: Long, limit: Int): Pair<List<Msg>, Long?> = wrap {
         val p = core.inboxPage(cursor, pageLimit(limit.toUInt()))
-        Pair(p.rows.map { Msg(it.seq, it.contactId, it.text) }, p.nextCursor)
+        Pair(p.rows.map { Msg(it.seq, it.contactId, it.text, it.kind, it.voice) }, p.nextCursor)
     }
 
     override fun outbox(cursor: Long, limit: Int): Pair<List<OutRow>, Long?> = wrap {
@@ -138,6 +138,27 @@ class UniFfiFacade(private val dbPath: String, key: ByteArray, private val conte
     override fun deleteMessage(contactId: String, localId: Long, scope: DeleteScope) = wrap {
         core.deleteMessage(contactId, localId, scope)
     }
+    override fun voiceSessionReady(contactId: String) = wrap { core.voiceSessionReady(contactId) }
+    override fun primeVoiceSession(contactId: String) = dnsCommand { core.primeVoiceSessionDns(contactId) }
+    override fun queueVoice(contactId: String, midHex: String, encodedBytes: ByteArray) = wrap {
+        core.queueVoice(contactId, midHex, encodedBytes)
+    }
+    override fun historyMessageByMid(contactId: String, midHex: String) = wrap { core.historyMessageByMid(contactId, midHex) }
+    override fun voiceData(contactId: String, localId: Long) = wrap { core.voiceData(contactId, localId) }
+    override fun pendingVoiceUpload() = wrap { core.pendingVoiceUpload() }
+    override fun clearVoiceCache() = wrap { core.clearVoiceCache() }
+    override fun prepareVoiceTransfer(contactId: String, localId: Long, download: Boolean): VoiceTransferHandle {
+        observeDnsNetwork()
+        val transfer = wrap { applyDns(); core.prepareVoiceTransfer(contactId, localId, download) }
+        return object : VoiceTransferHandle {
+            private val closed = java.util.concurrent.atomic.AtomicBoolean(false)
+            override fun advance() = try { transfer.advance() } catch (e: FfiException) { throw ffiError(e) }
+            override fun commit() = wrap { core.commitVoiceTransfer(transfer) }
+            override fun cancel() {
+                if (closed.compareAndSet(false, true)) try { transfer.cancel() } finally { transfer.close() }
+            }
+        }
+    }
 
     override fun retry(): LongArray = dnsCommand {
         val r = core.retryDns()
@@ -147,7 +168,7 @@ class UniFfiFacade(private val dbPath: String, key: ByteArray, private val conte
     override fun fetch(): FetchRes = dnsCommand {
         val r = core.fetchDns()
         FetchRes(
-            r.received.map { Msg(it.seq.toLong(), it.contactId, it.text) },
+            r.received.map { Msg(it.seq.toLong(), it.contactId, it.text, it.kind, it.voice) },
             longArrayOf(
                 r.skippedUnknown.toLong(), r.skippedBlocked.toLong(),
                 r.skippedUndecryptable.toLong(), r.skippedMismatch.toLong()

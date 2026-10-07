@@ -121,9 +121,9 @@ environment/socket/data-volume names remain unchanged to preserve state/pins.
 
 ## Storage and verification
 
-Only fresh schema 5 is supported. Existing empty version 0 can initialize;
-nonempty version 0, versions 1–4, and future versions are rejected during a
-read-only preflight before writable open or WAL setup. Schema 5 has unique
+Only fresh schema 6 is supported. Existing empty version 0 can initialize;
+nonempty version 0, versions 1–5, and future versions are rejected during a
+read-only preflight before writable open or WAL setup. Schema 6 has unique
 non-null logins and password hashes, persisted registration mode, and a partial
 unique index allowing one nonretired device per account.
 
@@ -140,3 +140,41 @@ failures to prove signup/replacement rollback, and verify Argon slot and
 attempt bounds. `mailbox_probe`, `backup_probe`, `msgctl_probe`, and
 `noise_probe` retain the durable mailbox/GC/backup and transport/control gates.
 These are local server probes; DNS/Android acceptance is separate.
+
+## Opaque voice blobs (wire2, fresh server6)
+
+`dmsg_protocol::blob` owns bounded payload builders/parsers and exact DTOs.
+RESERVE/RESERVED retain opcodes26/27; STATUS/RESP37/38, PUT/ACK39/40,
+FINISH/ACK41/42, GET/DATA43/44, SEND_MEDIA45 (existing SEND_ACK17).
+Chunk indices and lengths are `u16 BE`, status is blob16 + size4 + state1
+(`Reserved=0`, `Complete=1`) + received `u64 BE` bitmap (bit = index).
+Chunks are up to8192 ciphertext bytes; generic blobs up to512KiB/64chunks.
+Voice manifest v1/profile1 is E2E kind4, authenticated inside Olm; msgd never
+receives its key, waveform, samples or plaintext container. Voice clients cap
+the encrypted object at128KiB and encode8176 plaintext bytes +16 AEAD tag per
+full chunk. No additional checksum/digest registry is involved.
+
+Uploads belong to the exact authenticated owner user/device. PUT syncs a0600
+temporary chunk, renames it and syncs the parent before committing its SQLite
+receipt and returning an ID/index-bound ACK. Same index/same bytes is
+idempotent; different bytes fail, including durable rename before receipt.
+FINISH requires every receipt and exact ciphertext size. STATUS supports
+resume after reopen; recipient GET requires completion, a committed exact-device
+ACL, an active exact requester device and an accepted, unblocked contact pair.
+
+SEND_MEDIA atomically commits mailbox+ACL. Retries must match original blob,
+recipient user/device and Olm ciphertext. A matching retry reports the original
+accept/delivery after recipient replacement; it never routes to a replacement
+or adds a replacement ACL. FETCH/DELIVERY_ACK also respect exact media device.
+Reservations and completed blobs together count against32MiB/512blobs per
+owner. Reserved TTL24h; completed TTL7d (retained through accepted mailbox TTL).
+`53ctl gc` removes expired metadata before chunks and sweeps orphan files.
+
+One shared IO permit bounds blob disk work and excludes backup/GC races;
+contending blob operations return retryable ERR_BUSY. Disk work runs on a
+blocking worker with no DB lock across it; separate control streams remain
+usable. Backup uses a separate read-only SQLite snapshot, copies exactly its
+referenced chunks, verifies sizes/completion/ACL references and fails on missing
+data. Secret files remain outside the backup. `blob_probe` covers local live
+resume, ACL/replacement, receipt and ACL-transaction failure boundaries,
+concurrent control progress, consistent backup references and orphan/TTL GC.
