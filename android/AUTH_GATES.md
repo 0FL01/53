@@ -54,10 +54,13 @@ restores metadata for the five shared original events35–39: equal sequence/tim
 unchanged history rows/statuses, actual before/after chat screenshots. Main FGS
 restored. No old ACK/drop body restoration or TTL-deleted metadata fabrication.
 Never downgrade to core6 after upgrade or reset data to make an install pass.
-The final exact-row patch/APK was installed-r and DNS/UI-verified on Moto after
-the user removed Pacman. Pacman retains the preceding tested chronology/schema7
-build; installation of the final artifact there is not claimed. Both original
-authenticated-upgrade and two-phone chronology proofs remain valid and preserved.
+The final exact-row patch/APK was installed-r and DNS/UI-verified on Moto, then on
+Pacman after the user returned it. Both installed APK readbacks match the final
+artifact; Pacman's existing schema7 history/contacts/ratchets/keys survive install
+unchanged before startup. Its saved-key DNS and retained Chat refresh/server
+labels pass; all six current shared records have identical server order/time.
+Both original authenticated-upgrade and pair proofs remain preserved; rollout is
+complete without reset, additional migration or new fixture registration.
 
 JVM57/debug/release/native and targeted localization lint PASS; EN/RU286-key
 parity. The two previously ignored explicit native-host gates/full lint debt are

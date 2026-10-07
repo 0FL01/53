@@ -1,6 +1,6 @@
 # Goal: Telegram-like confirmed message chronology
 
-Status: blocked
+Status: complete
 Source: user: «Нужно сделать такую же логику как в телеграмм», then «реализовать, проверить на устройства и коммит»
 Last updated: 2026-10-07
 
@@ -32,14 +32,14 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Source: approved fix plan, existing R18/native UI invariants.
   - Acceptance: >one page, delayed insert and pending→confirmed transitions lose/duplicate no rows; local ingest API remains available for reconciliation.
   - Primary evidence: Rust/JVM targeted tests and physical current-chat observation.
-   - Status: verified
-   - Evidence: >600-row Rust/JVM pages, late insert, pending movement, whole-history burst and receive-between-bridge-pages tests; local-ingest API/TextSend unchanged. Final exact-row regression fixed without weakening cursor validation. Final-native Moto gate verifies all601 records/contact boundaries and retained last-row Queued→Delivered refresh/recreation, zero skips. Main original rows/seq/time remain unchanged.
+  - Status: verified
+  - Evidence: >600-row Rust/JVM pages, late insert, pending movement, whole-history burst and receive-between-bridge-pages tests; local-ingest API/TextSend unchanged. Final exact-row regression fixed without weakening cursor validation. Final-native Moto gate verifies all601 records/contact boundaries and retained last-row Queued→Delivered refresh/recreation, zero skips. Main original rows/seq/time remain unchanged.
 - R4: deploy required compatible backend, update both main APKs without reset,
   verify actual DNS and create intended commit.
   - Source: latest implementation/device/commit request and approved model.
   - Primary evidence: preserved backend schema/data/pins/carrier, APK readback and physical gates, commit.
-   - Status: blocked
-   - Evidence: backend schema5/data/pins/volumes/carrier preserved, deployed source hashes match intended files; seven one-QR plus five chronology executions PASS/zero skips. Both Main6→7/actual DNS/original shared-history proofs PASS. Final exact-row/native/APK installed-r and DNS/UI-verified on Moto with keys/history preserved; owned fixtures cleaned. User removed Pacman before this final artifact, so its final installation remains externally unavailable; the requested implementation/evidence commit can be delivered independently.
+  - Status: verified
+  - Evidence: backend schema5/data/pins/volumes/carrier preserved, deployed source hashes match intended files; seven one-QR plus five chronology executions PASS/zero skips. Both Main6→7/actual DNS/original shared-history proofs PASS. Implementation committed as `47f5170`. After user returned Pacman, final APK installed-r there with all schema7 history/contacts/ratchets/keys unchanged before startup. Both installed APK readbacks match final artifact; Pacman saved-key DNS and actual Chat refresh/server labels pass. All six current shared MID/seq/time tuples match; original five events35–39 retained. Owned fixtures cleaned; no blocker remains.
 
 ### Constraints
 - Wire2/server schema5, auth and E2E payload unchanged; add bounded authenticated metadata lookup rather than changing existing SEND_ACK/FETCH layouts.
@@ -55,9 +55,8 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 
 ## Current Checkpoint
 - Closes: R4
-- External dependency: access to Pacman after user removal; `adb devices -l` lists only Moto.
-- Independent work delivered: final native/APK, Moto readback/preservation/DNS/UI, full host checks, fixture cleanup and intended commit.
-- Smallest unlock: Pacman accessible again for the same final `install-r` and saved-key/UI readback checks; no reset or new migration required.
+- Closed: returned Pacman received the final APK without reset; both readbacks, saved-key DNS, original history preservation and shared chronology verified.
+- No remaining action or external dependency.
 
 ## Current State
 - Baseline: clean tracked tree ea1b417; prior one-QR objective complete.
@@ -66,7 +65,7 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 - Relevant gates: full Rust workspace PASS (58 core unit passes; two pre-existing explicit native gates ignored), JVM57 and physical chronology/one-QR PASS. No Main reset or new cipher/ratchet caused by ordering.
 - Original defect: both current Main chats now interleave the five shared events in equal seq35–39 order/time; screenshots remain private/ignored. Pacman's initial ready timeout was an observed lock screen, not an app/database failure; resumed UI/DNS checks passed after unlock.
 - Final regression: fabricated local_id+1 was not a valid pagination anchor for the newest row or the next contact. Exact scoped SELECT shares the existing validated row decoder; host and final-native Moto gates are green.
-- Final artifact: `53.apk` SHA256 `08309ee79fff41f0c6c648d001a723c17395db01b4c155e319a690cce7cb8970`, native SHA256 `17e2a95e664789fbcee72a9fa768749b9bb4697cfca3d7a8d681ae8e1f7f6c58`; Main Moto readback matches. Pacman retains its preceding schema7 chronology build, not this final artifact.
+- Final artifact: `53.apk` SHA256 `08309ee79fff41f0c6c648d001a723c17395db01b4c155e319a690cce7cb8970`, native SHA256 `17e2a95e664789fbcee72a9fa768749b9bb4697cfca3d7a8d681ae8e1f7f6c58`; Main Moto and Pacman readbacks both match. All six currently shared records have equal original server order/time; both background services restored.
 
 ## Material Decisions
 - Use existing global mailbox seq as confirmed order, created_at as server time. No new server counter/table or server schema upgrade.
@@ -74,9 +73,9 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 - The approved implementation is the explicit exception permitting core6→7 upgrade; all other old versions still rejected. Already TTL-deleted or old ACK/drop message bodies are not recovered.
 - Reconciliation uses append-only local history, not canonical rank. A reproduced receive-between-pages regression is fixed by keeping bridge pages from advancing the ingestion watermark past unseen rows.
 - No unauthenticated plain6 upgrade/sealing is permitted; current-schema plain harness support is unchanged.
-- User removed Pacman after the two-phone chronology/upgrade checks. Final exact-row patch is validated on the remaining Moto; do not touch the removed phone or claim its final-artifact installation.
+- Pacman was temporarily unavailable after the pair checks; final exact-row native gate ran on Moto. On user return/request, Pacman received the identical final APK and passed preservation/DNS/Chat checks; no additional migration or fixture registration was needed.
 
 ## Completion
-- R1–R3 verified; code, backend deployment, final Moto installation and requested commit delivered. Full rollout remains blocked solely by the unavailable Pacman final installation, not by a code/test failure.
+- R1–R4 verified; implementation `47f5170`, compatible backend deployment and final identical APK on both phones delivered. Goal complete; no blocker remains.
 - Final checks: `cargo build -p msgd -p dmsg-core`, generated Kotlin bindings, `cargo test --workspace`, NDKr28c arm64, JVM57/debug/release/test APK and targeted localization lint PASS. The two pre-existing explicit native-host ignores/full lint debt are unchanged.
-- Evidence: preserved original two-phone/6→7 proofs and private final-active proof; final local native/UI gate PASS/zero skips. No main reset, secret/user-text in Git, pin/carrier change or extra dependency. Owned disposable fixture packages/access and private raw logs removed.
+- Evidence: preserved original two-phone/6→7 proofs, private final-active proof and Pacman closure proof; final local native/UI gate PASS/zero skips. Both final APK readbacks, preserved identities/history and Pacman actual DNS/retained Chat refresh verified. No main reset, secret/user-text in Git, pin/carrier change or extra dependency. Owned disposable fixture packages/access and private raw logs removed.
