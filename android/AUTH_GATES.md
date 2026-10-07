@@ -17,9 +17,84 @@ listed environment. Do not print inherited environment or provider credentials.
 
 ## Operator fixtures
 
-### Fresh8 message actions: current acceptance (2026-10-07)
+### Fresh9 voice notes: current isolated acceptance (2026-10-08)
 
-Current core is fresh encrypted schema8/one `core_messages`, strict E2E v1;
+Fresh core9/server6 only, fixed libopus1.6.1 mono16k/10k VBR/20ms,
+encoder10/NoLACE7. No comparative codec benchmark or manual SHA256 registry.
+Working server5/main8, Main and Pacman identities/data/install were not accessed
+or updated. Do not run the now-schema9 Main fixtures against that old installation.
+
+Parent clean-env Rust workspace/build PASS (core64 + one existing explicit
+ignore, protocol55, all live voice/blob/auth/actions); both existing native-host
+ignores unchanged. Explicit host codegen/NDKr28c arm64, JVM85/zero skips,
+debug/release/gated test APK/scoped localization lint PASS. Release8783352bytes,
+zipalign16KiB PASS; no16KiB-device runtime claim.
+
+Only Moto `ZY22JFJ5LP`, isolated `.gate`/`.gate.test`, exact-method instrumentation.
+Five local native methods and nine DNS/recovery methods PASS, **14 distinct
+methods/zero skips**. The DNS path was native UDP through a dedicated controlled
+stub resolver forwarding a private zone to the pinned carrier/fresh msgd6.
+This is not DirectTCP/USB relay, default-ISP/public-delegation acceptance or two
+physical Androids. Production UDP53/NS/carrier/backend were left unchanged.
+
+Inputs in the gate sandbox only: owner0400/0600 `gate-voice-auth.json`
+(`serverCode,resolvers,login,password,invitation`) and public `gate-voice-peer.qr`.
+Host peer: fresh encrypted DB/key and `crates/core/examples/voice_gate_peer.rs`,
+all credentials in files, never argv/env/logs. Apply observed network before the
+explicit controlled resolver override in each instrumentation process.
+
+```sh
+adb -s ZY22JFJ5LP shell am instrument -w -r -e class \
+  'org.dmsg.client.VoiceDnsGatesTest#METHOD' \
+  org.dmsg.client.gate.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+| Exact method | Verified evidence |
+|---|---|
+| `VoiceGatesTest#seedFreshVoiceChatOnlyInGatePackage` | Real native fresh encrypted fixture and visible voice/text rows |
+| `microphonePreviewPlayerLifecycleOnlyInGatePackage` | Actual mic/cancel/lock/pause/preview/AudioTrack/seek/recreation and foreground lifecycle |
+| `mixedVoiceRowsKeepSystemCopyAcrossNativeRefreshOnlyInGatePackage` | Real waveform content-aware rows preserve system TEXT Copy selection |
+| `codecPartialFramesSeekAndStaticFailureOnlyInGatePackage` | Native JNI trim/partial frames/seek/malformed static errors |
+| `DeviceGatesTest#freshEncryptedReopenAndRestoreOnlyWithOriginalKey` | Same-key snapshot/reopen/restore, missing-key and nonempty-path refusal |
+| `VoiceDnsGatesTest#bootstrapFreshDnsVoiceAccount` | Fresh signup/prekeys through controlled UDP DNS, export public phone QR |
+| `acceptFreshPeer` | Fresh peer/contact consent, reciprocal request/fetch |
+| `recordAndSendTwoVoicesThroughUi` | Actual hold/release2s and lock/preview/Send3s, Accepted, no Edit; newest-first native vs oldest-first UI |
+| `selfDeleteDefaultVoiceThroughUi` | Default SelfOnly, Cancel no-op, hide/no placeholder; peer retains both notes |
+| `everyoneDeleteVoiceThroughUi` | Delete while playing stops player, saves exact control and peer terminal tombstone |
+| `receiveAndCommitFirstDownloadChunk` | No auto-download; commit STATUS+first8192bytes and cancel only handle |
+| `resumeDownloadAndPlaybackThroughUi` | New process/manual Download resumes to15877bytes, actual player/seek/pause/recreation |
+| `reopenVerifyVoiceState` | Saved-key DNS resume; persistent downloaded192000samples, tombstones/base+control Delivered |
+| `resumeInterruptedOwnVoiceUploadThroughUi` | Genuine FINISH-before-manifest persisted row becomesAccepted on new UI process with same ID/cipher/order |
+
+Run the eight normal DNS methods in table order, with the fresh host accepting
+the exported phone QR before `acceptFreshPeer`. Host fetches/decodes both notes
+before deletion, checks unchanged peer projection after SelfOnly, then fetches
+DELETE/checks terminal row after Everyone. Host uploads the12s192000-sample
+reverse note before partial-download/resume methods. The interrupted-own-upload
+recovery method uses a separate genuine interrupted row, not the normal pair.
+
+For real recording, operator grants `RECORD_AUDIO` before instrumentation and
+revokes it **after result collection**; revoking inside the runner kills its UID.
+All tests keep FGS off. Never clear/install Main or use another device implicitly.
+Stable original chronology and zero duplicate/skipped messages verified by own
+native peer; no audio/keys/credentials/hash manifests in public proof outputs.
+
+Two real delivery regressions were resolved: waveform-array no-op rebind lost
+Copy selection; upload FINISH did not wake the existing control retry, leaving
+the manifestQueued with FGS off. Both final native/UI cycles pass. Test failures
+from invalid synthetic IDs, permission-change runner kill, opposite page orders
+and timing-dependent Queued sampling were diagnosed, not skipped/suppressed.
+The final fresh pair passed all eight methods after fixes.
+
+Contract: `docs/goals/2026-10-07-voice-notes.md`. Cleanup is scoped to owned gate
+containers/firewall rule/secret fixtures/packages; production rollout is separate.
+Completed cleanup removed three owned containers, resolver image, temporary
+firewall rule, remote gate data/secrets, two gate packages and30local private
+fixture files. Working backend remains healthy/pong; other containers retained.
+
+### Historical fresh8 message actions (2026-10-07)
+
+That rollout used fresh encrypted schema8/one `core_messages`, strict E2E v1;
 wire2/server5/carrier/auth/pins and existing backend data/policy are unchanged.
 No old-schema/plain conversion or legacy body decode. Reset is an explicitly
 authorized operation, never an open-error fallback. User limited this rollout

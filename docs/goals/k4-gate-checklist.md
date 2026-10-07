@@ -3,7 +3,15 @@
 R4 пока не закрыта. Ниже сохранены исходные ожидания и отдельно записаны
 измерения; сборка и instrumented doubles не подменяют аппаратные gates.
 
-## Актуальные own-message actions (2026-10-07)
+## Актуальные voice notes: isolated fresh9/6 (2026-10-08)
+
+- Fixed libopus1.6.1 mono16k/10k VBR/20ms,encoder10/NoLACE7;60s/128KiB final encrypted cap. Без comparative benchmark/manual SHA registry. One core_messages + sealed manifest/encrypted chunks внутри core.db; native foreground recorder/player, Telegram-style gestures/waveform/manual download/seek и оба own-delete scope.
+- Parent Rust workspace/build PASS(core64+existingignore/protocol55/live voice/blob/auth/action suites); explicit bindings/NDKr28c arm64; JVM85/debug/release/test APK/scoped lint PASS. Release8783352bytes/zipalign16KiB, не16KiB runtime. Два прежних explicit native-host ignores не выданы за PASS.
+- Только Moto fresh `.gate`, **14 distinct methods PASS/zero skips**:5 local native+snapshot,8 full DNS sequence,1 persisted interrupted-own-upload recovery. Two actualmic notes→fresh native peer; defaultSelfOnly peer unchanged, Everyone playing→terminal peer row; reverse12s/192000samples15877bytes, durable8192→new-process resume/play/seek/reopenDelivered.
+- Actual UDP DNS через dedicated controlled stub resolver/private zone/carrier/msgd6. Не DirectTCP/USB, не default-ISP/public delegation и не два Android. Working server5/main8/production UDP53/NS/carrier и Main/Pacman identity/data/install сохранены. Incompatible rollout отдельно по явному разрешению.
+- Copy waveform-refresh и FINISH-without-manifest delivery RED→GREEN; retry существующим control worker, без нового framework. Команды/границы — `android/AUTH_GATES.md`, цель `2026-10-07-voice-notes.md`. Фото/файлы UI/live calls и длительная background-матрица не объявлены готовыми.
+
+## Предыдущие own-message actions (2026-10-07, main8)
 
 - **Fresh core8**: одна `core_messages`, direct encrypted initialization, без old-schema/plain conversion/legacy E2E. Server5/wire2/carrier/pins/data сохранены. Unsupported/key errors не стирают данные.
 - **Edit / SelfOnly / Everyone**: собственные Accepted/Delivered для remote действий; SelfOnly queued не отменяет send. Original IDs/seq/time/ciphertext неизменны; delete терминален, controls невидимы, placeholder нет. Copy/accessibility, отдельные drafts/Save/Cancel и hidden paging сохранены.
@@ -17,7 +25,7 @@ R4 пока не закрыта. Ниже сохранены исходные о
 
 Deployment APK уже содержит доверенный публичный server profile; generic APK сохраняет server code/QR и явный trust preview. «Сканировать приглашение» / «Импортировать файл» → signup с логином/паролем → явное создание → диалоги. Приглашение остаётся «считанным», не проверенным до ответа сервера; это отдельный секрет, не browser URI или серверный profile. TTL/отзыв/одноразовость и key-only resume сохранены. `53-1` / `53` / `53ctl qr-invite` deployed с теми же volumes/pins/schema5, carrier не пересоздавался. JVM51/Rust170 и 4 USB onboarding метода PASS: parser, synthetic decoder-result lifecycle, file signup через actual DNS, новый процесс key resume. Optical camera scan user-owned; DocumentsUI picker не заявлен проверенным (проверен точный importer после SAF). Main identity/history сохранены. Goal/evidence — `2026-10-06-invite-onboarding.md`, `android/AUTH_GATES.md`.
 
-Account-auth wire2/server schema5/core schema8 fresh-only и Light/Square Android UI реализованы, без legacy paths. Проверки прежних ENROL/core6–7 ниже исторические. Полный клиентский контракт — `2026-09-29-client-track.md` R12–R21; текущие fixtures/methods — `android/AUTH_GATES.md`.
+Account-auth wire2 и Light/Square Android UI реализованы, без legacy paths; working server5/main8 не обновлены isolated fresh6/9 voice-cut. Проверки прежних ENROL/core6–7 ниже исторические. Полный клиентский контракт — `2026-09-29-client-track.md` R12–R21; текущие fixtures/methods — `android/AUTH_GATES.md`.
 
 | Auth gate | Ожидание |
 |---|---|

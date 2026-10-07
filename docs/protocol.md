@@ -1,6 +1,6 @@
 # dmsg wire v2: единая account-auth логика
 
-Реализованный путь: **доверенный профиль сервера → Войти / Создать аккаунт → диалоги**. Регистрация `invite_only` (default) или `open`; приглашение — только одноразовое разрешение signup. Wire2/server schema5 unchanged; core schema8 fresh-only, без old-schema/plain→sealed conversion и legacy E2E decode. Ошибка не вызывает wipe/новую identity; несовместимый клиентский cutover выполняется отдельно по явному разрешению. ENROL/token replay/credential attach/admin invite-rebind отсутствуют.
+Реализованный путь: **доверенный профиль сервера → Войти / Создать аккаунт → диалоги**. Регистрация `invite_only` (default) или `open`; приглашение — только одноразовое разрешение signup. Wire2/auth сохранены; fresh server6/core9 добавляют VOICE/blob. Old-schema/plain→sealed conversion и legacy E2E decode отсутствуют. Working server5/main8 не обновлены; несовместимый cutover отдельно по явному разрешению. Ошибка не вызывает wipe/новую identity. ENROL/token replay/credential attach/admin invite-rebind отсутствуют.
 
 ## Публичный профиль
 
@@ -46,7 +46,7 @@ Opcodes16–27: SEND16/ACK17, FETCH18/RESP19, DELIVERY_ACK20, UPLOAD_PREKEYS21, 
 
 Core обновляет binding известных контактов перед отправкой; смена Noise/Ed/Curve сохраняет warning и **STOP до explicit confirm**. Outgoing event фиксирует SHA256 domain-separated binding полного user/device/Ed/Curve tuple; confirm не делает старый ciphertext пригодным для новой identity. Inbound event со сменившимся sender связывается с известным user_id, не ACK/discard до подтверждения. Ratchet/event ciphertext одна TX, retry byte-identical. Undecryptable integrity failures не продвигают ratchet/ACK.
 
-## E2E v1: текст и собственные изменения
+## E2E v1: текст, голос и собственные изменения
 
 Olm type0/1 framing не меняется. Plaintext строго кодируется `crates/protocol/src/e2e.rs`:
 
@@ -55,12 +55,14 @@ Olm type0/1 framing не меняется. Plaintext строго кодируе
 TEXT   kind1: UTF-8 text1..4096 bytes
 EDIT   kind2: target_mid16 | revision:u64 BE | UTF-8 text1..4096
 DELETE kind3: target_mid16 | revision:u64 BE   (exact length)
+VOICE  kind4: fixed166-byte voice manifest v1/profile1 (below)
 ```
 
 Revision1..i64MAX, whole envelope≤4170; unknown version/kind, invalid UTF8/length,
 legacy plaintext и trailing DELETE bytes отвергаются. MID выбирается до encrypt,
 inner MID должен совпадать с outer FETCH MID; Ed сверяется с закреплённым sender.
-Target — TEXT того же contact/sender/MID, не чужое сообщение/control/self-target.
+EDIT target — TEXT; DELETE target — TEXT/VOICE того же contact/sender/MID,
+не чужое сообщение/control/self-target. Pending EDIT не применяется к VOICE.
 
 EDIT с большей revision обновляет effective text; lower/equal не перезаписывает.
 DELETE терминален; поздний original/edit не воскрешает bubble. Control-before-base
@@ -75,6 +77,52 @@ TTL/quota/Olm bounds сохраняются; indefinite convergence и lost-orig
 не обещаются. Участвующие отправители должны перейти согласованно, old E2E decode
 не вводится; backend не обязан стирать accounts/mailbox для этого формата.
 
+## VOICE и encrypted blobs
+
+```text
+manifest: version1 | profile1 | blob_id16 | key32 | nonce_prefix8 |
+          recipient_binding32 | plain_len:u32 BE | byte_len:u32 BE |
+          sample_count:u32 BE | waveform64
+```
+
+Profile1: libopus1.6.1 mono PCM16/16kHz,10kbit/s VBR/20ms,encoder10/NoLACE
+decoder7, DTX/FEC/loss/DRED/BWE off. Sample count1..960000; whole encrypted
+note≤128KiB including Olm/SEND_MEDIA metadata. Canonical bounded ULEB128 packet
+lengths, queried lookahead/pre-skip/flush/end trim; отсутствующие packets не
+скрываются PLC. Encoded parser/actual decode ограничены до allocation/playback.
+
+ChaCha20Poly1305 key случайный на blob; nonce=`prefix8|index:u32 BE`.
+AAD domain-separated и связывает blob/MID/senderEd/recipient epoch/index/count/
+plain length. Plain chunk8176bytes + tag16 = ciphertext≤8192; last-size точный,
+retry bytes неизменны. Manifest/key E2E; server codec/audio не читает.
+Дополнительного digest/checksum registry нет.
+
+| Request | Payload | Response |
+|---|---|---|
+| RESERVE26 | blob16 + ciphertext size:u32 BE | RESERVED27 blob16 |
+| STATUS37 | blob16 | RESP38 blob16 + size:u32 + state:u8 + receipt bitmap:u64 |
+| PUT39 | blob16 + index:u16 + length:u16 + chunk bytes | ACK40 blob16 + index:u16 |
+| FINISH41 | blob16 | ACK42 blob16 |
+| GET43 | blob16 + index:u16 | DATA44 blob16 + index:u16 + length:u16 + chunk bytes |
+| SEND_MEDIA45 | recipient user16 + expected device32 + MID16 + blob16 + Olm ciphertext | SEND_ACK17 |
+
+Все числа big-endian, strict parsers/geometry — `crates/protocol/src/blob.rs`.
+Generic reserve≤512KiB/64chunks, window1 на клиенте. Owner и recipient ACL —
+exact authenticated active device; replacement не наследует ACL. SEND_MEDIA
+atomically mailbox+ACL+dedup, только completed blob; retry не меняет исходные
+blob/device/ciphertext. STATUS/PUT идемпотентны, different bytes того же index —
+BAD. Temp/sync/rename/parent-sync и durable DB receipt предшествуют PUT ACK;
+FINISH проверяет все receipts/actual sizes. Quotas учитывают reserved+complete,
+TTL24h/7d, coherent blob/SQLite backup и orphan GC.
+
+Core9 хранит sealed manifest и encrypted chunks внутри core.db, одну canonical
+VOICE row в core_messages. Queue атомарен с ratchet и immutable Olm event. После
+FINISH обычный control retry отправляет manifest; upload-pending не задерживает
+TEXT/DELETE. Получатель ACKed manifest без auto-download. Delivered не означает
+скачивание/прослушивание. Manual download resumes bitmap после reopen; поздний
+receipt не оживляет tombstone. SelfOnlyQueued не отменяет upload/send; удаление
+логически очищает playable key/cache, ciphertext сервера остаётся до TTL/GC.
+
 ## Один contact QR → входящий запрос
 
 Contact QR v1: `dmsg://contact/<base64url>` от raw126 `[version1][cid_len12][contact_id12][user_id16][device32][Ed32][Curve32]`. Профиль сервера внутри него отсутствует. Preview/cancel не меняют контакты; Add закрепляет QR pins и durable `inviting`, без второго местного Accept.
@@ -85,7 +133,7 @@ Contact QR v1: `dmsg://contact/<base64url>` от raw126 `[version1][cid_len12][c
 | CONTACT_REQUESTS `31` | empty | RESP `32`: count:u8, ≤32 records `[contact_id12][binding112]` |
 | CONTACT_DECIDE `33` | peer user_id16 + decision:u8 (`1` accepted, `2` blocked) | CONTACT_OK или ERROR |
 
-Sender определяется только authenticated session. Existing schema5 `contact_permissions` хранит directed recipient/peer requested/accepted/blocked; повтор не открывает accepted/blocked заново, pending cap32. List возвращает только собственные incoming requests и текущие active/unblocked public bindings, не каталог пользователей. SEND также создаёт отсутствующий request **в той же TX**, что новый ciphertext; dedup не создаёт новый request.
+Sender определяется только authenticated session. `contact_permissions` хранит directed recipient/peer requested/accepted/blocked; повтор не открывает accepted/blocked заново, pending cap32. List возвращает только собственные incoming requests и текущие active/unblocked public bindings, не каталог пользователей. SEND также создаёт отсутствующий request **в той же TX**, что новый ciphertext; dedup не создаёт новый request.
 
 Core повторяет `inviting` через существующий reconnect/fetch; ACK переводит его в `accepted`. Request не зависит от публикации prekeys получателем: это только routing/public metadata. SEND сохраняет строгие binding/claim gates, первая отправка без ключей/сессии не сохраняет plaintext. Перед FETCH core публикует свои prekeys и получает incoming requests. Новый receiver contact имеет `incoming`, после явного Accept — `accepted_server`: ключи получены через pinned server, **не проверены лично по QR**. Старые pins не перезаписываются; подмена остаётся STOP. Explicit consent/block отправляется DECIDE при следующем fetch, повтор идемпотентен; transient сеть не отменяет локально сохранённое согласие.
 
@@ -112,15 +160,15 @@ trailing, oversized или неверное число записей — оши
 не меняются; E2E v1 выше отдельный строгий формат. Metadata не означает прочтение.
 
 Core проверяет durable replay до optional metadata lookup вне write-lock, затем
-decrypt один раз в disposable crypto state под IMMEDIATE. Только unseen TEXT
-требует positive metadata с current FETCH seq; missing/stale TEXT не продвигает
+decrypt один раз в disposable crypto state под IMMEDIATE. Только unseen TEXT/VOICE
+требует positive metadata с current FETCH seq; missing/stale base не продвигает
 ratchet/ACK, malformed response остаётся Protocol error. Controls игнорируют order
-и ACK current seq после durable commit. SEND_ACK для TEXT сохраняет original order/
+и ACK current seq после durable commit. SEND_ACK для TEXT/VOICE сохраняет original order/
 status одной TX; control ACK сохраняет только его status. Нет backfill/checked
-marker/legacy prefix. Known seq/time immutable; unique index защищает TEXT order.
-Обычный TEXT после server TTL/manual GC не получает выдуманную старую chronology;
+marker/legacy prefix. Known seq/time immutable; unique index защищает base order.
+Обычный base после server TTL/manual GC не получает выдуманную старую chronology;
 более сильный race-free retry/retention contract не входит в эту фичу.
 
 ## Проверка и границы
 
-`cargo build -p msgd && cargo test --workspace`, core `accounts/e2e_olm/one_qr_contacts/chronology/message_actions` и server fixtures проверяют schemas/auth/trust/consent/chronology/actions/atomicity. Current Android acceptance: `android/AUTH_GATES.md`, goal `2026-10-07-message-actions.md`; предыдущие pair/upgrade PASS исторические. Credentials/keys/invitations/deployment values не в Git/argv/logs; secrets read-only файлами.
+`cargo build -p msgd && cargo test --workspace`, core `accounts/e2e_olm/one_qr_contacts/chronology/message_actions/voice_notes` и server `blob_probe`/fixtures проверяют schemas/auth/trust/consent/chronology/actions/atomicity/resume/ACL. Current Android voice acceptance: `android/AUTH_GATES.md`, goal `2026-10-07-voice-notes.md`; предыдущие main/pair/upgrade PASS исторические. Credentials/keys/invitations/deployment values не в Git/argv/logs; secrets read-only файлами.

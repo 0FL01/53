@@ -1,8 +1,8 @@
 # Goal: голосовые сообщения через DNS
 
-Status: active
+Status: complete
 Source: пользователь 2026-10-07: «записи и отправления голосовых сообщений», узкий DNS-канал, Telegram-подобный UI/анимации, удаление; «Только fresh-схемы»; последний override: фиксированный «профиль 10 kbit/s», копия плана в цель, итеративная реализация/коммиты/тесты на телефоне, без SHA256-фиксации, KISS/YAGNI/PARETO.
-Last updated: 2026-10-07
+Last updated: 2026-10-08
 
 ## Objective
 Записать, отправить, вручную скачать, прослушать и удалить собственное E2E голосовое через существующий DNS carrier. Один фиксированный speech-профиль, без сравнительного codec-ресерча. Только fresh core9/server6 и отдельный gate-пакет; текущие main/серверные данные сохраняются.
@@ -17,32 +17,32 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Source: последний override и утверждённый план codec/audio.
   - Acceptance: mono PCM16/16 kHz, 20 ms, VBR, VOIP/VOICE, MAX_WIDEBAND/AUTO, encoder complexity10; bundled libopus1.6.1/OSCE и decoder complexity7; DTX/FEC/DRED/BWE/QEXT off. До60s и128KiB итогового encrypted object; корректные lookahead/flush/trim, bounded parser/JNI, без PCM/plaintext audio на диске.
   - Primary evidence: codec/container tests, arm64 native build и настоящий recorder/player gate.
-  - Status: pending
-  - Evidence:
+  - Status: verified
+  - Evidence: Opus controls + six core codec tests PASS, explicit host codegen and NDKr28c arm64 PASS; Moto native partial/trim/seek and real microphone/preview/AudioTrack/lifecycle PASS.
 - R2: Durable E2E blob upload/download через fresh server6/core9, resume и независимый control-path.
   - Source: утверждённый план, ARCHITECTURE §7–8, WORK_PLAN M5.
   - Acceptance: VOICE manifest внутри Olm; случайный blob key/unique chunk nonce, AEAD с index/count/length binding; chunks≤8KiB, одна bulk-передача. ACK только после durable receipt; повтор bytes неизменен; resume после reopen; exact-device ACL/revocation, reservation/quota/TTL. TEXT/DELETE не блокируются полной передачей.
   - Primary evidence: live-msgd integration/ACL/resume tests и actual DNS gate, если отдельный endpoint доступен.
-  - Status: pending
-  - Evidence:
+  - Status: verified
+  - Evidence: core live voice four tests + server live blob two tests PASS. Moto actual native UDP DNS/Noise/Olm: own fresh peer receives/decodes two real-mic notes; reverse 12s/192000samples blob15877bytes uploads, first8192bytes durable download then new-process UI resumes. Control status/tombstone/original chronology and restart-window manifest retry verified. Controlled stub resolver, not default ISP delegation.
 - R3: Telegram-подобные действия и анимации, интеграция voice в историю и удаление.
   - Source: исходный запрос/утверждённый Android-план.
   - Acceptance: hold/release, swipe cancel/up lock, locked pause/resume/preview/send/discard; mic amplitude/timer/waveform/play/pause/seek/download progress. Voice только manual download; original timeline/unread/paging. Default SelfOnly, Everyone только own Accepted/Delivered; queued SelfOnly не отменяет отправку; EDIT толькоTEXT; late callbacks не воскрешают deleted voice. Существующие Copy/drafts/selection/anchors сохранены.
   - Primary evidence: JVM state/action tests и isolated native UI gates.
-  - Status: pending
-  - Evidence:
+  - Status: verified
+  - Evidence: JVM85/zero skips; four local VoiceGates + encrypted snapshot gate PASS; eight DNS sequence methods plus interrupted-own-upload recovery PASS. Real hold/release, lock/preview/send, manual download/play/seek/recreation, default SelfOnly/cancel/peer unchanged, Everyone while playing→peer terminal tombstone/base+control Delivered. Content-aware waveform refresh preserves system Copy selection.
 - R4: Релевантные проверки и телефонная приёмка без повреждения существующих identity/data.
   - Source: «тесты на телефоне», AGENTS.md/AUTH_GATES.md.
   - Acceptance: Rust workspace/build/codegen, Android JVM/debug/release/arm64 и выбранные .gate instrumentation методы зелёные. Только Moto ZY22JFJ5LP, без main reset/install и без Pacman. DirectTCP/USB не выдавать за recursive DNS.
   - Primary evidence: команды/selected instrumentation results и границы runtime evidence.
-  - Status: pending
-  - Evidence:
+  - Status: verified
+  - Evidence: parent clean-env cargo build msgd/workspace PASS(core64+one existing ignore,protocol55,all live/auth/action/blob suites); explicit host bindings/NDKr28c arm64; final JVM85/debug/release/scoped lint PASS. Release8783352bytes/zipalign16KiB PASS. Moto14 selected methods/zero skips; no Main/Pacman install/reset/access. Two pre-existing native-host ignores unchanged.
 - R5: План в цели, scoped-коммиты, актуальные контракты и closure.
   - Source: последний запрос пользователя.
   - Acceptance: цель хранит текущую проверяемую state, intended feature/doc commits, без unrelated PNG/secrets/generated databases/.local и без push.
   - Primary evidence: git diff/status/log и финальный closure check.
-  - Status: in_progress
-  - Evidence: цель создана до реализации; исходное tracked дерево чистое.
+  - Status: verified
+  - Evidence: plan8a71152, atomic featureefc3b70 and this contract/closure commit. Intended diff/status/log reviewed; original upstream kept, owned-code formatting PASS. No user PNG/secrets/.local/build databases staged, no push. Owned3containers/image/firewall rule/remote data and2gatepackages/30local private fixtures removed; working backend healthy/pong.
 
 ### Constraints
 - Fresh core9/server6 ONLY. Без migrations/plain→sealed/legacy decode/autowipe. Existing production8/5 несовместимы и не обновляются этой задачей.
@@ -78,26 +78,30 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 10. Обновить контракты/цель, scoped commits и один closurecheck. Остановиться после DONE.
 
 ## Current Checkpoint
-- Closes: R1/R2/R5.
-- Smallest next action: зафиксировать goal; параллельные независимые codec, protocol/server, core и Android workstreams с согласованным API; затем интеграция и проверки.
-- Expected evidence: focused package tests и feature build, без schema8/5 data mutation.
-- Stop or replan if: наблюдаемый endpoint/device/access blocker. Продолжать независимые части.
+- Closes: R1–R5, complete.
+- Smallest next action: none; stop. Production rollout requires separate explicit authorization.
+- Expected evidence: all outcomes verified, feature committed, scoped cleanup and contract closure recorded.
+- Stop or replan if: new user scope; no additional audits or hardening.
 
 ## Current State
-- Resolved: контракт/границы зафиксированы; profile10k выбран пользователем без сравнительного gate.
-- Last relevant evidence: baseline ba895fe, только unrelated user PNG untracked.
-- Blocker: fresh DNS endpoint ещё не подтверждён; проверяется без изменения production.
-- Next: feature implementation.
+- Resolved: R1–R5; fixed10k codec/protocol/server6/core9/Android; plan8a71152, featureefc3b70. Final Rust/JVM85/native/build/lint green and14 selected Moto methods PASS/zero skips.
+- Last relevant evidence: FINISH alone left manifestQueued; minimal existing-control wake after upload/start fixed and new-process recovery PASS. Test permission-revoke runner kill moved to operator after result; native newest-first vs UI oldest-first asserted separately; durable DELETE/peer state replaces timing-dependent Queued sampling. All final phone scenarios repeated on a fresh owned pair.
+- Blocker: none. Separate controlled UDP stub resolver/carrier provided real DNS evidence without changing working UDP53/NS/backend; no default-ISP delegation claim.
+- Next: none. Owned runtime/secret fixtures cleaned; working backend healthy/pong, Main/Pacman untouched. No production rollout.
 
 ## Material Decisions
 - 2026-10-07: последний user override снимает comparative benchmark и ручную SHA256-фиксацию; crypto validation/functional gates остаются.
 - 2026-10-07: narrow phone authorization — только fresh .gate Moto; main/Pacman не участвуют.
+- 2026-10-08: no spare public delegation; isolated private-zone stub resolver/high UDP port allowed only gate client sources. Public deployment details stay ignored; exact temporary firewall rule removed on cleanup.
 
 ## Checkpoint History
 - 2026-10-07: preflight/goal; tracked baseline clean, plan copied with latest override.
+- 2026-10-07: codec/core/server/Android checkpoint; host/live and five local native phone gates PASS. Docker msgd workspace copy includes new opus-sys member. Next isolated DNS proof; production untouched.
+- 2026-10-08: fixed missing post-FINISH control wake; interrupted persisted note resumes toAccepted through new UI process. Fresh pair full eight-method DNS sequence and five local methods PASS; reverse multichunk download resumes8192→15877bytes and playback192000samples. Parent broad gates PASS; next scoped commits/cleanup.
+- 2026-10-08: featureefc3b70 committed. Owned3containers/image/temporary firewall rule/remote data removed;2gatepackages/30private local fixture files removed. Working backend ping=pong/healthy, other containers retained. Current contracts updated and closure verified; stop.
 
 ## Completion
-- Resolved outcomes: pending.
-- Commands and artifacts: pending.
-- Constraint and diff-scope check: pending.
-- Final status: active.
+- Resolved outcomes: R1–R5 verified.
+- Commands and artifacts: clean-env `cargo build -p msgd --offline && cargo test --workspace --offline` PASS (211passed,2pre-existing explicit ignores); `cargo fmt --all --check`; explicit host `DMSG_GEN_BINDINGS=1` generation; NDKr28c arm64; final JDK17 `testDebugUnitTest assembleDebug assembleRelease lintDebug --init-script localization-lint.init.gradle` and gated-test APK PASS. JVM85 zero failures/errors/skips; release8783352bytes/zipalign16KiB. Fourteen exact Moto native/UDP-DNS methods PASS/zero skips. Sanitized public proofs remain ignored; no audio/secret artifacts committed.
+- Constraint and diff-scope check: only intended Cargo/Opus/core/protocol/server/Android/deploy workspace-copy/docs, existing transport revision unchanged. Core9/server6 fresh-only; working server5/main8/Main/Pacman untouched. No comparative benchmark/manual checksum registry/push. Vendored upstream autotools whitespace retained verbatim; owned-code diff check green. Own disposable runtime/credentials/data/packages cleaned, production healthy/pong.
+- Final status: complete; no known blocker, no further substantive work.
