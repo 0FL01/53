@@ -788,6 +788,10 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is
 // rather `InterfaceTooLargeException`, caused by too many methods
@@ -841,6 +845,8 @@ fun uniffi_dmsg_core_checksum_method_dmsgclient_dns_stop(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_fetch_dns(
 ): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_history_message(
+): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_history_page(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_inbox_page(
@@ -872,6 +878,8 @@ fun uniffi_dmsg_core_checksum_method_dmsgclient_set_contact_alias(
 fun uniffi_dmsg_core_checksum_method_dmsgclient_signup_dns(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_stop_dns(
+): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_timeline_page(
 ): Short
 fun uniffi_dmsg_core_checksum_constructor_dmsgclient_open(
 ): Short
@@ -966,6 +974,8 @@ fun uniffi_dmsg_core_fn_method_dmsgclient_dns_stop(`ptr`: Pointer,uniffi_out_err
 ): Unit
 fun uniffi_dmsg_core_fn_method_dmsgclient_fetch_dns(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
+fun uniffi_dmsg_core_fn_method_dmsgclient_history_message(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,`localId`: Long,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_history_page(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,`beforeLocalId`: RustBuffer.ByValue,`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_inbox_page(`ptr`: Pointer,`cursor`: Long,`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
@@ -998,6 +1008,8 @@ fun uniffi_dmsg_core_fn_method_dmsgclient_signup_dns(`ptr`: Pointer,`login`: Rus
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_stop_dns(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
 ): Unit
+fun uniffi_dmsg_core_fn_method_dmsgclient_timeline_page(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,`beforeLocalId`: RustBuffer.ByValue,`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_func_page_limit(`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
 ): Int
 fun uniffi_dmsg_core_fn_func_qr_kind(`uri`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
@@ -1187,6 +1199,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_fetch_dns() != 21412.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_history_message() != 13294.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_history_page() != 17501.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1233,6 +1248,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_stop_dns() != 16687.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_timeline_page() != 11414.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dmsg_core_checksum_constructor_dmsgclient_open() != 28712.toShort()) {
@@ -1726,6 +1744,11 @@ public interface DmsgClientInterface {
     fun `fetchDns`(): FetchReport
 
     /**
+     * Refresh a retained row's complete metadata, without trusting its old position.
+     */
+    fun `historyMessage`(`contactId`: kotlin.String, `localId`: kotlin.Long): HistoryMessage
+
+    /**
      * Newest-first bounded local timeline; cursor is exclusive and must belong
      * to this contact. Limits clamp to 1..=100. This call does not mark read.
      */
@@ -1786,6 +1809,11 @@ public interface DmsgClientInterface {
      * No SQLite access: cancellation can race a blocked connect/fetch.
      */
     fun `stopDns`()
+
+    /**
+     * Server-ordered presentation page; local IDs remain stable anchors.
+     */
+    fun `timelinePage`(`contactId`: kotlin.String, `beforeLocalId`: kotlin.Long?, `limit`: kotlin.UInt): HistoryPage
 
     companion object
 }
@@ -2116,6 +2144,22 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
 
 
     /**
+     * Refresh a retained row's complete metadata, without trusting its old position.
+     */
+    @Throws(FfiException::class)override fun `historyMessage`(`contactId`: kotlin.String, `localId`: kotlin.Long): HistoryMessage {
+            return FfiConverterTypeHistoryMessage.lift(
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_history_message(
+        it, FfiConverterString.lower(`contactId`),FfiConverterLong.lower(`localId`),_status)
+}
+    }
+    )
+    }
+
+
+
+    /**
      * Newest-first bounded local timeline; cursor is exclusive and must belong
      * to this contact. Limits clamp to 1..=100. This call does not mark read.
      */
@@ -2348,6 +2392,22 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
 }
     }
 
+
+
+
+    /**
+     * Server-ordered presentation page; local IDs remain stable anchors.
+     */
+    @Throws(FfiException::class)override fun `timelinePage`(`contactId`: kotlin.String, `beforeLocalId`: kotlin.Long?, `limit`: kotlin.UInt): HistoryPage {
+            return FfiConverterTypeHistoryPage.lift(
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_timeline_page(
+        it, FfiConverterString.lower(`contactId`),FfiConverterOptionalLong.lower(`beforeLocalId`),FfiConverterUInt.lower(`limit`),_status)
+}
+    }
+    )
+    }
 
 
 
@@ -2767,8 +2827,9 @@ public object FfiConverterTypeFetchReport: FfiConverterRustBuffer<FetchReport> {
 
 
 /**
- * Positive durable local ID orders the timeline. Incoming delivery_state is
- * always None; outgoing status is a persisted server-ACK fact (or Queued).
+ * Positive durable local ID identifies ingestion, not server presentation order.
+ * Incoming delivery_state is always None; outgoing status is a persisted
+ * server-ACK fact (or Queued).
  */
 data class HistoryMessage (
     var `localId`: kotlin.Long,
@@ -2777,7 +2838,9 @@ data class HistoryMessage (
     var `direction`: MessageDirection,
     var `text`: kotlin.String,
     var `localTimestampMs`: kotlin.Long,
-    var `deliveryState`: DeliveryState?
+    var `deliveryState`: DeliveryState?,
+    var `serverSeq`: kotlin.Long?,
+    var `serverTimestampMs`: kotlin.Long?
 ) {
 
     companion object
@@ -2796,6 +2859,8 @@ public object FfiConverterTypeHistoryMessage: FfiConverterRustBuffer<HistoryMess
             FfiConverterString.read(buf),
             FfiConverterLong.read(buf),
             FfiConverterOptionalTypeDeliveryState.read(buf),
+            FfiConverterOptionalLong.read(buf),
+            FfiConverterOptionalLong.read(buf),
         )
     }
 
@@ -2806,7 +2871,9 @@ public object FfiConverterTypeHistoryMessage: FfiConverterRustBuffer<HistoryMess
             FfiConverterTypeMessageDirection.allocationSize(value.`direction`) +
             FfiConverterString.allocationSize(value.`text`) +
             FfiConverterLong.allocationSize(value.`localTimestampMs`) +
-            FfiConverterOptionalTypeDeliveryState.allocationSize(value.`deliveryState`)
+            FfiConverterOptionalTypeDeliveryState.allocationSize(value.`deliveryState`) +
+            FfiConverterOptionalLong.allocationSize(value.`serverSeq`) +
+            FfiConverterOptionalLong.allocationSize(value.`serverTimestampMs`)
     )
 
     override fun write(value: HistoryMessage, buf: ByteBuffer) {
@@ -2817,14 +2884,16 @@ public object FfiConverterTypeHistoryMessage: FfiConverterRustBuffer<HistoryMess
             FfiConverterString.write(value.`text`, buf)
             FfiConverterLong.write(value.`localTimestampMs`, buf)
             FfiConverterOptionalTypeDeliveryState.write(value.`deliveryState`, buf)
+            FfiConverterOptionalLong.write(value.`serverSeq`, buf)
+            FfiConverterOptionalLong.write(value.`serverTimestampMs`, buf)
     }
 }
 
 
 
 /**
- * Newest first (local_id DESC), exclusive next_before_local_id. Reverse rows
- * for chronological rendering; prepend reversed older pages. None = exhausted.
+ * Newest first in the called API's order, with an exclusive local-ID anchor.
+ * Reverse rows for chronological rendering. None = exhausted.
  */
 data class HistoryPage (
     var `rows`: List<HistoryMessage>,

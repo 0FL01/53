@@ -3,6 +3,7 @@
 //! Внутренние структуры не являются wire-контрактом: совместимость — тест-векторами ниже.
 
 pub mod auth;
+pub mod chronology;
 pub mod contacts;
 pub mod mailbox;
 pub mod profile;
@@ -98,6 +99,11 @@ pub const OP_CONTACT_REQUESTS_RESP: u8 = 32;
 pub const OP_CONTACT_DECIDE: u8 = 33;
 /// CONTACT_OK: empty, after durable request/decision commit.
 pub const OP_CONTACT_OK: u8 = 34;
+/// MESSAGE_METADATA: count u8 + (sender_device32 + message_id16)*, max32.
+pub const OP_MESSAGE_METADATA: u8 = 35;
+/// MESSAGE_METADATA_RESP: count u8 + (seq u64 + accepted_seconds u64)*.
+/// All-zero record means missing/not owned; no directory information is exposed.
+pub const OP_MESSAGE_METADATA_RESP: u8 = 36;
 /// Статусы доставки (без «прочитано» — read receipts отложены).
 pub const ST_ACCEPTED: u8 = 1;
 /// Статусы доставки (без «прочитано» — read receipts отложены).

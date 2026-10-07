@@ -1,6 +1,8 @@
-//! Fresh unified schema. Old/future schemas fail before any database write.
+//! Unified schema. Only explicitly approved, authenticated 6→7 is upgraded.
 //! Same-schema plain-to-sealed conversion is a storage feature, not auth migration.
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
+const ORDER_INDEXES:&str="CREATE UNIQUE INDEX core_history_server_seq ON core_history(server_seq) WHERE server_seq IS NOT NULL;
+ CREATE INDEX core_history_timeline ON core_history(contact_id,(CASE WHEN server_seq IS NOT NULL THEN 1 WHEN delivery_state='queued' THEN 2 ELSE 0 END),coalesce(server_seq,local_id));";
 
 /// Internal plain storage for isolated Rust harnesses.
 pub fn open(path: &std::path::Path) -> Result<rusqlite::Connection, String> {
@@ -36,7 +38,7 @@ fn open_mode(
             |r| r.get(0),
         )
         .map_err(|_| "schema lookup failed")?;
-    if version != SCHEMA_VERSION && !(version == 0 && !nonempty) {
+    if version != SCHEMA_VERSION && version != 6 && !(version == 0 && !nonempty) {
         return Err("unsupported core schema".into());
     }
     // Check the marker BEFORE schema creation or any write, including on the
@@ -71,6 +73,9 @@ fn open_mode(
         _ => {}
     }
     crate::secure::register(&conn, key)?;
+    if version == 6 && marker.is_none() {
+        return Err("history upgrade requires authenticated storage".into());
+    }
     if version == 0 {
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -147,7 +152,11 @@ fn open_mode(
             sender_device BLOB,
             text TEXT NOT NULL,
             local_timestamp_ms INTEGER NOT NULL CHECK(local_timestamp_ms>=0),
-            delivery_state TEXT,
+             delivery_state TEXT,
+             server_seq INTEGER CHECK(server_seq>0),
+             server_timestamp_ms INTEGER CHECK(server_timestamp_ms>=0),
+             order_checked INTEGER NOT NULL DEFAULT 0 CHECK(order_checked IN (0,1)),
+             CHECK((server_seq IS NULL)=(server_timestamp_ms IS NULL)),
             CHECK((direction='incoming' AND sender_device IS NOT NULL AND length(sender_device)=32 AND delivery_state IS NULL)
                OR (direction='outgoing' AND sender_device IS NULL AND delivery_state IS NOT NULL AND delivery_state IN ('queued','accepted','delivered')))
           );
@@ -161,11 +170,44 @@ fn open_mode(
             profile TEXT NOT NULL
            );
            CREATE UNIQUE INDEX core_contact_user ON core_contacts(user_id) WHERE user_id IS NOT NULL;
-           PRAGMA user_version=6;",
+            PRAGMA user_version=7;",
     )
-    .map_err(|_| "create schema v6 failed")?;
+    .map_err(|_| "create schema v7 failed")?;
+        }
+        if locked_version == 0 {
+            tx.execute_batch(ORDER_INDEXES)
+                .map_err(|_| "history order index failed")?;
         }
         tx.commit().map_err(|_| "schema commit failed")?;
+    }
+    if version == 6 {
+        // Marker/key verification above precedes ALL upgrade writes. DDL and
+        // version change commit together; existing opaque values/IDs untouched.
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|_| "history upgrade transaction failed")?;
+        let locked: i64 = tx
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .map_err(|_| "history upgrade version failed")?;
+        if locked == 6 {
+            // Reject malformed lookalike schema rather than manufacture data.
+            let _: i64 = tx
+                .query_row(
+                    "SELECT count(*) FROM core_history WHERE local_id>0",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|_| "history upgrade schema invalid")?;
+            tx.execute_batch("ALTER TABLE core_history ADD COLUMN server_seq INTEGER CHECK(server_seq>0);
+                ALTER TABLE core_history ADD COLUMN server_timestamp_ms INTEGER CHECK(server_timestamp_ms>=0 AND ((server_seq IS NULL)=(server_timestamp_ms IS NULL)));
+                ALTER TABLE core_history ADD COLUMN order_checked INTEGER NOT NULL DEFAULT 0 CHECK(order_checked IN (0,1));
+                PRAGMA user_version=7;").map_err(|_|"history upgrade failed")?;
+            tx.execute_batch(ORDER_INDEXES)
+                .map_err(|_| "history order index failed")?;
+        } else if locked != SCHEMA_VERSION {
+            return Err("unsupported core schema".into());
+        }
+        tx.commit().map_err(|_| "history upgrade commit failed")?;
     }
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
         .map_err(|_| "storage durability setup failed")?;
@@ -505,11 +547,30 @@ pub fn outbox_set_status(
     message_id: &[u8; 16],
     status: &str,
 ) -> Result<(), String> {
+    outbox_set_status_order(conn, message_id, status, None)
+}
+
+pub(crate) fn outbox_set_status_order(
+    conn: &rusqlite::Connection,
+    message_id: &[u8; 16],
+    status: &str,
+    order: Option<dmsg_protocol::chronology::Order>,
+) -> Result<(), String> {
     if !matches!(status, "queued" | "accepted" | "delivered") {
         return Err("invalid delivery state".into());
     }
     let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
         .map_err(|_| "delivery transaction failed")?;
+    if let Some(order) = order {
+        let id: i64 = tx
+            .query_row(
+                "SELECT local_id FROM core_history WHERE message_id=?1 AND direction='outgoing'",
+                [message_id.as_slice()],
+                |r| r.get(0),
+            )
+            .map_err(|_| "history order row missing")?;
+        crate::history::set_order(&tx, id, Some(order))?;
+    }
     for (table, column, condition) in [
         ("core_outbox", "status", ""),
         (
@@ -658,7 +719,7 @@ mod tests {
 
     #[test]
     fn old_future_and_nonempty_unversioned_schemas_are_rejected_without_mutation() {
-        for version in [0, 1, 2, 3, 4, 5, 7, 99] {
+        for version in [0, 1, 2, 3, 4, 5, SCHEMA_VERSION + 1, 99] {
             let dir =
                 std::env::temp_dir().join(format!("dmsg-schema-{}-{version}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
@@ -703,6 +764,126 @@ mod tests {
     }
 
     const KEY: [u8; 32] = [0x37; 32];
+
+    #[test]
+    fn approved_six_to_seven_is_authenticated_atomic_and_preserves_opaque_rows() {
+        let p = tmp_db("chronology-upgrade");
+        cleanup(&p);
+        let c = open_encrypted(&p, &KEY).unwrap();
+        save_identity(&c, &[3; 32]).unwrap();
+        save_account(&c, &[4; 16], "PEER00000001").unwrap();
+        c.execute(
+            "INSERT INTO core_contacts(contact_id,state) VALUES('PEER00000001','accepted')",
+            [],
+        )
+        .unwrap();
+        let tx = rusqlite::Transaction::new_unchecked(&c, rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        crate::history::insert(&tx, &[8; 16], "PEER00000001", None, "keep encrypted text").unwrap();
+        tx.commit().unwrap();
+        c.execute(
+            "UPDATE core_contacts SET read_cursor=1 WHERE contact_id='PEER00000001'",
+            [],
+        )
+        .unwrap();
+        let opaque: Vec<u8> = c
+            .query_row("SELECT text FROM core_history", [], |r| r.get(0))
+            .unwrap();
+        let identity: Vec<u8> = c
+            .query_row("SELECT device_priv FROM core_identity", [], |r| r.get(0))
+            .unwrap();
+        // Exact prior history schema, with the original sealed bytes/local IDs.
+        c.execute_batch("DROP INDEX core_history_server_seq; DROP INDEX core_history_timeline;
+            ALTER TABLE core_history RENAME TO history7;
+            CREATE TABLE core_history(local_id INTEGER PRIMARY KEY AUTOINCREMENT,message_id BLOB NOT NULL CHECK(length(message_id)=16),contact_id TEXT NOT NULL,sender_device BLOB,direction TEXT NOT NULL CHECK(direction IN ('incoming','outgoing')),text BLOB NOT NULL,local_timestamp_ms INTEGER NOT NULL CHECK(local_timestamp_ms>=0),delivery_state TEXT, UNIQUE(sender_device,message_id));
+            INSERT INTO core_history(local_id,message_id,contact_id,sender_device,direction,text,local_timestamp_ms,delivery_state) SELECT local_id,message_id,contact_id,sender_device,direction,text,local_timestamp_ms,delivery_state FROM history7;
+            DROP TABLE history7;
+            CREATE UNIQUE INDEX core_history_outgoing_mid ON core_history(message_id) WHERE direction='outgoing';
+            CREATE INDEX core_history_contact_local ON core_history(contact_id,local_id DESC);
+            PRAGMA user_version=6;").unwrap();
+        drop(c);
+        assert!(open_encrypted(&p, &[1; 32]).is_err());
+        let raw = rusqlite::Connection::open(&p).unwrap();
+        assert_eq!(
+            raw.query_row::<i64, _, _>("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap(),
+            6
+        );
+        drop(raw);
+        let c = open_encrypted(&p, &KEY).unwrap();
+        assert_eq!(
+            c.query_row::<i64, _, _>("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap(),
+            7
+        );
+        assert_eq!(
+            opaque,
+            c.query_row::<Vec<u8>, _, _>("SELECT text FROM core_history", [], |r| r.get(0))
+                .unwrap()
+        );
+        assert_eq!(
+            identity,
+            c.query_row::<Vec<u8>, _, _>("SELECT device_priv FROM core_identity", [], |r| r.get(0))
+                .unwrap()
+        );
+        assert_eq!(
+            c.query_row::<i64, _, _>("SELECT read_cursor FROM core_contacts", [], |r| r.get(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            c.query_row::<(i64, Option<i64>, Option<i64>, i64), _, _>(
+                "SELECT local_id,server_seq,server_timestamp_ms,order_checked FROM core_history",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            )
+            .unwrap(),
+            (1, None, None, 0)
+        );
+        drop(c);
+        assert!(open_encrypted(&p, &KEY).is_ok());
+        cleanup(&p);
+    }
+
+    #[test]
+    fn unauthenticated_six_is_not_upgraded_or_sealed() {
+        let path = tmp_db("chronology-unauthenticated");
+        cleanup(&path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch("CREATE TABLE sentinel(value BLOB); INSERT INTO sentinel VALUES(x'123456'); PRAGMA user_version=6;").unwrap();
+        drop(c);
+        let before = std::fs::read(&path).unwrap();
+        assert!(open(&path).err().unwrap().contains("authenticated storage"));
+        assert!(open_encrypted(&path, &KEY)
+            .err()
+            .unwrap()
+            .contains("authenticated storage"));
+        assert_eq!(before, std::fs::read(&path).unwrap());
+        let c = rusqlite::Connection::open(&path).unwrap();
+        assert_eq!(
+            c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            6
+        );
+        assert_eq!(
+            c.query_row("SELECT hex(value) FROM sentinel", [], |r| r
+                .get::<_, String>(0))
+                .unwrap(),
+            "123456"
+        );
+        assert_eq!(
+            c.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        drop(c);
+        cleanup(&path);
+    }
 
     #[test]
     fn same_current_schema_plain_to_sealed_seals_every_sensitive_column_and_reopens() {

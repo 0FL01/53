@@ -904,7 +904,7 @@ class DeviceGatesTest {
             ActivityScenario.launch<ChatActivity>(Intent(app, ChatActivity::class.java).putExtra("peer", peer)).use { scenario ->
                 gateAwait(scenario, "decrypted incoming bubble and local time") {
                     val content = texts(it.findViewById(R.id.messages))
-                    fixture.getString("text") in content && content.any { label -> label.contains(it.getString(R.string.message_incoming)) && label.contains(it.getString(R.string.local_timestamp, "")) }
+                    fixture.getString("text") in content && content.any { label -> label.contains(it.getString(R.string.message_incoming)) && label.contains(it.getString(R.string.server_timestamp, "")) }
                 }
                 gateScreenshot(app, "chat-incoming")
                 scenario.recreate()

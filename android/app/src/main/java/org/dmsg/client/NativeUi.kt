@@ -81,7 +81,12 @@ internal class HistoryAdapter(private val context: Context, private val rows: Li
         bubble.addView(NativeUi.text(c).apply { text = message.text; setTextIsSelectable(true) },
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         bubble.addView(NativeUi.text(c, 12f, true).apply {
-            text = listOf(if (outgoing) deliveryLabel(c.resources, message.deliveryState) else c.getString(R.string.message_incoming), c.getString(R.string.local_timestamp, localTime(message.localTimestampMs))).joinToString(" · ")
+            val time = when {
+                message.serverTimestampMs != null -> c.getString(R.string.server_timestamp, localTime(message.serverTimestampMs))
+                message.deliveryState == uniffi.dmsg_core.DeliveryState.QUEUED -> c.getString(R.string.pending_timestamp, localTime(message.localTimestampMs))
+                else -> c.getString(R.string.legacy_timestamp, localTime(message.localTimestampMs))
+            }
+            text = listOf(if (outgoing) deliveryLabel(c.resources, message.deliveryState) else c.getString(R.string.message_incoming), time).joinToString(" · ")
         })
         root.addView(bubble, LinearLayout.LayoutParams(width.toInt(), ViewGroup.LayoutParams.WRAP_CONTENT))
         return root

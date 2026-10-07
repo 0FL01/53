@@ -86,6 +86,8 @@ class UniFfiFacade(private val dbPath: String, key: ByteArray, private val conte
         core.historyPage(contactId, beforeLocalId, limit.coerceIn(1, 100).toUInt())
     }
     override fun messageStatus(mid: String) = wrap { core.messageStatus(mid) }
+    override fun timelinePage(contactId: String, beforeLocalId: Long?, limit: Int) = wrap { core.timelinePage(contactId, beforeLocalId, limit.coerceIn(1, 100).toUInt()) }
+    override fun historyMessage(contactId: String, localId: Long) = wrap { core.historyMessage(contactId, localId) }
     override fun setContactAlias(id: String, alias: String?) = wrap { core.setContactAlias(id, alias) }
     override fun markRead(id: String, throughLocalId: Long) = wrap { core.markRead(id, throughLocalId) }
 

@@ -222,4 +222,7 @@
     <string name="trust_server_keys">Contact accepted · keys from the trusted server, not personally verified by QR</string>
     <string name="trust_inviting">Contact added · request queued until the next connection</string>
     <string name="pending_contacts">Messages waiting for contact acceptance: %1$d</string>
+    <string name="server_timestamp">Server time: %1$s</string>
+    <string name="pending_timestamp">Queued locally: %1$s</string>
+    <string name="legacy_timestamp">Local time (server time unavailable): %1$s</string>
 </resources>

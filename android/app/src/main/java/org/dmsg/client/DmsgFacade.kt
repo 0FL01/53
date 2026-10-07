@@ -55,6 +55,8 @@ interface DmsgFacade {
     fun contacts(cursor: String?, limit: Int): Pair<List<Dialog>, String?>
     fun dialogsPage(cursor: String?, limit: Int): DialogsPage
     fun historyPage(contactId: String, beforeLocalId: Long?, limit: Int): HistoryPage
+    fun timelinePage(contactId: String, beforeLocalId: Long?, limit: Int): HistoryPage
+    fun historyMessage(contactId: String, localId: Long): uniffi.dmsg_core.HistoryMessage
     fun messageStatus(mid: String): DeliveryState?
     fun setContactAlias(id: String, alias: String?)
     fun markRead(id: String, throughLocalId: Long): Long

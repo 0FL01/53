@@ -69,7 +69,7 @@
 
 **Хранение.** Keystore-wrapped local key, encrypted secrets/ratchets/content в app-private storage, отключение небезопасного auto-backup для identity state. Локальная очистка кэша и истории; политика потери телефона и перевыпуска доступа. Полный cloud backup/перенос истории отложить.
 
-**Текстовый frontend R17–R21 реализован.** Light/Square на Kotlin/AppCompat/XML; Rust schema6 хранит защищённую историю обеих сторон, exact status, summaries/local aliases/time/unread/read cursor. Pages per-contact, TX с ratchet/outbox/inbox; time локальное, delivered не read receipt. Actual recursive phone↔native/UI/200% font/IME verified, полная M4 background/compatibility матрица ниже этим не закрыта.
+**Текстовый frontend R17–R21 реализован.** Light/Square на Kotlin/AppCompat/XML; Rust schema7 хранит защищённую историю обеих сторон, exact status, summaries/local aliases/time/unread/read cursor. Pages per-contact, TX с ratchet/outbox/inbox; confirmed timeline использует server seq/time, отдельный local-ingest API сохраняет reconciliation/read cursor, delivered не read receipt. Actual recursive phone↔native/UI/200% font/IME verified, полная M4 background/compatibility матрица ниже этим не закрыта.
 
 **Проверки.** Forced Doze и App Standby; экран выключен продолжительное время; normal process death и force-stop отдельно; отсутствие Google Play Services; отказ разрешений; unreadable/oversized QR; очистка данных/переустановка; OEM battery restrictions. Измерить queries/s и батарею в обоих режимах. Проверить штатный выбор клавиатуры, clipboard, accessibility и большие списки сообщений.
 
@@ -123,7 +123,7 @@ docs/                    # архитектура, протокол, решен�
 
 ## Минимальная матрица приёмки
 
-Функциональность: подключение по публичному коду/QR через recursive DNS; неверный pin; login/register в обоих режимах; неверный пароль/занятый логин; one-time invitation race; old schema/wire fail-closed без migration; подтверждённая замена единственного устройства; reconnect без пароля; encrypted history/status/alias/local unread; dedup; prekey depletion; revoked device; oversized frames; interrupted blob; missed-call expiry.
+Функциональность: подключение по публичному коду/QR через recursive DNS; неверный pin; login/register в обоих режимах; неверный пароль/занятый логин; one-time invitation race; unsupported schema/wire fail-closed (единственное утверждённое исключение: authenticated core6→7); подтверждённая замена единственного устройства; reconnect без пароля; encrypted history/status/alias/local unread; dedup; prekey depletion; revoked device; oversized frames; interrupted blob; missed-call expiry.
 
 Надёжность: server/client restart; транспортный обрыв; обе стороны с низким upload; RAM/disk quota; неконсистентный backup не принимается; restore и schema update; цикл смены сети.
 
@@ -140,6 +140,10 @@ English-локаль реализована по отдельному утвер
 ## Односторонние contact requests
 
 Одностороннее добавление контакта реализовано отдельным scope: **один QR → Add → incoming request → Accept → E2E в обе стороны**, без обратного QR/второго местного approve. Первые сообщения ждут согласия, simultaneous Olm initiation исправлена с bounded двумя ratchets в прежнем sealed pickle. Compatible backend/main rollout и приёмка — `docs/goals/2026-10-07-one-qr-contacts.md`; это не разрешение на новые auth/schema/transport изменения.
+
+## Подтверждённая хронология сообщений
+
+Отдельный scope устраняет сортировку по локальному времени получения: первоначальные server mailbox seq/time общие для обеих сторон, pending→confirmed сохраняет bubble/local ID/ciphertext. Добавлен bounded authenticated metadata lookup без изменения SEND_ACK/FETCH, wire2/server5 сохранены. Core6→7 — явно утверждённый upgrade без потери keys/history; прочие старые версии не мигрируются. Порядок, pagination и device evidence — `docs/goals/2026-10-07-message-chronology.md`, `crates/core/R18_API.md`, `android/AUTH_GATES.md`.
 
 ## Что оставляем после v1
 

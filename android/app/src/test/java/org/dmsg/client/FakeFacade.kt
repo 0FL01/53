@@ -99,6 +99,13 @@ class FakeFacade : DmsgFacade {
         return HistoryPage(page.map { it.copy() }, if (all.size > page.size) page.last().localId else null)
     }
     override fun messageStatus(mid: String) = history.find { it.messageIdHex == mid && it.direction == MessageDirection.OUTGOING }?.deliveryState
+    override fun historyMessage(contactId: String, localId: Long) = history.single { it.contactId == contactId && it.localId == localId }.copy()
+    override fun timelinePage(contactId: String, beforeLocalId: Long?, limit: Int): HistoryPage {
+        val anchor = beforeLocalId?.let { historyMessage(contactId, it) }
+        val all = history.filter { it.contactId == contactId && (anchor == null || historyComparator.compare(it, anchor) < 0) }.sortedWith(historyComparator.reversed())
+        val page = all.take(limit.coerceIn(1, 100))
+        return HistoryPage(page.map { it.copy() }, if (all.size > page.size) page.last().localId else null)
+    }
     override fun dialogsPage(cursor: String?, limit: Int): DialogsPage {
         val summaries = dialogs.map { dialog ->
             val last = history.filter { it.contactId == dialog.contactId }.maxByOrNull { it.localId }
@@ -124,7 +131,7 @@ class FakeFacade : DmsgFacade {
         lastSent = text
         val localId = (history.maxOfOrNull { it.localId } ?: 0L) + 1
         val mid = localId.toString(16).padStart(32, '0')
-        history.add(HistoryMessage(localId, mid, id, MessageDirection.OUTGOING, text, localId, DeliveryState.QUEUED))
+        history.add(HistoryMessage(localId, mid, id, MessageDirection.OUTGOING, text, localId, DeliveryState.QUEUED, null, null))
         if (failAfterInsert) throw DmsgError("fixture post-commit failure", ErrorKind.Transport)
         return mid
     }

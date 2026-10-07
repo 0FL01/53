@@ -61,6 +61,8 @@ object Core {
         override fun contacts(cursor: String?, limit: Int): Pair<List<Dialog>, String?> = fail()
         override fun dialogsPage(cursor: String?, limit: Int): DialogsPage = fail()
         override fun historyPage(contactId: String, beforeLocalId: Long?, limit: Int): HistoryPage = fail()
+        override fun timelinePage(contactId: String, beforeLocalId: Long?, limit: Int): HistoryPage = fail()
+        override fun historyMessage(contactId: String, localId: Long): uniffi.dmsg_core.HistoryMessage = fail()
         override fun messageStatus(mid: String): DeliveryState? = fail()
         override fun setContactAlias(id: String, alias: String?) = fail()
         override fun markRead(id: String, throughLocalId: Long): Long = fail()

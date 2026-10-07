@@ -8,7 +8,7 @@ import uniffi.dmsg_core.DeliveryState
 
 class PagingTest {
     private fun row(id: Long, peer: String = "P", direction: MessageDirection = MessageDirection.INCOMING) =
-        HistoryMessage(id, id.toString(16).padStart(32, '0'), peer, direction, "fixture", id, if (direction == MessageDirection.OUTGOING) DeliveryState.QUEUED else null)
+        HistoryMessage(id, id.toString(16).padStart(32, '0'), peer, direction, "fixture", id, if (direction == MessageDirection.OUTGOING) DeliveryState.QUEUED else null, null, null)
 
     @Test fun boundedPerContactPagesPrependChronologicallyPast500() {
         val f = FakeFacade()
@@ -52,6 +52,20 @@ class PagingTest {
         assertEquals((51L..301L).toList(), history.rows.map { it.localId })
         history.older(f.historyPage("P", history.nextBefore, 50))
         assertEquals((1L..301L).toList(), history.rows.map { it.localId })
+    }
+
+    @Test fun burstIsBridgedEvenWhenThePreviousWholeHistoryFitOnePage() {
+        val f = FakeFacade()
+        (1L..10L).forEach { f.history.add(row(it)) }
+        val window = HistoryWindow()
+        window.latest(f.timelinePage("P", null, 50))
+        assertNull(window.nextBefore)
+        (11L..201L).forEach { f.history.add(row(it)) }
+        window.latest(f.timelinePage("P", null, 50))
+        assertNotNull(window.gapBefore)
+        while (window.gapBefore != null) window.latest(f.timelinePage("P", window.gapBefore, 50))
+        assertEquals((1L..201L).toList(), window.rows.map { it.localId })
+        assertNull(window.nextBefore)
     }
 
     @Test fun onlyViewedRowsAdvanceLocalReadCursor() {
@@ -103,5 +117,67 @@ class PagingTest {
         val f = FakeFacade()
         f.request("P"); f.accept("P"); assertEquals("accepted", f.get("P")?.state)
         f.block("P"); assertEquals("blocked", f.get("P")?.state)
+    }
+
+    @Test fun serverPagingAndLateInsertionBelowTheNewestPagePreserveAll601Rows() {
+        val f = FakeFacade()
+        (1L..601L).filter { it != 502L }.forEach { id ->
+            f.history.add(row(id).copy(serverSeq = 602L - id, serverTimestampMs = 1_000L))
+        }
+        val window = HistoryWindow()
+        window.latest(f.timelinePage("P", null, 50), localHead = 601L)
+        val boundary = window.nextBefore
+        val late = row(602L).copy(serverSeq = 100L, serverTimestampMs = 1_000L)
+        f.history.add(late)
+        window.latest(f.timelinePage("P", null, 50), listOf(late), 602L)
+        assertEquals(boundary, window.nextBefore)
+        while (window.gapBefore != null) window.latest(f.timelinePage("P", window.gapBefore, 50))
+        while (window.nextBefore != null) window.older(f.timelinePage("P", window.nextBefore, 50))
+        assertEquals((1L..601L).toList(), window.rows.map { it.serverSeq })
+        assertEquals(601, window.rows.map { it.localId }.distinct().size)
+        assertEquals(602L, window.latestLocalId)
+        assertEquals(601L, f.historyPage("P", 602L, 1).rows.single().localId)
+        assertEquals(0L, f.readCursors["P"] ?: 0L)
+    }
+
+    @Test fun retainedPendingRowMovesBelow50ConfirmedRowsWithoutChangingItsLocalId() {
+        val f = FakeFacade()
+        (1L..600L).forEach { id -> f.history.add(row(id).copy(serverSeq = 1000L + id, serverTimestampMs = 2_000L)) }
+        val pending = row(700L, direction = MessageDirection.OUTGOING)
+        f.history.add(pending)
+        val window = HistoryWindow()
+        window.latest(f.timelinePage("P", null, 50), localHead = 700L)
+        assertEquals(700L, window.rows.last().localId)
+        val accepted = pending.copy(deliveryState = DeliveryState.ACCEPTED, serverSeq = 500L, serverTimestampMs = 1_000L)
+        f.history[f.history.lastIndex] = accepted
+        window.latest(f.timelinePage("P", null, 50), window.rows.map { f.historyMessage("P", it.localId) }, 700L)
+        assertEquals(700L, window.rows.first().localId)
+        while (window.gapBefore != null) window.latest(f.timelinePage("P", window.gapBefore, 50))
+        while (window.nextBefore != null) window.older(f.timelinePage("P", window.nextBefore, 50))
+        assertEquals(601, window.rows.size)
+        assertEquals(601, window.rows.map { it.localId }.distinct().size)
+        assertEquals(500L, window.rows.first().serverSeq)
+        assertEquals(700L, window.viewedAnchor(listOf(700L)))
+        assertEquals(700L, f.historyPage("P", null, 1).rows.single().localId)
+    }
+
+    @Test fun bridgeDoesNotAdvanceIngestionPastAnUnseenLateReceive() {
+        val f = FakeFacade()
+        (1L..100L).forEach { f.history.add(row(it).copy(serverSeq = it * 10, serverTimestampMs = 1_000L)) }
+        val window = HistoryWindow()
+        window.latest(f.timelinePage("P", null, 50), localHead = 100L)
+        (101L..201L).forEach { f.history.add(row(it).copy(serverSeq = it * 10, serverTimestampMs = 1_000L)) }
+        window.latest(f.timelinePage("P", null, 50), localHead = 201L)
+        // A receive between pages: one new row is in the bridge, another is far below it.
+        f.history.add(row(202L).copy(serverSeq = 5L, serverTimestampMs = 1_000L))
+        f.history.add(row(203L).copy(serverSeq = 1_305L, serverTimestampMs = 1_000L))
+        while (window.gapBefore != null) window.latest(f.timelinePage("P", window.gapBefore, 50))
+        assertTrue(window.rows.any { it.localId == 203L })
+        assertTrue(window.rows.none { it.localId == 202L })
+        assertEquals(201L, window.latestLocalId)
+        val appended = f.historyPage("P", null, 50).rows.filter { it.localId > window.latestLocalId!! }
+        window.latest(f.timelinePage("P", null, 50), appended, 203L)
+        assertEquals(1, window.rows.count { it.localId == 202L })
+        assertEquals(203L, window.latestLocalId)
     }
 }

@@ -1,5 +1,5 @@
-//! R18 local text history. Times are local wall-clock milliseconds, never sender
-//! timestamps. Read cursors/unread counts stay on this device, not on the wire.
+//! R18 local text history with separate ingestion and server-ordered timelines.
+//! Read cursors/unread counts stay on this device, not on the wire.
 //! Content and aliases use the existing authenticated column-sealing functions.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -20,8 +20,9 @@ pub enum DeliveryState {
     Delivered,
 }
 
-/// Positive durable local ID orders the timeline. Incoming delivery_state is
-/// always None; outgoing status is a persisted server-ACK fact (or Queued).
+/// Positive durable local ID identifies ingestion, not server presentation order.
+/// Incoming delivery_state is always None; outgoing status is a persisted
+/// server-ACK fact (or Queued).
 #[derive(Clone, PartialEq, Eq, uniffi::Record)]
 pub struct HistoryMessage {
     pub local_id: i64,
@@ -31,6 +32,8 @@ pub struct HistoryMessage {
     pub text: String,
     pub local_timestamp_ms: i64,
     pub delivery_state: Option<DeliveryState>,
+    pub server_seq: Option<i64>,
+    pub server_timestamp_ms: Option<i64>,
 }
 
 impl std::fmt::Debug for HistoryMessage {
@@ -43,8 +46,8 @@ impl std::fmt::Debug for HistoryMessage {
     }
 }
 
-/// Newest first (local_id DESC), exclusive next_before_local_id. Reverse rows
-/// for chronological rendering; prepend reversed older pages. None = exhausted.
+/// Newest first in the called API's order, with an exclusive local-ID anchor.
+/// Reverse rows for chronological rendering. None = exhausted.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct HistoryPage {
     pub rows: Vec<HistoryMessage>,
@@ -198,49 +201,63 @@ pub fn history_page(
     before_local_id: Option<i64>,
     limit: u32,
 ) -> Result<HistoryPage, HistoryError> {
+    page(conn, contact_id, before_local_id, limit, false)
+}
+
+/// Presentation order, distinct from append-only IDs used by send reconciliation
+/// and local read cursors. Legacy unknown rows form an honest local-order prefix;
+/// confirmed rows follow server seq; pending rows form a local-order tail.
+pub fn timeline_page(
+    conn: &Connection,
+    contact_id: &str,
+    before_local_id: Option<i64>,
+    limit: u32,
+) -> Result<HistoryPage, HistoryError> {
+    page(conn, contact_id, before_local_id, limit, true)
+}
+fn page(
+    conn: &Connection,
+    contact_id: &str,
+    before_local_id: Option<i64>,
+    limit: u32,
+    timeline: bool,
+) -> Result<HistoryPage, HistoryError> {
     let tx = Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Deferred)?;
     require_contact(&tx, contact_id)?;
     if let Some(anchor) = before_local_id {
         require_anchor(&tx, contact_id, anchor)?;
     }
     let limit = limit.clamp(1, 100) as usize;
-    let mut stmt = tx.prepare(
-        "SELECT local_id,message_id,direction,CAST(dmsg_unseal('history_text',text) AS TEXT),local_timestamp_ms,delivery_state
-         FROM core_history WHERE contact_id=?1 AND local_id<=?2
-         ORDER BY local_id DESC LIMIT ?3",
-    )?;
+    let key =
+        "CASE WHEN server_seq IS NOT NULL THEN 1 WHEN delivery_state='queued' THEN 2 ELSE 0 END";
+    let mut sql="SELECT local_id,message_id,direction,CAST(dmsg_unseal('history_text',text) AS TEXT),local_timestamp_ms,delivery_state,server_seq,server_timestamp_ms FROM core_history WHERE contact_id=?1".to_string();
+    let anchor: Option<(i64, i64)> = if timeline {
+        before_local_id.map(|id|tx.query_row(&format!("SELECT {key},coalesce(server_seq,local_id) FROM core_history WHERE local_id=?1"),[id],|r|Ok((r.get(0)?,r.get(1)?)))).transpose()?
+    } else {
+        None
+    };
+    if timeline {
+        sql+=&format!(" AND (?2 IS NULL OR ({key},coalesce(server_seq,local_id)) < (?2,?3)) ORDER BY {key} DESC,coalesce(server_seq,local_id) DESC LIMIT ?4");
+    } else {
+        sql += " AND local_id<=?2 ORDER BY local_id DESC LIMIT ?4";
+    }
+    let mut stmt = tx.prepare(&sql)?;
     // A validated positive anchor makes subtract-one safe and lets SQLite use
     // the contact/local_id index range directly, even for deep older pages.
     let upper = before_local_id.map(|id| id - 1).unwrap_or(i64::MAX);
-    let mut rows = stmt.query(params![contact_id, upper, (limit + 1) as i64])?;
+    let mut rows = if timeline {
+        stmt.query(params![
+            contact_id,
+            anchor.map(|k| k.0),
+            anchor.map(|k| k.1),
+            (limit + 1) as i64
+        ])?
+    } else {
+        stmt.query(params![contact_id, upper, None::<i64>, (limit + 1) as i64])?
+    };
     let mut out = Vec::with_capacity(limit + 1);
     while let Some(row) = rows.next()? {
-        let message_id: Vec<u8> = row.get(1)?;
-        if message_id.len() != 16 {
-            return Err(HistoryError::Store);
-        }
-        let direction = match row.get::<_, String>(2)?.as_str() {
-            "incoming" => MessageDirection::Incoming,
-            "outgoing" => MessageDirection::Outgoing,
-            _ => return Err(HistoryError::Store),
-        };
-        let delivery = row
-            .get::<_, Option<String>>(5)?
-            .as_deref()
-            .map(state)
-            .transpose()?;
-        if (direction == MessageDirection::Outgoing) != delivery.is_some() {
-            return Err(HistoryError::Store);
-        }
-        out.push(HistoryMessage {
-            local_id: row.get(0)?,
-            message_id_hex: hex(&message_id),
-            contact_id: contact_id.into(),
-            direction,
-            text: row.get(3)?,
-            local_timestamp_ms: row.get(4)?,
-            delivery_state: delivery,
-        });
+        out.push(read_message(row, contact_id)?);
     }
     let next = if out.len() > limit {
         out.pop();
@@ -252,6 +269,79 @@ pub fn history_page(
         rows: out,
         next_before_local_id: next,
     })
+}
+
+fn read_message(row: &rusqlite::Row<'_>, contact_id: &str) -> Result<HistoryMessage, HistoryError> {
+    let message_id: Vec<u8> = row.get(1)?;
+    if message_id.len() != 16 {
+        return Err(HistoryError::Store);
+    }
+    let direction = match row.get::<_, String>(2)?.as_str() {
+        "incoming" => MessageDirection::Incoming,
+        "outgoing" => MessageDirection::Outgoing,
+        _ => return Err(HistoryError::Store),
+    };
+    let delivery = row
+        .get::<_, Option<String>>(5)?
+        .as_deref()
+        .map(state)
+        .transpose()?;
+    if (direction == MessageDirection::Outgoing) != delivery.is_some() {
+        return Err(HistoryError::Store);
+    }
+    Ok(HistoryMessage {
+        local_id: row.get(0)?,
+        message_id_hex: hex(&message_id),
+        contact_id: contact_id.into(),
+        direction,
+        text: row.get(3)?,
+        local_timestamp_ms: row.get(4)?,
+        delivery_state: delivery,
+        server_seq: row.get(6)?,
+        server_timestamp_ms: row.get(7)?,
+    })
+}
+
+/// Monotonic authenticated metadata, never replace a known order with a retry's
+/// wall clock or fabricate TTL-expired legacy order. Caller owns transaction.
+pub(crate) fn set_order(
+    tx: &Transaction<'_>,
+    id: i64,
+    order: Option<dmsg_protocol::chronology::Order>,
+) -> Result<(), String> {
+    if let Some(o) = order {
+        if o.seq <= 0 || o.timestamp_ms < 0 {
+            return Err("invalid server order".into());
+        }
+        let old:Option<(i64,i64)>=tx.query_row("SELECT server_seq,server_timestamp_ms FROM core_history WHERE local_id=?1 AND server_seq IS NOT NULL",[id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|_|"history order lookup failed")?;
+        if old.is_some_and(|v| v != (o.seq, o.timestamp_ms)) {
+            return Err("server order changed".into());
+        }
+        tx.execute("UPDATE core_history SET server_seq=?2,server_timestamp_ms=?3,order_checked=1 WHERE local_id=?1",params![id,o.seq,o.timestamp_ms]).map_err(|_|"history order update failed")?;
+    } else {
+        tx.execute(
+            "UPDATE core_history SET order_checked=1 WHERE local_id=?1",
+            [id],
+        )
+        .map_err(|_| "history order check failed")?;
+    }
+    Ok(())
+}
+
+pub fn history_message(
+    conn: &Connection,
+    contact_id: &str,
+    local_id: i64,
+) -> Result<HistoryMessage, HistoryError> {
+    let tx = Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Deferred)?;
+    require_contact(&tx, contact_id)?;
+    if local_id <= 0 {
+        return Err(HistoryError::InvalidInput);
+    }
+    let mut stmt = tx.prepare("SELECT local_id,message_id,direction,CAST(dmsg_unseal('history_text',text) AS TEXT),local_timestamp_ms,delivery_state,server_seq,server_timestamp_ms FROM core_history WHERE contact_id=?1 AND local_id=?2")?;
+    let mut rows = stmt.query(params![contact_id, local_id])?;
+    let row = rows.next()?.ok_or(HistoryError::InvalidInput)?;
+    read_message(row, contact_id)
 }
 
 /// Exact outgoing status; None for an unknown ID or incoming-only ID. Never
@@ -465,6 +555,62 @@ mod tests {
         let local_id = tx.last_insert_rowid();
         tx.commit().unwrap();
         local_id
+    }
+
+    #[test]
+    fn presentation_pages_follow_server_order_across_600_rows_not_local_ids_or_clocks() {
+        let (conn, dir) = fixture("server-order");
+        for n in 1..=601 {
+            let id = append(&conn, A, n, true, "fixture");
+            let tx = Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            set_order(
+                &tx,
+                id,
+                Some(dmsg_protocol::chronology::Order {
+                    seq: 602 - n as i64,
+                    timestamp_ms: 1000,
+                }),
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+        let local = history_page(&conn, A, None, 2).unwrap();
+        assert_eq!(
+            local.rows.iter().map(|r| r.local_id).collect::<Vec<_>>(),
+            vec![601, 600]
+        );
+        let mut cursor = None;
+        let mut ids = vec![];
+        loop {
+            let p = timeline_page(&conn, A, cursor, 50).unwrap();
+            assert!(p.rows.len() <= 50);
+            ids.extend(p.rows.iter().map(|r| r.local_id));
+            cursor = p.next_before_local_id;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(ids, (1..=601).collect::<Vec<_>>());
+        let tx =
+            Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate).unwrap();
+        assert!(set_order(
+            &tx,
+            1,
+            Some(dmsg_protocol::chronology::Order {
+                seq: 42,
+                timestamp_ms: 3000
+            })
+        )
+        .is_err());
+        drop(tx);
+        assert_eq!(history_message(&conn, A, 1).unwrap().server_seq, Some(601));
+        assert_eq!(history_message(&conn, A, 601).unwrap().server_seq, Some(1));
+        append(&conn, B, 900, true, "other contact");
+        assert_eq!(history_message(&conn, A, 601).unwrap().local_id, 601);
+        assert!(timeline_page(&conn, B, Some(1), 50).is_err());
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

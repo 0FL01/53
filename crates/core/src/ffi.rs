@@ -895,6 +895,25 @@ impl DmsgClient {
             .map_err(map_history)
     }
 
+    /// Server-ordered presentation page; local IDs remain stable anchors.
+    pub fn timeline_page(
+        &self,
+        contact_id: String,
+        before_local_id: Option<i64>,
+        limit: u32,
+    ) -> Result<HistoryPage, FfiError> {
+        crate::history::timeline_page(&self.conn()?, &contact_id, before_local_id, limit)
+            .map_err(map_history)
+    }
+    /// Refresh a retained row's complete metadata, without trusting its old position.
+    pub fn history_message(
+        &self,
+        contact_id: String,
+        local_id: i64,
+    ) -> Result<crate::history::HistoryMessage, FfiError> {
+        crate::history::history_message(&self.conn()?, &contact_id, local_id).map_err(map_history)
+    }
+
     /// Exact persisted outgoing state. None means unknown/incoming-only, never
     /// delivered. Both cases are distinct from malformed hex (InvalidInput).
     pub fn message_status(

@@ -207,6 +207,40 @@ pub fn fetch(
     Ok(out)
 }
 
+/// No writes, plaintext or foreign-message enumeration. Missing and foreign are
+/// indistinguishable; sender keys/recipient ownership come from authenticated DB.
+pub fn metadata(
+    conn: &Connection,
+    user: &[u8; 16],
+    keys: &[dmsg_protocol::chronology::Key],
+) -> Result<Vec<Option<dmsg_protocol::chronology::Order>>, MboxError> {
+    if keys.is_empty() || keys.len() > dmsg_protocol::chronology::MAX {
+        return Err(MboxError::Bad);
+    }
+    let mut stmt=conn.prepare("SELECT m.seq,m.created_at FROM mailbox_events m JOIN devices d ON d.device_key=m.sender_device WHERE m.sender_device=?1 AND m.message_id=?2 AND (m.recipient_user_id=?3 OR d.user_id=?3)").map_err(|e|store("metadata",e))?;
+    keys.iter()
+        .map(|(sender, mid)| {
+            let row: Option<(i64, i64)> = stmt
+                .query_row(
+                    rusqlite::params![sender.as_slice(), mid.as_slice(), user.as_slice()],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()
+                .map_err(|e| store("metadata", e))?;
+            row.map(|(seq, seconds)| {
+                if seq <= 0 || seconds < 0 {
+                    return Err(MboxError::Bad);
+                }
+                Ok(dmsg_protocol::chronology::Order {
+                    seq,
+                    timestamp_ms: seconds.checked_mul(1000).ok_or(MboxError::Bad)?,
+                })
+            })
+            .transpose()
+        })
+        .collect()
+}
+
 /// DELIVERY_ACK: пометить seq + двинуть cursor по доставленному префиксу
 /// получателя — всё в одной TX. Глобальные пропуски seq не блокируют cursor.
 /// Возвращает новый cursor.

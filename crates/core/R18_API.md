@@ -7,6 +7,10 @@ callers. Kotlin bindings must be regenerated from the host cdylib by integration
 ```rust
 history_page(contact_id: String, before_local_id: Option<i64>, limit: u32)
     -> Result<HistoryPage, FfiError>
+timeline_page(contact_id: String, before_local_id: Option<i64>, limit: u32)
+    -> Result<HistoryPage, FfiError>
+history_message(contact_id: String, local_id: i64)
+    -> Result<HistoryMessage, FfiError>
 message_status(message_id_hex: String)
     -> Result<Option<DeliveryState>, FfiError>
 dialogs_page(cursor: Option<String>, limit: u32)
@@ -36,6 +40,8 @@ HistoryMessage {
     text: String,
     local_timestamp_ms: i64,
     delivery_state: Option<DeliveryState>,
+    server_seq: Option<i64>,
+    server_timestamp_ms: Option<i64>,
 }
 HistoryPage {
     rows: Vec<HistoryMessage>,
@@ -61,10 +67,18 @@ DialogsPage {
 ## UI semantics
 
 - Page limits clamp to **1..=100**, as in the existing core API.
-- History is **newest first, local ID descending**. Start with `None`; use the
-  returned exclusive `next_before_local_id` for older rows. Reverse each page
-  for chronological bubbles and prepend reversed older pages. `None` next means
-  exhausted. History reads do not mark anything read.
+- `history_page` remains **local ID descending**: append-only ingestion order
+  for exact send reconciliation, not presentation chronology.
+- `timeline_page` is newest first: queued local-ID tail, confirmed **original
+  server seq descending**, then unavailable legacy metadata by local ID.
+  Reverse for displayed bubbles. Start with `None`; exclusive
+  `next_before_local_id` resolves the anchor's current timeline position, not
+  numeric ID order. `None` next means exhausted. `history_message` refreshes an
+  exact retained row by stable ID. All history reads leave read cursors unchanged.
+- Pending confirmation can move a stable row between pages. UI refreshes retained
+  rows, discovers appends through the separate ingestion watermark, bridges
+  canonical gaps and preserves the visible local-ID/offset anchor. A bridge page
+  must not advance ingestion past unseen late receives.
 - IDs are positive durable SQLite local IDs, shared across contacts. A supplied
   history/read anchor must exist in the requested contact; zero, negatives,
   nonexistent/future and cross-contact IDs return `InvalidInput`.
@@ -76,9 +90,14 @@ DialogsPage {
 - Pagination is keyset-based, not a frozen multi-call snapshot. Restart dialog
   paging at `None` after send/fetch/contact additions change activity. A history
   insert above an older-page anchor does not duplicate older rows.
-- Times are this device's `SystemTime` milliseconds since Unix epoch, recorded
-  when queueing/decrypting locally. They are **not sender times, server times,
-  last-seen or read receipts**. Pre-epoch/overflow clocks fail the write.
+- `local_timestamp_ms` remains this device's queue/decrypt time, unchanged on
+  confirmation/upgrade. Dialog activity remains local. These are not server times
+  or read receipts; pre-epoch/overflow local clocks fail the write.
+- Paired `server_seq`/`server_timestamp_ms` come from the authenticated server's
+  durable acceptance metadata (seconds represented as milliseconds). Dedup/retry
+  cannot replace them. Confirmed bubbles show server time, queued bubbles local
+  queue time. Missing/TTL-expired legacy metadata gets an honest local-time label,
+  not a fabricated server timestamp or a restored missing message body.
 - Preview is the latest local history row, truncated to 160 Unicode scalar
   values. Empty dialogs have `None` preview/time. Alias is trimmed, 1..=128 UTF-8
   bytes, without control characters; `None` clears it, invalid values are errors.
@@ -87,7 +106,7 @@ DialogsPage {
   incoming and outgoing viewed anchors are accepted. The returned cursor is
   monotonic; older valid anchors are idempotent. No read receipt is transmitted.
 - Incoming rows have `delivery_state=None`. Outgoing status is exact, persistent
-  and monotonic: Queued before a confirmed SEND_ACK, Accepted on ST_ACCEPTED,
+  and monotonic: fresh Queued until valid SEND_ACK plus its original metadata, Accepted on ST_ACCEPTED,
   Delivered on ST_DELIVERED. Transport errors retain the last known state.
   `message_status` accepts exactly 32 ASCII hex characters (case-insensitive),
   returns `None` for unknown/incoming-only IDs, and never interprets absent
@@ -105,9 +124,14 @@ DialogsPage {
 
 ## Storage and atomicity
 
-Core local schema is **6**. Existing nonempty/unversioned, older (including 5)
-and future schemas are rejected before database writes, with no migration,
-aliases or automatic wipe. Wire VERSION=2 and server schema=5 are unchanged.
+Core local schema is **7**. The explicitly approved **6→7** upgrade verifies the
+encrypted storage marker/key first, then atomically adds three ordering columns
+and indexes in an IMMEDIATE transaction. Identity/account, encrypted text,
+ratchets, local IDs/timestamps and read cursors are not rewritten. Wrong keys,
+nonempty/unversioned, all other older and future schemas fail before writes;
+no generic migration, aliases or wipe. An older core6 APK cannot reopen upgraded
+data; do not downgrade/reset it as rollback. Wire2/server schema5 stay unchanged;
+deploy metadata-capable backend before this client.
 Same-current-schema plain-to-sealed conversion remains supported for Rust
 harness storage; Android uses `open_encrypted` with its Keystore-wrapped key.
 
@@ -118,3 +142,9 @@ Outgoing history is in the same transaction as ratchet and ciphertext outbox;
 incoming history is in the account/session/inbox-dedup transaction before ACK.
 Retry reuses ciphertext/message ID, bypasses history insertion, and cannot
 regress status. Status updates commit outbox/history together.
+
+New incoming history stores validated server order in its decrypt transaction
+before ACK; SEND promotion stores order/status together. Existing reconnect/fetch
+restores at most 32 unchecked legacy rows per call, records unavailable results
+without starving later batches, and never silently changes a known order. No
+extra worker or periodic full-history scan is introduced.

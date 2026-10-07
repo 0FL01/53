@@ -220,4 +220,7 @@
     <string name="trust_server_keys">Контакт принят · ключи от доверенного сервера, лично по QR не проверены</string>
     <string name="trust_inviting">Контакт добавлен · запрос в очереди до следующего подключения</string>
     <string name="pending_contacts">Сообщений, ожидающих принятия контакта: %1$d</string>
+    <string name="server_timestamp">Время сервера: %1$s</string>
+    <string name="pending_timestamp">В очереди локально: %1$s</string>
+    <string name="legacy_timestamp">Локальное время (время сервера недоступно): %1$s</string>
 </resources>

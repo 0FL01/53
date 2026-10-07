@@ -222,6 +222,7 @@ impl Core {
         )
         .await?;
         self.push_contact_requests(t).await?;
+        self.sync_history_order(t).await?;
         Ok(count)
     }
 
@@ -310,6 +311,66 @@ impl Core {
             return Err(OlmError::Protocol("bad contact reply"));
         }
         Ok(p)
+    }
+
+    async fn message_orders(
+        &self,
+        t: &mut impl Transport,
+        keys: &[dmsg_protocol::chronology::Key],
+    ) -> Result<Vec<Option<dmsg_protocol::chronology::Order>>, OlmError> {
+        let p = dmsg_protocol::chronology::build_keys(keys)
+            .ok_or(OlmError::Protocol("metadata keys"))?;
+        t.send_frame(dmsg_protocol::OP_MESSAGE_METADATA, &p)
+            .await
+            .map_err(|e| OlmError::Transport(e.to_string()))?;
+        let p = self
+            .contact_reply(t, dmsg_protocol::OP_MESSAGE_METADATA_RESP)
+            .await?;
+        dmsg_protocol::chronology::parse_orders(&p, keys.len())
+            .ok_or(OlmError::Protocol("metadata response"))
+    }
+
+    /// One bounded legacy batch per existing poll/reconnect, no new worker.
+    /// An absent/expired record is marked checked, so it cannot starve later rows.
+    async fn sync_history_order(&mut self, t: &mut impl Transport) -> Result<(), OlmError> {
+        let pending: Vec<(i64, Vec<u8>, Option<Vec<u8>>)> = {
+            let mut stmt=self.conn.prepare("SELECT local_id,message_id,sender_device FROM core_history WHERE order_checked=0 AND (direction='incoming' OR delivery_state!='queued') ORDER BY local_id LIMIT 32").map_err(|_|OlmError::Store("history order list".into()))?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .map_err(|_| OlmError::Store("history order list".into()))?;
+            rows.collect::<Result<_, _>>()
+                .map_err(|_| OlmError::Store("history order list".into()))?
+        };
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let keys = pending
+            .iter()
+            .map(|(_, mid, sender)| {
+                Ok((
+                    match sender {
+                        Some(v) => v
+                            .as_slice()
+                            .try_into()
+                            .map_err(|_| OlmError::Protocol("history sender"))?,
+                        None => self.device_pub,
+                    },
+                    mid.as_slice()
+                        .try_into()
+                        .map_err(|_| OlmError::Protocol("history mid"))?,
+                ))
+            })
+            .collect::<Result<Vec<_>, OlmError>>()?;
+        let orders = self.message_orders(t, &keys).await?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|_| OlmError::Store("history order tx".into()))?;
+        for ((id, _, _), order) in pending.iter().zip(orders) {
+            crate::history::set_order(&tx, *id, order).map_err(OlmError::Store)?;
+        }
+        tx.commit()
+            .map_err(|_| OlmError::Store("history order commit".into()))
     }
 
     /// Resume this connection using the Noise identity, without credentials.
@@ -607,7 +668,19 @@ impl Core {
         )
         .await?;
         self.sync_contacts(t).await?;
+        self.sync_history_order(t).await?;
         let events = self.fetch_raw(t).await?;
+        let mut orders = std::collections::HashMap::new();
+        for chunk in events.chunks(dmsg_protocol::chronology::MAX) {
+            let keys: Vec<_> = chunk.iter().map(|e| (e.sender, e.message_id)).collect();
+            for (e, order) in chunk.iter().zip(self.message_orders(t, &keys).await?) {
+                let order = order.ok_or(OlmError::Protocol("missing event metadata"))?;
+                if u64::try_from(order.seq).ok() != Some(e.seq) {
+                    return Err(OlmError::Protocol("event metadata mismatch"));
+                }
+                orders.insert(e.seq, order);
+            }
+        }
         let mut res = FetchResult::default();
         let mut seqs: Vec<u64> = Vec::with_capacity(events.len());
         for e in &events {
@@ -633,7 +706,10 @@ impl Core {
                     }
                 }
             }
-            match self.decrypt_event(e).await {
+            match self
+                .decrypt_event_order(e, orders.get(&e.seq).copied())
+                .await
+            {
                 Ok(Some(r)) => {
                     res.received.push(r);
                     seqs.push(e.seq);
@@ -661,7 +737,15 @@ impl Core {
     /// Unknown/unaccepted and identity/integrity failures stay unacknowledged.
     /// Explicitly blocked senders follow the existing drop policy.
     /// Fail::Err — жёсткая ошибка (store), прерывает пачку.
+    #[cfg(test)]
     async fn decrypt_event(&mut self, e: &RawEvent) -> Result<Option<Received>, Fail> {
+        self.decrypt_event_order(e, None).await
+    }
+    async fn decrypt_event_order(
+        &mut self,
+        e: &RawEvent,
+        order: Option<dmsg_protocol::chronology::Order>,
+    ) -> Result<Option<Received>, Fail> {
         // At-least-once replay cannot be decrypted twice by an Olm ratchet.
         // Only a durable inbox row permits this early return; a lookup failure
         // aborts the batch before ACK, and unseen events still undergo checks.
@@ -842,6 +926,10 @@ impl Core {
             if n == 1 {
                 crate::history::insert(&tx, &e.message_id, &c.contact_id, Some(&e.sender), text)
                     .map_err(OlmError::Store)?;
+                if let Some(order) = order {
+                    let id = tx.last_insert_rowid();
+                    crate::history::set_order(&tx, id, Some(order)).map_err(OlmError::Store)?;
+                }
             }
             tx.commit()
                 .map_err(|e| OlmError::Store(format!("commit: {e}")))?;
@@ -962,7 +1050,14 @@ impl Core {
                 ST_DELIVERED => crate::store::outbox_status::DELIVERED,
                 _ => return Err(OlmError::Protocol("bad send status")),
             };
-            crate::store::outbox_set_status(&self.conn, message_id, status)
+            let order = self
+                .message_orders(t, &[(self.device_pub, *message_id)])
+                .await?
+                .into_iter()
+                .next()
+                .flatten()
+                .ok_or(OlmError::Protocol("missing send metadata"))?;
+            crate::store::outbox_set_status_order(&self.conn, message_id, status, Some(order))
                 .map_err(OlmError::Store)?;
             return Ok(());
         }
@@ -1046,6 +1141,10 @@ mod tests {
         replies: VecDeque<(u8, Vec<u8>)>,
         echo_send_ack: bool,
         pub sent: Vec<(u8, Vec<u8>)>,
+        orders: std::collections::HashMap<
+            dmsg_protocol::chronology::Key,
+            dmsg_protocol::chronology::Order,
+        >,
     }
 
     impl Fake {
@@ -1054,6 +1153,7 @@ mod tests {
                 replies: replies.into(),
                 echo_send_ack: false,
                 sent: Vec::new(),
+                orders: Default::default(),
             }
         }
         fn with_echo() -> Self {
@@ -1061,6 +1161,7 @@ mod tests {
                 replies: VecDeque::new(),
                 echo_send_ack: true,
                 sent: Vec::new(),
+                orders: Default::default(),
             }
         }
     }
@@ -1071,6 +1172,26 @@ mod tests {
         }
         async fn send_frame(&mut self, opcode: u8, payload: &[u8]) -> Result<(), TransportError> {
             self.sent.push((opcode, payload.to_vec()));
+            if opcode == dmsg_protocol::OP_MESSAGE_METADATA {
+                let keys = dmsg_protocol::chronology::parse_keys(payload).unwrap();
+                let orders: Vec<_> = keys
+                    .iter()
+                    .map(|key| {
+                        Some(*self.orders.entry(*key).or_insert_with(|| {
+                            dmsg_protocol::chronology::Order {
+                                seq: (u64::from_be_bytes(key.1[..8].try_into().unwrap())
+                                    % 1_000_000
+                                    + 1) as i64,
+                                timestamp_ms: 1000,
+                            }
+                        }))
+                    })
+                    .collect();
+                self.replies.push_front((
+                    dmsg_protocol::OP_MESSAGE_METADATA_RESP,
+                    dmsg_protocol::chronology::build_orders(&orders).unwrap(),
+                ));
+            }
             // Empty request list is the default directory state in these
             // ratchet-focused doubles. Contact scenarios script a real list.
             if opcode == dmsg_protocol::OP_CONTACT_REQUESTS
@@ -1092,7 +1213,24 @@ mod tests {
             Ok(())
         }
         async fn recv_frame(&mut self) -> Result<(u8, Vec<u8>), TransportError> {
-            self.replies.pop_front().ok_or(TransportError::Closed)
+            let reply = self.replies.pop_front().ok_or(TransportError::Closed)?;
+            if reply.0 == OP_FETCH_RESP {
+                if let Some(events) = mp::parse_fetch_resp(&reply.1) {
+                    for e in events {
+                        self.orders.insert(
+                            (
+                                e.sender.try_into().unwrap(),
+                                e.message_id.try_into().unwrap(),
+                            ),
+                            dmsg_protocol::chronology::Order {
+                                seq: e.seq as i64,
+                                timestamp_ms: 1000,
+                            },
+                        );
+                    }
+                }
+            }
+            Ok(reply)
         }
         async fn close(&mut self) {}
         fn is_connected(&self) -> bool {

@@ -431,6 +431,7 @@ async fn handle_conn(
                 match op {
                     OP_SEND => send_reply(&st, &c, &device_key, &payload)?,
                     OP_FETCH => fetch_reply(&st, &c, &user, &device_key, &payload)?,
+                    OP_MESSAGE_METADATA => metadata_reply(&st, &user, &device_key, payload),
                     OP_DELIVERY_ACK => ack_reply(&st, &c, &user, &device_key, &payload)?,
                     OP_UPLOAD_PREKEYS => upload_reply(&st, &c, &user, &device_key, &payload)?,
                     OP_CLAIM => claim_reply(&st, &c, &device_key, &payload)?,
@@ -538,6 +539,23 @@ fn is_revoked(db: &rusqlite::Connection, device_key: &[u8]) -> bool {
 
 fn mbox_code(e: &mbox::MboxError) -> u8 {
     e.code()
+}
+
+fn metadata_reply(st: &State, user: &[u8; 16], device: &[u8; 32], payload: &[u8]) -> Vec<u8> {
+    let db = st.db.lock().expect("db");
+    let reply = (|| {
+        if is_revoked(&db, device) {
+            return Err(ERR_REVOKED);
+        }
+        let keys = dmsg_protocol::chronology::parse_keys(payload).ok_or(ERR_BAD)?;
+        let orders = mbox::metadata(&db, user, &keys).map_err(|e| e.code())?;
+        let p = dmsg_protocol::chronology::build_orders(&orders).ok_or(ERR_BAD)?;
+        Ok(p)
+    })();
+    match reply {
+        Ok(p) => encode_frame(OP_MESSAGE_METADATA_RESP, &p).expect("bounded"),
+        Err(code) => encode_frame(OP_ERROR, &[code]).expect("fits"),
+    }
 }
 
 fn contact_reply(

@@ -17,6 +17,54 @@ listed environment. Do not print inherited environment or provider credentials.
 
 ## Operator fixtures
 
+### Confirmed server chronology (2026-10-07)
+
+Use the current metadata-capable backend, generated bindings and arm64 native.
+Run the seven one-QR executions below on two fresh `.gate` accounts first, then
+select exactly one `org.dmsg.client.ChronologyGatesTest#METHOD` per process:
+
+| Phone | Method | Evidence |
+|---|---|---|
+| B | `receiverSendsEarlierBeforeSenderFetch` | Earlier server acceptance while absent on A |
+| A | `senderSendsLaterThenFetchesEarlierMessageAndReopensUi` | Later own send, then delayed peer fetch; opposite local-ingest order, server timeline correct; actual Chat adapter/time/stable IDs and recreation |
+| B | `receiverFetchesLaterTextAndRetainsOrderThroughRetryAndReopen` | Identical four MID/seq/server-time tuples; retry/dedup/recreation unchanged |
+| A and B | `reopenConfirmedTimelineOnFinalApk` | Final APK install-r without fixture reset; local confirmed history and real UI/recreation still correct |
+
+Local clock corruption is SQL **only in the disposable history fixture**, not a
+phone clock/system setting. Actual DNS text verifies the first three methods;
+the final two reopen checks are local UI verification, not additional network
+acceptance. Twelve executions including the seven one-QR gates PASS/zero skips
+on API35 USB and API36 Wi-Fi ADB. Host live integration additionally covers
+offline queued→confirmed, byte-identical retry/reopen and foreign/missing metadata
+indistinguishability. Rust/JVM cover >600 rows, late inserts below the newest page,
+pending movement and receive-between-bridge-pages ingestion watermarks.
+
+After this pair sequence, on a **fresh `.gate` only**, select
+`ChronologyGatesTest#exactRowAndRetainedRefreshOnlyInFreshGatePackage`.
+It seeds synthetic current-schema history, seals it via the real store, checks
+601 exact records and contact boundaries, then verifies the retained last row
+changes Queued→Delivered/server order without duplication and survives recreation.
+This final-native gate passed on the remaining API35 Moto, zero skips; it is local
+native/UI evidence, not a server registration or another DNS delivery claim.
+
+Main `install-r` on both phones verifies authenticated core6→7 with original
+sealed history/local IDs/times, contacts/read cursors, account/identity, Olm/session
+pickles, wrapped key and UID/first-install retained. Actual DNS saved-key resume
+restores metadata for the five shared original events35–39: equal sequence/time,
+unchanged history rows/statuses, actual before/after chat screenshots. Main FGS
+restored. No old ACK/drop body restoration or TTL-deleted metadata fabrication.
+Never downgrade to core6 after upgrade or reset data to make an install pass.
+The final exact-row patch/APK was installed-r and DNS/UI-verified on Moto after
+the user removed Pacman. Pacman retains the preceding tested chronology/schema7
+build; installation of the final artifact there is not claimed. Both original
+authenticated-upgrade and two-phone chronology proofs remain valid and preserved.
+
+JVM57/debug/release/native and targeted localization lint PASS; EN/RU286-key
+parity. The two previously ignored explicit native-host gates/full lint debt are
+not reclassified as passed. Backend schema5/data/pins/volumes/carrier preserved;
+wire2/SEND_ACK/FETCH layouts unchanged. Private evidence stays ignored in
+`.local/chronology/`; contract: `docs/goals/2026-10-07-message-chronology.md`.
+
 ### One contact QR / incoming consent (2026-10-07)
 
 Build with current generated bindings/arm64 native and a trusted public profile,

@@ -1,6 +1,6 @@
 # dmsg wire v2: единая account-auth логика
 
-Реализованный пользовательский путь: **доверенный профиль сервера → Войти / Создать аккаунт → диалоги**. Серверная регистрация `invite_only` (default) или `open`; приглашение QR/файлом — только одноразовое разрешение signup, не credential входа. Server schema5/core schema6, старые schema/wire/`dmsg://join` отвергаются; ENROL/token replay/credential attach/admin invite-rebind удалены. Односторонние contact requests добавлены совместимо, без SQL migration/wipe; сначала обновляется backend, затем клиенты.
+Реализованный пользовательский путь: **доверенный профиль сервера → Войти / Создать аккаунт → диалоги**. Серверная регистрация `invite_only` (default) или `open`; приглашение QR/файлом — только одноразовое разрешение signup, не credential входа. Server schema5/core schema7; единственное утверждённое исключение — authenticated transactional core6→7 без wipe. Прочие старые schema/wire/`dmsg://join` отвергаются; ENROL/token replay/credential attach/admin invite-rebind удалены. Contact requests и chronology metadata добавлены без изменения server SQL schema; сначала обновляется backend, затем клиенты.
 
 ## Публичный профиль
 
@@ -64,6 +64,32 @@ Unknown/unaccepted ciphertext остаётся без ACK в существую�
 
 При одновременных первых отправках нужны две независимые Olm sessions. Они ограничены двумя и хранятся в **существующем sealed session pickle**: legacy primary fields плюс optional `dmsg_receiving_sessions` (≤1). Используются vodozemac session IDs/decrypt; после успешной проверки deterministic session-ID ordering выбирает primary для новых отправок, второй ratchet сохраняет приём ранее отправленного ciphertext. Failed authentication работает с disposable copies; account/session/inbox/history commit атомарен. Это не новая криптография, SQL schema или повторное шифрование outbox.
 
+## Подтверждённый порядок и время
+
+Подтверждённая хронология — первоначальные `mailbox_events.seq` и `created_at`,
+одинаковые для отправителя/получателя. Не время нажатия Send, decrypt или FETCH.
+Offline send остаётся pending локально и занимает подтверждённое место только
+после server commit; retry/dedup возвращают первоначальные seq/date без нового
+ciphertext/MID/bubble. SEND_ACK17 и FETCH_RESP19 сохраняют прежние точные layout.
+
+| Authenticated request | Exact payload | Response |
+|---|---|---|
+| MESSAGE_METADATA `35` | count:u8, 1..32, `[sender_device32][message_id16]` per key | RESP `36`: same count/order, `[seq:u64 BE][accepted_seconds:u64 BE]` per key |
+
+Lookup разрешён только владельцу sender account либо recipient account; не каталог
+чужих сообщений. Неизвестный и чужой key одинаково возвращают `(0,0)`. Positive
+seq, nonnegative seconds и checked seconds→milliseconds conversion валидируются; partial,
+trailing, oversized или неверное число записей — ошибка. Transport/auth и E2E
+body не меняются. Metadata не означает прочтение или наличие plaintext истории.
+
+Core проверяет metadata нового FETCH event до decrypt/ACK и фиксирует его вместе
+с history/account/session/inbox. После SEND_ACK metadata/status фиксируются одной
+TX; потеря ответа оставляет прежний durable queued ciphertext для dedup retry.
+Upgrade6→7 сохраняет старые IDs/local times/sealed content, добавляя nullable
+server seq/time и checked marker. Existing reconnect/fetch восстанавливает ≤32
+legacy rows за вызов; TTL-deleted/foreign rows остаются честным local-time fallback.
+Known seq/time immutable; partial unique index защищает историю от повторного seq.
+
 ## Проверка и границы
 
-`cargo build -p msgd && cargo test --workspace`, core `accounts`/`e2e_olm`/`one_qr_contacts`, server `auth_probe`/`msgctl_probe`/backup fixtures проверяют schemas, policy/races/retry/replace/peer STOP, deferred consent, simultaneous first sends и pre-block. Android recursive-DNS one-QR acceptance и ограничения optical evidence: `android/AUTH_GATES.md`, `docs/goals/2026-10-07-one-qr-contacts.md`. Реальные credentials/keys/invitations/deployment values не в Git/argv/logs; production secrets read-only файлами.
+`cargo build -p msgd && cargo test --workspace`, core `accounts`/`e2e_olm`/`one_qr_contacts`/`chronology`, server `auth_probe`/`msgctl_probe`/backup fixtures проверяют schemas, policy/races/retry/replace/peer STOP, consent, simultaneous first sends, pre-block, authenticated metadata scope и delayed/offline chronology. Android acceptance/evidence limits: `android/AUTH_GATES.md`, goals `2026-10-07-one-qr-contacts.md` и `2026-10-07-message-chronology.md`. Реальные credentials/keys/invitations/deployment values не в Git/argv/logs; production secrets read-only файлами.

@@ -42,8 +42,6 @@ class ChatActivity : DmsgActivity() {
     @Volatile private var active = false
     @Volatile private var lifecycleStamp = 0L
     private var readPending = false
-    private var gapBefore: Long? = null
-    private var gapThrough: Long? = null
     private var pageError = ""
     private val id get() = intent.getStringExtra("peer").orEmpty()
     private val handler = Handler(Looper.getMainLooper())
@@ -145,38 +143,41 @@ class ChatActivity : DmsgActivity() {
 
     private fun loadPage(older: Boolean = false) {
         if (!active || memory.pending) return
-        val before = if (gapBefore != null) gapBefore else if (older) memory.history.nextBefore ?: return else null
+        val before = memory.history.gapBefore ?: if (older) memory.history.nextBefore ?: return else null
         val stamp = pageGuard.begin() ?: return
         val firstId = memory.history.rows.getOrNull(list.firstVisiblePosition)?.localId
         val offset = list.getChildAt(0)?.top ?: 0
         val bottom = !memory.history.initialized || list.lastVisiblePosition >= adapter.count - 2
-        val previousNewest = memory.history.rows.lastOrNull()?.localId
-        val bridge = gapBefore != null
-        val outgoingIds = memory.history.rows.filter { it.direction == MessageDirection.OUTGOING && it.deliveryState != uniffi.dmsg_core.DeliveryState.DELIVERED }.map { it.messageIdHex }
+        val bridge = memory.history.gapBefore != null
+        val retainedIds = if (!older && !bridge) memory.history.rows.map { it.localId } else emptyList()
+        val ingestionThrough = memory.history.latestLocalId
         Core.dispatch {
             val result = runCatching {
-                val f = Core.facade(applicationContext)
-                val contact = f.get(id)
-                val page = f.historyPage(id, before, 50)
-                // Exact status is also refreshed for older loaded outgoing rows.
-                val statuses = outgoingIds.map { it to f.messageStatus(it) }
-                Triple(contact, page, statuses)
+                synchronized(Core.storeLock) {
+                    val f = Core.facade(applicationContext)
+                    val contact = f.get(id)
+                    val page = f.timelinePage(id, before, 50)
+                    val refreshed = retainedIds.map { f.historyMessage(id, it) }.toMutableList()
+                    val head = if (!older && !bridge) f.historyPage(id, null, 1).rows.firstOrNull()?.localId else null
+                    // Late receives can rank BELOW the newest server-order page.
+                    // Discover them by append-only ingestion IDs, not timeline rank.
+                    if (head != null && ingestionThrough != null && head > ingestionThrough) {
+                        var cursor: Long? = null
+                        do {
+                            val appended = f.historyPage(id, cursor, 50)
+                            refreshed.addAll(appended.rows.filter { it.localId > ingestionThrough })
+                            cursor = if (appended.rows.lastOrNull()?.localId?.let { it > ingestionThrough } == true) appended.nextBeforeLocalId else null
+                        } while (cursor != null)
+                    }
+                    Triple(contact, page, refreshed to head)
+                }
             }
             runOnUiThread {
                 if (!active || !pageGuard.finish(stamp)) return@runOnUiThread
-                result.fold({ (contact, page, statuses) ->
+                result.fold({ (contact, page, refresh) ->
                     memory.contact = contact
                     pageError = ""
-                    if (older && !bridge) memory.history.older(page) else memory.history.latest(page)
-                    statuses.forEach { (mid, status) ->
-                        // Unknown never upgrades a previously known state.
-                        if (status != null) memory.history.rows.find { it.messageIdHex == mid }?.deliveryState = status
-                    }
-                    if (bridge) {
-                        gapBefore = if (page.rows.any { it.localId <= (gapThrough ?: 0L) }) null else page.nextBeforeLocalId
-                    } else if (!older && previousNewest != null && page.rows.isNotEmpty() && page.rows.last().localId > previousNewest) {
-                        gapThrough = previousNewest; gapBefore = page.nextBeforeLocalId
-                    }
+                    if (older && !bridge) memory.history.older(page) else memory.history.latest(page, refresh.first, refresh.second)
                     adapter.notifyDataSetChanged()
                     list.post {
                         if (!active) return@post
@@ -186,7 +187,7 @@ class ChatActivity : DmsgActivity() {
                             if (index >= 0) list.setSelectionFromTop(index, offset)
                         }
                         markViewed()
-                        if (gapBefore != null) loadPage()
+                        if (memory.history.gapBefore != null) loadPage()
                     }
                 }, { pageError = humanError(resources, it) })
                 render()

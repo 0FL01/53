@@ -72,7 +72,13 @@ internal fun trustLabel(resources: Resources, contact: Dialog?): String = resour
     }
 }
 
-/** One local per-contact window; page reads themselves never move the read cursor. */
+internal fun historyOrder(row: HistoryMessage): Pair<Int, Long> =
+    row.serverSeq?.let { 1 to it } ?: if (row.deliveryState == DeliveryState.QUEUED) 2 to row.localId else 0 to row.localId
+internal val historyComparator = compareBy<HistoryMessage>({ historyOrder(it).first }, { historyOrder(it).second })
+internal fun compareHistoryOrder(a: Pair<Int, Long>, b: Pair<Int, Long>): Int =
+    a.first.compareTo(b.first).takeIf { it != 0 } ?: a.second.compareTo(b.second)
+
+/** Server-order window with stable local IDs; reads never move the local read cursor. */
 internal class HistoryWindow {
     val rows = mutableListOf<HistoryMessage>()
     var nextBefore: Long? = null
@@ -81,24 +87,39 @@ internal class HistoryWindow {
         private set
     var gapBefore: Long? = null
         private set
-    private var gapThrough = 0L
-    fun latest(page: HistoryPage) {
-        val previouslyNewest = rows.lastOrNull()?.localId
+    private var gapThrough: Pair<Int, Long>? = null
+    var latestLocalId: Long? = null
+        private set
+    fun latest(page: HistoryPage, refreshed: List<HistoryMessage> = emptyList(), localHead: Long? = null) {
+        val oldById = rows.associateBy { it.localId }
         val bridging = gapBefore != null
         val byId = rows.associateBy { it.localId }.toMutableMap()
+        refreshed.forEach { byId[it.localId] = it }
         page.rows.forEach { byId[it.localId] = it }
-        rows.clear(); rows.addAll(byId.values.sortedBy { it.localId })
+        val metadataMoved = refreshed.any { oldById[it.localId]?.let { old -> historyOrder(old) != historyOrder(it) } == true }
+        // A bridge may see a new high ID without seeing every earlier ingest.
+        // Only a normal refresh/discovery may advance that watermark.
+        val head = localHead ?: if (!bridging) page.rows.maxOfOrNull { it.localId } else null
+        val appended = head?.let { it > (latestLocalId ?: 0L) } == true
+        rows.clear(); rows.addAll(byId.values.sortedWith(historyComparator))
         if (bridging) {
-            gapBefore = if (page.rows.any { it.localId <= gapThrough }) null else page.nextBeforeLocalId
-        } else if (initialized && previouslyNewest != null && page.rows.isNotEmpty() && page.rows.last().localId > previouslyNewest) {
-            gapThrough = previouslyNewest; gapBefore = page.nextBeforeLocalId
+            gapBefore = if (page.rows.any { compareHistoryOrder(historyOrder(it), gapThrough!!) <= 0 }) null else page.nextBeforeLocalId
+        } else if (initialized && (appended || metadataMoved)) {
+            // Keep the previous pagination boundary, not the lowest newly inserted
+            // row: a late receive may rank far below an otherwise contiguous page.
+            val retainedOrders = oldById.keys.mapNotNull { byId[it]?.let(::historyOrder) }
+            gapThrough = if (metadataMoved) retainedOrders.minWithOrNull(::compareHistoryOrder) else retainedOrders.maxWithOrNull(::compareHistoryOrder)
+            gapBefore = if (gapThrough == null || page.rows.any { compareHistoryOrder(historyOrder(it), gapThrough!!) <= 0 }) null else page.nextBeforeLocalId
         }
         if (!initialized) nextBefore = page.nextBeforeLocalId
+        else if (page.nextBeforeLocalId == null) nextBefore = null
+        latestLocalId = maxOf(latestLocalId ?: 0L, head ?: 0L).takeIf { it > 0 }
         initialized = true
     }
     fun older(page: HistoryPage) {
-        val ids = rows.map { it.localId }.toSet()
-        rows.addAll(0, page.rows.asReversed().filter { it.localId !in ids })
+        val byId = rows.associateBy { it.localId }.toMutableMap()
+        page.rows.forEach { byId[it.localId] = it }
+        rows.clear(); rows.addAll(byId.values.sortedWith(historyComparator))
         nextBefore = page.nextBeforeLocalId
     }
     fun viewedAnchor(renderedIds: Collection<Long>): Long? = renderedIds.filter { id -> rows.any { it.localId == id } }.maxOrNull()
