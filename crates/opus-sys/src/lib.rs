@@ -1,5 +1,8 @@
 //! Small ownership boundary around the bundled, statically linked Opus release.
-//! No system-library fallback, model loading, PLC or FEC entry point is exposed.
+//! No system-library fallback or runtime model loading. The fixed voice-note API
+//! rejects concealment packets; [`live`] has a separate bounded profile and PLC.
+
+pub mod live;
 
 use std::{ffi::c_int, ptr::NonNull};
 

@@ -18,13 +18,13 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Acceptance: этот документ содержит замороженный план, evidence и следующий checkpoint; intended commits опубликованы в origin, без unrelated PNG/secrets/.local/build artifacts.
   - Primary evidence: goal, git status/diff/log и успешные scoped push.
   - Status: in_progress
-  - Evidence: preflight master da84814; единственный unrelated untracked файл — пользовательский PNG в 53-opendesign; не трогать/не stage.
+  - Evidence: frozen goal7a37e47 pushed to origin/master. Clean-env SSH push потребовал штатный SSH_AUTH_SOCK (без него publickey denied); для build/test agent socket не передаётся. Пользовательский untracked PNG не трогать/не stage.
 - R2: Отдельный bounded live Opus API, без изменения voice-note контракта.
   - Source: аудированный media-план, ARCHITECTURE §9, переиспользование голосовых сообщений из исходного запроса.
   - Acceptance: исходный кандидат mono PCM16/16kHz, VOIP, 12 kbit/s, 40ms/640samples, VBR с реальным max_data_bytes=100, encoder10/decoder7, WB maximum/AUTO, DTX/PLC. FEC/DRED/BWE/QEXT off. Legal tiny DTX packets допустимы, zero-byte incoming packet запрещён; duration/mono/bandwidth/cap проверяются. Existing 10k/20ms DVN API/validation неизменны. NoLACE и Deep PLC проверяются по actual decoder path, не только CTL readback.
   - Primary evidence: live codec tests, existing voice_codec/voice-note regressions, host/Android native linkage.
-  - Status: pending
-  - Evidence:
+  - Status: in_progress
+  - Evidence: live API host6 tests + six note-container regressions PASS; separate core voice_codec6 PASS. Actual WB40 NoLACE and isolated Deep PLC4/5 change decoded PCM. Fresh target/live-check test/clippy(-D warnings)/fmt PASS; старый clippy CMake cache attempted /usr/local install, fresh target resolves without privilege/config change. Android packaged activation remains for R4 checkpoint.
 - R3: Memory-only protected duplex media/feedback/relay с ограниченными очередями и retirement старой generation.
   - Source: аудированный media-план; ARCHITECTURE §7–9.
   - Acceptance: один bidirectional media lane и один control lane на endpoint, независимые Noise states; RTP/SRTP AES_CM_128_HMAC_SHA1_80, SRTCP feedback. Один pending plaintext media packet + один committed frame; deadline drop до Noise, после commitment — finish ordered frame либо уничтожить lane. Remote-authenticated terminal progress ограничивает admitted bytes; local writes не считаются ACK. Relay не получает media keys и не декодирует звук. Fresh generation/Noise/SRTP keys/SSRC/codec/queues после coordinated fixture restart; старый material не replay.
@@ -73,16 +73,16 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 6. **Evidence-driven screening и длительный gate.** Сначала local codec/crypto/trace tests и protected timestamp traffic, затем коротко20/40/60ms на одном lane (cap12k соответственно50/100/150B; пересчитать overhead/window). Freeze один профиль. Доступные phone↔host DNS/audio проверки выполнить, не объявлять physical pair PASS. Для final pair:45min50 и80 profiles; silence/mute, external loss vs application drops, 100/300/1000ms bursts, bandwidth collapse/restore, admitted8KiB competitor и максимальный разрешённый TEXT-sized frame/backlog, coordinated restart, relative skew±100/500ppm. Competing frames моделируют нагрузку, не доказывают production bulk pause/TEXT durability. Sequence rollover и timestamp rollover тестировать near-boundary явно:43m41s относится к16-bit sequence, timestamp48k — около24h51m; DTX count не обеспечивает sequence wrap. Common-clock acoustic latency, source-active loss accounting, отдельно normal/outage scenarios и listening evidence. Нет новых branches/dependencies без измеренной причины.
 
 ## Current Checkpoint
-- Closes: R1, затем R2.
-- Smallest next action: commit/push frozen goal; implement independent live codec and its focused tests.
-- Expected evidence: goal commit/push, bounded Opus outputs/legal DTX/PLC/activation and unchanged note tests.
+- Closes: R2 host part, затем R3.
+- Smallest next action: commit/push live codec checkpoint; integrate verified SRTP boundary and implement private duplex probe/relay.
+- Expected evidence: bounded live codec/unchanged notes; crypto and duplex/admission/generation tests; Android activation later in R4.
 - Stop or replan if: изменение требует production rollout/schema/carrier rewrite либо иной physical device permission.
 
 ## Current State
-- Resolved: read-only audit четырьмя независимыми general atoms; scope сокращён до M1-V, противоречия fixture keys/feedback/reset/rollover устранены.
-- Last relevant evidence: master da84814; working tracked tree clean; adb devices -l показывает единственный разрешённый Moto.
+- Resolved: frozen goal pushed; отдельный live codec host checkpoint green. Independent SRTP native boundary implemented and reviewed, not yet committed: host12 tests/fmt/clippy and arm64/API26 build PASS in isolated target/srtp-check.
+- Last relevant evidence: live test6+note regression6/core voice_codec6, isolated clippy/fmt PASS; adb devices -l показывает единственный разрешённый Moto.
 - Blocker: для R5 physical two-phone acceptance нужен второй явно разрешённый физический Android; это не блокирует R2–R4 и phone↔host evidence.
-- Next: frozen-goal commit/push, live codec checkpoint.
+- Next: live codec commit/push, protected duplex probe checkpoint.
 
 ## Material Decisions
 - 2026-10-09: последний user override разрешает implementation/commits/push/тесты на ZY22JFJ5LP; отменяет прежний read-only режим, не разрешает Main reset или production rollout.
@@ -91,6 +91,7 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 
 ## Checkpoint History
 - 2026-10-09: preflight/audit/contract freeze; implementation и tests ещё не выполнялись.
+- 2026-10-09: goal7a37e47 pushed; separate bounded LiveEncoder/LiveDecoder, valid tiny DTX, exact PLC and actual WB40 neural activation host tests PASS. Note contract unchanged. Fresh target/live-check avoids stale native CMake cache; no upstream build changes.
 
 ## Completion
 - Resolved outcomes: pending.
