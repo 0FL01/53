@@ -1,6 +1,6 @@
 # Goal: Reply на TEXT/VOICE сообщения
 
-Status: active
+Status: complete
 Source: пользователь: «холдишь сообщение и жмёшь reply», «по аналогии как в Telegram»; выбран ответ текстом и голосовыми; «fresh db допустима, если это упростит путь внедрения»; после read-only аудита: «делай копию плана в цель, итеративно реализовать и коммит пуш, тесты на телефоне».
 Last updated: 2026-10-08
 
@@ -35,8 +35,8 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Source: последний запрос.
   - Acceptance: эта цель хранит plan/current evidence/closure; current contracts/runbook соответствуют source; только intended source/tests/docs/bindings committed/pushed, без private/build artifacts и чужого PNG.
   - Primary evidence: git status/diff/log, push и remote ref.
-  - Status: in_progress
-  - Evidence: goal commit22aedea pushed; current protocol/API/schema/runbook notes updated; feature/closure commits pending.
+  - Status: verified
+  - Evidence: plan22aedea and feature b2574b2dfdd41d9dec0061e1740564cdf6adaa31 committed/pushed to origin/master; remote ref matches feature. Reviewed46 intended source/tests/docs/generated-binding files, no private/build artifacts or unrelated PNG. Current contracts/runbook and this closure record complete the deliverables.
 
 ### Constraints
 - Fresh core schema10 напрямую, strict E2E v2, без миграций/legacy decoder/conversion/autowipe. Server6 и outer wire2 не меняются. Main8/backend5 сохраняются; fresh-DB разрешение применяется к owned disposable `.gate`, не Main.
@@ -72,24 +72,22 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 - 2026-10-08: phone evidence exposed read-only ticker swallowing a visible Reply selection; local start/menu now use draft readiness, not read-only paging readiness. Edit/Delete retain their existing guards. Opposite-ingest fixture measures native unread via Core rather than a retained stale Android SQLite reader.
 
 ## Current Checkpoint
-- Closes: R4.
-- Smallest next action: review/stage only intended source/tests/docs/generated binding; feature commit/push, then closure record/commit/push.
-- Expected evidence: scope-clean staged diff, remote ref matching pushed commits and final contract closure.
-- Stop or replan if: unintended/private/build files enter the diff or push exposes an external failure; preserve unrelated PNG and existing Main/backend.
+- Closed: R1–R4; one closure comparison passed against the frozen contract, current evidence and approved change envelope. No substantive follow-up work in this goal.
 
 ## Current State
-- Resolved: R1–R3 verified; copied plan22aedea pushed. E2E/schema10/history/writers, generated ABI, native Android actions/banner/drafts/recovery/navigation implemented; current docs/runbook updated.
+- Resolved: R1–R4 verified; plan22aedea and featureb2574b2 pushed. E2E/schema10/history/writers, generated ABI, native Android actions/banner/drafts/recovery/navigation implemented; current docs/runbook and closure complete.
 - Last relevant evidence: host222 + final JVM113 + native arm64/debug/release/test APK PASS; two actual fresh Moto methods PASS. Complete E2Ev2 fixtures and schema10 assertions; no Main install/reset/backend or DNS-delivery acceptance claim.
 - Blocker: none.
-- Next: scoped feature commit/push and closure.
+- Next: none; objective complete. Main/backend/Android DNS rollout is outside this goal, not unfinished implementation work.
 
 ## Checkpoint History
 - 2026-10-08: audited plan frozen/copy created after explicit implementation authorization; user PNG untouched.
 - 2026-10-08: R1 host/runtime checkpoint PASS; merged JVM/build checkpoint PASS. Phone remains independent evidence; no Main/backend changes or Android DNS delivery claim.
 - 2026-10-08: R2/R3 physical checkpoint PASS; final current JVM/debug/release/test build PASS. Main metadata unchanged; current contracts/runbook reviewed, R4 Git/closure checkpoint next.
+- 2026-10-08: featureb2574b2 pushed, remote ref verified; tracked/index diff empty, unrelated PNG untouched. Closure check resolves R1–R4 with current runtime/build/phone evidence and preserved constraints.
 
 ## Completion
-- Resolved outcomes: pending.
+- Resolved outcomes: R1–R4 verified.
 - Commands and artifacts: clean cargo build msgd/workspace222; hostcore/codegen; NDKr28c arm64; final Gradle JVM113/debug/release/instrumentation; both manual selected ReplyGatesTest methods. Debug APK SHA256 `2c9ebd9be840ceb9f6af9a02a0ded245ba6ef4a4af3d6df6688698316b409c34`; unsigned release `3c21555fd633e4b4a6d1932de6d105d2cc8bad3a34bc8740327e8bc95b51437c`; test `9befcd7567cbc6a9f2190875ac5fa69dc1cc1ba383070c2a87f91fbcfcd6196c`; arm64 lib `fca631ee6c49face089c48a1f6c6620d462973c11001bfec80bcf07339a81538` (build artifacts not tracked).
-- Constraint and diff-scope check: pending.
-- Final status: active.
+- Constraint and diff-scope check:46 intended files only; generated binding from canonical codegen. No migrations/autowipe/legacy decoder, new dependencies/services/workers, transport/codec/AAD/frame/ciphertext changes or quote snapshots. Main UID10420/versionCode2, identity/data/install and backend preserved; user PNG remains unrelated/untracked. Host DirectTCP E2E + local phone UX explicitly not successful Android DNS Reply delivery; retained v1 mailbox cutover remains outside scope.
+- Final status: complete.
