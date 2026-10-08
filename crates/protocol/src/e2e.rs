@@ -1,12 +1,12 @@
 //! Strict E2E plaintext v1: `[version:u8][kind:u8][message_id:16][sender_ed:32][body]`.
 //! Text is the remaining UTF-8 bytes; controls start with target16 + revision8 BE.
 
-use crate::{CIPHERTEXT_MAX, TEXT_MAX};
+use crate::{CIPHERTEXT_MAX, TEXT_CHAR_MAX, TEXT_UTF8_MAX};
 
 const VERSION: u8 = 1;
 const HEADER_LEN: usize = 1 + 1 + 16 + 32;
 const CONTROL_LEN: usize = 16 + 8;
-const ENVELOPE_MAX: usize = HEADER_LEN + CONTROL_LEN + TEXT_MAX;
+const ENVELOPE_MAX: usize = HEADER_LEN + CONTROL_LEN + TEXT_UTF8_MAX;
 
 pub const VOICE_MANIFEST_LEN: usize = 166;
 pub const VOICE_SAMPLE_MAX: u32 = 960_000;
@@ -139,7 +139,7 @@ impl Event {
 pub fn encode(event: &Event) -> Result<Vec<u8>, &'static str> {
     let body_len = match &event.body {
         Body::Text(text) => {
-            validate_text_len(text.len())?;
+            validate_text(text)?;
             text.len()
         }
         Body::Voice(manifest) => {
@@ -148,7 +148,7 @@ pub fn encode(event: &Event) -> Result<Vec<u8>, &'static str> {
         }
         Body::Edit { revision, text, .. } => {
             validate_revision(*revision)?;
-            validate_text_len(text.len())?;
+            validate_text(text)?;
             CONTROL_LEN + text.len()
         }
         Body::Delete { revision, .. } => {
@@ -231,8 +231,18 @@ fn validate_envelope_len(len: usize) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn validate_text_len(len: usize) -> Result<(), &'static str> {
-    if len == 0 || len > TEXT_MAX {
+fn validate_text_bytes(len: usize) -> Result<(), &'static str> {
+    if len == 0 || len > TEXT_UTF8_MAX {
+        return Err("invalid E2E text length");
+    }
+    Ok(())
+}
+
+/// New TEXT/EDIT source is 1..=4000 Unicode scalar values. Validate only:
+/// spaces, newlines and Markdown markers count; never trim or normalize source.
+pub fn validate_text(text: &str) -> Result<(), &'static str> {
+    validate_text_bytes(text.len())?;
+    if text.chars().count() > TEXT_CHAR_MAX {
         return Err("invalid E2E text length");
     }
     Ok(())
@@ -246,8 +256,9 @@ fn validate_revision(revision: u64) -> Result<(), &'static str> {
 }
 
 fn decode_text(bytes: &[u8]) -> Result<String, &'static str> {
-    validate_text_len(bytes.len())?;
+    validate_text_bytes(bytes.len())?;
     let text = std::str::from_utf8(bytes).map_err(|_| "invalid E2E UTF-8")?;
+    validate_text(text)?;
     Ok(text.to_owned())
 }
 
@@ -361,15 +372,23 @@ mod tests {
     }
 
     #[test]
-    fn text_and_edit_unicode_byte_bounds() {
-        assert_eq!(TEXT_MAX, 4096);
+    fn text_and_edit_unicode_scalar_bounds_and_exact_source() {
+        assert_eq!(TEXT_CHAR_MAX, 4000);
+        assert_eq!(TEXT_UTF8_MAX, 16000);
+        assert_eq!(ENVELOPE_MAX, 16074);
         for text in [
             "x".to_owned(),
             " \0\n".to_owned(),
-            "a".repeat(TEXT_MAX),
-            "🦀".repeat(TEXT_MAX / 4),
-            format!("{}é", "a".repeat(TEXT_MAX - 2)),
+            " \n".repeat(TEXT_CHAR_MAX / 2),
+            "a".repeat(TEXT_CHAR_MAX),
+            "я".repeat(TEXT_CHAR_MAX),
+            "修".repeat(TEXT_CHAR_MAX),
+            "🦀".repeat(TEXT_CHAR_MAX),
+            "e\u{301}".repeat(TEXT_CHAR_MAX / 2),
+            format!("{}é", "a".repeat(TEXT_CHAR_MAX - 1)),
+            "  # heading\r\n**bold** _italic_ ~~strike~~ `code`\n> quote\n- list\n```\na < b\n```\n[link](https://example.test)\n![alt](image) <b>literal</b>  \n".into(),
         ] {
+            assert_eq!(validate_text(&text), Ok(()));
             for body in [
                 Body::Text(text.clone()),
                 Body::Edit {
@@ -386,6 +405,7 @@ mod tests {
                     0
                 };
                 assert_eq!(bytes.len(), HEADER_LEN + control_len + text.len());
+                assert_eq!(&bytes[HEADER_LEN + control_len..], text.as_bytes());
                 assert!(bytes.len() <= ENVELOPE_MAX && bytes.len() <= CIPHERTEXT_MAX);
                 assert_eq!(decode(&bytes).unwrap(), event);
             }
@@ -396,9 +416,13 @@ mod tests {
     fn empty_and_oversize_text_rejected_by_both_directions() {
         for text in [
             String::new(),
-            "a".repeat(TEXT_MAX + 1),
-            format!("{}é", "a".repeat(TEXT_MAX - 1)),
+            "a".repeat(TEXT_CHAR_MAX + 1),
+            "я".repeat(TEXT_CHAR_MAX + 1),
+            "修".repeat(TEXT_CHAR_MAX + 1),
+            "🦀".repeat(TEXT_CHAR_MAX + 1),
+            format!("{}é", "a".repeat(TEXT_CHAR_MAX)),
         ] {
+            assert_eq!(validate_text(&text), Err("invalid E2E text length"));
             assert!(encode(&event(Body::Text(text.clone()))).is_err());
             assert!(decode(&wire(1, text.as_bytes())).is_err());
             assert!(encode(&event(Body::Edit {
@@ -411,6 +435,35 @@ mod tests {
             body.extend_from_slice(text.as_bytes());
             assert!(decode(&wire(2, &body)).is_err());
         }
+        // Scalar overflow must be rejected even though its byte length fits.
+        let ascii = "a".repeat(TEXT_CHAR_MAX + 1);
+        assert!(ascii.len() < TEXT_UTF8_MAX);
+        assert_eq!(
+            decode(&wire(1, ascii.as_bytes())),
+            Err("invalid E2E text length")
+        );
+    }
+
+    #[test]
+    fn decode_byte_bound_precedes_utf8_and_edit_revision_precedes_text() {
+        assert_eq!(
+            decode(&wire(1, &vec![0xff; TEXT_UTF8_MAX + 1])),
+            Err("invalid E2E text length")
+        );
+        let body = vec![0xff; TEXT_UTF8_MAX];
+        assert_eq!(decode(&wire(1, &body)), Err("invalid E2E UTF-8"));
+        let mut body = TARGET.to_vec();
+        body.extend_from_slice(&0u64.to_be_bytes());
+        body.push(0xff);
+        assert_eq!(decode(&wire(2, &body)), Err("invalid E2E revision"));
+        assert_eq!(
+            encode(&event(Body::Edit {
+                target: TARGET,
+                revision: 0,
+                text: "a".repeat(TEXT_CHAR_MAX + 1),
+            })),
+            Err("invalid E2E revision")
+        );
     }
 
     #[test]
@@ -499,7 +552,7 @@ mod tests {
 
     #[test]
     fn delete_trailing_data_rejected() {
-        for trailing in [1, TEXT_MAX] {
+        for trailing in [1, TEXT_UTF8_MAX] {
             let mut bytes = DELETE_VECTOR.to_vec();
             bytes.resize(bytes.len() + trailing, 0);
             assert_eq!(decode(&bytes), Err("invalid E2E delete length"));

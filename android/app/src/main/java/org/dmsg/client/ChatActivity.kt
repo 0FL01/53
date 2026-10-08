@@ -116,7 +116,10 @@ class ChatActivity : DmsgActivity() {
         composer.isSaveEnabled = false
         composer.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { memory.draft = s?.toString().orEmpty(); if (active) renderVoice() }
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                memory.draft = s?.toString().orEmpty()
+                if (active) { updateComposer(); renderVoice() }
+            }
             override fun afterTextChanged(s: android.text.Editable?) {}
         })
         adapter = HistoryAdapter(this, memory.history.rows,
@@ -205,6 +208,19 @@ class ChatActivity : DmsgActivity() {
         val compact = visible && resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
         findViewById<View>(R.id.chat_header)?.visibility = if (compact) View.GONE else View.VISIBLE
         findViewById<EditText>(R.id.composer)?.maxLines = if (compact) 1 else 3
+        // Counter + touch targets must fit above IME even with a scrollable notice.
+        // Keep font scaling/minHeight; only reduce spare vertical padding.
+        val controlPadding = NativeUi.dp(this, if (compact) 4 else 12)
+        listOf(R.id.composer, R.id.btn_save_edit, R.id.btn_cancel_edit).forEach { id ->
+            findViewById<View>(id)?.let { it.setPadding(it.paddingLeft, controlPadding, it.paddingRight, controlPadding) }
+        }
+        val rowPadding = NativeUi.dp(this, if (compact) 0 else 8)
+        findViewById<View>(R.id.chat_composer_row)?.let { it.setPadding(it.paddingLeft, rowPadding, it.paddingRight, rowPadding) }
+        if (compact) findViewById<android.widget.ScrollView>(R.id.chat_footer)?.let { footer ->
+            // Insets can resize an already focused editor without another focus request.
+            // Scroll, rather than move focus or hide the edit banner/notice.
+            footer.post { footer.scrollTo(0, footer.getChildAt(0).height) }
+        }
     }
 
     private fun render() {
@@ -228,9 +244,7 @@ class ChatActivity : DmsgActivity() {
         findViewById<View>(R.id.edit_banner).visibility = if (editing == null) View.GONE else View.VISIBLE
         findViewById<Button>(R.id.btn_save_edit).visibility = if (editing == null) View.GONE else View.VISIBLE
         findViewById<Button>(R.id.btn_cancel_edit).visibility = if (editing == null) View.GONE else View.VISIBLE
-        findViewById<Button>(R.id.btn_save_edit).isEnabled = editing != null && !editing.unavailable && !memory.rebaseEdit && allowed && !memory.pending && !unresolved && !pageGuard.pending
         findViewById<Button>(R.id.btn_cancel_edit).isEnabled = !memory.pending && !unresolved
-        findViewById<Button>(R.id.btn_send).isEnabled = allowed && editing == null && !memory.pending && !unresolved && !memory.voice.busy
         findViewById<Button>(R.id.btn_retry).isEnabled = allowed && !memory.pending
         composer.isEnabled = (allowed || editing != null) && !memory.pending && !unresolved && !memory.voice.busy
         findViewById<Button>(R.id.btn_history_retry).isEnabled = !pageGuard.pending && !memory.pending
@@ -238,7 +252,33 @@ class ChatActivity : DmsgActivity() {
         findViewById<View>(R.id.chat_notice).visibility = if (info.text.isEmpty()) View.GONE else View.VISIBLE
         info.setBackgroundResource(if (memory.contact?.identityMismatch == true || memory.contact?.state == "blocked") R.color.error_surface
             else if (allowed && pageError.isEmpty()) R.color.surface else R.color.warning_surface)
+        updateComposer()
         renderVoice()
+    }
+
+    /** Keystrokes update only composer controls; history refresh belongs to render/loadPage. */
+    private fun updateComposer() {
+        val count = MessageTextPolicy.count(memory.draft)
+        val withinLimit = count != null && count <= MessageTextPolicy.MAX_SCALARS
+        val allowed = contactCta(memory.contact) == ContactCta.Chat
+        val editing = memory.composition.edit
+        val unresolved = memory.uncertain != null || memory.uncertainAction != null || memory.uncertainVoice != null
+        // Hidden Send retains its old readiness for an empty normal draft.
+        findViewById<Button>(R.id.btn_send).isEnabled = allowed && editing == null && !memory.pending && !unresolved && !memory.voice.busy && withinLimit
+        findViewById<Button>(R.id.btn_save_edit).isEnabled = editing != null && !editing.unavailable && !memory.rebaseEdit && allowed && !memory.pending && !unresolved && !pageGuard.pending && withinLimit && count != 0
+        findViewById<TextView>(R.id.composer_counter).text = when {
+            count == null -> getString(R.string.message_counter_invalid, MessageTextPolicy.MAX_SCALARS)
+            count > MessageTextPolicy.MAX_SCALARS -> getString(R.string.message_counter_overflow, count, MessageTextPolicy.MAX_SCALARS)
+            else -> getString(R.string.message_counter, count, MessageTextPolicy.MAX_SCALARS)
+        }
+    }
+
+    private fun validateComposerText(text: String): Boolean {
+        if (MessageTextPolicy.isValid(text)) return true
+        val messageRes = if (MessageTextPolicy.count(text) == null) R.string.message_unicode_invalid else R.string.message_bounds
+        memory.action = { it.getString(messageRes) }
+        render()
+        return false
     }
 
     private fun captureAnchor(): HistoryAnchor? = historyAnchor(adapter.visibleRows, list.firstVisiblePosition,
@@ -386,9 +426,7 @@ class ChatActivity : DmsgActivity() {
             memory.action = { it.getString(R.string.error_message_unavailable) }; render(); return
         }
         memory.draft = composer.text.toString()
-        if (draft.text.isEmpty() || draft.text.toByteArray(Charsets.UTF_8).size > 4096) {
-            memory.action = { it.getString(R.string.message_bounds) }; render(); return
-        }
+        if (!validateComposerText(draft.text)) return
         // Even unchanged text goes through native CAS validation.
         mutate(draft.localId, MessageActionCommand.Edit(draft.expectedRevision, draft.text))
     }
@@ -496,9 +534,7 @@ class ChatActivity : DmsgActivity() {
     private fun send() {
         if (memory.voice.busy || memory.composition.edit != null || memory.pending || memory.uncertain != null || memory.uncertainAction != null || memory.uncertainVoice != null || contactCta(memory.contact) != ContactCta.Chat) { render(); return }
         val text = composer.text.toString()
-        if (text.isEmpty() || text.toByteArray(Charsets.UTF_8).size > 4096) {
-            memory.action = { it.getString(R.string.message_bounds) }; render(); return
-        }
+        if (!validateComposerText(text)) return
         memory.draft = text
         memory.outgoing.begin() ?: return
         memory.pending = true

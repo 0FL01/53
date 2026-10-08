@@ -23,7 +23,7 @@
     <string name="error_quota">Превышена квота сервера</string>
     <string name="error_revoked">Доступ этого устройства отозван</string>
     <string name="error_busy">Сервер занят. Попробуйте позже</string>
-    <string name="error_bad_text">Сообщение пустое или длиннее 4096 байт UTF-8</string>
+    <string name="error_bad_text">Сообщение должно содержать 1–4000 корректных символов Unicode</string>
     <string name="error_transport">Нет связи с сервером. Проверьте сеть и DNS</string>
     <string name="error_store">Ошибка защищённого хранилища. Данные не сброшены; существующая копия сохранена.</string>
     <string name="error_crypto">Ошибка проверки криптографических данных</string>

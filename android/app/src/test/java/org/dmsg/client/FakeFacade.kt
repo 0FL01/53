@@ -150,6 +150,7 @@ class FakeFacade : DmsgFacade {
     }
     override fun send(id: String, text: String): String {
         sendFailure?.let { throw it }
+        if (!MessageTextPolicy.isValid(text)) throw DmsgError(R.string.error_bad_text, ErrorKind.BadText)
         lastSent = text
         val localId = (history.maxOfOrNull { it.localId } ?: 0L) + 1
         val mid = localId.toString(16).padStart(32, '0')
@@ -163,10 +164,10 @@ class FakeFacade : DmsgFacade {
     override fun editMessage(contactId: String, localId: Long, expectedRevision: ULong, text: String): HistoryMessage {
         mutationCalls++
         mutationFailure?.let { throw it }
+        if (!MessageTextPolicy.isValid(text)) throw DmsgError(R.string.error_bad_text, ErrorKind.BadText)
         val row = historyMessage(contactId, localId)
         if (!canEditMessage(row, get(contactId))) throw DmsgError(R.string.error_message_unavailable, ErrorKind.MessageUnavailable)
         if (row.revision != expectedRevision) throw DmsgError(R.string.error_message_changed, ErrorKind.MessageChanged)
-        if (text.isEmpty() || text.toByteArray(Charsets.UTF_8).size > 4096) throw DmsgError(R.string.error_bad_text, ErrorKind.BadText)
         if (text == row.text) return row
         val updated = row.copy(text = text, revision = row.revision + 1uL, changeDeliveryState = DeliveryState.QUEUED)
         history[history.indexOfFirst { it.localId == localId }] = updated

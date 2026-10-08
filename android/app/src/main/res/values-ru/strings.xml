@@ -106,7 +106,11 @@
     <string name="retry_queue">Повторить очередь</string>
     <string name="message_hint">Сообщение</string>
     <string name="send_message">Отправить сообщение</string>
-    <string name="message_bounds">Сообщение должно содержать 1–4096 байт UTF-8</string>
+    <string name="message_bounds">Сообщение должно содержать 1–4000 символов Unicode</string>
+    <string name="message_counter">%1$d/%2$d</string>
+    <string name="message_counter_overflow">%1$d/%2$d · Слишком длинно — черновик сохранён</string>
+    <string name="message_counter_invalid">—/%1$d · Неверный Unicode — черновик сохранён</string>
+    <string name="message_unicode_invalid">В сообщении неверный Unicode. Исправьте текст перед отправкой или сохранением; черновик сохранён.</string>
     <string name="saving_sending">Сохраняем и отправляем…</string>
     <string name="message_saved">Сообщение сохранено · %1$s</string>
     <string name="send_recovered">Попытка связи завершилась ошибкой. Повторяйте очередь, а не текст.</string>

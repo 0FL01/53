@@ -17,6 +17,48 @@ listed environment. Do not print inherited environment or provider credentials.
 
 ## Operator fixtures
 
+### Markdown and 4000-scalar text: isolated acceptance (2026-10-08)
+
+Current core9/server6 source; strict TEXT/EDIT limit is **1–4000 Unicode scalar
+values of the raw source**, not UTF-8 bytes, UTF-16 units or grapheme clusters.
+Markdown markers/spaces/newlines count; no trim/normalization/truncation.
+Native bubbles format Markdown; Edit uses the exact source and system Copy uses
+the displayed selection. Links open only through the explicit selection action,
+for absolute HTTP(S) destinations; HTML is literal and images are alt-only.
+
+Build current arm64 native and the APKs with the clean environment above and
+`-PgateInstall=true`. Verify `.gate`/`.gate.test` package IDs before installing.
+FGS must be off. Select **one exact method per process**:
+
+```sh
+adb -s ZY22JFJ5LP shell am instrument -w -r -e class \
+  'org.dmsg.client.MarkdownMessagesGatesTest#METHOD' \
+  org.dmsg.client.gate.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+| Exact method | Verified evidence |
+|---|---|
+| `rendererLinksAndRawFallbackOnlyInGatePackage` | Native formatting spans/newlines, literal HTML/alt images, unsafe-link rejection, full raw depth fallback including4096-scalar durable history; incoming/outgoing selection menu and intercepted HTTP(S) Open link/no-handler |
+| `freshComposerMarkdownCopyAndActionsOnlyInGatePackage` | Fresh keyed schema9, mixed TEXT/VOICE; real4001-scalar paste retained/blocked and4000 allowed, raw Edit/Cancel/recreation, actual touchscreen selection and Copy clipboard after ticker, Delete Cancel no-op,200% font/landscape IME and48dp controls |
+
+The composer method requires **no existing core.db before native open/key setup**;
+it fails rather than overwriting a store. Re-execution requires an explicitly
+authorized reset of only the owned disposable `.gate`, never Main. The fixture
+has no real DNS profile/Olm session: it proves local UI/validation, not successful
+Android DNS Send/Save. Live host `message_actions` separately verifies maximum-size
+TEXT/EDIT, exact raw source, reopen and byte-identical control retries.
+
+Final Moto API35 executions: **two PASS/zero skips**. Clipboard/font/orientation
+restored; Main UID10420/versionCode2 unchanged, no Main install/reset/backend
+update. The new counter initially exposed landscape clipping; bounded native
+footer scroll and baseline-disabled composer row fixed it without hiding safety
+notices or shrinking touch targets. Clean-env workspace214 PASS/two pre-existing
+native-host ignores unchanged, NDKr28c arm64, JVM97/zero skips and debug/release/
+gated-test APK PASS. This is **not Android DNS delivery or production cutover**.
+Old byte-limit clients and retained pending ciphertext are incompatible in both
+directions; future cutover needs a separate pending/mailbox decision, no migration
+or legacy decoder was added. Contract: `docs/goals/2026-10-08-markdown-messages.md`.
+
 ### Fresh9 voice notes: current isolated acceptance (2026-10-08)
 
 Fresh core9/server6 only, fixed libopus1.6.1 mono16k/10k VBR/20ms,

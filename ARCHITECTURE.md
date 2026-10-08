@@ -145,7 +145,7 @@ Same-install локальная копия восстанавливается т
 
 Начальные лимиты продукта:
 
-- Текст: до 4 KiB UTF-8.
+- Текст/EDIT: 1–4000 Unicode scalar values исходника (до16000 UTF-8 bytes), включая Markdown/пробелы/переносы. Android TEXT bubbles используют native Markdown; E2E/DB/Edit сохраняют raw source. Wire frame/ciphertext bounds прежние; несовместимые старые byte-limit клиенты и pending ciphertext требуют отдельного fresh cutover, не миграции.
 - Голосовое: до 60 секунд и 128 KiB итогового encrypted object, первый достигнутый лимит; libopus1.6.1 mono16kHz/10kbit/s VBR,20ms,encoder10/NoLACE decoder7, DTX/FEC/DRED/BWE/QEXT off. Это фиксированный профиль, не результат comparative quality benchmark.
 - Фото: после уменьшения до 1024 px по длинной стороне и до 256 KiB; metadata удаляется локально.
 - Любое вложение: до 512 KiB; автозагрузка выключена.

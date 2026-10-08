@@ -709,9 +709,7 @@ impl DmsgClient {
         self.retry_queued(self.dns_endpoint(&p)?, p.noise_pubkey.to_vec(), p.domain)
     }
     pub fn send_dns(&self, contact_id: String, text: String) -> Result<String, FfiError> {
-        if text.is_empty() || text.len() > dmsg_protocol::TEXT_MAX {
-            return Err(FfiError::BadText);
-        }
+        dmsg_protocol::e2e::validate_text(&text).map_err(|_| FfiError::BadText)?;
         let p = self.dns_profile()?;
         let mut core = self.core()?;
         core.preflight_text(&contact_id, &text).map_err(map_olm)?;
@@ -1167,9 +1165,7 @@ impl DmsgClient {
         if addr.is_empty() {
             return Err(FfiError::BadArgs("empty addr".into()));
         }
-        if text.is_empty() || text.len() > dmsg_protocol::TEXT_MAX {
-            return Err(FfiError::BadText);
-        }
+        dmsg_protocol::e2e::validate_text(&text).map_err(|_| FfiError::BadText)?;
         let (sp, dom) = parse_transport_args(server_pub, domain)?;
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1477,6 +1473,83 @@ mod tests {
     }
 
     #[test]
+    fn scalar_boundaries_apply_to_ffi_send_dns_direct_and_edit_without_mutation_on_rejection() {
+        let (c, dir) = authenticated_client("scalar-boundaries");
+        let (id, mut peer) = peer_contact(&c);
+        install_session(&c, &id, &mut peer);
+        let addr = offline_addr();
+        for (i, (text, replacement)) in [
+            ("a".repeat(4000), "я".repeat(4000)),
+            ("я".repeat(4000), "🦀".repeat(4000)),
+            ("🦀".repeat(4000), " \n".repeat(2000)),
+            (" \n".repeat(2000), "a".repeat(4000)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            // Valid DNS source passes policy to the existing profile gate;
+            // actual persistence uses the offline DirectTCP fixture.
+            assert_eq!(
+                c.send_dns(id.clone(), text.clone()),
+                Err(FfiError::BadArgs("DNS profile is not configured".into()))
+            );
+            let mid = offline_send(&c, &addr, &id, &text).unwrap();
+            let row = c.history_page(id.clone(), None, 1).unwrap().rows.remove(0);
+            assert_eq!(row.text, text);
+            assert_eq!(row.message_id_hex, mid);
+            let mid = crate::history::parse_message_id(&mid).unwrap();
+            crate::store::outbox_set_status_order(
+                &c.conn().unwrap(),
+                &mid,
+                "accepted",
+                Some(dmsg_protocol::chronology::Order {
+                    seq: i as i64 + 1,
+                    timestamp_ms: 1000,
+                }),
+            )
+            .unwrap();
+            let original = c.history_page(id.clone(), None, 1).unwrap().rows.remove(0);
+            let session = crate::store::load_session(&c.conn().unwrap(), &id).unwrap();
+            let outbox = c.outbox_page(0, 100).unwrap();
+            for invalid in [
+                String::new(),
+                "a".repeat(4001),
+                "я".repeat(4001),
+                "🦀".repeat(4001),
+            ] {
+                assert_eq!(
+                    offline_send(&c, &addr, &id, &invalid),
+                    Err(FfiError::BadText)
+                );
+                assert_eq!(
+                    c.send_dns(id.clone(), invalid.clone()),
+                    Err(FfiError::BadText)
+                );
+                assert_eq!(
+                    c.edit_message(id.clone(), row.local_id, 0, invalid),
+                    Err(FfiError::BadText)
+                );
+            }
+            assert_eq!(
+                crate::store::load_session(&c.conn().unwrap(), &id).unwrap(),
+                session
+            );
+            assert_eq!(c.outbox_page(0, 100).unwrap(), outbox);
+            assert_eq!(
+                c.history_page(id.clone(), None, 1).unwrap().rows[0],
+                original
+            );
+            let edited = c
+                .edit_message(id.clone(), row.local_id, 0, replacement.clone())
+                .unwrap();
+            assert_eq!(edited.text, replacement);
+            assert_eq!(edited.revision, 1);
+        }
+        drop(c);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn offline_send_changed_identity_stops_before_queue() {
         let (c, dir) = authenticated_client("queued-mismatch");
         let (id, mut peer) = peer_contact(&c);
@@ -1717,15 +1790,42 @@ mod tests {
             r,
             Err(FfiError::BadArgs("server_pub must be 32 bytes".into()))
         );
-        // Пустой текст — BadText без сети.
-        let r2 = c.send_text(
-            "127.0.0.1:1".into(),
-            vec![1u8; 32],
-            "x.test".into(),
-            "ABCD1234EFGH".into(),
-            "".into(),
-        );
-        assert_eq!(r2, Err(FfiError::BadText));
+        // BadText remains after addr, but before transport args/profile/store.
+        for text in [String::new(), "a".repeat(4001), "🦀".repeat(4001)] {
+            assert_eq!(
+                c.send_text(
+                    "127.0.0.1:1".into(),
+                    vec![1; 5],
+                    "x.test".into(),
+                    "ABCD1234EFGH".into(),
+                    text.clone(),
+                ),
+                Err(FfiError::BadText)
+            );
+            assert_eq!(
+                c.send_text(
+                    "".into(),
+                    vec![1; 32],
+                    "x.test".into(),
+                    "ABCD1234EFGH".into(),
+                    text.clone(),
+                ),
+                Err(FfiError::BadArgs("empty addr".into()))
+            );
+            assert_eq!(
+                c.send_dns("ABCD1234EFGH".into(), text.clone()),
+                Err(FfiError::BadText)
+            );
+            assert_eq!(
+                c.edit_message("ABCD1234EFGH".into(), 0, 0, text.clone()),
+                Err(FfiError::InvalidInput)
+            );
+            // Edit still initializes Core before applying its text policy.
+            assert_eq!(
+                c.edit_message("ABCD1234EFGH".into(), 1, 0, text),
+                Err(FfiError::NotEnrolled)
+            );
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 }

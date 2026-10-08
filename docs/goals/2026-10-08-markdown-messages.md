@@ -17,26 +17,26 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Source: исходный запрос и исправленный план после аудита.
   - Acceptance: bold/italic/strikethrough, inline/fenced code, quotes/lists/headings/links; обычные переносы строк. HTML буквально, images alt-only без загрузки; разрешённые absolute HTTP(S) links открываются только через explicit selection action. Edit получает raw source; системный Copy копирует выбранный отображаемый текст, unchanged refresh сохраняет selection.
   - Primary evidence: renderer/view и fresh native ChatActivity exact-method instrumentation gates.
-  - Status: pending
-  - Evidence: —
+  - Status: verified
+  - Evidence: final Moto API35 rendererLinksAndRawFallbackOnlyInGatePackage PASS (0.128s) и freshComposerMarkdownCopyAndActionsOnlyInGatePackage PASS (11.342s): native spans/filtered Open link, raw Edit, actual Copy clipboard и ticker selection в mixed TEXT/VOICE. JVM policy tests PASS.
 - R2: Единый предел 1–4000 Unicode scalar values исходника для новых TEXT/EDIT.
   - Source: «4к символов», конкретизация исправленного плана.
   - Acceptance: ASCII/Cyrillic/supplementary Unicode и Markdown markers считаются одинаково в Kotlin/Rust. 4000 проходят, 4001 отвергаются. No trim/normalization/truncation. Счётчик N/4000, overflow draft сохраняется, Send/Save блокируются. Malformed UTF-16 не заменяется при FFI encoding. Encode/decode/Core/FFI используют тот же контракт; ciphertext/frame limits и messaging atomicity сохранены.
   - Primary evidence: protocol/core/FFI boundary и Olm fit tests, live message_actions, JVM policy tests, actual composer gate.
-  - Status: pending
-  - Evidence: —
+  - Status: verified
+  - Evidence: parent full workspace PASS (214 tests, two pre-existing explicit native ignores); real max TEXT/EDIT prekey+normal fit, invalid inbound rollback/ACK, FFI gates и live raw-source/control retry PASS. JVM97 PASS; actual phone editor4001 paste retained/blocked,4000 allowed, normal/edit raw drafts/counter/recreation и rejected handlers no pending/outbox change PASS.
 - R3: Сборки/регрессии и тесты на телефоне без повреждения existing identities/data.
   - Source: последний запрос, AGENTS.md и android/AUTH_GATES.md.
   - Acceptance: clean-env msgd/workspace, arm64 NDK, JVM/debug/release/gated-test APK зелёные; выбранные `.gate` методы проходят на явно выбранном доступном телефоне. Только свежая изолированная DB, не Main reset/install. Host/local UI evidence не выдаётся за Android DNS delivery acceptance.
   - Primary evidence: результаты команд и exact-method instrumentation, APK/native package check.
-  - Status: pending
-  - Evidence: —
+  - Status: verified
+  - Evidence: clean-env cargo build msgd + test workspace, cargo fmt, NDKr28c arm64 и final Gradle testDebugUnitTest/assembleDebug/assembleRelease/assembleDebugAndroidTest -PgateInstall=true PASS. APK package/arm64 checked; final two exact methods PASS/zero skips. Phone font1.0 restored, Main UID10420/versionCode2 unchanged; only owned .gate/.gate.test installed/reset, no Main/backend operation.
 - R4: План в цели, актуальные контракты, scoped commits и push.
   - Source: последний запрос.
   - Acceptance: эта цель содержит copied plan/current evidence/closure; protocol/product/runbook актуальны; intended изменения закоммичены и pushed, без user PNG, private fixtures, secrets/build outputs.
   - Primary evidence: git status/diff/log, push result и remote commit.
   - Status: in_progress
-  - Evidence: цель создана; tracked baseline clean, unrelated untracked design PNG оставлен нетронутым.
+  - Evidence: plan34dd0e5 committed; remote .gitignore34a87ee preserved via ordinary mergec61ae62 and pushed to origin/master. Unrelated design PNG untouched; implementation commit/closure pending.
 
 ### Constraints
 - 4000 = Unicode scalar values исходника, не bytes/UTF-16 units/grapheme clusters. Пробелы/newlines/Markdown markers входят в count; whitespace-only сохраняет прежнюю допустимость.
@@ -52,7 +52,7 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 
 ## Change Envelope
 - Protocol lib/e2e и существующие core chat/FFI/Olm tests/live message_actions.
-- Android MessageTextPolicy/MessageMarkdown, ChatActivity/NativeUi, chat layout, EN/RU strings/errors/IDs, pinned Markwon core + strikethrough 4.6.2, relevant JVM/fresh native gates.
+- Android MessageTextPolicy/MessageMarkdown, ChatActivity/NativeUi, chat layout/ChatFooterScrollView in NoticeScrollView.kt, EN/RU strings/errors/IDs, pinned Markwon core + strikethrough 4.6.2, relevant JVM/fresh native gates.
 - ARCHITECTURE §8, WORK_PLAN current limits, docs/protocol.md, android/AUTH_GATES.md и эта цель.
 - Binaries только target/build; private disposable fixtures вне Git. Не трогать unrelated `53-opendesign/` PNG, `.local/slipstream`, Main/Pacman/рабочий backend.
 
@@ -65,22 +65,26 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 ## Material Decisions
 - 2026-10-08: fresh DB явно разрешена; migrations не добавлять. Узкая безопасная граница — disposable `.gate`, Main/production не затрагивать.
 - 2026-10-08: новый scalar-limit несовместим со старыми byte-limit clients в обе стороны, включая уже сохранённый недоставленный ciphertext. Приёмка на fresh clients; future cutover требует отдельного решения для pending/mailbox, не просто согласованного обновления. E2E version/layout не меняются.
-- 2026-10-08: статический расчёт pinned vodozemac0.11.0: max EDIT/prekey ciphertext≤16244 при CIPHERTEXT_MAX16304; запас60bytes. Runtime fit ещё не проверен.
+- 2026-10-08: pinned vodozemac0.11.0 max EDIT/prekey ciphertext≤16244 при CIPHERTEXT_MAX16304; real TEXT/EDIT prekey+normal SEND/FETCH frame fit tests PASS.
+- 2026-10-08: выбран Moto ZY22JFJ5LP/API35; standard ADB native backend не видел подключённый USB, переключение server на clean-env ADB_LIBUSB=1 восстановило доступ. Никаких Main/device resets. JDK17 из existing ignored frontend-gates toolchain работает; /usr/lib/jvm/java-21-openjdk содержит только man/, не JDK.
+- 2026-10-08: R3 gate воспроизвёл clipping после добавления counter при200%/landscape/IME. Минимальное расширение — native ChatFooterScrollView, измеряемый по remaining height, компактный vertical padding и baselineAligned=false у composer row. Notices/font scale/min48dp сохранены; final strict counter/full48dp visible checks PASS, требования не ослаблены.
 
 ## Current Checkpoint
-- Closes: R4 (план) и подготовка R1/R2.
-- Smallest next action: scoped plan commit, затем независимые Rust limit / Android composer / renderer workstreams; проверить доступ к телефону.
-- Expected evidence: goal committed; узкие boundary/render checks; наблюдаемый ADB serial.
+- Closes: R4.
+- Smallest next action: commit/push only reviewed feature/tests/contracts, then record closure after checking remote/worktree.
+- Expected evidence: scoped commit pushed to origin/master; no private/build/unrelated PNG in tracked changes.
 - Stop or replan if: конкретный required gate показывает нарушение frozen outcome; без расширения requirements.
 
 ## Current State
-- Resolved: план скопирован; baseline read-only checks, existing constraints и tools проверены.
-- Last relevant evidence: 2026-10-08 initial clean-env `adb devices -l` вернул пустой список; альтернативный configured server/socket и USB доступ ещё не исследованы. Это не окончательно доказанный blocker.
-- Blocker: none proven; реализация независима от device discovery.
-- Next: implement/verify R1/R2, диагностировать ADB, затем R3.
+- Resolved: R1–R3 verified, план committed/pushed; full host/JVM97/native/final APK builds и two final phone gates PASS. Current contracts/runbook updated.
+- Last relevant evidence: final renderer0.128s/composer11.342s, zero skips. Counter + input/Save/Cancel reachability at200%/landscape/IME green after bounded-footer/baseline fix. No Main reset/install; font/clipboard/orientation restored.
+- Blocker: none.
+- Next: scoped feature commit/push and one closure.
 
 ## Checkpoint History
 - 2026-10-08: цель active, audited plan copied; user fresh-DB authorization recorded, no migration/Main rollout.
+- 2026-10-08: plan34dd0e5/mergec61ae62 pushed; independent implementation merged, parent full host/JVM/build/native evidence green. Device discovery fixed without phone reset; next two isolated native gates.
+- 2026-10-08: actual phone gates RED→GREEN: landscape clipping diagnosed by visible bounds and fixed in production. Final strict renderer/composer executions PASS on final gated APK; final JVM/build/fmt/diff checks green. R1–R3 verified; next R4 commit/push/closure.
 
 ## Completion
 - Resolved outcomes: pending.

@@ -82,7 +82,7 @@ pub enum OlmError {
     WireType(u8),
     /// Неизвестная wire-версия кадра.
     WireVersion(u8),
-    /// Пустой текст или длиннее TEXT_MAX.
+    /// Текст вне 1..=TEXT_CHAR_MAX Unicode scalar values.
     BadText,
     /// The target revision changed since the editor opened it.
     MessageChanged,
@@ -531,6 +531,94 @@ mod tests {
         assert!(matches!(back, OlmMessage::PreKey(_)));
         assert_eq!(decode_wire(&[9, 0, 1]), Err(OlmError::WireType(9)));
         assert!(decode_wire(&[]).is_err());
+    }
+
+    #[test]
+    fn maximum_text_and_edit_fit_real_prekey_and_normal_olm_send_fetch_frames() {
+        use dmsg_protocol::{e2e, encode_frame, mailbox, MAX_FRAME, OP_FETCH_RESP, OP_SEND};
+        let text = "🦀".repeat(dmsg_protocol::TEXT_CHAR_MAX);
+        assert_eq!(text.len(), dmsg_protocol::TEXT_UTF8_MAX);
+        for body in [
+            e2e::Body::Text(text.clone()),
+            e2e::Body::Edit {
+                target: [2; 16],
+                revision: 1,
+                text: text.clone(),
+            },
+        ] {
+            let alice = Account::new();
+            let mut bob = Account::new();
+            bob.generate_one_time_keys(1);
+            let ot = *bob.one_time_keys().values().next().unwrap().as_bytes();
+            let mut sending = outbound(&alice, &curve_identity(&bob), &ot).unwrap();
+            let event = e2e::Event {
+                message_id: [1; 16],
+                sender_ed: ed_identity(&alice),
+                body,
+            };
+            let plain = e2e::encode(&event).unwrap();
+            assert_eq!(
+                plain.len(),
+                if event.kind() == e2e::Kind::Edit {
+                    16074
+                } else {
+                    16050
+                }
+            );
+            let assert_frames = |wire: &[u8], expected_type: u8| {
+                assert_eq!(wire[0], expected_type);
+                assert!(wire.len() <= 16244);
+                assert!(wire.len() <= dmsg_protocol::CIPHERTEXT_MAX);
+                let mut send = vec![3; 16];
+                send.extend_from_slice(&event.message_id);
+                send.extend_from_slice(wire);
+                let send_frame = encode_frame(OP_SEND, &send).unwrap();
+                assert!(send_frame.len() <= MAX_FRAME);
+                let (_, op, payload, consumed) = dmsg_protocol::decode_frame(&send_frame).unwrap();
+                assert_eq!((op, consumed), (OP_SEND, send_frame.len()));
+                assert_eq!(mailbox::parse_send(payload).unwrap().ciphertext, wire);
+
+                let mut fetch = vec![0, 1];
+                fetch.extend_from_slice(&1u64.to_be_bytes());
+                fetch.extend_from_slice(&[4; 32]);
+                fetch.extend_from_slice(&[5; 16]);
+                fetch.extend_from_slice(&event.message_id);
+                fetch.extend_from_slice(&u16::try_from(wire.len()).unwrap().to_be_bytes());
+                fetch.extend_from_slice(wire);
+                let fetch_frame = encode_frame(OP_FETCH_RESP, &fetch).unwrap();
+                assert!(fetch_frame.len() <= MAX_FRAME);
+                let (_, op, payload, consumed) = dmsg_protocol::decode_frame(&fetch_frame).unwrap();
+                assert_eq!((op, consumed), (OP_FETCH_RESP, fetch_frame.len()));
+                assert_eq!(
+                    mailbox::parse_fetch_resp(payload).unwrap()[0].ciphertext,
+                    wire
+                );
+            };
+            let prekey = encode_wire(&sending.encrypt(&plain).unwrap());
+            assert_frames(&prekey, 0);
+            let OlmMessage::PreKey(pre) = decode_wire(&prekey).unwrap() else {
+                panic!("expected prekey");
+            };
+            let (mut receiving, _, decrypted) =
+                inbound(&mut bob, &curve_identity(&alice), &pre).unwrap();
+            assert_eq!(e2e::decode(&decrypted).unwrap(), event);
+
+            // A server SEND_ACK cannot confirm an Olm session: B sends a real
+            // E2E reply and A decrypts it before either max-size normal message.
+            let reply = e2e::Event {
+                message_id: [6; 16],
+                sender_ed: ed_identity(&bob),
+                body: e2e::Body::Text("reply".into()),
+            };
+            let reply_wire = encode_wire(&receiving.encrypt(e2e::encode(&reply).unwrap()).unwrap());
+            assert_eq!(reply_wire[0], 1);
+            let reply_plain = sending.decrypt(&decode_wire(&reply_wire).unwrap()).unwrap();
+            assert_eq!(e2e::decode(&reply_plain).unwrap(), reply);
+            let normal = encode_wire(&sending.encrypt(&plain).unwrap());
+            assert_frames(&normal, 1);
+            let decrypted = receiving.decrypt(&decode_wire(&normal).unwrap()).unwrap();
+            assert_eq!(e2e::decode(&decrypted).unwrap(), event);
+        }
     }
 
     #[test]

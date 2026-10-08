@@ -67,6 +67,7 @@ internal class HistoryAdapter(private val context: Context, private val rows: Li
     private val canEdit: (HistoryMessage) -> Boolean, private val onEdit: (Long) -> Unit,
     private val onDelete: (Long) -> Unit, private val onMenu: (Long) -> Unit,
     private val bindVoice: (VoiceBubbleView, HistoryMessage) -> Unit) : BaseAdapter() {
+    private val markdown = MessageMarkdown(context)
     var visibleRows: List<HistoryMessage> = rows.filter(::messageVisible)
         private set
     override fun notifyDataSetChanged() { visibleRows = rows.filter(::messageVisible); super.notifyDataSetChanged() }
@@ -106,19 +107,29 @@ internal class HistoryAdapter(private val context: Context, private val rows: Li
         val width = ((parent.width.takeIf { it > 0 } ?: c.resources.displayMetrics.widthPixels) - NativeUi.dp(c, 32)) * .86
         val body: View = if (message.kind == uniffi.dmsg_core.MessageKind.VOICE) VoiceBubbleView(c).also { bindVoice(it, message) }
         else NativeUi.text(c).apply {
-            text = message.text
-            setTextIsSelectable(true)
-            if (canHideMessage(message)) customSelectionActionModeCallback = object : ActionMode.Callback {
+            markdown.setMarkdown(this, message.text)
+            customSelectionActionModeCallback = object : ActionMode.Callback {
                 override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean { selectionActions(menu); return true }
                 override fun onPrepareActionMode(mode: ActionMode, menu: Menu): Boolean { selectionActions(menu); return true }
                 private fun selectionActions(menu: Menu) {
-                    menu.removeItem(R.id.action_edit); menu.removeItem(R.id.action_delete)
-                    if (canEdit(message)) menu.add(0, R.id.action_edit, 100, R.string.edit_whole_message)
-                    menu.add(0, R.id.action_delete, 101, R.string.delete_whole_message)
+                    menu.removeItem(R.id.action_edit); menu.removeItem(R.id.action_delete); menu.removeItem(R.id.action_open_link)
+                    if (canHideMessage(message)) {
+                        if (canEdit(message)) menu.add(0, R.id.action_edit, 100, R.string.edit_whole_message)
+                        menu.add(0, R.id.action_delete, 101, R.string.delete_whole_message)
+                    }
+                    if (MessageMarkdown.selectedLink(this@apply) != null)
+                        menu.add(0, R.id.action_open_link, 102, R.string.open_link)
                 }
                 override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean = when (item.itemId) {
                     R.id.action_edit -> { mode.finish(); onEdit(message.localId); true }
                     R.id.action_delete -> { mode.finish(); onDelete(message.localId); true }
+                    R.id.action_open_link -> {
+                        // Recheck before finish clears selection; never infer a URL from its label.
+                        val destination = MessageMarkdown.selectedLink(this@apply)
+                        if (destination != null) { mode.finish(); MessageMarkdown.openLink(c, destination) }
+                        else mode.invalidate()
+                        true
+                    }
                     else -> false // System Copy/Select all keep their normal behavior.
                 }
                 override fun onDestroyActionMode(mode: ActionMode) {}

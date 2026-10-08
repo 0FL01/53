@@ -25,7 +25,7 @@
 
 use dmsg_protocol::{
     decode_frame, mailbox as mp, OP_AUTHENTICATED, OP_DELIVERY_ACK, OP_ERROR, OP_FETCH,
-    OP_FETCH_RESP, OP_RESUME, OP_SEND, OP_SEND_ACK, ST_ACCEPTED, ST_DELIVERED, TEXT_MAX,
+    OP_FETCH_RESP, OP_RESUME, OP_SEND, OP_SEND_ACK, ST_ACCEPTED, ST_DELIVERED,
 };
 
 use crate::contacts::{self, Contact};
@@ -407,9 +407,7 @@ impl Core {
     /// Проверить локальные гейты до попытки подключиться: подмена не должна
     /// превращаться в успешную офлайн-очередь при сетевом отказе.
     pub(crate) fn preflight_text(&self, contact_id: &str, text: &str) -> Result<(), OlmError> {
-        if text.is_empty() || text.len() > TEXT_MAX {
-            return Err(OlmError::BadText);
-        }
+        dmsg_protocol::e2e::validate_text(text).map_err(|_| OlmError::BadText)?;
         let c = contacts::get(&self.conn, contact_id)?.ok_or(OlmError::UnknownContact)?;
         contacts::sendable(&c)?;
         let (_, _, peer_ed, peer_curve) = contact_keys(&c)?;
@@ -504,9 +502,7 @@ impl Core {
         expected_revision: u64,
         text: &str,
     ) -> Result<crate::history::HistoryMessage, OlmError> {
-        if text.is_empty() || text.len() > TEXT_MAX {
-            return Err(OlmError::BadText);
-        }
+        dmsg_protocol::e2e::validate_text(text).map_err(|_| OlmError::BadText)?;
         self.mutate_message(
             contact_id,
             local_id,
@@ -1639,6 +1635,40 @@ mod tests {
         use crate::history::{DeleteScope, DeliveryState, HistoryError};
         let (mut a, mut b, da, db, mid, wire, id) = action_pair("actions-owned");
         let original = exact(&a, "BOBB00000002", id);
+        let session = crate::store::load_session(&a.conn, "BOBB00000002").unwrap();
+        let mut no_network = Fake::new(vec![]);
+        for invalid in [
+            String::new(),
+            "a".repeat(4001),
+            "я".repeat(4001),
+            "🦀".repeat(4001),
+        ] {
+            assert_eq!(
+                a.send_text(&mut no_network, "unknown", &invalid).await,
+                Err(OlmError::BadText)
+            );
+            assert_eq!(
+                a.queue_text_existing_session("BOBB00000002", &invalid),
+                Err(OlmError::BadText)
+            );
+            assert_eq!(
+                a.edit_message("BOBB00000002", id, 0, &invalid),
+                Err(OlmError::BadText)
+            );
+        }
+        assert!(no_network.sent.is_empty());
+        assert_eq!(exact(&a, "BOBB00000002", id), original);
+        assert_eq!(
+            crate::store::load_session(&a.conn, "BOBB00000002").unwrap(),
+            session
+        );
+        assert_eq!(
+            crate::store::outbox_queued(&a.conn, 0, 100)
+                .unwrap()
+                .0
+                .len(),
+            1
+        );
         b.decrypt_event(&RawEvent {
             seq: 1,
             sender: a.device_pub(),
@@ -2623,6 +2653,71 @@ mod tests {
 
     #[tokio::test]
     async fn failed_integrity_retains_event_without_advancing_account_or_session() {
+        async fn assert_invalid_source_retained(
+            a: &Core,
+            b: &mut Core,
+            sending: &vodozemac::olm::Session,
+            seq: u64,
+            cursor: u64,
+            wire_type: u8,
+        ) {
+            let source = "a".repeat(dmsg_protocol::TEXT_CHAR_MAX + 1);
+            assert!(source.len() < dmsg_protocol::TEXT_UTF8_MAX);
+            let session = crate::store::load_session(&b.conn, "ALICE0000001").unwrap();
+            let account = crate::store::load_olm(&b.conn).unwrap();
+            let history = b.history_page("ALICE0000001", None, 100).unwrap();
+            for kind in [1, 2] {
+                let mid = [40 + kind; 16];
+                // Bypass the new encoder: valid header/control/UTF-8, but an
+                // authenticated TEXT/EDIT with 4001 scalars inside the byte cap.
+                let mut plain = vec![1, kind];
+                plain.extend_from_slice(&mid);
+                plain.extend_from_slice(&olm::ed_identity(&a.account));
+                if kind == 2 {
+                    plain.extend_from_slice(&[1; 16]);
+                    plain.extend_from_slice(&1u64.to_be_bytes());
+                }
+                plain.extend_from_slice(source.as_bytes());
+                assert_eq!(
+                    dmsg_protocol::e2e::decode(&plain),
+                    Err("invalid E2E text length")
+                );
+                let mut candidate = vodozemac::olm::Session::from_pickle(sending.pickle());
+                let event = RawEvent {
+                    seq,
+                    sender: a.device_pub(),
+                    sender_user: a.my_account().unwrap().0,
+                    message_id: mid,
+                    ciphertext: olm::encode_wire(&candidate.encrypt(&plain).unwrap()),
+                };
+                assert_eq!(event.ciphertext[0], wire_type);
+                let mut t = Fake::new(vec![
+                    authenticated_resp(),
+                    count_resp(16),
+                    (OP_FETCH_RESP, fetch_batch(&[&event])),
+                    binding_resp(a),
+                    (OP_DELIVERY_ACK, cursor.to_be_bytes().to_vec()),
+                ]);
+                let result = b.fetch_and_decrypt(&mut t).await.unwrap();
+                assert_eq!(result.skipped_undecryptable, 1);
+                assert!(result.received.is_empty());
+                assert_eq!(result.cursor, cursor);
+                let ack = &t
+                    .sent
+                    .iter()
+                    .find(|(op, _)| *op == OP_DELIVERY_ACK)
+                    .unwrap()
+                    .1;
+                assert_eq!(mp::parse_delivery_ack(ack).unwrap(), Vec::<u64>::new());
+                assert!(!crate::store::durable_event(&b.conn, &event.sender, &mid).unwrap());
+                assert_eq!(
+                    crate::store::load_session(&b.conn, "ALICE0000001").unwrap(),
+                    session
+                );
+                assert_eq!(crate::store::load_olm(&b.conn).unwrap(), account);
+                assert_eq!(b.history_page("ALICE0000001", None, 100).unwrap(), history);
+            }
+        }
         let (mut a, da) = tmp_core("integrity-a");
         let (mut b, db) = tmp_core("integrity-b");
         link(&mut a, &mut b, "ALICE0000001", "BOBB00000002");
@@ -2637,6 +2732,7 @@ mod tests {
             .as_bytes();
         let mut outbound =
             olm::outbound(&a.account, &olm::curve_identity(&b.account), &ot).unwrap();
+        assert_invalid_source_retained(&a, &mut b, &outbound, 1, 0, 0).await;
         let mut event = dmsg_protocol::e2e::Event {
             message_id: [1; 16],
             sender_ed: olm::ed_identity(&a.account),
@@ -2655,6 +2751,7 @@ mod tests {
         let _ = outbound
             .decrypt(&olm::decode_wire(&reverse.2).unwrap())
             .unwrap();
+        assert_invalid_source_retained(&a, &mut b, &outbound, 2, 1, 1).await;
         event.message_id = [2; 16];
         let valid = olm::encode_wire(
             &outbound

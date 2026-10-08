@@ -131,8 +131,10 @@ pub const HEADER_LEN: usize = 4;
 pub const MAX_PAYLOAD: usize = MAX_FRAME - HEADER_LEN;
 /// Максимальная длина домена.
 pub const DOMAIN_MAX: usize = 253;
-/// Лимит текста (E2E UTF-8).
-pub const TEXT_MAX: usize = 4 * 1024;
+/// Лимит исходника TEXT/EDIT в Unicode scalar values, включая Markdown/пробелы.
+pub const TEXT_CHAR_MAX: usize = 4000;
+/// Byte bound до UTF-8 decode/allocation: один scalar занимает до 4 байт.
+pub const TEXT_UTF8_MAX: usize = TEXT_CHAR_MAX * 4;
 /// Mailbox: событий на аккаунт.
 pub const MAILBOX_EVENTS_MAX: usize = 512;
 /// Mailbox: байт на аккаунт.

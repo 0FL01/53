@@ -50,6 +50,22 @@ class MessageActionsTest {
         assertNull(composer.edit); assertEquals("normal draft", composer.text)
     }
 
+    @Test fun overflowDraftsSurviveRebaseAndCancelWithoutChangingSource() {
+        val normalSource = " \n**Ж**\n " + "😀".repeat(3992)
+        val editSource = "e\u0301".repeat(2000) + " "
+        val composer = MessageComposer().apply { text = normalSource; start(row()); text = editSource }
+        assertFalse(MessageTextPolicy.isValid(composer.text))
+        composer.refresh(row().copy(revision = 1uL, text = "**other edit**"), rebase = true)
+        assertEquals(editSource, composer.text)
+        assertEquals(1uL, composer.edit!!.expectedRevision)
+        assertEquals("**other edit**", composer.edit!!.baseline)
+        assertEquals(normalSource, composer.normal.text)
+        composer.cancel()
+        assertNull(composer.edit)
+        assertEquals(normalSource, composer.text)
+        assertFalse(MessageTextPolicy.isValid(composer.text))
+    }
+
     @Test fun conflictKeepsTextAndRefreshRebasesOnlyAfterExplicitConflict() {
         val composer = MessageComposer().apply { normal.text = "normal"; start(row()); text = "my edit" }
         val changed = row().copy(revision = 1uL, text = "other edit")
@@ -90,6 +106,38 @@ class MessageActionsTest {
         assertEquals(0, f.retryCalls)
         val failed = TextSendCoordinator.mutate(f, "P", 1, MessageActionCommand.Edit(1uL, "original")) as MessageActionOutcome.NotSaved
         assertEquals(ErrorKind.MessageChanged, (failed.error as DmsgError).kind)
+    }
+
+    @Test fun scalarBoundaryEditsPreserveSourceAndOriginalIdentityAndOrder() {
+        for (scalar in listOf("a", "Я", "😀")) {
+            val f = facade()
+            val before = f.history.single().copy()
+            val source = " \n**Ж**\n " + scalar.repeat(3991)
+            val saved = TextSendCoordinator.mutate(f, "P", 1, MessageActionCommand.Edit(0uL, source)) as MessageActionOutcome.Saved
+            assertEquals(source, saved.row.text)
+            assertEquals(source, f.history.single().text)
+            assertEquals(1uL, saved.row.revision)
+            assertEquals(before.localId, saved.row.localId)
+            assertEquals(before.messageIdHex, saved.row.messageIdHex)
+            assertEquals(before.localTimestampMs, saved.row.localTimestampMs)
+            assertEquals(before.serverSeq, saved.row.serverSeq)
+            assertEquals(before.serverTimestampMs, saved.row.serverTimestampMs)
+            assertEquals(1, f.controls.size)
+            assertEquals(1, f.retryCalls)
+        }
+    }
+
+    @Test fun invalidEditTextPrecedesCasAndLeavesHistoryAndOutboxUntouched() {
+        val f = facade()
+        val before = f.history.single().copy()
+        for (source in listOf("", "Я".repeat(4001), "\uDC00")) {
+            val failed = TextSendCoordinator.mutate(f, "P", 1, MessageActionCommand.Edit(1uL, source)) as MessageActionOutcome.NotSaved
+            assertEquals(ErrorKind.BadText, (failed.error as DmsgError).kind)
+            assertEquals(before, f.history.single())
+            assertTrue(f.controls.isEmpty())
+            assertEquals(0, f.retryCalls)
+            assertNull(TextSendCoordinator.pendingActionFor("P"))
+        }
     }
 
     @Test fun localCommitIsSavedEvenWhenNetworkAndLaterReadsFail() {
@@ -162,16 +210,18 @@ class MessageActionsTest {
                 return real.historyMessage(contactId, localId)
             }
         }
-        val unknown = TextSendCoordinator.mutate(failing, "P", 1, MessageActionCommand.Edit(0uL, "edited")) as MessageActionOutcome.Uncertain
+        val source = " \n**edited Ж** e\u0301 👩‍💻\n "
+        val unknown = TextSendCoordinator.mutate(failing, "P", 1, MessageActionCommand.Edit(0uL, source)) as MessageActionOutcome.Uncertain
         try {
             assertEquals(unknown.attempt, TextSendCoordinator.pendingActionFor("P"))
             assertTrue(TextSendCoordinator.send(failing, "OTHER", "new") is TextSendOutcome.NotSaved)
             assertTrue(TextSendCoordinator.mutate(failing, "P", 1, MessageActionCommand.Delete(DeleteScope.SELF_ONLY)) is MessageActionOutcome.NotSaved)
             assertEquals(1, real.mutationCalls); assertEquals(1, real.history.size)
             val restored = MessageComposer().apply { restore(unknown.attempt) }
-            assertEquals("edited", restored.text); assertEquals(0uL, restored.edit!!.expectedRevision)
+            assertEquals(source, restored.text); assertEquals(0uL, restored.edit!!.expectedRevision)
         } finally { TextSendCoordinator.reconcileAction(real, unknown.attempt) }
         val proof = TextSendCoordinator.reconcileAction(real, unknown.attempt) as MessageActionOutcome.Saved
+        assertEquals(source, proof.row.text)
         assertEquals(1uL, proof.row.revision)
         assertNull(TextSendCoordinator.pendingActionFor("P"))
         real.failAfterMutation = false

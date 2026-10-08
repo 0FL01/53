@@ -23,7 +23,7 @@
     <string name="error_quota">Server quota exceeded</string>
     <string name="error_revoked">Access for this device has been revoked</string>
     <string name="error_busy">The server is busy. Try again later</string>
-    <string name="error_bad_text">The message is empty or exceeds 4096 UTF-8 bytes</string>
+    <string name="error_bad_text">The message must contain 1–4000 valid Unicode characters</string>
     <string name="error_transport">Cannot reach the server. Check your network and DNS</string>
     <string name="error_store">Protected storage error. Data has not been reset; the existing copy is preserved.</string>
     <string name="error_crypto">Cryptographic verification failed</string>

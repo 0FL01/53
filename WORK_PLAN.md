@@ -81,7 +81,7 @@
 
 **Задачи.** Запись Opus mono, ограничение по длительности и размеру, локальное прослушивание. Client-side photo resize/metadata removal, file picker, размеры до отправки. Blob manifest внутри E2E, шифрование chunks, quota reservation, upload/download resume, отмена и уборка временных файлов. Перезапуск не должен требовать повторной передачи уже подтверждённых chunks.
 
-**Лимиты.** Текст 4 KiB, voice 60 s/128 KiB, photo 1024 px/256 KiB, общий attachment 512 KiB. Размер файлового лимита считается по итоговому wire ciphertext; сервер не доверяет заявленному размеру. Одна bulk-передача, chunk до 8 KiB. Бюджеты и TTL описаны в ARCHITECTURE.md.
+**Лимиты.** TEXT/EDIT 1–4000 Unicode scalar values raw source (до16000 UTF-8 bytes), native Markdown в Android bubbles; voice 60 s/128 KiB, photo 1024 px/256 KiB, общий attachment 512 KiB. Размер файлового лимита считается по итоговому wire ciphertext; сервер не доверяет заявленному размеру. Одна bulk-передача, chunk до 8 KiB. Бюджеты и TTL описаны в ARCHITECTURE.md. Markdown/scalar-limit fresh acceptance и границы cutover — `docs/goals/2026-10-08-markdown-messages.md`.
 
 **Безопасность.** Права на blob привязаны к разрешённым участникам, угадывание blob ID не даёт чтения. Проверить reorder/truncation/chunk replay, недостаток места, ложный MIME, изображение с огромной распакованной памятью, неверную длительность и оборванный manifest. Прежний ciphertext можно переслать повторно, но изменённые данные нельзя шифровать с прежним key/nonce.
 

@@ -52,13 +52,23 @@ Olm type0/1 framing не меняется. Plaintext строго кодируе
 
 ```text
 [version:u8=1][kind:u8][event_mid16][sender_ed32][body]
-TEXT   kind1: UTF-8 text1..4096 bytes
-EDIT   kind2: target_mid16 | revision:u64 BE | UTF-8 text1..4096
+TEXT   kind1: UTF-8 source, 1..4000 Unicode scalar values
+EDIT   kind2: target_mid16 | revision:u64 BE | same UTF-8 source contract
 DELETE kind3: target_mid16 | revision:u64 BE   (exact length)
 VOICE  kind4: fixed166-byte voice manifest v1/profile1 (below)
 ```
 
-Revision1..i64MAX, whole envelope≤4170; unknown version/kind, invalid UTF8/length,
+Исходник TEXT/EDIT сохраняется byte-for-byte, включая Markdown markers, пробелы
+и newlines: без trim/normalization/truncation. Whitespace-only допустим. 4000 —
+Unicode scalar values, не UTF-8 bytes/UTF-16 units/grapheme clusters. Один
+`e2e::validate_text` обслуживает encode/decode и Core/FFI submission. Decode
+проверяет byte bound 16000 до borrowed UTF-8/scalar count и allocation; durable
+history не перепроверяется, retry отправляет прежний ciphertext.
+Максимальный исходник TEXT/EDIT проходит реальные Olm type0/type1 и SEND/FETCH
+frame-fit tests с pinned vodozemac0.11.0: ciphertext≤16244 при прежнем cap16304.
+Type1 подтверждается расшифрованным ответным E2E сообщением, не server ACK.
+
+Revision1..i64MAX, whole envelope≤16074; unknown version/kind, invalid UTF8/length,
 legacy plaintext и trailing DELETE bytes отвергаются. MID выбирается до encrypt,
 inner MID должен совпадать с outer FETCH MID; Ed сверяется с закреплённым sender.
 EDIT target — TEXT; DELETE target — TEXT/VOICE того же contact/sender/MID,
@@ -76,6 +86,10 @@ applied/superseded bodies очищаются. Crypto/event/projection commit д�
 TTL/quota/Olm bounds сохраняются; indefinite convergence и lost-original recovery
 не обещаются. Участвующие отправители должны перейти согласованно, old E2E decode
 не вводится; backend не обязан стирать accounts/mailbox для этого формата.
+Новый scalar-limit несовместим со старым byte-limit в обе стороны, включая
+уже сохранённые pending/mailbox ciphertext. Приёмка использует fresh core9/server6;
+будущий cutover/pending drain требует отдельного решения. Schema, E2E version/layout,
+wire2 и frame/ciphertext bounds не меняются.
 
 ## VOICE и encrypted blobs
 

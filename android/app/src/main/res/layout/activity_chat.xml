@@ -15,29 +15,34 @@
         <Button android:id="@+id/btn_history_retry" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:text="@string/refresh_messages"/>
         <Button android:id="@+id/btn_retry" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:text="@string/retry_queue"/>
     </LinearLayout>
-    <LinearLayout android:id="@+id/edit_banner" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:paddingHorizontal="8dp" android:background="@color/accent_soft" android:visibility="gone">
-        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/editing_message" android:textSize="14sp" android:accessibilityHeading="true"/>
-    </LinearLayout>
-    <LinearLayout android:id="@+id/voice_panel" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:paddingHorizontal="8dp" android:background="@color/accent_soft" android:visibility="gone">
-        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="center_vertical">
-            <TextView android:id="@+id/voice_timer" android:layout_width="wrap_content" android:layout_height="wrap_content" android:textSize="18sp" android:padding="8dp"/>
-            <TextView android:id="@+id/voice_hint" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:textSize="14sp"/>
-        </LinearLayout>
-        <org.dmsg.client.VoiceWaveformView android:id="@+id/voice_waveform" android:layout_width="match_parent" android:layout_height="48dp"/>
-        <HorizontalScrollView android:layout_width="match_parent" android:layout_height="wrap_content" android:fillViewport="true">
-            <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content">
-                <Button android:id="@+id/voice_discard" android:layout_width="wrap_content" android:layout_height="wrap_content" android:minHeight="48dp" android:minWidth="48dp" android:text="@string/voice_discard"/>
-                <Button android:id="@+id/voice_pause" android:layout_width="wrap_content" android:layout_height="wrap_content" android:minHeight="48dp" android:minWidth="48dp" android:text="@string/voice_pause"/>
-                <Button android:id="@+id/voice_preview" android:layout_width="wrap_content" android:layout_height="wrap_content" android:minHeight="48dp" android:minWidth="48dp" android:text="@string/voice_preview"/>
-                <Button android:id="@+id/voice_send" android:layout_width="wrap_content" android:layout_height="wrap_content" android:minHeight="48dp" android:minWidth="48dp" android:text="@string/voice_send"/>
+    <org.dmsg.client.ChatFooterScrollView android:id="@+id/chat_footer" android:layout_width="match_parent" android:layout_height="wrap_content">
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical">
+            <LinearLayout android:id="@+id/edit_banner" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:paddingHorizontal="8dp" android:background="@color/accent_soft" android:visibility="gone">
+                <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/editing_message" android:textSize="14sp" android:accessibilityHeading="true"/>
             </LinearLayout>
-        </HorizontalScrollView>
-    </LinearLayout>
-    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="bottom" android:padding="8dp">
-        <EditText android:id="@+id/composer" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:minLines="1" android:maxLines="3" android:inputType="textMultiLine|textCapSentences" android:imeOptions="flagNoExtractUi" android:hint="@string/message_hint" android:saveEnabled="false" android:importantForAutofill="no"/>
-        <Button android:id="@+id/btn_cancel_edit" android:layout_width="wrap_content" android:layout_height="wrap_content" android:minWidth="48dp" android:text="@string/cancel" android:contentDescription="@string/cancel_edit" android:visibility="gone"/>
-        <Button android:id="@+id/btn_save_edit" android:layout_width="wrap_content" android:layout_height="wrap_content" android:minWidth="48dp" android:text="@string/save_edit" android:visibility="gone"/>
-        <Button android:id="@+id/btn_send" style="@style/Widget.Dmsg.Icon" android:layout_width="48dp" android:layout_height="48dp" android:layout_marginStart="8dp" android:drawableTop="@drawable/ic_send" android:contentDescription="@string/send_message"/>
-        <org.dmsg.client.VoiceMicView android:id="@+id/btn_mic" android:layout_width="48dp" android:layout_height="48dp" android:layout_marginStart="8dp"/>
-    </LinearLayout>
+            <LinearLayout android:id="@+id/voice_panel" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:paddingHorizontal="8dp" android:background="@color/accent_soft" android:visibility="gone">
+                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="center_vertical">
+                    <TextView android:id="@+id/voice_timer" android:layout_width="wrap_content" android:layout_height="wrap_content" android:textSize="18sp" android:padding="8dp"/>
+                    <TextView android:id="@+id/voice_hint" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:textSize="14sp"/>
+                </LinearLayout>
+                <org.dmsg.client.VoiceWaveformView android:id="@+id/voice_waveform" android:layout_width="match_parent" android:layout_height="48dp"/>
+                <HorizontalScrollView android:layout_width="match_parent" android:layout_height="wrap_content" android:fillViewport="true">
+                    <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content">
+                        <Button android:id="@+id/voice_discard" android:layout_width="wrap_content" android:layout_height="wrap_content" android:minHeight="48dp" android:minWidth="48dp" android:text="@string/voice_discard"/>
+                        <Button android:id="@+id/voice_pause" android:layout_width="wrap_content" android:layout_height="wrap_content" android:minHeight="48dp" android:minWidth="48dp" android:text="@string/voice_pause"/>
+                        <Button android:id="@+id/voice_preview" android:layout_width="wrap_content" android:layout_height="wrap_content" android:minHeight="48dp" android:minWidth="48dp" android:text="@string/voice_preview"/>
+                        <Button android:id="@+id/voice_send" android:layout_width="wrap_content" android:layout_height="wrap_content" android:minHeight="48dp" android:minWidth="48dp" android:text="@string/voice_send"/>
+                    </LinearLayout>
+                </HorizontalScrollView>
+            </LinearLayout>
+            <TextView android:id="@+id/composer_counter" android:layout_width="match_parent" android:layout_height="wrap_content" android:paddingHorizontal="12dp" android:gravity="end" android:textSize="12sp" android:includeFontPadding="false" android:lineSpacingExtra="0sp" android:accessibilityLiveRegion="polite"/>
+            <LinearLayout android:id="@+id/chat_composer_row" android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="bottom" android:baselineAligned="false" android:padding="8dp">
+                <EditText android:id="@+id/composer" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:minLines="1" android:maxLines="3" android:inputType="textMultiLine|textCapSentences" android:imeOptions="flagNoExtractUi" android:hint="@string/message_hint" android:saveEnabled="false" android:importantForAutofill="no"/>
+                <Button android:id="@+id/btn_cancel_edit" android:layout_width="wrap_content" android:layout_height="wrap_content" android:minWidth="48dp" android:text="@string/cancel" android:contentDescription="@string/cancel_edit" android:visibility="gone"/>
+                <Button android:id="@+id/btn_save_edit" android:layout_width="wrap_content" android:layout_height="wrap_content" android:minWidth="48dp" android:text="@string/save_edit" android:visibility="gone"/>
+                <Button android:id="@+id/btn_send" style="@style/Widget.Dmsg.Icon" android:layout_width="48dp" android:layout_height="48dp" android:layout_marginStart="8dp" android:drawableTop="@drawable/ic_send" android:contentDescription="@string/send_message"/>
+                <org.dmsg.client.VoiceMicView android:id="@+id/btn_mic" android:layout_width="48dp" android:layout_height="48dp" android:layout_marginStart="8dp"/>
+            </LinearLayout>
+        </LinearLayout>
+    </org.dmsg.client.ChatFooterScrollView>
 </LinearLayout>

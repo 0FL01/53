@@ -146,6 +146,9 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("androidx.activity:activity-ktx:1.11.0")
     implementation("androidx.core:core-ktx:1.16.0")
+    // Native message spans only; keep Markwon's default CommonMark dependency.
+    implementation("io.noties.markwon:core:4.6.2")
+    implementation("io.noties.markwon:ext-strikethrough:4.6.2")
     // UniFFI runtime for generated bindings (uniffi/dmsg_core/dmsg_core.kt).
     // The jar's Linux dispatch is not Android/bionic; use the Android AAR.
     implementation("net.java.dev.jna:jna:5.18.1@aar")

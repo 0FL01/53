@@ -108,7 +108,11 @@
     <string name="retry_queue">Retry outbox</string>
     <string name="message_hint">Message</string>
     <string name="send_message">Send message</string>
-    <string name="message_bounds">Message must contain 1–4096 UTF-8 bytes</string>
+    <string name="message_bounds">Message must contain 1–4000 Unicode characters</string>
+    <string name="message_counter">%1$d/%2$d</string>
+    <string name="message_counter_overflow">%1$d/%2$d · Too long — draft retained</string>
+    <string name="message_counter_invalid">—/%1$d · Invalid Unicode — draft retained</string>
+    <string name="message_unicode_invalid">Message contains invalid Unicode. Fix the text before sending or saving; the draft is retained.</string>
     <string name="saving_sending">Saving and sending…</string>
     <string name="message_saved">Message saved · %1$s</string>
     <string name="send_recovered">The connectivity attempt failed. Retry the outbox, not the text.</string>

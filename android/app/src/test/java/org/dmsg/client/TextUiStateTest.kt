@@ -99,10 +99,38 @@ class TextUiStateTest {
         draft.finish(true)
         assertEquals("next", draft.text)
     }
+    @Test fun scalarBoundarySendsPreserveTheRawSource() {
+        for (scalar in listOf("a", "Я", "😀")) {
+            val source = " \n**Ж**\n " + scalar.repeat(3991)
+            val f = FakeFacade()
+            val draft = OutgoingDraft().apply { text = source }
+            val submitted = draft.begin()!!
+            val result = TextSendCoordinator.send(f, "P", submitted) as TextSendOutcome.Saved
+            assertEquals(source, submitted)
+            assertEquals(source, f.lastSent)
+            assertEquals(source, f.history.single().text)
+            assertEquals(f.history.single().messageIdHex, result.messageId)
+            draft.finish(true)
+            assertEquals("", draft.text)
+        }
+    }
+    @Test fun invalidSourceNeverInsertsASend() {
+        val f = FakeFacade()
+        for (source in listOf("", "😀".repeat(4001), "\uD800")) {
+            val result = TextSendCoordinator.send(f, "P", source) as TextSendOutcome.NotSaved
+            assertEquals(ErrorKind.BadText, (result.error as DmsgError).kind)
+            assertNull(f.lastSent)
+            assertTrue(f.history.isEmpty())
+            assertNull(TextSendCoordinator.pendingFor("P"))
+        }
+    }
     @Test fun failedNetworkAfterCommitUsesDurableIdWithoutResubmittingPlaintext() {
         val f = FakeFacade().apply { failAfterInsert = true }
-        val result = sendTextSafely(f, "P", "fixture") as TextSendOutcome.Saved
+        val source = " \n**Ж**\n " + "😀".repeat(3991)
+        val result = sendTextSafely(f, "P", source) as TextSendOutcome.Saved
         assertTrue(result.recoveredAfterError)
+        assertEquals(source, f.lastSent)
+        assertEquals(source, f.history.single().text)
         assertEquals(f.history.single().messageIdHex, result.messageId)
         assertEquals(uniffi.dmsg_core.DeliveryState.QUEUED, f.messageStatus(result.messageId))
         assertEquals(1, f.history.size)
@@ -116,9 +144,12 @@ class TextUiStateTest {
                 return real.historyPage(contactId, beforeLocalId, limit)
             }
         }
-        val unknown = sendTextSafely(failing, "P", "fixture") as TextSendOutcome.Uncertain
+        val source = " \n**Ж** e\u0301 👩‍💻\n "
+        val unknown = sendTextSafely(failing, "P", source) as TextSendOutcome.Uncertain
+        assertEquals(source, unknown.text)
         val resolved = reconcileTextSend(real, "P", unknown.baseline, unknown.text) as TextSendOutcome.Saved
         assertEquals(real.history.single().messageIdHex, resolved.messageId)
+        assertEquals(source, real.history.single().text)
         assertEquals(1, real.history.size)
     }
     @Test fun crossScreenPendingGuardPreservesProofAcrossLaterSends() {
