@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="title_invitations">Пригласить человека</string>
+    <string name="invitation_explanation">Создайте одноразовое приглашение для нового аккаунта. QR и фраза из шести слов действуют 24 часа. Передавайте их только тому, кого приглашаете.</string>
+    <string name="invitation_create">Создать приглашение</string>
+    <string name="invitation_retry">Повторить то же приглашение</string>
+    <string name="invitation_share_qr">Поделиться QR-картинкой</string>
+    <string name="invitation_copy_phrase">Скопировать фразу</string>
+    <string name="invitation_phrase_copied">Фраза скопирована</string>
+    <string name="invitation_revoke">Отозвать приглашение</string>
+    <string name="invitation_active_list">Действующие приглашения (до восьми)</string>
+    <string name="invitation_qr_description">QR одноразового приглашения для регистрации</string>
+    <string name="invitation_working">Проверяем приглашения через DNS…</string>
+    <string name="invitation_list_ready">Выберите действующее приглашение или создайте новое.</string>
+    <string name="invitation_active">Действует · один новый аккаунт</string>
+    <string name="invitation_used">Это приглашение уже использовано.</string>
+    <string name="invitation_revoked">Это приглашение отозвано.</string>
+    <string name="invitation_expired">Срок приглашения истёк.</string>
+    <string name="invitation_remaining">Истекает через %1$d ч %2$d мин</string>
+    <string name="invitation_list_item">Приглашение %1$d · до %2$s</string>
+    <string name="invitation_image">Открыть QR-картинку</string>
+    <string name="invitation_enter_phrase">Введите или вставьте фразу из шести слов</string>
+    <string name="invitation_use_phrase">Использовать фразу</string>
+    <string name="invitation_image_invalid">Не удалось прочитать QR приглашения. Выберите PNG, JPEG или WebP размером до 8 МиБ.</string>
+    <string name="error_invite_limit">У вас уже восемь действующих приглашений. Отзовите одно или дождитесь окончания срока.</string>
+    <string name="error_password_characters">Пароль должен быть корректным текстом без управляющих символов.</string>
+</resources>

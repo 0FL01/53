@@ -23,26 +23,26 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Source: original request to replace routine administrator issuance with client invitations; approved audited plan.
   - Acceptance: issue, same-ID recovery, own active list and revoke work; signup consumes one invitation atomically; existing account/password/device/replacement behavior remains intact.
   - Primary evidence: protocol/server/core tests against a fresh server DB.
-  - Status: pending
-  - Evidence: pending.
+  - Status: verified
+  - Evidence: parent clean-environment cargo build -p msgd && cargo test --workspace PASS (238 active tests; two explicit native-carrier tests ignored); four example tests PASS; current host Core/bindings and ARM64 native built. Server/core probes cover owner access, single token, replay/restart, terminal/quota/rate/rollback and account regressions.
 - R3: Implement the agreed native sender/recipient UX, including actual QR image sharing and same-phone image import.
   - Source: QR sharing/registration UX discussion and latest instruction to implement after audit.
   - Acceptance: separate invitation screen, QR PNG Share, phrase Copy, revoke, camera/image/phrase signup inputs; no contact-QR confusion or automatic signup/server trust.
   - Primary evidence: Android JVM tests, APK/native builds and isolated device gates.
-  - Status: pending
-  - Evidence: pending.
+   - Status: verified
+   - Evidence: 122 JVM tests and native/debug/release/instrumentation builds PASS. Actual Moto raster test found immutable bitmap cleanup crash; mutable QR bitmap fixed and rerun PASS. Production Share QR button opens the real chooser; independent-UID receiver decodes PNG after sender pause. Production system picker imports a phone-issued PNG and explicit DNS signup succeeds; phrase, lifecycle, revoke and saved-key reopen gates PASS.
 - R4: Test the feature on Moto g54 serial ZY22JFJ5LP, distinguishing Android DNS, image transfer/import and optical camera evidence.
   - Source: phone provided for testing and latest explicit request for phone tests.
   - Acceptance: isolated .gate sender/recipient scenarios with real DNS and host peer; functional PNG transfer/import; camera optics only marked verified if physically observed.
   - Primary evidence: exact-method instrumentation/device observations recorded without secrets.
-  - Status: pending
-  - Evidence: pending.
+   - Status: verified
+   - Evidence: exact-method Moto sender recovery, actual chooser/independent-UID PNG read after pause/revoke, uppercase phrase signup, actual system picker PNG signup and new-process saved-key resume/list PASS through isolated LAN UDP authoritative carrier; fresh host signup uses a phone-issued invite. Existing ScannerActivity ticket/lifecycle gate also PASS (synthetic decoder, not optics). Main package identity/install times and private DB/preferences hashes match the pre-test inventory. Owned phone fixtures removed and isolated server/carrier stopped. This is not public-delegation/default-network, two-physical-phone or optical-camera evidence.
 - R5: Commit and push the plan, verified implementation and acceptance state.
   - Source: latest explicit "коммит пуш" instruction.
   - Acceptance: intended files committed in repository style and pushed to the configured remote; no secrets, generated binaries or unrelated work included.
   - Primary evidence: git status/diff/log and successful push with matching remote revision.
-  - Status: pending
-  - Evidence: pending.
+   - Status: in_progress
+   - Evidence: plan7830695 pushed to origin/master; verified implementation and final acceptance commits are the remaining delivery checkpoint.
 
 ### Constraints
 - Preserve wire2 SIGNUP optional32, password/login validation, accepted immutable local account, pending-key retry, one active device, replacement CAS, strict E2Ev2 and existing contact QR meaning.
@@ -109,16 +109,16 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 - Documentation: this goal, current protocol/server/auth-gate/deploy/version references only. No secrets, runtime dumps, databases, APKs or PNG grants in Git.
 
 ## Current Checkpoint
-- Closes: R1; starts R2/R3.
-- Smallest next action: commit the corrected goal, then implement independent server/protocol, Core and Android slices against the frozen contract.
-- Expected evidence: intended-only plan commit; targeted compile/tests and compatible generated binding surface.
+- Closes: R5.
+- Smallest next action: final current-source formatting/APK check, remove owned local secret fixtures, then commit/push intended implementation and final acceptance state.
+- Expected evidence: clean relevant gates/diff, no secrets or unrelated design PNG staged, successful pushes with matching remote revision.
 - Stop or replan if: a required external permission/resource is observably unavailable; record the exact dependency, not a speculative blocker.
 
 ## Current State
-- Resolved: four independent read-only audits completed; single-secret simplification and QR Share/gallery contradiction resolved.
-- Last relevant evidence: workspace master at e7e2a3a; only pre-existing unrelated untracked design image; implementation/tests not started.
-- Blocker: none established. Physical optical preparation and current dev runtime inventory not yet observed.
-- Next: plan commit, parallel implementation, host checks, native/APK checks, isolated phone acceptance, intended-only commits/push.
+- Resolved: R1–R4. Single-secret implementation, uppercase normalization and real bitmap lifecycle fix verified by host/native/JVM/APK and actual Moto DNS/PNG gates.
+- Last relevant evidence: final phone-issued PNG → real system picker → fresh same-phone DNS signup → new-process key-only resume PASS; actual Share button/chooser reads after pause; Main inventory unchanged. Owned phone fixtures removed; disposable LAN backend/carrier stopped. Implementation uncommitted; plan7830695 pushed.
+- Blocker: none. Optical placement was not observed; synthetic scanner lifecycle is explicitly not optical evidence.
+- Next: final intended-diff check and local fixture cleanup, implementation commit/push, final acceptance-state commit/push.
 
 ## Material Decisions
 - 2026-10-08: user explicitly permits fresh DB to avoid migrations and requests implementation, phone tests, commits and push.
@@ -129,6 +129,9 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 
 ## Checkpoint History
 - 2026-10-08: frozen corrected plan; no implementation or device actions yet.
+- 2026-10-08: plan7830695 pushed; implementation integrated; workspace/examples/bindings/ARM64/JVM/APKs PASS. Uppercase phrase parser corrected; actual raster gate exposed and fixed mutable-bitmap wipe requirement.
+- 2026-10-08: isolated Moto/host UDP-DNS signup both directions, sender ID recovery and independent-UID PNG read/revoke PASS; real DocumentsUI picker remains in progress, not substituted with stream injection.
+- 2026-10-08: real chooser and system picker PASS using actual finger input; owned MediaStore fixture published, no production Main callback workaround needed. New-process saved-key resume/list and scanner ticket lifecycle PASS. Main inventory unchanged; owned phone artifacts removed and isolated processes stopped.
 
 ## Completion
 - Resolved outcomes: pending.

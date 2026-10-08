@@ -5,6 +5,7 @@
 - `ARCHITECTURE.md` — инварианты: переиспользование C-транспорта, границы v1, crypto-слои
 - `WORK_PLAN.md` — порядок M0–M7, ворота приёмки, раскладка репозитория (`crates/`, `deploy/`, `docs/`, `vendor/`)
 - `docs/protocol.md`, `crates/server/README.md`, `android/AUTH_GATES.md` — wire2/account-auth, CLI и изолированные device gates
+- `android/SELF_SERVICE_INVITATION_GATES.md` — account-owned signup invites, private PNG Share/image picker; contact QR не переиспользовать
 - `crates/core/R18_API.md` — timeline vs local-ingest history, exact status и dialog summaries для native UI
 - `.local/slipstream` — gitignored исследовательский checkout `feat/rust-parity-ab`, не править и не вендорить копипастом
 - `.local/dns-delegation.md` — gitignored детали делегирования поддомена мессенджера; фактические имена/IP только там, в трекаемые файлы не вносить
@@ -16,7 +17,7 @@
 - Секреты только read-only файлами, не в Git/образ/логи/argv; данные — в volumes (ARCHITECTURE.md §4)
 - Не коммитить `.local/`, `.opencode/` — они в `.gitignore`
 - `53-opendesign/` — разрешённый пользователем дизайн-источник Light/Square; HTML не встраивать в APK, demo/calls не выдавать за working API
-- Единая auth: `dmsg://server/`, wire2, fresh server6/core10, strict E2Ev2; одна `core_messages` для TEXT/VOICE/Reply/операций, encrypted chunks внутри core.db. Deployed5/main8 не обновлены; old-schema/plain→sealed/legacy decode запрещены, fresh DB не очищает старый mailbox; несовместимый rollout только по явному разрешению
+- Единая auth: `dmsg://server/`, wire2, fresh server7/core10, strict E2Ev2; одна `core_messages` для TEXT/VOICE/Reply/операций, encrypted chunks внутри core.db. Deployed5/main8 не обновлены; old-schema/plain→sealed/legacy decode запрещены, fresh DB не очищает старый mailbox; несовместимый rollout только по явному разрешению
 - Build/diagnostic tools — clean allowlist environment без credentials; не печатать env. Внешнему disposable Rust harness свой `CARGO_TARGET_DIR`, не перезаписывать workspace host-cdylib/rlib
 - `connectedDebugAndroidTest` удаляет target package/Keystore: только `-PgateInstall=true` (отдельный `.gate`). Main dev reset допустим по явному разрешению; остальные identity сохранять. Device gates вручную по методам `am instrument`, не считать label-only install application acceptance.
 - Kotlin UniFFI bindings не править вручную; генерировать host-cdylib тестом ниже. USB/SSH DirectTCP smoke не выдавать за Android DNS acceptance.

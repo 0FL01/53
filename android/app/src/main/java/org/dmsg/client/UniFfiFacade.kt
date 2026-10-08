@@ -36,6 +36,22 @@ class UniFfiFacade(private val dbPath: String, key: ByteArray, private val conte
     }
     override fun configureDns(code: String, resolvers: List<String>) = wrap { core.configureDns(code, resolvers) }
     override fun registrationPolicyDns() = dnsCommand { core.registrationPolicyDns() }
+    // Pure export: no store lock, policy fetch, resolver observation or network.
+    override fun normalizeInvitation(input: String): String = try { uniffi.dmsg_core.invitationToken(input) }
+        catch (e: FfiException) { throw ffiError(e) }
+    override fun issueInvitation(id: ByteArray): InvitationGrant = dnsCommand {
+        val issued = core.issueInvitationDns(id)
+        InvitationGrant(issued.serverNow,
+            InvitationInfo(issued.invitation.issueId.copyOf(), issued.invitation.createdAt, issued.invitation.expiresAt),
+            InvitationState.valueOf(issued.state.name), issued.phrase?.toCharArray())
+    }
+    override fun listInvitations(): InvitationList = dnsCommand {
+        val result = core.listInvitationsDns()
+        InvitationList(result.serverNow, result.invitations.map {
+            InvitationInfo(it.issueId.copyOf(), it.createdAt, it.expiresAt)
+        })
+    }
+    override fun revokeInvitation(id: ByteArray) = dnsCommand { core.revokeInvitationDns(id) }
     override fun signupDns(login: String, password: String, invitation: String?) =
         dnsCommand { core.signupDns(login, password, invitation) }
     override fun loginDns(login: String, password: String, expectedDevice: String?) =

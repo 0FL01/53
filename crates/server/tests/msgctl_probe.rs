@@ -106,7 +106,7 @@ fn empty_db_formats_and_public_profile() {
         srv.ctl(&["quotas"]),
         "limits events=512 bytes=33554432\nok\n"
     );
-    assert_eq!(srv.ctl(&["dbversion"]), "6\n");
+    assert_eq!(srv.ctl(&["dbversion"]), "7\n");
     let profile = srv.ctl(&["server-code"]);
     let profile = dmsg_protocol::profile::parse(profile.trim()).unwrap();
     assert_eq!(profile.domain, DOMAIN.as_bytes());

@@ -12,6 +12,7 @@ internal fun ffiError(error: FfiException): DmsgError = when (error) {
     is FfiException.InviteExpired -> DmsgError(R.string.error_invite_expired, ErrorKind.InviteExpired)
     is FfiException.InviteRevoked -> DmsgError(R.string.error_invite_revoked, ErrorKind.InviteRevoked)
     is FfiException.InviteUsed -> DmsgError(R.string.error_invite_used, ErrorKind.InviteUsed)
+    is FfiException.InviteLimit -> DmsgError(R.string.error_invite_limit, ErrorKind.InviteLimit)
     is FfiException.AuthRateLimited -> DmsgError(R.string.error_auth_rate, ErrorKind.AuthRateLimited)
     is FfiException.InvalidInput -> DmsgError(R.string.error_input, ErrorKind.InvalidInput)
     is FfiException.BadArgs -> DmsgError(R.string.error_arguments, ErrorKind.InvalidInput)

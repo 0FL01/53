@@ -13,6 +13,7 @@ class FfiErrorsTest {
             FfiException.InviteExpired() to ErrorKind.InviteExpired,
             FfiException.InviteRevoked() to ErrorKind.InviteRevoked,
             FfiException.InviteUsed() to ErrorKind.InviteUsed,
+            FfiException.InviteLimit() to ErrorKind.InviteLimit,
             FfiException.AuthRateLimited() to ErrorKind.AuthRateLimited,
             FfiException.InvalidInput() to ErrorKind.InvalidInput
         )

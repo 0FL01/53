@@ -45,6 +45,7 @@ internal class InvitationMemory {
     fun replace(next: CharArray) { clear(); value = next }
     fun take(): CharArray = value?.also { value = null } ?: charArrayOf()
     fun clear() { value?.fill('\u0000'); value = null }
+    fun peek(): String? = value?.concatToString()
 }
 
 /** One-shot process-local scanner handoff; only its non-secret ticket enters an Intent. */

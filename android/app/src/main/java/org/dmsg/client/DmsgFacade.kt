@@ -22,7 +22,7 @@ class DmsgError(msg: String, val kind: ErrorKind = ErrorKind.Other,
         this("UI error", kind, uiMessageRes)
 }
 enum class ErrorKind { Other, InvalidCredentials, LoginTaken, InviteRequired, InviteExpired, InviteRevoked,
-    InviteUsed, AuthRateLimited, InvalidInput, Transport, PinMismatch, IdentityMismatch, NotAuthenticated,
+    InviteUsed, InviteLimit, AuthRateLimited, InvalidInput, Transport, PinMismatch, IdentityMismatch, NotAuthenticated,
     BadQr, UnknownContact, NotAccepted, Blocked, MissingKeys, Revoked, Busy, BadText, Store, Crypto, Protocol, NativeUnavailable,
     StorageKeyLost, SnapshotMissing, LiveDatabaseExists, LiveDatabaseMissing, SnapshotRestoreRequired, SnapshotInvalid,
     MessageChanged, MessageUnavailable, VoiceSessionRequired, BadVoice }
@@ -49,6 +49,10 @@ interface DmsgFacade {
     fun dnsProfile(): DnsProfile?
     fun configureDns(code: String, resolvers: List<String>)
     fun registrationPolicyDns(): RegistrationPolicy
+    fun normalizeInvitation(input: String): String
+    fun issueInvitation(id: ByteArray): InvitationGrant
+    fun listInvitations(): InvitationList
+    fun revokeInvitation(id: ByteArray)
     fun signupDns(login: String, password: String, invitation: String?): AccountInfo
     fun loginDns(login: String, password: String, expectedDevice: String?): LoginOutcome
     fun dnsNetworkChanged(resolvers: List<String>)

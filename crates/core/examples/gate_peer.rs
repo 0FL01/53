@@ -111,7 +111,7 @@ fn parse_credentials(raw: &str) -> Result<(&str, &str, Option<&str>)> {
         return Err("invalid credential file");
     }
     let secret = invite
-        .map(dmsg_protocol::auth::parse_invitation)
+        .map(dmsg_protocol::invitation::parse_invitation_input)
         .transpose()
         .map_err(|_| "invalid invitation")?;
     dmsg_protocol::auth::build_signup(login, password, secret.as_ref())
@@ -163,5 +163,11 @@ mod tests {
         assert!(parse_credentials("alice\nshort\n").is_err());
         assert!(parse_credentials("alice\npassword8\ndmsg://join/old\n").is_err());
         assert!(parse_credentials("alice\npassword8\nextra\nextra\n").is_err());
+        let phrase = [dmsg_protocol::invitation::word(0).unwrap(); 6].join(" ");
+        let credentials = format!("alice\npassword8\n{phrase}\n");
+        assert_eq!(
+            parse_credentials(&credentials).unwrap().2,
+            Some(phrase.as_str())
+        );
     }
 }

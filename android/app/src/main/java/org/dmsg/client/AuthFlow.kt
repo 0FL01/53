@@ -23,9 +23,24 @@ internal object AuthForm {
             throw DmsgError(R.string.error_password_short, ErrorKind.InvalidInput)
         if (passwordBytes > 128)
             throw DmsgError(R.string.error_password_long, ErrorKind.InvalidInput)
+        var i = 0
+        while (i < password.length) {
+            val c = password[i]
+            if (c.isHighSurrogate()) {
+                if (i + 1 >= password.length || !password[i + 1].isLowSurrogate())
+                    throw DmsgError(R.string.error_password_characters, ErrorKind.InvalidInput)
+                i += 2
+            } else {
+                if (c.isLowSurrogate() || Character.isISOControl(c))
+                    throw DmsgError(R.string.error_password_characters, ErrorKind.InvalidInput)
+                i++
+            }
+        }
         if (action == AuthAction.Signup && policy == null) throw DmsgError(R.string.error_policy_required)
         if (needsInvitation(action, policy) && (invitation == null || !InvitationInput.isCanonical(invitation)))
             throw DmsgError(R.string.error_invite_import, ErrorKind.InviteRequired)
+        if (action == AuthAction.Signup && invitation != null && !InvitationInput.isCanonical(invitation))
+            throw DmsgError(R.string.error_invite_format, ErrorKind.InvalidInput)
     }
 }
 
@@ -75,7 +90,7 @@ internal class AuthFlow(private val f: DmsgFacade) {
         var retained = false
         try {
             val password = secrets.password()
-            val invitation = if (AuthForm.needsInvitation(action, policy)) secrets.invitation() else null
+            val invitation = if (action == AuthAction.Signup) secrets.invitation().takeIf { it.isNotEmpty() } else null
             AuthForm.validate(action, policy, login, password, invitation)
             val outcome = if (action == AuthAction.Signup) {
                 val account = f.signupDns(login, password, invitation)

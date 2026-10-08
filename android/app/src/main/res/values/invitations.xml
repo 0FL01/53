@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="title_invitations">Invite a person</string>
+    <string name="invitation_explanation">Create a single-use invitation for a new account. The QR and six-word phrase work for 24 hours. Share them only with the person you invite.</string>
+    <string name="invitation_create">Create invitation</string>
+    <string name="invitation_retry">Retry the same invitation</string>
+    <string name="invitation_share_qr">Share QR image</string>
+    <string name="invitation_copy_phrase">Copy phrase</string>
+    <string name="invitation_phrase_copied">Phrase copied</string>
+    <string name="invitation_revoke">Revoke invitation</string>
+    <string name="invitation_active_list">Active invitations (up to eight)</string>
+    <string name="invitation_qr_description">Single-use registration invitation QR</string>
+    <string name="invitation_working">Checking invitations through DNS…</string>
+    <string name="invitation_list_ready">Choose an active invitation or create a new one.</string>
+    <string name="invitation_active">Active · one new account</string>
+    <string name="invitation_used">This invitation has been used.</string>
+    <string name="invitation_revoked">This invitation has been revoked.</string>
+    <string name="invitation_expired">This invitation has expired.</string>
+    <string name="invitation_remaining">Expires in %1$d h %2$d min</string>
+    <string name="invitation_list_item">Invitation %1$d · expires %2$s</string>
+    <string name="invitation_image">Open QR image</string>
+    <string name="invitation_enter_phrase">Enter or paste the six-word phrase</string>
+    <string name="invitation_use_phrase">Use phrase</string>
+    <string name="invitation_image_invalid">Unable to read an invitation QR from this image. Choose a PNG, JPEG or WebP up to 8 MiB.</string>
+    <string name="error_invite_limit">You already have eight active invitations. Revoke one or wait for it to expire.</string>
+    <string name="error_password_characters">Password must contain valid text without control characters.</string>
+</resources>

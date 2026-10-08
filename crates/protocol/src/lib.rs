@@ -7,6 +7,7 @@ pub mod blob;
 pub mod chronology;
 pub mod contacts;
 pub mod e2e;
+pub mod invitation;
 pub mod mailbox;
 pub mod profile;
 
@@ -59,6 +60,8 @@ pub const ERR_INVALID_INPUT: u8 = 11;
 pub const ERR_THROTTLED: u8 = 12;
 /// Одноразовое приглашение уже использовано.
 pub const ERR_INVITE_USED: u8 = 13;
+/// This account has eight active self-service invitations.
+pub const ERR_INVITE_LIMIT: u8 = 14;
 /// Диапазон 16+ — mailbox и дальше (P4).
 /// SEND: recipient 16 + message_id 16 + ciphertext (rest, ≤ CIPHERTEXT_MAX).
 pub const OP_SEND: u8 = 16;
@@ -116,6 +119,12 @@ pub const OP_BLOB_GET: u8 = 43;
 pub const OP_BLOB_DATA: u8 = 44;
 /// Exact recipient device + completed blob; response is the existing SEND_ACK.
 pub const OP_SEND_MEDIA: u8 = 45;
+pub const OP_INVITE_ISSUE: u8 = 46;
+pub const OP_INVITE_ISSUED: u8 = 47;
+pub const OP_INVITE_REVOKE: u8 = 48;
+pub const OP_INVITE_REVOKED: u8 = 49;
+pub const OP_INVITE_LIST: u8 = 50;
+pub const OP_INVITE_LISTED: u8 = 51;
 /// Статусы доставки (без «прочитано» — read receipts отложены).
 pub const ST_ACCEPTED: u8 = 1;
 /// Статусы доставки (без «прочитано» — read receipts отложены).

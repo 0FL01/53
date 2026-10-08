@@ -6,6 +6,9 @@ description = "dmsg wire framing, versions and limits (ARCH §8)"
 
 [dependencies]
 base64 = "0.22"
+sha2 = "0.10"
+zeroize = "1"
+diceware_wordlists = "=1.2.3"
 
 [lib]
 name = "dmsg_protocol"

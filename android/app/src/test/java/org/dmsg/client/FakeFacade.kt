@@ -31,6 +31,10 @@ class FakeFacade : DmsgFacade {
     val loginCalls = mutableListOf<Pair<String, String?>>()
     val outcomes = ArrayDeque<LoginOutcome>()
     var signupProbe: (String, String, String?) -> Unit = { _, _, _ -> }
+    var normalizeProbe: (String) -> String = { value -> InvitationInput.parse(value).let { it.fill('\u0000'); value } }
+    var issueProbe: (ByteArray) -> InvitationGrant = { id -> InvitationGrant(100, InvitationInfo(id, 100, 86500), InvitationState.ACTIVE, "test phrase".toCharArray()) }
+    var listProbe: () -> InvitationList = { InvitationList(100, emptyList()) }
+    var revokeProbe: (ByteArray) -> Unit = {}
     var loginProbe: (String, String, String?) -> Unit = { _, _, _ -> }
     val dialogs = mutableListOf<Dialog>()
     val messages = mutableListOf<Msg>()
@@ -59,6 +63,10 @@ class FakeFacade : DmsgFacade {
         profile = DnsProfile("test.example", ByteArray(32), "ab".repeat(32), resolvers)
     }
     override fun registrationPolicyDns(): RegistrationPolicy { policyFailure?.let { throw it }; return policy }
+    override fun normalizeInvitation(input: String) = normalizeProbe(input)
+    override fun issueInvitation(id: ByteArray) = issueProbe(id)
+    override fun listInvitations() = listProbe()
+    override fun revokeInvitation(id: ByteArray) = revokeProbe(id)
     override fun signupDns(login: String, password: String, invitation: String?): AccountInfo {
         signupCalls++
         authFailure?.let { throw it }

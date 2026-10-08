@@ -9,7 +9,7 @@ use dmsg_core::{
     },
     voice_codec::{VoiceDecoder, VoiceEncoder, VoiceNote, MAX_BATCH_SAMPLES, SAMPLE_RATE},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     fs::{self, File, OpenOptions},
@@ -19,6 +19,7 @@ use std::{
     sync::{mpsc, Arc},
     time::Duration,
 };
+use zeroize::{Zeroize, Zeroizing};
 
 const USAGE: &str = "usage:
   voice_gate_peer signup DB KEY_FILE FIXTURE_JSON OWN_QR_OUTPUT
@@ -27,10 +28,17 @@ const USAGE: &str = "usage:
   voice_gate_peer send-voice DB KEY_FILE FIXTURE_JSON PHONE_QR_FILE PROOF_OUTPUT
   voice_gate_peer download DB KEY_FILE FIXTURE_JSON PHONE_QR_FILE
   voice_gate_peer verify DB KEY_FILE FIXTURE_JSON PHONE_QR_FILE [EXPECTED_VISIBLE_VOICE [EXPECTED_DELETED_VOICE]]
+  voice_gate_peer invitation-issue DB KEY_FILE FIXTURE_JSON NONCE16_FILE GRANT_OUTPUT
+  voice_gate_peer invitation-list DB KEY_FILE FIXTURE_JSON
+  voice_gate_peer invitation-revoke DB KEY_FILE FIXTURE_JSON NONCE16_FILE
   voice_gate_peer --help
 
 FIXTURE_JSON: owner-only JSON with serverCode, resolvers (numeric IP:port),
-login, password, invitation (string or null). KEY_FILE is exactly 32 raw bytes.
+and, for signup, login, password, invitation (string or null).
+Invitation commands need only serverCode/resolvers and an accepted owner DB/key.
+NONCE16_FILE is an owner-only file containing exactly 16 raw bytes; issue retries
+reuse this file. GRANT_OUTPUT is new 0600 JSON with metadata, phrase and QR token.
+KEY_FILE is exactly 32 raw bytes.
 signup requires a fresh DB path and creates a 0600 key if absent.
 Outputs are new 0600 files. Proof contains only public IDs/size/sample counts.
 History is bounded to 1000 rows; each transfer is bounded to 32 steps.
@@ -75,6 +83,7 @@ fn core<T>(stage: &'static str, result: std::result::Result<T, FfiError>) -> Res
             FfiError::InviteExpired => "invite_expired",
             FfiError::InviteRevoked => "invite_revoked",
             FfiError::InviteUsed => "invite_used",
+            FfiError::InviteLimit => "invite_limit",
             FfiError::AuthRateLimited => "auth_rate_limited",
             FfiError::Busy => "busy",
             FfiError::MessageChanged => "message_changed",
@@ -103,9 +112,19 @@ struct Fixture {
     #[serde(rename = "serverCode")]
     server_code: String,
     resolvers: Vec<String>,
-    login: String,
-    password: String,
+    login: Option<String>,
+    password: Option<String>,
     invitation: Option<String>,
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        if let Some(password) = &mut self.password {
+            password.zeroize();
+        }
+        if let Some(invitation) = &mut self.invitation {
+            invitation.zeroize();
+        }
+    }
 }
 
 fn private_metadata(path: &Path, stage: &'static str) -> Result<fs::Metadata> {
@@ -147,20 +166,33 @@ fn read_file(path: &Path, private: bool, limit: usize, stage: &'static str) -> R
     Ok(bytes)
 }
 
-fn fixture(path: &Path) -> Result<Fixture> {
-    let bytes = read_file(path, true, MAX_FIXTURE_BYTES, "fixture")?;
+fn fixture(path: &Path, signup: bool) -> Result<Fixture> {
+    let bytes = Zeroizing::new(read_file(path, true, MAX_FIXTURE_BYTES, "fixture")?);
     let fixture: Fixture =
         serde_json::from_slice(&bytes).map_err(|_| fail("fixture", "invalid_json"))?;
     dmsg_core::dns::Profile::from_qr(&fixture.server_code, fixture.resolvers.clone())
         .map_err(|_| fail("fixture", "invalid_profile_or_resolvers"))?;
-    let invitation = fixture
-        .invitation
-        .as_deref()
-        .map(dmsg_protocol::auth::parse_invitation)
-        .transpose()
-        .map_err(|_| fail("fixture", "invalid_invitation"))?;
-    dmsg_protocol::auth::build_signup(&fixture.login, &fixture.password, invitation.as_ref())
-        .map_err(|_| fail("fixture", "invalid_credentials"))?;
+    if signup {
+        let invitation = fixture
+            .invitation
+            .as_deref()
+            .map(dmsg_protocol::invitation::parse_invitation_input)
+            .transpose()
+            .map_err(|_| fail("fixture", "invalid_invitation"))?;
+        let invitation = invitation.map(Zeroizing::new);
+        let login = fixture
+            .login
+            .as_deref()
+            .ok_or_else(|| fail("fixture", "missing_login"))?;
+        let password = fixture
+            .password
+            .as_deref()
+            .ok_or_else(|| fail("fixture", "missing_password"))?;
+        let _payload = Zeroizing::new(
+            dmsg_protocol::auth::build_signup(login, password, invitation.as_deref())
+                .map_err(|_| fail("fixture", "invalid_credentials"))?,
+        );
+    }
     Ok(fixture)
 }
 
@@ -327,7 +359,9 @@ fn expected_count(value: Option<&String>) -> Result<Option<usize>> {
 fn valid_args(args: &[String]) -> bool {
     match args.first().map(String::as_str) {
         Some("signup" | "accept" | "download") => args.len() == 5,
-        Some("fetch") => args.len() == 4,
+        Some("fetch" | "invitation-list") => args.len() == 4,
+        Some("invitation-issue") => args.len() == 6,
+        Some("invitation-revoke") => args.len() == 5,
         Some("send-voice") => args.len() == 6,
         Some("verify") => (5..=7).contains(&args.len()),
         _ => false,
@@ -346,7 +380,7 @@ fn run(args: &[String]) -> Result<()> {
     } else {
         None
     };
-    let fixture = fixture(Path::new(&args[3]))?;
+    let mut fixture = fixture(Path::new(&args[3]), action == "signup")?;
     let db = Path::new(&args[1]);
     let signup = action == "signup";
     if signup {
@@ -357,7 +391,7 @@ fn run(args: &[String]) -> Result<()> {
     } else {
         private_metadata(db, "db")?;
     }
-    let key = storage_key(Path::new(&args[2]), signup)?;
+    let key = Zeroizing::new(storage_key(Path::new(&args[2]), signup)?);
     // Reserve a fresh owner-only empty DB; core initializes fresh schema10.
     // Existing databases and secret inputs are never truncated or replaced.
     if signup {
@@ -372,14 +406,97 @@ fn run(args: &[String]) -> Result<()> {
     let _guard = DnsGuard(client.clone());
     core(
         "configure_dns",
-        client.configure_dns(fixture.server_code, fixture.resolvers),
+        client.configure_dns(
+            std::mem::take(&mut fixture.server_code),
+            std::mem::take(&mut fixture.resolvers),
+        ),
     )?;
     match action {
+        "invitation-issue" => {
+            let id = read_file(Path::new(&args[4]), true, 16, "nonce")?;
+            dmsg_protocol::invitation::parse_issue_id(&id)
+                .map_err(|_| fail("nonce", "expected_16_raw_bytes"))?;
+            let mut output = new_output(Path::new(&args[5]), "grant_output")?;
+            let issued = Zeroizing::new(core("invitation_issue", client.issue_invitation_dns(id))?);
+            let token = issued
+                .phrase
+                .as_ref()
+                .map(|phrase| {
+                    core(
+                        "invitation_token",
+                        dmsg_core::ffi::invitation_token(phrase.clone()),
+                    )
+                    .map(Zeroizing::new)
+                })
+                .transpose()?;
+            #[derive(Serialize)]
+            struct Grant<'a> {
+                server_now: i64,
+                issue_id: &'a [u8],
+                #[serde(rename = "issueIdHex")]
+                issue_id_hex: String,
+                created_at: i64,
+                expires_at: i64,
+                state: &'static str,
+                phrase: Option<&'a str>,
+                token: Option<&'a str>,
+            }
+            let state = match issued.state {
+                dmsg_core::ffi::InvitationState::Active => "Active",
+                dmsg_core::ffi::InvitationState::Used => "Used",
+                dmsg_core::ffi::InvitationState::Revoked => "Revoked",
+                dmsg_core::ffi::InvitationState::Expired => "Expired",
+            };
+            let grant = Grant {
+                server_now: issued.server_now,
+                issue_id: &issued.invitation.issue_id,
+                issue_id_hex: issued
+                    .invitation
+                    .issue_id
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect(),
+                created_at: issued.invitation.created_at,
+                expires_at: issued.invitation.expires_at,
+                state,
+                phrase: issued.phrase.as_deref(),
+                token: token.as_ref().map(|t| t.as_str()),
+            };
+            let bytes = Zeroizing::new(
+                serde_json::to_vec(&grant).map_err(|_| fail("grant_output", "encode"))?,
+            );
+            write_output(&mut output, &bytes, "grant_output")?;
+            print_report(
+                json!({"action":"invitation-issue", "ok":1, "state":state, "private_grant_files":1}),
+            )
+        }
+        "invitation-list" => {
+            let list = core("invitation_list", client.list_invitations_dns())?;
+            print_report(
+                json!({"action":"invitation-list", "ok":1, "active":list.invitations.len(),
+                "server_now":list.server_now}),
+            )
+        }
+        "invitation-revoke" => {
+            let id = read_file(Path::new(&args[4]), true, 16, "nonce")?;
+            core("invitation_revoke", client.revoke_invitation_dns(id))?;
+            print_report(json!({"action":"invitation-revoke", "ok":1}))
+        }
         "signup" => {
             let mut output = new_output(Path::new(&args[4]), "own_qr_output")?;
             let account = core(
                 "signup_dns",
-                client.signup_dns(fixture.login, fixture.password, fixture.invitation),
+                client.signup_dns(
+                    fixture
+                        .login
+                        .take()
+                        .ok_or_else(|| fail("fixture", "missing_login"))?,
+                    fixture
+                        .password
+                        .take()
+                        .ok_or_else(|| fail("fixture", "missing_password"))?,
+                    fixture.invitation.take(),
+                ),
             )?;
             if !account.authenticated {
                 return Err(fail("signup_dns", "not_enrolled"));
@@ -654,5 +771,35 @@ mod tests {
         ));
         assert!(expected_count(Some(&"1".into())).is_ok());
         assert!(expected_count(Some(&"not-a-count".into())).is_err());
+        assert!(valid_args(
+            &["invitation-list", "db", "key", "fixture"].map(str::to_owned)
+        ));
+        assert!(valid_args(
+            &["invitation-issue", "db", "key", "fixture", "nonce", "grant"].map(str::to_owned)
+        ));
+        assert!(valid_args(
+            &["invitation-revoke", "db", "key", "fixture", "nonce"].map(str::to_owned)
+        ));
+    }
+
+    #[test]
+    fn invitation_public_fixture_needs_no_signup_credentials() {
+        let path = std::env::temp_dir().join(format!(
+            "dmsg-voice-peer-public-fixture-{}.json",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let profile = dmsg_protocol::profile::build(b"fixture.test", &[0x30, 0], &[9; 32]).unwrap();
+        let bytes = serde_json::to_vec(&json!({"serverCode":profile,"resolvers":["127.0.0.1:53"]}))
+            .unwrap();
+        let mut file = new_output(&path, "fixture").unwrap_or_else(|_| panic!("fixture output"));
+        write_output(&mut file, &bytes, "fixture").unwrap_or_else(|_| panic!("fixture write"));
+        assert!(fixture(&path, false).is_ok());
+        assert!(fixture(&path, true).is_err());
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        fs::remove_file(path).unwrap();
     }
 }

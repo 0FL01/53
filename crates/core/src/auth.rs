@@ -49,6 +49,7 @@ pub enum AuthError {
     InviteExpired,
     InviteRevoked,
     InviteUsed,
+    InviteLimit,
     AuthRateLimited,
     Revoked,
     AlreadyAuthenticated,
@@ -70,6 +71,7 @@ impl std::fmt::Display for AuthError {
             Self::InviteExpired => "invitation expired",
             Self::InviteRevoked => "invitation revoked",
             Self::InviteUsed => "invitation used",
+            Self::InviteLimit => "active invitation limit reached",
             Self::AuthRateLimited => "auth rate limited",
             Self::Revoked => "device revoked",
             Self::AlreadyAuthenticated => "account already authenticated",
@@ -202,11 +204,14 @@ pub async fn signup_direct(
     invitation: Option<&str>,
 ) -> Result<Account, AuthError> {
     let invite = invitation
-        .map(wire::parse_invitation)
+        .map(dmsg_protocol::invitation::parse_invitation_input)
         .transpose()
         .map_err(|_| AuthError::InvalidInput)?;
-    let payload = wire::build_signup(login, password, invite.as_ref())
-        .map_err(|_| AuthError::InvalidInput)?;
+    let invite = invite.map(zeroize::Zeroizing::new);
+    let payload = zeroize::Zeroizing::new(
+        wire::build_signup(login, password, invite.as_deref())
+            .map_err(|_| AuthError::InvalidInput)?,
+    );
     match direct(code, addr, db, pin, storage_key, OP_SIGNUP, &payload).await? {
         LoginOutcome::Authenticated(a) => Ok(a),
         _ => Err(AuthError::Protocol("signup replacement response")),

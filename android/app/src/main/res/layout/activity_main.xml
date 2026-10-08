@@ -20,21 +20,25 @@
     </ScrollView>
     <ScrollView android:id="@+id/auth_panel" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:visibility="gone">
         <LinearLayout android:orientation="vertical" android:layout_width="match_parent" android:layout_height="wrap_content" android:padding="16dp" android:saveEnabled="false" android:importantForAutofill="noExcludeDescendants">
-            <Button android:id="@+id/btn_login" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/sign_in" />
             <Button android:id="@+id/btn_signup" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/sign_up" />
+            <Button android:id="@+id/btn_login" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/sign_in" />
             <TextView android:id="@+id/auth_title" android:layout_width="match_parent" android:layout_height="wrap_content" style="@style/Dmsg.Title" android:text="@string/sign_in" />
+            <LinearLayout android:id="@+id/invitation_group" android:orientation="vertical" android:layout_width="match_parent" android:layout_height="wrap_content" android:visibility="gone" android:saveEnabled="false">
+                <Button android:id="@+id/btn_invitation_scan" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/invitation_scan" />
+                <Button android:id="@+id/btn_invitation_image" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/invitation_image" />
+                <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:labelFor="@id/auth_invitation_phrase" android:text="@string/invitation_enter_phrase" />
+                <EditText android:id="@+id/auth_invitation_phrase" android:layout_width="match_parent" android:layout_height="wrap_content" android:inputType="textMultiLine|textNoSuggestions" android:maxLength="256" android:saveEnabled="false" android:importantForAutofill="no" />
+                <Button android:id="@+id/btn_invitation_phrase" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/invitation_use_phrase" />
+                <TextView android:id="@+id/invitation_status" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/invitation_empty" android:accessibilityLiveRegion="polite" android:saveEnabled="false" />
+                <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/invitation_server_check" />
+                <Button android:id="@+id/btn_invitation_cancel" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/invitation_clear" />
+                <Button android:id="@+id/btn_invitation_file" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/invitation_file" />
+            </LinearLayout>
             <TextView android:id="@+id/auth_login_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:labelFor="@id/auth_login" android:text="@string/auth_login" />
             <EditText android:id="@+id/auth_login" android:layout_width="match_parent" android:layout_height="wrap_content" android:inputType="textVisiblePassword|textNoSuggestions" android:singleLine="true" android:maxLength="33" android:saveEnabled="false" android:importantForAutofill="no" />
             <TextView android:id="@+id/auth_password_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:labelFor="@id/auth_password" android:text="@string/auth_password" />
             <EditText android:id="@+id/auth_password" android:layout_width="match_parent" android:layout_height="wrap_content" android:inputType="textPassword" android:singleLine="true" android:saveEnabled="false" android:importantForAutofill="no" />
             <Button android:id="@+id/btn_password_reveal" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/show_password"/>
-            <LinearLayout android:id="@+id/invitation_group" android:orientation="vertical" android:layout_width="match_parent" android:layout_height="wrap_content" android:visibility="gone" android:saveEnabled="false">
-                <TextView android:id="@+id/invitation_status" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/invitation_empty" android:accessibilityLiveRegion="polite" android:saveEnabled="false" />
-                <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/invitation_server_check" />
-                <Button android:id="@+id/btn_invitation_cancel" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/invitation_clear" />
-            </LinearLayout>
-            <Button android:id="@+id/btn_invitation_scan" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/invitation_scan" />
-            <Button android:id="@+id/btn_invitation_file" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/invitation_file" />
             <Button android:id="@+id/btn_auth_submit" style="@style/Widget.Dmsg.Primary" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/sign_in" />
             <Button android:id="@+id/btn_policy_retry" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/policy_retry" />
         </LinearLayout>

@@ -3,17 +3,19 @@ use argon2::{
     password_hash::{PasswordHash, SaltString},
     Algorithm, Argon2, Params, PasswordHasher, PasswordVerifier, Version,
 };
+use dmsg_protocol::invitation::{self as ip, Issued, Metadata, State as InviteState};
 use dmsg_protocol::{
     auth::{self, RegistrationMode},
     *,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tokio::sync::Semaphore;
+use zeroize::Zeroizing;
 
 pub const HASH_SLOTS: usize = 2;
 const WINDOW: Duration = Duration::from_secs(60);
@@ -91,6 +93,7 @@ impl Attempts {
 pub struct Engine {
     slots: Arc<Semaphore>,
     attempts: Mutex<Attempts>,
+    issuance: Mutex<Issuance>,
     dummy: String,
 }
 impl Engine {
@@ -101,8 +104,136 @@ impl Engine {
         Ok(Self {
             slots: Arc::new(Semaphore::new(HASH_SLOTS)),
             attempts: Mutex::new(Attempts::default()),
+            issuance: Mutex::new(Issuance::default()),
             dummy,
         })
+    }
+
+    /// Synchronous management under DB -> limiter locks. Secrets are guarded
+    /// from DB materialization through response encoding; no await under locks.
+    pub fn invitation(
+        &self,
+        db: &Arc<Mutex<Connection>>,
+        device: &[u8; 32],
+        user: &[u8; 16],
+        op: u8,
+        payload: &[u8],
+    ) -> Result<(u8, Zeroizing<Vec<u8>>), u8> {
+        let id = match op {
+            OP_INVITE_ISSUE | OP_INVITE_REVOKE => {
+                Some(ip::parse_issue_id(payload).map_err(|_| ERR_INVALID_INPUT)?)
+            }
+            OP_INVITE_LIST if payload.is_empty() => None,
+            _ => return Err(ERR_INVALID_INPUT),
+        };
+        let mut conn = db.lock().expect("db");
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(store)?;
+        // Take the management wall-clock snapshot only after entering the DB
+        // operation. Existing account/Argon timestamp behavior stays separate.
+        let now = crate::now_secs();
+        check_invitation_owner(&tx, device, user)?;
+        match op {
+            OP_INVITE_ISSUE => {
+                let id = id.expect("parsed");
+                if let Some(existing) = owned_invitation(&tx, user, &id, now)? {
+                    let response =
+                        Zeroizing::new(ip::build_issued(&existing).map_err(|_| ERR_BAD)?);
+                    tx.commit().map_err(store)?;
+                    return Ok((OP_INVITE_ISSUED, response));
+                }
+                let active: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM invites WHERE owner_user_id=?1 AND used_at IS NULL AND revoked=0 AND expires_at>?2",
+                    rusqlite::params![user.as_slice(), now], |r| r.get(0)).map_err(store)?;
+                if active >= ip::MAX_ACTIVE as i64 {
+                    return Err(ERR_INVITE_LIMIT);
+                }
+                let mut limiter = self.issuance.lock().expect("issuance");
+                if !limiter.available(user, Instant::now()) {
+                    return Err(ERR_THROTTLED);
+                }
+                let expires_at = now.checked_add(ip::TTL_SECONDS).ok_or(ERR_BAD)?;
+                // A token collision is an ordinary single-PK retry, never a
+                // second namespace/alias. Regenerate only for that collision.
+                let (phrase, token) = loop {
+                    let phrase = generate_phrase()?;
+                    let token =
+                        Zeroizing::new(ip::parse_invitation_input(&phrase).map_err(|_| ERR_BAD)?);
+                    let collision: bool = tx
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM invites WHERE token=?1)",
+                            [token.as_slice()],
+                            |r| r.get(0),
+                        )
+                        .map_err(store)?;
+                    if !collision {
+                        break (phrase, token);
+                    }
+                };
+                let issued = Zeroizing::new(Issued {
+                    server_now: now,
+                    invitation: Metadata {
+                        issue_id: id,
+                        created_at: now,
+                        expires_at,
+                    },
+                    state: InviteState::Active,
+                    phrase: Some(phrase.to_string()),
+                });
+                let response = Zeroizing::new(ip::build_issued(&issued).map_err(|_| ERR_BAD)?);
+                tx.execute("INSERT INTO invites(token,created_at,expires_at,owner_user_id,issue_id,phrase_ascii) VALUES(?1,?2,?3,?4,?5,?6)",
+                    rusqlite::params![token.as_slice(), now, expires_at, user.as_slice(), id.as_slice(), issued.phrase.as_deref().ok_or(ERR_BAD)?]).map_err(store)?;
+                tx.commit().map_err(store)?;
+                // Only a durable new insertion spends budget. Retries, quotas,
+                // randomness/storage failures and rolled-back commits are free.
+                limiter.charge(*user, Instant::now());
+                Ok((OP_INVITE_ISSUED, response))
+            }
+            OP_INVITE_REVOKE => {
+                let id = id.expect("parsed");
+                let existing = owned_invitation(&tx, user, &id, now)?.ok_or(ERR_BAD)?;
+                if existing.state == InviteState::Active {
+                    tx.execute(
+                        "UPDATE invites SET revoked=1 WHERE owner_user_id=?1 AND issue_id=?2",
+                        rusqlite::params![user.as_slice(), id.as_slice()],
+                    )
+                    .map_err(store)?;
+                }
+                tx.commit().map_err(store)?;
+                Ok((OP_INVITE_REVOKED, Zeroizing::new(Vec::new())))
+            }
+            OP_INVITE_LIST => {
+                let mut statement = tx.prepare("SELECT issue_id,created_at,expires_at FROM invites WHERE owner_user_id=?1 AND used_at IS NULL AND revoked=0 AND expires_at>?2 ORDER BY created_at,issue_id").map_err(store)?;
+                let rows = statement
+                    .query_map(rusqlite::params![user.as_slice(), now], |r| {
+                        let id: Vec<u8> = r.get(0)?;
+                        Ok(Metadata {
+                            issue_id: id.try_into().map_err(|_| rusqlite::Error::InvalidQuery)?,
+                            created_at: r.get(1)?,
+                            expires_at: r.get(2)?,
+                        })
+                    })
+                    .map_err(store)?;
+                let mut invitations = Vec::new();
+                for row in rows {
+                    invitations.push(row.map_err(store)?);
+                    // Detect inconsistent DB state; never silently truncate.
+                    if invitations.len() > ip::MAX_ACTIVE {
+                        return Err(ERR_BAD);
+                    }
+                }
+                drop(statement);
+                let response = ip::build_list(&ip::List {
+                    server_now: now,
+                    invitations,
+                })
+                .map_err(|_| ERR_BAD)?;
+                tx.commit().map_err(store)?;
+                Ok((OP_INVITE_LISTED, Zeroizing::new(response)))
+            }
+            _ => unreachable!("validated"),
+        }
     }
 
     /// Returns only non-secret wire errors. The owned slot stays with the blocking
@@ -208,6 +339,88 @@ impl Engine {
             return Ok(outcome);
         }
     }
+}
+
+/// A rolling window of successful commits is also the entire owner tracking
+/// state: bounded by 32 global charges, without an independent owner registry.
+#[derive(Default)]
+struct Issuance {
+    commits: VecDeque<(Instant, [u8; 16])>,
+}
+impl Issuance {
+    fn available(&mut self, owner: &[u8; 16], now: Instant) -> bool {
+        while self
+            .commits
+            .front()
+            .is_some_and(|(start, _)| now.duration_since(*start) >= WINDOW)
+        {
+            self.commits.pop_front();
+        }
+        self.commits.len() < GLOBAL_LIMIT as usize
+            && self
+                .commits
+                .iter()
+                .filter(|(_, user)| user == owner)
+                .count()
+                < KEY_LIMIT as usize
+    }
+    fn charge(&mut self, owner: [u8; 16], now: Instant) {
+        self.commits.push_back((now, owner));
+        debug_assert!(self.commits.len() <= GLOBAL_LIMIT as usize);
+    }
+}
+
+fn check_invitation_owner(conn: &Connection, device: &[u8; 32], user: &[u8; 16]) -> Result<(), u8> {
+    let valid: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM devices d JOIN users u ON u.user_id=d.user_id WHERE d.device_key=?1 AND d.user_id=?2 AND d.revoked=0 AND d.blocked=0)",
+        rusqlite::params![device.as_slice(), user.as_slice()], |r| r.get(0)).map_err(store)?;
+    if valid {
+        Ok(())
+    } else {
+        Err(ERR_REVOKED)
+    }
+}
+
+fn owned_invitation(
+    conn: &Connection,
+    owner: &[u8; 16],
+    id: &[u8; 16],
+    now: i64,
+) -> Result<Option<Zeroizing<Issued>>, u8> {
+    conn.query_row("SELECT created_at,expires_at,used_at,revoked,phrase_ascii FROM invites WHERE owner_user_id=?1 AND issue_id=?2",
+        rusqlite::params![owner.as_slice(), id.as_slice()], |r| {
+            let created_at = r.get(0)?;
+            let expires_at = r.get(1)?;
+            let used: Option<i64> = r.get(2)?;
+            let revoked: bool = r.get(3)?;
+            let state = if used.is_some() { InviteState::Used } else if revoked { InviteState::Revoked }
+                else if expires_at <= now { InviteState::Expired } else { InviteState::Active };
+            // Terminal responses do not materialize a secret from SQLite.
+            let phrase = if state == InviteState::Active { Some(r.get(4)?) } else { None };
+            Ok(Zeroizing::new(Issued { server_now: now, invitation: Metadata {issue_id:*id,created_at,expires_at}, state, phrase }))
+        }).optional().map_err(store)
+}
+
+fn generate_phrase() -> Result<Zeroizing<String>, u8> {
+    let mut phrase = Zeroizing::new(String::with_capacity(59));
+    // Rejection sampling: 8 complete 7776-sized buckets fit in u16. No
+    // modulo bias, no deduplication; each of the six words is independent.
+    let bound = (65536 / ip::WORD_COUNT) * ip::WORD_COUNT;
+    for i in 0..6 {
+        let index = loop {
+            let mut bytes = [0; 2];
+            getrandom::fill(&mut bytes).map_err(|_| ERR_BAD)?;
+            let n = usize::from(u16::from_be_bytes(bytes));
+            if n < bound {
+                break n % ip::WORD_COUNT;
+            }
+        };
+        if i != 0 {
+            phrase.push(' ');
+        }
+        phrase.push_str(ip::word(index).ok_or(ERR_BAD)?);
+    }
+    Ok(phrase)
 }
 
 fn store(e: rusqlite::Error) -> u8 {
@@ -453,6 +666,271 @@ mod tests {
     }
     fn counts(db: &Arc<Mutex<Connection>>) -> (i64, i64, i64, i64) {
         db.lock().unwrap().query_row("SELECT (SELECT COUNT(*) FROM users),(SELECT COUNT(*) FROM devices),(SELECT COUNT(*) FROM cursors),(SELECT COUNT(*) FROM invites WHERE used_at IS NOT NULL)",[],|r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap()
+    }
+
+    fn owner_fixture(db: &Arc<Mutex<Connection>>, n: u8) -> ([u8; 16], [u8; 32]) {
+        let user = [n; 16];
+        let device = [n; 32];
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO users VALUES(?1,?2,?3,'$argon2id$fixture',1)",
+            rusqlite::params![user.as_slice(), format!("{n:012}"), format!("owner{n}")],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO devices(device_key,user_id,created_at) VALUES(?1,?2,1)",
+            rusqlite::params![device.as_slice(), user.as_slice()],
+        )
+        .unwrap();
+        (user, device)
+    }
+
+    fn issue(
+        engine: &Engine,
+        db: &Arc<Mutex<Connection>>,
+        user: &[u8; 16],
+        device: &[u8; 32],
+        id: &[u8; 16],
+    ) -> Issued {
+        let (op, bytes) = engine
+            .invitation(db, device, user, OP_INVITE_ISSUE, id)
+            .unwrap();
+        assert_eq!(op, OP_INVITE_ISSUED);
+        ip::parse_issued(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn invitation_commit_failure_is_free_and_rollback_preserves_same_id() {
+        let engine = Engine::new().await.unwrap();
+        let db = memory();
+        let (user, device) = owner_fixture(&db, 1);
+        // Deferred FK violation specifically fails COMMIT, after successful INSERT.
+        db.lock().unwrap().execute_batch("PRAGMA foreign_keys=ON; CREATE TABLE fail_commit(owner BLOB REFERENCES users(user_id) DEFERRABLE INITIALLY DEFERRED); CREATE TRIGGER fail AFTER INSERT ON invites BEGIN INSERT INTO fail_commit VALUES(zeroblob(16)); END;").unwrap();
+        assert_eq!(
+            engine
+                .invitation(&db, &device, &user, OP_INVITE_ISSUE, &[1; 16])
+                .err()
+                .expect("invitation rejected"),
+            ERR_BAD
+        );
+        assert_eq!(
+            db.lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM invites", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert!(engine.issuance.lock().unwrap().commits.is_empty());
+        db.lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail")
+            .unwrap();
+        let original = issue(&engine, &db, &user, &device, &[1; 16]);
+        for _ in 0..20 {
+            let retry = issue(&engine, &db, &user, &device, &[1; 16]);
+            assert_eq!(retry.invitation, original.invitation);
+            assert!(retry.phrase == original.phrase);
+        }
+        assert_eq!(engine.issuance.lock().unwrap().commits.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn invitation_owner_scoping_device_fence_and_terminal_priority() {
+        let engine = Engine::new().await.unwrap();
+        let db = memory();
+        let (user, device) = owner_fixture(&db, 1);
+        let (other, other_device) = owner_fixture(&db, 2);
+        let original = issue(&engine, &db, &user, &device, &[3; 16]);
+        assert_eq!(
+            engine
+                .invitation(&db, &other_device, &other, OP_INVITE_REVOKE, &[3; 16])
+                .err()
+                .expect("invitation rejected"),
+            ERR_BAD
+        );
+        assert_eq!(
+            engine
+                .invitation(&db, &device, &user, OP_INVITE_REVOKE, &[4; 16])
+                .err()
+                .expect("invitation rejected"),
+            ERR_BAD
+        );
+        assert_eq!(
+            engine
+                .invitation(&db, &device, &other, OP_INVITE_LIST, &[])
+                .err()
+                .expect("invitation rejected"),
+            ERR_REVOKED
+        );
+        // Same IDs live in different owner scopes and mint independent bearers.
+        let foreign = issue(&engine, &db, &other, &other_device, &[3; 16]);
+        assert!(foreign.phrase != original.phrase);
+        for flag in ["blocked", "revoked"] {
+            db.lock()
+                .unwrap()
+                .execute(
+                    &format!("UPDATE devices SET {flag}=1 WHERE device_key=?1"),
+                    [device.as_slice()],
+                )
+                .unwrap();
+            for (op, payload) in [
+                (OP_INVITE_ISSUE, &[3; 16][..]),
+                (OP_INVITE_REVOKE, &[3; 16][..]),
+                (OP_INVITE_LIST, &[][..]),
+            ] {
+                assert_eq!(
+                    engine
+                        .invitation(&db, &device, &user, op, payload)
+                        .err()
+                        .expect("invitation rejected"),
+                    ERR_REVOKED
+                );
+            }
+            db.lock()
+                .unwrap()
+                .execute(
+                    &format!("UPDATE devices SET {flag}=0 WHERE device_key=?1"),
+                    [device.as_slice()],
+                )
+                .unwrap();
+        }
+        let now = crate::now_secs();
+        db.lock().unwrap().execute("UPDATE invites SET created_at=?1,expires_at=?2,revoked=1,used_at=?2 WHERE owner_user_id=?3",rusqlite::params![now-ip::TTL_SECONDS,now,user.as_slice()]).unwrap();
+        let used = issue(&engine, &db, &user, &device, &[3; 16]);
+        assert_eq!(used.state, InviteState::Used);
+        assert!(used.phrase.is_none());
+        engine
+            .invitation(&db, &device, &user, OP_INVITE_REVOKE, &[3; 16])
+            .unwrap();
+        db.lock()
+            .unwrap()
+            .execute(
+                "UPDATE invites SET used_at=NULL WHERE owner_user_id=?1",
+                [user.as_slice()],
+            )
+            .unwrap();
+        assert_eq!(
+            issue(&engine, &db, &user, &device, &[3; 16]).state,
+            InviteState::Revoked
+        );
+        db.lock()
+            .unwrap()
+            .execute(
+                "UPDATE invites SET revoked=0 WHERE owner_user_id=?1",
+                [user.as_slice()],
+            )
+            .unwrap();
+        assert_eq!(
+            issue(&engine, &db, &user, &device, &[3; 16]).state,
+            InviteState::Expired
+        );
+        engine
+            .invitation(&db, &device, &user, OP_INVITE_REVOKE, &[3; 16])
+            .unwrap();
+        assert_eq!(
+            db.lock()
+                .unwrap()
+                .query_row(
+                    "SELECT revoked FROM invites WHERE owner_user_id=?1",
+                    [user.as_slice()],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(engine.issuance.lock().unwrap().commits.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn invitation_active_quota_retries_before_limits_and_rolling_commit_budgets() {
+        let engine = Engine::new().await.unwrap();
+        let db = memory();
+        let (user, device) = owner_fixture(&db, 1);
+        for i in 0..8 {
+            issue(&engine, &db, &user, &device, &[i; 16]);
+        }
+        assert_eq!(
+            engine
+                .invitation(&db, &device, &user, OP_INVITE_ISSUE, &[8; 16])
+                .err()
+                .expect("invitation rejected"),
+            ERR_INVITE_LIMIT
+        );
+        assert_eq!(
+            issue(&engine, &db, &user, &device, &[0; 16]).state,
+            InviteState::Active
+        );
+        engine
+            .invitation(&db, &device, &user, OP_INVITE_REVOKE, &[0; 16])
+            .unwrap();
+        assert_eq!(
+            issue(&engine, &db, &user, &device, &[0; 16]).state,
+            InviteState::Revoked
+        );
+        assert_eq!(
+            engine
+                .invitation(&db, &device, &user, OP_INVITE_ISSUE, &[8; 16])
+                .err()
+                .expect("invitation rejected"),
+            ERR_THROTTLED
+        );
+        assert_eq!(engine.issuance.lock().unwrap().commits.len(), 8);
+        // Other owners can commit up to the global 32 budget; quota failures
+        // above did not consume the remaining 24 charges.
+        for n in 2..=4 {
+            let (u, d) = owner_fixture(&db, n);
+            for i in 0..8 {
+                issue(&engine, &db, &u, &d, &[i; 16]);
+            }
+        }
+        let (u, d) = owner_fixture(&db, 5);
+        assert_eq!(
+            engine
+                .invitation(&db, &d, &u, OP_INVITE_ISSUE, &[0; 16])
+                .err()
+                .expect("invitation rejected"),
+            ERR_THROTTLED
+        );
+        assert_eq!(engine.issuance.lock().unwrap().commits.len(), 32);
+        for entry in &mut engine.issuance.lock().unwrap().commits {
+            entry.0 -= WINDOW;
+        }
+        issue(&engine, &db, &user, &device, &[8; 16]);
+        assert_eq!(engine.issuance.lock().unwrap().commits.len(), 1);
+        let (_, bytes) = engine
+            .invitation(&db, &device, &user, OP_INVITE_LIST, &[])
+            .unwrap();
+        let list = ip::parse_list(&bytes).unwrap();
+        assert_eq!(list.invitations.len(), 8);
+        assert!(list
+            .invitations
+            .windows(2)
+            .all(|w| (w[0].created_at, w[0].issue_id) <= (w[1].created_at, w[1].issue_id)));
+        assert_eq!(
+            engine
+                .invitation(&db, &device, &user, OP_INVITE_LIST, &[0])
+                .err()
+                .expect("invitation rejected"),
+            ERR_INVALID_INPUT
+        );
+        assert_eq!(
+            engine
+                .invitation(&db, &device, &user, OP_INVITE_ISSUE, &[0; 15])
+                .err()
+                .expect("invitation rejected"),
+            ERR_INVALID_INPUT
+        );
+        // Corrupt/inconsistent active count fails closed instead of truncating LIST.
+        let phrase = "abacus abacus abacus abacus abacus abacus";
+        let now = crate::now_secs();
+        db.lock().unwrap().execute("INSERT INTO invites(token,created_at,expires_at,owner_user_id,issue_id,phrase_ascii) VALUES(?1,?2,?3,?4,?5,?6)",rusqlite::params![[99u8;32].as_slice(),now,now+ip::TTL_SECONDS,user.as_slice(),[99u8;16].as_slice(),phrase]).unwrap();
+        assert_eq!(
+            engine
+                .invitation(&db, &device, &user, OP_INVITE_LIST, &[])
+                .err()
+                .expect("invitation rejected"),
+            ERR_BAD
+        );
     }
 
     #[test]

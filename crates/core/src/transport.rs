@@ -7,6 +7,7 @@
 
 use dmsg_protocol::{decode_frame, encode_frame, OP_AUTH_DOMAIN, OP_WELCOME};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use zeroize::Zeroizing;
 
 /// Noise-паттерн msgd v1. Должен совпадать с серверным `noise::PATTERN`,
 /// иначе рассинхрон handshake (см. crates/server/src/noise.rs).
@@ -123,9 +124,10 @@ impl Transport for DirectTcp {
     }
 
     async fn send_frame(&mut self, opcode: u8, payload: &[u8]) -> Result<(), TransportError> {
-        let inner =
-            encode_frame(opcode, payload).map_err(|e| TransportError::Frame(format!("{e:?}")))?;
-        let mut buf = vec![0u8; HS_BUF_LEN];
+        let inner = Zeroizing::new(
+            encode_frame(opcode, payload).map_err(|e| TransportError::Frame(format!("{e:?}")))?,
+        );
+        let mut buf = Zeroizing::new(vec![0u8; HS_BUF_LEN]);
         let n = self.noise_mut().and_then(|t| {
             t.write_message(&inner, &mut buf)
                 .map_err(|e| TransportError::Io(format!("encrypt: {e}")))
@@ -135,13 +137,16 @@ impl Transport for DirectTcp {
 
     async fn recv_frame(&mut self) -> Result<(u8, Vec<u8>), TransportError> {
         let cipher = rlen(self.stream_mut()?).await?;
-        let mut buf = vec![0u8; HS_BUF_LEN];
+        let mut buf = Zeroizing::new(vec![0u8; HS_BUF_LEN]);
         let n = self.noise_mut().and_then(|t| {
             t.read_message(&cipher, &mut buf)
                 .map_err(|_| TransportError::Closed)
         })?;
-        let (_, op, payload, _) =
+        let (_, op, payload, consumed) =
             decode_frame(&buf[..n]).map_err(|e| TransportError::Frame(format!("{e:?}")))?;
+        if consumed != n {
+            return Err(TransportError::Frame("trailing application bytes".into()));
+        }
         Ok((op, payload.to_vec()))
     }
 
@@ -207,7 +212,7 @@ pub async fn initiate_with_key(
         .map_err(|e| TransportError::Handshake(format!("remote key: {e}")))?
         .build_initiator()
         .map_err(|e| TransportError::Handshake(format!("initiator: {e}")))?;
-    let mut buf = vec![0u8; HS_BUF_LEN];
+    let mut buf = Zeroizing::new(vec![0u8; HS_BUF_LEN]);
     let mut s = tokio::net::TcpStream::connect(addr)
         .await
         .map_err(|e| TransportError::Io(format!("connect: {e}")))?;
@@ -226,8 +231,10 @@ pub async fn initiate_with_key(
     let mut t = hs
         .into_transport_mode()
         .map_err(|_| TransportError::Handshake("transport".into()))?;
-    let inner = encode_frame(OP_AUTH_DOMAIN, domain)
-        .map_err(|e| TransportError::Frame(format!("{e:?}")))?;
+    let inner = Zeroizing::new(
+        encode_frame(OP_AUTH_DOMAIN, domain)
+            .map_err(|e| TransportError::Frame(format!("{e:?}")))?,
+    );
     let n = t
         .write_message(&inner, &mut buf)
         .map_err(|_| TransportError::Closed)?;
@@ -238,9 +245,9 @@ pub async fn initiate_with_key(
     let n = t
         .read_message(&c, &mut buf)
         .map_err(|_| TransportError::Auth("no welcome".into()))?;
-    let (_, op, payload, _) =
+    let (_, op, payload, consumed) =
         decode_frame(&buf[..n]).map_err(|e| TransportError::Frame(format!("{e:?}")))?;
-    if op != OP_WELCOME || payload != domain {
+    if consumed != n || op != OP_WELCOME || payload != domain {
         return Err(TransportError::Auth("domain mismatch".into()));
     }
     Ok(DirectTcp {
@@ -314,5 +321,56 @@ mod tests {
         assert!(!ch.is_connected());
         assert!(ch.connect().await.is_err());
         assert!(!ch.is_connected());
+    }
+
+    #[tokio::test]
+    async fn authenticated_message_with_trailing_frame_is_rejected() {
+        let private = [71; 32];
+        let mut responder = snow::Builder::new(PATTERN.parse().unwrap())
+            .local_private_key(&private)
+            .unwrap()
+            .build_responder()
+            .unwrap();
+        let mut initiator = snow::Builder::new(PATTERN.parse().unwrap())
+            .local_private_key(&[72; 32])
+            .unwrap()
+            .remote_public_key(&crate::olm::device_pubkey(&private))
+            .unwrap()
+            .build_initiator()
+            .unwrap();
+        let mut buf = Zeroizing::new(vec![0; HS_BUF_LEN]);
+        let mut scratch = Zeroizing::new(vec![0; HS_BUF_LEN]);
+        let n = initiator.write_message(&[], &mut buf).unwrap();
+        responder.read_message(&buf[..n], &mut scratch).unwrap();
+        let n = responder.write_message(&[], &mut buf).unwrap();
+        initiator.read_message(&buf[..n], &mut scratch).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut server, _) = listener.accept().await.unwrap();
+        let mut transport = DirectTcp {
+            addr: "fixture".into(),
+            server_pub: [0; 32],
+            domain: b"fixture".to_vec(),
+            stream: Some(client),
+            noise: Some(initiator.into_transport_mode().unwrap()),
+        };
+        let mut plain =
+            Zeroizing::new(encode_frame(dmsg_protocol::OP_INVITE_REVOKED, &[]).unwrap());
+        plain.extend_from_slice(
+            &encode_frame(dmsg_protocol::OP_ERROR, &[dmsg_protocol::ERR_BAD]).unwrap(),
+        );
+        let n = responder
+            .into_transport_mode()
+            .unwrap()
+            .write_message(&plain, &mut buf)
+            .unwrap();
+        wlen(&mut server, &buf[..n]).await.unwrap();
+        assert_eq!(
+            transport.recv_frame().await,
+            Err(TransportError::Frame("trailing application bytes".into()))
+        );
+        transport.close().await;
     }
 }

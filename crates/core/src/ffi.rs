@@ -16,6 +16,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::auth::AuthError;
 use crate::contacts::{self, Contact};
@@ -159,6 +160,71 @@ pub enum LoginOutcome {
     ReplacementRequired { expected_device: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum InvitationState {
+    Active,
+    Used,
+    Revoked,
+    Expired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct InvitationInfo {
+    pub issue_id: Vec<u8>,
+    pub created_at: i64,
+    pub expires_at: i64,
+}
+
+/// The phrase is an intentional secret export. UniFFI moves these fields during
+/// serialization; generated immutable JVM copies have their own lifetime.
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
+pub struct IssuedInvitation {
+    pub server_now: i64,
+    pub invitation: InvitationInfo,
+    pub state: InvitationState,
+    pub phrase: Option<String>,
+}
+
+impl std::fmt::Debug for IssuedInvitation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IssuedInvitation")
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
+}
+impl Zeroize for IssuedInvitation {
+    fn zeroize(&mut self) {
+        if let Some(phrase) = &mut self.phrase {
+            phrase.zeroize();
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct InvitationList {
+    pub server_now: i64,
+    pub invitations: Vec<InvitationInfo>,
+}
+
+fn invitation_info(metadata: &dmsg_protocol::invitation::Metadata) -> InvitationInfo {
+    InvitationInfo {
+        issue_id: metadata.issue_id.to_vec(),
+        created_at: metadata.created_at,
+        expires_at: metadata.expires_at,
+    }
+}
+
+enum InvitationCommand {
+    Issue([u8; 16]),
+    List,
+    Revoke([u8; 16]),
+}
+enum InvitationResult {
+    Issued(IssuedInvitation),
+    Listed(InvitationList),
+    Revoked,
+}
+
 /// Одно расшифрованное входящее (событие приёма).
 #[derive(Clone, PartialEq, Eq, uniffi::Record)]
 pub struct ReceivedMsg {
@@ -222,6 +288,7 @@ pub enum FfiError {
     InviteExpired,
     InviteRevoked,
     InviteUsed,
+    InviteLimit,
     AuthRateLimited,
     InvalidInput,
     Busy,
@@ -262,6 +329,7 @@ impl std::fmt::Display for FfiError {
             Self::InviteExpired => write!(f, "invitation expired"),
             Self::InviteRevoked => write!(f, "invitation revoked"),
             Self::InviteUsed => write!(f, "invitation used"),
+            Self::InviteLimit => write!(f, "active invitation limit reached"),
             Self::AuthRateLimited => write!(f, "auth rate limited"),
             Self::InvalidInput => write!(f, "invalid input"),
             Self::Busy => write!(f, "server busy, retry later"),
@@ -333,6 +401,7 @@ fn map_auth(e: AuthError) -> FfiError {
         AuthError::InviteExpired => FfiError::InviteExpired,
         AuthError::InviteRevoked => FfiError::InviteRevoked,
         AuthError::InviteUsed => FfiError::InviteUsed,
+        AuthError::InviteLimit => FfiError::InviteLimit,
         AuthError::AuthRateLimited => FfiError::AuthRateLimited,
         AuthError::AlreadyAuthenticated => FfiError::InvalidInput,
         AuthError::Revoked => FfiError::Revoked,
@@ -352,6 +421,17 @@ fn map_auth(e: AuthError) -> FfiError {
 /// (public server ≤ ~5.5 KiB b64, contact ~170 символов). Сверх — явная ошибка
 /// «oversized», а не молчаливый Truncated парсера.
 pub const QR_URI_MAX: usize = 8192;
+
+/// Normalize a raw QR token or six-word phrase offline, without a client/store.
+#[uniffi::export]
+pub fn invitation_token(input: String) -> Result<String, FfiError> {
+    let input = Zeroizing::new(input);
+    let token = Zeroizing::new(
+        dmsg_protocol::invitation::parse_invitation_input(&input)
+            .map_err(|_| FfiError::InvalidInput)?,
+    );
+    Ok(dmsg_protocol::auth::build_invitation(&token))
+}
 
 /// Классифицировать сканированный QR (оба формата). Битый/oversized —
 /// явная ошибка со статической причиной (содержимое не возвращается).
@@ -487,6 +567,27 @@ fn parse_transport_args(
 }
 
 impl DmsgClient {
+    fn invitation_dns(&self, command: InvitationCommand) -> Result<InvitationResult, FfiError> {
+        // Validate the latest durable accepted account before starting DNS.
+        let mut core = self.core()?;
+        core.my_account().map_err(map_olm)?;
+        let key = Zeroizing::new(
+            crate::store::load_identity(&core.conn)
+                .map_err(|_| FfiError::Store("invitation identity unavailable".into()))?
+                .ok_or(FfiError::NotEnrolled)?,
+        );
+        let profile = self.dns_profile()?;
+        let addr = self.dns_endpoint(&profile)?;
+        runtime()?.block_on(invitation_connected(
+            &mut core,
+            &addr,
+            &profile,
+            &key,
+            command,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+        ))
+    }
+
     fn auth_dns(&self, opcode: u8, payload: &[u8]) -> Result<crate::auth::LoginOutcome, FfiError> {
         use crate::transport::Transport;
         let p = self.dns_profile()?;
@@ -554,8 +655,102 @@ impl DmsgClient {
     }
 }
 
+/// Keep an established stream outside the timed future so RESUME/command
+/// cancellation still reaches bounded close. A canceled handshake drops its TCP.
+async fn invitation_connected(
+    core: &mut crate::chat::Core,
+    addr: &str,
+    profile: &crate::dns::Profile,
+    key: &[u8; 32],
+    command: InvitationCommand,
+    deadline: tokio::time::Instant,
+) -> Result<InvitationResult, FfiError> {
+    use crate::transport::Transport;
+    let mut transport = None;
+    let result = tokio::time::timeout_at(deadline, async {
+        transport = Some(
+            crate::transport::initiate_with_key(
+                addr,
+                &profile.noise_pubkey,
+                profile.domain.as_bytes(),
+                key,
+            )
+            .await
+            .map_err(|_| FfiError::Transport("pinned invitation channel failed".into()))?,
+        );
+        let t = transport
+            .as_mut()
+            .ok_or_else(|| FfiError::Transport("invitation channel unavailable".into()))?;
+        match command {
+            InvitationCommand::Issue(id) => {
+                let mut issued = core.issue_invitation(t, &id).await.map_err(map_olm)?;
+                let state = match issued.state {
+                    dmsg_protocol::invitation::State::Active => InvitationState::Active,
+                    dmsg_protocol::invitation::State::Used => InvitationState::Used,
+                    dmsg_protocol::invitation::State::Revoked => InvitationState::Revoked,
+                    dmsg_protocol::invitation::State::Expired => InvitationState::Expired,
+                };
+                Ok(InvitationResult::Issued(IssuedInvitation {
+                    server_now: issued.server_now,
+                    invitation: invitation_info(&issued.invitation),
+                    state,
+                    phrase: issued.phrase.take(),
+                }))
+            }
+            InvitationCommand::List => {
+                let list = core.list_invitations(t).await.map_err(map_olm)?;
+                Ok(InvitationResult::Listed(InvitationList {
+                    server_now: list.server_now,
+                    invitations: list.invitations.iter().map(invitation_info).collect(),
+                }))
+            }
+            InvitationCommand::Revoke(id) => {
+                core.revoke_invitation(t, &id).await.map_err(map_olm)?;
+                Ok(InvitationResult::Revoked)
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| Err(FfiError::Transport("invitation command deadline".into())));
+    if let Some(t) = &mut transport {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), t.close()).await;
+    }
+    result
+}
+
 #[uniffi::export]
 impl DmsgClient {
+    pub fn issue_invitation_dns(&self, issue_id: Vec<u8>) -> Result<IssuedInvitation, FfiError> {
+        let id = dmsg_protocol::invitation::parse_issue_id(&issue_id)
+            .map_err(|_| FfiError::InvalidInput)?;
+        match self.invitation_dns(InvitationCommand::Issue(id))? {
+            InvitationResult::Issued(issued) => Ok(issued),
+            _ => Err(FfiError::Protocol(
+                "invalid invitation command result".into(),
+            )),
+        }
+    }
+
+    pub fn list_invitations_dns(&self) -> Result<InvitationList, FfiError> {
+        match self.invitation_dns(InvitationCommand::List)? {
+            InvitationResult::Listed(list) => Ok(list),
+            _ => Err(FfiError::Protocol(
+                "invalid invitation command result".into(),
+            )),
+        }
+    }
+
+    pub fn revoke_invitation_dns(&self, issue_id: Vec<u8>) -> Result<(), FfiError> {
+        let id = dmsg_protocol::invitation::parse_issue_id(&issue_id)
+            .map_err(|_| FfiError::InvalidInput)?;
+        match self.invitation_dns(InvitationCommand::Revoke(id))? {
+            InvitationResult::Revoked => Ok(()),
+            _ => Err(FfiError::Protocol(
+                "invalid invitation command result".into(),
+            )),
+        }
+    }
+
     /// Offline import after QR preview confirmation. Saved pins are immutable.
     pub fn configure_dns(&self, qr: String, resolvers: Vec<String>) -> Result<(), FfiError> {
         let profile =
@@ -655,13 +850,18 @@ impl DmsgClient {
         password: String,
         invitation: Option<String>,
     ) -> Result<AccountInfo, FfiError> {
+        let password = Zeroizing::new(password);
+        let invitation = invitation.map(Zeroizing::new);
         let invite = invitation
             .as_deref()
-            .map(dmsg_protocol::auth::parse_invitation)
+            .map(|value| dmsg_protocol::invitation::parse_invitation_input(value))
             .transpose()
             .map_err(|_| FfiError::InvalidInput)?;
-        let payload = dmsg_protocol::auth::build_signup(&login, &password, invite.as_ref())
-            .map_err(|_| FfiError::InvalidInput)?;
+        let invite = invite.map(Zeroizing::new);
+        let payload = Zeroizing::new(
+            dmsg_protocol::auth::build_signup(&login, &password, invite.as_deref())
+                .map_err(|_| FfiError::InvalidInput)?,
+        );
         match self.auth_dns(dmsg_protocol::OP_SIGNUP, &payload)? {
             crate::auth::LoginOutcome::Authenticated(a) => Ok(AccountInfo {
                 authenticated: true,
@@ -1313,6 +1513,175 @@ impl DmsgClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn invitation_test_read(s: &mut tokio::net::TcpStream) -> std::io::Result<Vec<u8>> {
+        use tokio::io::AsyncReadExt;
+        let n = s.read_u16().await?;
+        let mut bytes = vec![0; n as usize];
+        s.read_exact(&mut bytes).await?;
+        Ok(bytes)
+    }
+    async fn invitation_test_write(s: &mut tokio::net::TcpStream, bytes: &[u8]) {
+        use tokio::io::AsyncWriteExt;
+        s.write_u16(bytes.len() as u16).await.unwrap();
+        s.write_all(bytes).await.unwrap();
+    }
+
+    /// A real Noise peer stalls at handshake, RESUME, or command; EOF proves
+    /// cleanup reached the established stream after success/error/cancellation.
+    async fn invitation_test_server(
+        stall: Option<u8>,
+        error_reply: bool,
+    ) -> (String, crate::dns::Profile, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let private = [61; 32];
+        let profile = crate::dns::Profile::from_qr(
+            &dmsg_protocol::profile::build(
+                b"invitation.test",
+                &[0x30, 0],
+                &crate::olm::device_pubkey(&private),
+            )
+            .unwrap(),
+            vec!["127.0.0.1:53".into()],
+        )
+        .unwrap();
+        let handle = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = Zeroizing::new(vec![0; 65535]);
+            let mut hs = snow::Builder::new(crate::transport::PATTERN.parse().unwrap())
+                .local_private_key(&private)
+                .unwrap()
+                .build_responder()
+                .unwrap();
+            let msg = invitation_test_read(&mut stream).await.unwrap();
+            hs.read_message(&msg, &mut buf).unwrap();
+            if stall != Some(0) {
+                let n = hs.write_message(&[], &mut buf).unwrap();
+                invitation_test_write(&mut stream, &buf[..n]).await;
+                let mut noise = hs.into_transport_mode().unwrap();
+                let cipher = invitation_test_read(&mut stream).await.unwrap();
+                let n = noise.read_message(&cipher, &mut buf).unwrap();
+                let (_, op, payload, consumed) = dmsg_protocol::decode_frame(&buf[..n]).unwrap();
+                assert_eq!(op, dmsg_protocol::OP_AUTH_DOMAIN);
+                assert_eq!(payload, b"invitation.test");
+                assert_eq!(consumed, n);
+                let frame =
+                    dmsg_protocol::encode_frame(dmsg_protocol::OP_WELCOME, b"invitation.test")
+                        .unwrap();
+                let n = noise.write_message(&frame, &mut buf).unwrap();
+                invitation_test_write(&mut stream, &buf[..n]).await;
+                let cipher = invitation_test_read(&mut stream).await.unwrap();
+                let n = noise.read_message(&cipher, &mut buf).unwrap();
+                let (_, op, payload, consumed) = dmsg_protocol::decode_frame(&buf[..n]).unwrap();
+                assert_eq!(op, dmsg_protocol::OP_RESUME);
+                assert!(payload.is_empty());
+                assert_eq!(consumed, n);
+                if stall != Some(1) {
+                    let payload =
+                        dmsg_protocol::auth::build_authenticated(&[4; 16], "A11CE0000001").unwrap();
+                    let frame =
+                        dmsg_protocol::encode_frame(dmsg_protocol::OP_AUTHENTICATED, &payload)
+                            .unwrap();
+                    let n = noise.write_message(&frame, &mut buf).unwrap();
+                    invitation_test_write(&mut stream, &buf[..n]).await;
+                    let cipher = invitation_test_read(&mut stream).await.unwrap();
+                    let n = noise.read_message(&cipher, &mut buf).unwrap();
+                    let (_, op, payload, consumed) =
+                        dmsg_protocol::decode_frame(&buf[..n]).unwrap();
+                    assert_eq!(op, dmsg_protocol::OP_INVITE_LIST);
+                    assert!(payload.is_empty());
+                    assert_eq!(consumed, n);
+                    if stall != Some(2) {
+                        let list = dmsg_protocol::invitation::build_list(
+                            &dmsg_protocol::invitation::List {
+                                server_now: 100,
+                                invitations: vec![],
+                            },
+                        )
+                        .unwrap();
+                        let frame = if error_reply {
+                            dmsg_protocol::encode_frame(
+                                dmsg_protocol::OP_ERROR,
+                                &[dmsg_protocol::ERR_QUOTA],
+                            )
+                            .unwrap()
+                        } else {
+                            dmsg_protocol::encode_frame(dmsg_protocol::OP_INVITE_LISTED, &list)
+                                .unwrap()
+                        };
+                        let n = noise.write_message(&frame, &mut buf).unwrap();
+                        invitation_test_write(&mut stream, &buf[..n]).await;
+                    }
+                }
+            }
+            let mut byte = [0];
+            let eof =
+                tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut byte))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(
+                eof, 0,
+                "invitation operation must close its application stream"
+            );
+        });
+        (addr, profile, handle)
+    }
+
+    #[tokio::test]
+    async fn invitation_deadline_closes_stream_at_every_stage_and_on_server_error() {
+        let (client, dir) = authenticated_client("invitation-deadline");
+        let mut core = client.core().unwrap();
+        for (stall, error) in [
+            (None, false),
+            (None, true),
+            (Some(0), false),
+            (Some(1), false),
+            (Some(2), false),
+        ] {
+            let (addr, profile, server) = invitation_test_server(stall, error).await;
+            let result = invitation_connected(
+                &mut core,
+                &addr,
+                &profile,
+                &[3; 32],
+                InvitationCommand::List,
+                tokio::time::Instant::now() + std::time::Duration::from_millis(300),
+            )
+            .await;
+            if stall.is_some() {
+                assert!(
+                    matches!(result, Err(FfiError::Transport(ref text)) if text == "invitation command deadline")
+                );
+            } else if error {
+                assert!(matches!(result, Err(FfiError::InviteLimit)));
+            } else {
+                assert!(
+                    matches!(result, Ok(InvitationResult::Listed(ref list)) if list.invitations.is_empty())
+                );
+            }
+            server.await.unwrap();
+        }
+        assert_eq!(map_olm(OlmError::Quota), FfiError::Quota);
+        assert_eq!(map_auth(AuthError::InviteLimit), FfiError::InviteLimit);
+        let secret = "redacted phrase sentinel";
+        let value = IssuedInvitation {
+            server_now: 100,
+            invitation: InvitationInfo {
+                issue_id: vec![1; 16],
+                created_at: 100,
+                expires_at: 86500,
+            },
+            state: InvitationState::Active,
+            phrase: Some(secret.into()),
+        };
+        assert!(!format!("{value:?}").contains(secret));
+        drop(core);
+        drop(client);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn simultaneous_dns_import_cannot_replace_the_winning_pin() {

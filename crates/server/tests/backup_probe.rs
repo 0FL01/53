@@ -142,7 +142,7 @@ fn backup_restore_start() {
         child: spawn(p0 + 1, &rest, &key),
         port: p0 + 1,
     };
-    assert_eq!(ctl(&rest, &["dbversion"]), "6\n");
+    assert_eq!(ctl(&rest, &["dbversion"]), "7\n");
     assert_eq!(ctl(&rest, &["invite-list"]), before);
     assert_eq!(ctl(&rest, &["registration-mode"]), "open\n");
     let conn = rusqlite::Connection::open(rest.join("msgd.db")).unwrap();

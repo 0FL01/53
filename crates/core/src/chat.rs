@@ -334,6 +334,7 @@ impl Core {
     /// Resume this connection using the Noise identity, without credentials.
     /// A foreign AUTHENTICATED reply is rejected, never attached or persisted.
     pub async fn login(&mut self, t: &mut impl Transport) -> Result<(), OlmError> {
+        let (my_uid, my_cid) = self.my_account()?;
         t.send_frame(OP_RESUME, &[])
             .await
             .map_err(|e| OlmError::Transport(e.to_string()))?;
@@ -344,7 +345,6 @@ impl Core {
         if op == OP_AUTHENTICATED {
             let accepted = dmsg_protocol::auth::parse_authenticated(&p)
                 .map_err(|_| OlmError::Protocol("bad authenticated response"))?;
-            let (my_uid, my_cid) = self.my_account()?;
             if accepted.user_id != my_uid || accepted.contact_id != my_cid {
                 return Err(OlmError::Protocol("authenticated account mismatch"));
             }
@@ -354,6 +354,87 @@ impl Core {
             return Err(OlmError::Auth(crate::auth::map_error(p[0], false)));
         }
         Err(OlmError::Protocol("unexpected resume response"))
+    }
+
+    /// One RESUME, then one idempotent account-owned invitation command.
+    pub async fn issue_invitation(
+        &mut self,
+        t: &mut impl Transport,
+        issue_id: &[u8; 16],
+    ) -> Result<zeroize::Zeroizing<dmsg_protocol::invitation::Issued>, OlmError> {
+        self.login(t).await?;
+        t.send_frame(dmsg_protocol::OP_INVITE_ISSUE, issue_id)
+            .await
+            .map_err(|_| OlmError::Transport("invitation send failed".into()))?;
+        let payload = self
+            .invitation_reply(t, dmsg_protocol::OP_INVITE_ISSUED)
+            .await?;
+        let issued = zeroize::Zeroizing::new(
+            dmsg_protocol::invitation::parse_issued(&payload)
+                .map_err(|_| OlmError::Protocol("invalid issued invitation"))?,
+        );
+        if issued.invitation.issue_id != *issue_id {
+            return Err(OlmError::Protocol("invitation issue ID mismatch"));
+        }
+        Ok(issued)
+    }
+
+    pub async fn list_invitations(
+        &mut self,
+        t: &mut impl Transport,
+    ) -> Result<dmsg_protocol::invitation::List, OlmError> {
+        self.login(t).await?;
+        t.send_frame(dmsg_protocol::OP_INVITE_LIST, &[])
+            .await
+            .map_err(|_| OlmError::Transport("invitation send failed".into()))?;
+        let payload = self
+            .invitation_reply(t, dmsg_protocol::OP_INVITE_LISTED)
+            .await?;
+        dmsg_protocol::invitation::parse_list(&payload)
+            .map_err(|_| OlmError::Protocol("invalid invitation list"))
+    }
+
+    pub async fn revoke_invitation(
+        &mut self,
+        t: &mut impl Transport,
+        issue_id: &[u8; 16],
+    ) -> Result<(), OlmError> {
+        self.login(t).await?;
+        t.send_frame(dmsg_protocol::OP_INVITE_REVOKE, issue_id)
+            .await
+            .map_err(|_| OlmError::Transport("invitation send failed".into()))?;
+        let payload = self
+            .invitation_reply(t, dmsg_protocol::OP_INVITE_REVOKED)
+            .await?;
+        if !payload.is_empty() {
+            return Err(OlmError::Protocol(
+                "invalid invitation revoke acknowledgement",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn invitation_reply(
+        &self,
+        t: &mut impl Transport,
+        expected: u8,
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>, OlmError> {
+        let (op, payload) = t
+            .recv_frame()
+            .await
+            .map_err(|_| OlmError::Transport("invitation receive failed".into()))?;
+        let payload = zeroize::Zeroizing::new(payload);
+        if op == OP_ERROR && payload.len() == 1 {
+            return Err(OlmError::Auth(if payload[0] == dmsg_protocol::ERR_QUOTA {
+                crate::auth::AuthError::InviteLimit
+            } else {
+                crate::auth::map_error(payload[0], false)
+            }));
+        }
+        if op != expected {
+            return Err(OlmError::Protocol("unexpected invitation response"));
+        }
+        Ok(payload)
     }
 
     /// Отправить текст контакту. Возвращает message_id (16).

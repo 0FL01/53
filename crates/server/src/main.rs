@@ -31,6 +31,7 @@ use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::{Notify, Semaphore};
 
 use dmsg_protocol::{auth as ap, mailbox as mp, profile, *};
+use zeroize::Zeroizing;
 
 /// Кап незавершённых handshake (≪16 пилота, резерв до транспортных 32).
 const PRE_AUTH_CAP: usize = 8;
@@ -412,7 +413,7 @@ async fn handle_conn(
             if total != n {
                 return Err(());
             }
-            let reply = if op == OP_POLICY && payload.is_empty() {
+            let reply = Zeroizing::new(if op == OP_POLICY && payload.is_empty() {
                 let db = st.db.lock().expect("db");
                 match auth::mode(&db) {
                     Ok(mode) => encode_frame(OP_POLICY_RESP, &mode.encode()).expect("fits"),
@@ -431,6 +432,14 @@ async fn handle_conn(
             } else if authenticated_user.is_some() {
                 let user = authenticated_user.expect("checked");
                 match op {
+                    OP_INVITE_ISSUE | OP_INVITE_REVOKE | OP_INVITE_LIST => {
+                        match st.auth.invitation(&st.db, &device_key, &user, op, payload) {
+                            Ok((opcode, response)) => {
+                                encode_frame(opcode, &response).map_err(|_| ())?
+                            }
+                            Err(code) => encode_frame(OP_ERROR, &[code]).expect("fits"),
+                        }
+                    }
                     OP_SEND => send_reply(&st, &c, &device_key, &payload)?,
                     OP_FETCH => fetch_reply(&st, &c, &user, &device_key, &payload)?,
                     OP_MESSAGE_METADATA => metadata_reply(&st, &user, &device_key, payload),
@@ -454,10 +463,13 @@ async fn handle_conn(
             } else {
                 c.proto_err.fetch_add(1, Ordering::Relaxed);
                 return Err(());
-            };
+            });
             plain.fill(0);
             let mut out = vec![0u8; HS_BUF_LEN];
             let wn = transport.write_message(&reply, &mut out).map_err(|_| ())?;
+            // Destroy the secret plaintext response before the network await.
+            // Zeroizing also covers encryption errors and cancellation.
+            drop(reply);
             write_hs_msg(&mut stream, &out[..wn])
                 .await
                 .map_err(|_| ())?;

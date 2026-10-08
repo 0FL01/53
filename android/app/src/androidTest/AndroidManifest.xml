@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- A distinct APK/UID reads only an explicitly granted cache URI. Gate-only. -->
+        <activity android:name="org.dmsg.client.InvitationShareReadTarget" android:exported="true"
+            android:label="53 invitation PNG gate">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/png" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

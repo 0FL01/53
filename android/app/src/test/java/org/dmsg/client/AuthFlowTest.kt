@@ -21,7 +21,7 @@ class AuthFlowTest {
         assertTrue(runCatching { flow.policy() }.isFailure)
         assertEquals(2, f.stopCalls)
     }
-    @Test fun invitationOnlySignupAndOnlyWhenPolicyRequiresIt() {
+    @Test fun signupAlwaysPassesPresentInvitationLoginNeverDoes() {
         for (policy in RegistrationPolicy.entries) {
             assertFalse(AuthForm.needsInvitation(AuthAction.Login, policy))
         }
@@ -30,10 +30,13 @@ class AuthFlowTest {
         assertTrue(AuthForm.needsInvitation(AuthAction.Signup, RegistrationPolicy.INVITE_ONLY))
         val f = FakeFacade(); val flow = AuthFlow(f)
         f.signupProbe = { _, _, invite -> assertNull(invite) }
-        flow.submit(AuthAction.Signup, RegistrationPolicy.OPEN, "New.User", AuthSecrets("password".toCharArray(), "ignored".toCharArray()))
+        flow.submit(AuthAction.Signup, RegistrationPolicy.OPEN, "New.User", AuthSecrets("password".toCharArray()))
         f.signupProbe = { _, _, invite -> assertEquals("A".repeat(43), invite) }
+        flow.submit(AuthAction.Signup, RegistrationPolicy.OPEN, "openuser", AuthSecrets("password".toCharArray(), "A".repeat(43).toCharArray()))
         flow.submit(AuthAction.Signup, RegistrationPolicy.INVITE_ONLY, "another", AuthSecrets("password".toCharArray(), "A".repeat(43).toCharArray()))
-        assertEquals(2, f.signupCalls)
+        flow.submit(AuthAction.Login, RegistrationPolicy.INVITE_ONLY, "another", AuthSecrets("password".toCharArray(), "not a signup token".toCharArray()))
+        assertEquals(3, f.signupCalls)
+        assertEquals(1, f.loginCalls.size)
     }
     @Test fun boundsUseAsciiLoginAndExactUtf8PasswordWithoutTrimming() {
         val f = FakeFacade(); val flow = AuthFlow(f)
@@ -44,9 +47,10 @@ class AuthFlowTest {
         }
         AuthForm.validate(AuthAction.Login, null, "a".repeat(32), "é".repeat(64), null)
         AuthForm.validate(AuthAction.Login, null, "abc", "é".repeat(4), null)
-        for (password in listOf("1234567", "é".repeat(65))) {
+        for (password in listOf("1234567", "é".repeat(65), "password\u0000", "password\n", "password\u007f", "password\u0085", "password\ud800", "password\udc00")) {
             assertEquals(ErrorKind.InvalidInput, failure { AuthForm.validate(AuthAction.Login, null, "abc", password, null) }.kind)
         }
+        AuthForm.validate(AuthAction.Login, null, "abc", "😀😀", null)
     }
     @Test fun validationExplainsOnlyTheErrorWithoutTechnicalEncodingHints() {
         val cases = listOf(

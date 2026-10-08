@@ -45,6 +45,7 @@ class ScannerActivity : DmsgActivity() {
     private val exec = Executors.newSingleThreadExecutor()
     @Volatile private var done = false
     private var active = true
+    @Volatile private var generation = 0L
     private var prompt: AlertDialog? = null
     private val guard = UiGuard()
 
@@ -94,10 +95,9 @@ class ScannerActivity : DmsgActivity() {
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build()
             analysis.setAnalyzer(exec) { img ->
-                if (!done) {
-                    decode(img)?.let { onText(it) }
-                }
-                img.close()
+                val stamp = generation
+                try { if (!done) decode(img)?.let { onText(it, stamp) } }
+                finally { img.close() }
             }
             pv.unbindAll()
             pv.bindToLifecycle(
@@ -112,11 +112,12 @@ class ScannerActivity : DmsgActivity() {
     }
 
     private fun decode(img: androidx.camera.core.ImageProxy): String? {
+        var bytes: ByteArray? = null
         return try {
             val plane = img.planes[0]
             val yuv = plane.buffer
             val base = yuv.position()
-            val bytes = ByteArray(img.width * img.height)
+            bytes = ByteArray(img.width * img.height)
             for (row in 0 until img.height) {
                 for (col in 0 until img.width) {
                     bytes[row * img.width + col] =
@@ -129,13 +130,16 @@ class ScannerActivity : DmsgActivity() {
             MultiFormatReader().decode(BinaryBitmap(HybridBinarizer(src))).text
         } catch (_: Exception) {
             null
-        }
+        } finally { bytes?.fill(0) }
     }
 
     private fun onText(uri: String) {
+        onText(uri, generation)
+    }
+    private fun onText(uri: String, scanGeneration: Long) {
         done = true
         runOnUiThread {
-        if (!active || isFinishing || isDestroyed) return@runOnUiThread
+        if (!active || scanGeneration != generation || isFinishing || isDestroyed) return@runOnUiThread
         if (invitationOnly) {
             try {
                 val value = InvitationInput.parse(uri)
@@ -245,6 +249,7 @@ class ScannerActivity : DmsgActivity() {
         if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) bind()
     }
     override fun onPause() {
+        generation++
         active = false; guard.stop(); prompt?.dismiss(); prompt = null
         findViewById<EditText>(R.id.scanner_code).text.clear()
         super.onPause()

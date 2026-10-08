@@ -38,6 +38,12 @@
         <activity android:name=".DiagnosticsActivity" android:exported="false" />
         <activity android:name=".AdvancedProfileActivity" android:exported="false" />
         <activity android:name=".OutboxActivity" android:exported="false" />
+        <activity android:name=".InvitationsActivity" android:exported="false" />
+        <provider android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.invitation-share"
+            android:exported="false" android:grantUriPermissions="true">
+            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/invitation_share_paths" />
+        </provider>
 
         <!-- Single always-on foreground service (no second FGS mode;
              "Economy" is only a poll-interval flag, see DmsgService). -->

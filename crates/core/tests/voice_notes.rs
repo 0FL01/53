@@ -1,4 +1,4 @@
-//! Fresh core10/server6, actual Opus notes, and the opaque API used by Android.
+//! Fresh core10/server7, actual Opus notes, and the opaque API used by Android.
 //! Direct TCP is a host integration seam, not DNS/device acceptance evidence.
 mod support;
 
@@ -87,7 +87,7 @@ impl Pair {
                     |r| r.get(0)
                 )
                 .unwrap(),
-            "6"
+            "7"
         );
         assert!(
             server_db

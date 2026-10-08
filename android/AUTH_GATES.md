@@ -17,9 +17,18 @@ listed environment. Do not print inherited environment or provider credentials.
 
 ## Operator fixtures
 
+### Self-service invitations: fresh server7/core10 (2026-10-08)
+
+Current source adds account-owned single-use QR/phrase invitations on server7,
+preserving wire2, core10 and strict E2Ev2. Exact sender/recipient methods, private
+fixtures, QR-PNG Share, system image picker and evidence boundaries are in
+`SELF_SERVICE_INVITATION_GATES.md`; acceptance state is in
+`../docs/goals/2026-10-08-self-service-invitations.md`. Use `.gate` only; historical
+backend5/Main8 and earlier gate evidence below are not a new rollout authorization.
+
 ### Reply: fresh10 local phone + host E2E acceptance (2026-10-08)
 
-Current source is fresh core10 / strict E2Ev2 / server6 / outer wire2. Replies
+That Reply cut used fresh core10 / strict E2Ev2 / server6 / outer wire2. Replies
 use original Noise device32 + MID16, not a local ID or quoted-content snapshot.
 TEXT/EDIT remain1–4000 raw Unicode scalar values; metadata does not count.
 Strict v2 rejects v1 and old schemas without migration/wipe. Fresh local DB does

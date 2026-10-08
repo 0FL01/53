@@ -1,4 +1,4 @@
-//! Live fresh-schema6 Noise tests: durable resume, exact-device ACL, atomic
+//! Live fresh-schema7 Noise tests: durable resume, exact-device ACL, atomic
 //! mailbox/ACL dedup, independent control and coherent backup references.
 mod common;
 use common::*;
@@ -67,7 +67,7 @@ async fn accept(a: &mut Client, b: &mut Client, au: &[u8; 16], bu: &[u8; 16]) {
 async fn durable_resume_exact_device_acl_and_retry_never_reroutes() {
     let mut s = Server::new("blob-resume");
     s.ctl(&["registration-mode", "open"]);
-    assert_eq!(s.ctl(&["dbversion"]), "6\n");
+    assert_eq!(s.ctl(&["dbversion"]), "7\n");
     let (mut a, au) = account(&s, 11, "alice").await;
     let (mut b, bu) = account(&s, 12, "bob").await;
     let (mut e, _) = account(&s, 13, "eve").await;

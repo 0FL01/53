@@ -1,6 +1,6 @@
 # dmsg wire v2: единая account-auth логика
 
-Реализованный путь: **доверенный профиль сервера → Войти / Создать аккаунт → диалоги**. Регистрация `invite_only` (default) или `open`; приглашение — только одноразовое разрешение signup. Wire2/auth и server6 сохраняются; fresh core10/E2Ev2 добавляют Reply к TEXT/VOICE. Old-schema/plain→sealed conversion и legacy E2E decode отсутствуют. Working server5/main8 не обновлены; несовместимый cutover отдельно по явному разрешению. Ошибка не вызывает wipe/новую identity. ENROL/token replay/credential attach/admin invite-rebind отсутствуют.
+Реализованный путь: **доверенный профиль сервера → Войти / Создать аккаунт → диалоги**. Регистрация `invite_only` (default) или `open`; приглашение — только одноразовое разрешение signup. Wire2/auth сохраняются; fresh server7 добавляет клиентский выпуск приглашений, local core10/E2Ev2 не меняются. Old-schema/plain→sealed conversion и legacy E2E decode отсутствуют. Working server5/main8 не обновлены; несовместимый cutover отдельно по явному разрешению. Ошибка не вызывает wipe/новую identity. ENROL/token replay/credential attach/admin invite-rebind отсутствуют.
 
 ## Публичный профиль
 
@@ -31,9 +31,57 @@ AUTHENTICATED — user_id16 + contact_id12 Crockford; REPLACE_REQUIRED — те�
 
 ## Error codes
 
-ERROR payload — один byte: BAD1, EXPIRED2, REVOKED3, BOUND_OTHER4, NO_PREKEY5, QUOTA6, BUSY7, CREDENTIALS8, CONFLICT9, INVITE_REQUIRED10, INVALID_INPUT11, THROTTLED12, INVITE_USED13. Opcode и error code — разные пространства. Missing account/wrong password имеют одинаковый CREDENTIALS и same-cost verification; secret invitation 256-bit имеет отдельные lifecycle ошибки. Клиент показывает статические typed сообщения, unknown error остаётся retryable.
+ERROR payload — один byte: BAD1, EXPIRED2, REVOKED3, BOUND_OTHER4, NO_PREKEY5, QUOTA6, BUSY7, CREDENTIALS8, CONFLICT9, INVITE_REQUIRED10, INVALID_INPUT11, THROTTLED12, INVITE_USED13, INVITE_LIMIT14. Opcode и error code — разные пространства: INVITE_LIMIT не REPLACE_REQUIRED и не mailbox QUOTA. Missing account/wrong password имеют одинаковый CREDENTIALS и same-cost verification; приглашение имеет отдельные lifecycle ошибки. Клиент показывает статические typed сообщения, unknown error остаётся retryable.
 
 Argon2id v19: 19 MiB, t=2, p=1, random16 salt; максимум два nonqueued hash workers вне DB mutex/Tokio executor. Attempts: 32 global и 8 на canonical login/device за 60 s, bounded counters; без IP/resolver ban. Invitation — отдельная canonical base64url строка 43 символа/raw32, только signup; issue пишет новый файл0600, stdout только `ok`.
+
+## Самостоятельные одноразовые приглашения
+
+Только после account-auth/RESUME, с актуальной exact device/user проверкой active/unblocked:
+
+| Request | Exact payload | Response |
+|---|---|---|
+| INVITE_ISSUE46 | issue_id16 | INVITE_ISSUED47: now8 + id16 + created8 + expires8 + state1; только Active добавляет phrase_len1 + canonical phrase |
+| INVITE_REVOKE48 | issue_id16 | INVITE_REVOKED49, empty |
+| INVITE_LIST50 | empty | INVITE_LISTED51: now8 + count1 + ≤8 records `[id16,created8,expires8]` |
+
+Время — неотрицательные Unix seconds/i64 BE; state Active0/Used1/Revoked2/Expired3.
+LIST — полный bounded own-active snapshot в порядке created/id, не история/каталог;
+без секретов и повторных ID. Terminal ISSUE не содержит фразу. Parser отвергает
+truncation/trailing bytes, неверные состояния/TTL/IDs. Один Noise message содержит
+ровно один application frame.
+
+Сервер равномерно выбирает шесть слов pinned EFF Long7776; повтор слова допустим.
+`T = SHA256(b"dmsg signup phrase v1\0" || canonical_phrase)`. QR содержит прежний raw43
+от T, фраза даёт те же32 байта существующего SIGNUP. Self-service entropy≈77.55bit,
+не256bit; admin random32 остаётся256bit. Словарь/атрибуция —
+`crates/protocol/EFF-WORDLIST.md`. Client input raw≤256bytes: строгий raw43 либо
+ровно шесть слов, ASCII lowercase/case normalization и ASCII whitespace; без URI,
+Unicode folding, fuzzy correction или нового серверного профиля. Raw-file/admin
+parser остаётся строгим raw43.
+
+TTL24h, ≤8 active/account. Idempotency `(owner_user_id,issue_id)` переживает restart:
+найденный ID возвращает исходные времена и актуальное состояние, без продления или
+расхода квоты. Новый commit расходует отдельный rolling60s бюджет8/account,
+32/global; auth-attempt budget не меняется. Quota → INVITE_LIMIT, rate → THROTTLED.
+Exact access, retry/quota/limiter/insert/commit сериализованы DB lock/IMMEDIATE,
+без await. QR/фраза атомарно потребляют одну строку существующим signup; пароль,
+occupied-login и same-key retry сохраняют прежний порядок.
+
+Своя terminal REVOKE — no-op ACK; чужой/неизвестный ID одинаково BAD. Management
+state precedence used/revoked/expired/active не меняет signup error precedence
+revoked/used/expired. Приглашение принадлежит аккаунту, переживает replacement/block
+выдавшего устройства; само устройство лишается новых команд. Отзыв не отключает
+созданный аккаунт. Terminal rows сохраняются без GC ради durable retry, поэтому
+persistent storage не ограничен восемью строками. Phrase/token в SQLite/backup —
+bearer secrets, hash не является шифрованием хранения.
+
+Первый аккаунт fresh invite_only сервера получает операторское приглашение;
+последующие приглашения выпускает клиент. Secret UI очищается при pause; явные
+Copy/QR-PNG Share разрешают экспорт. PNG — narrow read-only private-cache URI с
+best-effort cleanup, не public secret link; секретов нет в navigation/saved state.
+Android gallery/phrase import не выполняет autosubmit и не меняет trust/contact QR.
+Runtime contract — `android/SELF_SERVICE_INVITATION_GATES.md`.
 
 ## Mailbox и peer binding
 

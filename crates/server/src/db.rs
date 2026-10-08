@@ -1,11 +1,11 @@
-//! Fresh schema 6 only. Compatibility is checked before writable open/WAL.
+//! Fresh schema 7 only. Compatibility is checked before writable open/WAL.
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::path::Path;
 
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 const SCHEMA: &str = "
 CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
-INSERT INTO meta VALUES('schema_version','6'),('registration_mode','invite_only');
+INSERT INTO meta VALUES('schema_version','7'),('registration_mode','invite_only');
 CREATE TABLE users(
   user_id BLOB PRIMARY KEY NOT NULL CHECK(length(user_id)=16),
   contact_id TEXT UNIQUE NOT NULL CHECK(length(contact_id)=12),
@@ -25,8 +25,21 @@ CREATE TABLE invites(
   token BLOB PRIMARY KEY NOT NULL CHECK(length(token)=32),
   created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
   revoked INTEGER NOT NULL DEFAULT 0 CHECK(revoked IN (0,1)),
-  used_at INTEGER
+  used_at INTEGER,
+  owner_user_id BLOB REFERENCES users(user_id),
+  issue_id BLOB,
+  phrase_ascii TEXT,
+  CHECK((owner_user_id IS NULL AND issue_id IS NULL AND phrase_ascii IS NULL) OR
+    (owner_user_id IS NOT NULL AND typeof(owner_user_id)='blob' AND length(owner_user_id)=16
+     AND issue_id IS NOT NULL AND typeof(issue_id)='blob' AND length(issue_id)=16
+     AND phrase_ascii IS NOT NULL AND typeof(phrase_ascii)='text'
+     AND length(CAST(phrase_ascii AS BLOB)) BETWEEN 11 AND 255
+     AND phrase_ascii NOT GLOB '*[^a-z -]*'
+     AND length(phrase_ascii)=length(CAST(phrase_ascii AS BLOB)))),
+  UNIQUE(owner_user_id,issue_id)
 );
+CREATE INDEX active_invites_owner ON invites(owner_user_id,expires_at)
+  WHERE used_at IS NULL AND revoked=0;
 CREATE TABLE contact_permissions(
   user_id BLOB NOT NULL, peer_user_id BLOB NOT NULL, state TEXT NOT NULL,
   PRIMARY KEY(user_id,peer_user_id)
@@ -95,7 +108,7 @@ fn version(conn: &Connection) -> rusqlite::Result<i64> {
             |r| r.get(0),
         )
         .optional()?;
-    if value.as_deref() != Some("6") {
+    if value.as_deref() != Some("7") {
         return Err(rusqlite::Error::InvalidQuery);
     }
     let mode: String = conn.query_row(
@@ -140,13 +153,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn invitation_owner_shape_foreign_key_unique_and_admin_nulls() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+        migrate(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO users VALUES(zeroblob(16),'0123456789AB','alice','$argon2id$fixture',1)",
+            [],
+        )
+        .unwrap();
+        // Administrative invites retain the original random-token row shape.
+        conn.execute(
+            "INSERT INTO invites(token,created_at,expires_at) VALUES(randomblob(32),1,2)",
+            [],
+        )
+        .unwrap();
+        for values in [
+            "zeroblob(16),NULL,NULL",
+            "NULL,zeroblob(16),NULL",
+            "NULL,NULL,'abacus abacus'",
+            "zeroblob(16),zeroblob(16),NULL",
+            "zeroblob(15),zeroblob(16),'abacus abacus'",
+            "zeroblob(16),zeroblob(15),'abacus abacus'",
+            "'abcdefghijklmnop',zeroblob(16),'abacus abacus'",
+            "zeroblob(16),'abcdefghijklmnop','abacus abacus'",
+            "zeroblob(16),zeroblob(16),zeroblob(32)",
+            "zeroblob(16),zeroblob(16),'short'",
+            "zeroblob(16),zeroblob(16),'abacus Abacus'",
+            "zeroblob(16),zeroblob(16),'abacus абакус'",
+            "zeroblob(16),zeroblob(16),'abacus/abacus'",
+            "zeroblob(16),zeroblob(16),CAST(zeroblob(256) AS TEXT)",
+            "randomblob(16),zeroblob(16),'abacus abacus'", // owner FK
+        ] {
+            assert!(conn.execute(&format!("INSERT INTO invites(token,created_at,expires_at,owner_user_id,issue_id,phrase_ascii) VALUES(randomblob(32),1,86401,{values})"),[]).is_err(),"{values}");
+        }
+        let sql="INSERT INTO invites(token,created_at,expires_at,owner_user_id,issue_id,phrase_ascii) VALUES(randomblob(32),1,86401,zeroblob(16),zeroblob(16),'abacus abacus abacus abacus abacus abacus')";
+        conn.execute(sql, []).unwrap();
+        assert!(conn.execute(sql, []).is_err());
+        let shape:(String,i64)=conn.query_row("SELECT sql,(SELECT COUNT(*) FROM invites) FROM sqlite_schema WHERE name='active_invites_owner'",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+        assert!(shape.0.contains("WHERE used_at IS NULL AND revoked=0"));
+        assert_eq!(shape.1, 2);
+    }
+
+    #[test]
     fn fresh_reopen_full_and_unique_active() {
         let dir = std::env::temp_dir().join(format!("msgd-schema-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("fresh.db");
         let conn = connect(&path).unwrap();
-        assert_eq!(migrate(&conn).unwrap(), 6);
-        assert_eq!(migrate(&conn).unwrap(), 6);
+        assert_eq!(migrate(&conn).unwrap(), 7);
+        assert_eq!(migrate(&conn).unwrap(), 7);
         assert_eq!(
             conn.query_row("PRAGMA synchronous", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
@@ -174,7 +230,7 @@ mod tests {
             )
             .is_err());
         drop(conn);
-        assert_eq!(migrate(&connect(&path).unwrap()).unwrap(), 6);
+        assert_eq!(migrate(&connect(&path).unwrap()).unwrap(), 7);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -182,7 +238,7 @@ mod tests {
     fn incompatible_versions_rejected_before_wal_without_mutation() {
         let dir = std::env::temp_dir().join(format!("msgd-legacy-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        for v in [0, 1, 2, 3, 4, 5, 7, 99] {
+        for v in [0, 1, 2, 3, 4, 5, 6, 8, 99] {
             let path = dir.join(format!("v{v}.db"));
             let conn = Connection::open(&path).unwrap();
             conn.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT); CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES('preserve');").unwrap();

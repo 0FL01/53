@@ -65,6 +65,8 @@
 
 **Уточнение onboarding 2026-10-06 реализовано:** deployment APK содержит доверенный публичный server profile; generic build сохраняет ручной trust preview. Отдельный QR/приватный файл приглашения автоматически выбирает signup с логином/паролем, но не создаёт аккаунт до явного submit и не устанавливает доверие к серверу. `53ctl qr-invite` выдаёт terminal QR + файл0600. Проверки и границы evidence — `docs/goals/2026-10-06-invite-onboarding.md` и `android/AUTH_GATES.md`; остальная M4 background-матрица не расширяется.
 
+**Self-service invitations, 2026-10-08:** fresh server7/core10/wire2; авторизованный пользователь явно выпускает одноразовый QR/шестисловную фразу, отправляет QR-PNG, восстанавливает прежний issue_id и отзывает приглашение. Получатель сканирует, выбирает картинку через системный picker или вводит фразу и явно создаёт аккаунт. Первый fresh invite_only аккаунт bootstrap через прежний CLI. Публичный профиль, contact QR, password/replacement и carrier не меняются; Main8/backend5 не обновляются автоматически. План/результаты — `docs/goals/2026-10-08-self-service-invitations.md`, runtime — `android/SELF_SERVICE_INVITATION_GATES.md`.
+
 **Задачи.** Первый запуск: вставить код/сканировать QR → проверить сервер → войти/создать аккаунт → диалоги. Приглашение показывать только когда его требует сервер; технические поля вынести в дополнительные настройки. Список диалогов, экран чата, composer, понятные ошибки («неверный логин или пароль», «логин занят», «нужно приглашение», «нет связи»), contact QR, настройки хранения и связи. Явные режимы «На связи»/«Экономия»; постоянное уведомление для активного соединения; корректные service types, разрешения и экран диагностики фоновых ограничений. Интеграция уведомлений без обязательного FCM.
 
 **Хранение.** Keystore-wrapped local key, encrypted secrets/ratchets/content в app-private storage, отключение небезопасного auto-backup для identity state. Локальная очистка кэша и истории; политика потери телефона и перевыпуска доступа. Полный cloud backup/перенос истории отложить.
@@ -103,7 +105,7 @@
 
 **Задачи.** Испытание до 16 concurrent devices; ограничение числа параллельных вызовов по полученной ёмкости. Интеграционные тесты регистрации, сообщений и медиа; parser fuzzing; ревью key/nonce/prekey/ACK/ACL логики; C sanitizers. Проверить отсутствие утечек секретов в app/server/CI logs.
 
-**Эксплуатация.** Согласованные backup/restore SQLite+blobs+server keys, проверка обновления/rollback с миграциями, восстановление чистого сервера, заполнение диска и graceful restart. Подписанный arm64 APK, стабильный release signing key, lockfiles, Git releases и краткий runbook. Команды создания invite и admin operations не являются публичным API.
+**Эксплуатация.** Согласованные backup/restore SQLite+blobs+server keys, проверка совместимого обновления/rollback и разрешённого fresh cutover, восстановление чистого сервера, заполнение диска и graceful restart. Подписанный arm64 APK, стабильный release signing key, lockfiles, Git releases и краткий runbook. Admin operations остаются локальными; owner-scoped ISSUE/LIST/REVOKE — authenticated client API.
 
 **Готово, когда.** Новый инстанс поднимается по runbook, получает делегированный DNS-поддомен и обслуживает два телефона без внешних сервисов. Restore проверен, потеря единственного сервера честно описана как отсутствие HA. В release notes указаны проверенные аппараты, путь резолва, режим фоновой связи и фактическая готовность звонков.
 

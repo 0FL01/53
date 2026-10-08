@@ -816,6 +816,14 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
+
+
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is
 // rather `InterfaceTooLargeException`, caused by too many methods
@@ -831,7 +839,9 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 // when the library is loaded.
 internal interface IntegrityCheckingUniffiLib : Library {
     // Integrity check functions only
-    fun uniffi_dmsg_core_checksum_func_page_limit(
+    fun uniffi_dmsg_core_checksum_func_invitation_token(
+): Short
+fun uniffi_dmsg_core_checksum_func_page_limit(
 ): Short
 fun uniffi_dmsg_core_checksum_func_qr_kind(
 ): Short
@@ -885,6 +895,10 @@ fun uniffi_dmsg_core_checksum_method_dmsgclient_inbox_page(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_invite_contact_qr(
 ): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_issue_invitation_dns(
+): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_list_invitations_dns(
+): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_login_dns(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_mark_read(
@@ -910,6 +924,8 @@ fun uniffi_dmsg_core_checksum_method_dmsgclient_reconnect_dns(
 fun uniffi_dmsg_core_checksum_method_dmsgclient_registration_policy_dns(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_retry_dns(
+): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_revoke_invitation_dns(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_send_dns(
 ): Short
@@ -1036,6 +1052,10 @@ fun uniffi_dmsg_core_fn_method_dmsgclient_inbox_page(`ptr`: Pointer,`cursor`: Lo
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_invite_contact_qr(`ptr`: Pointer,`uri`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
+fun uniffi_dmsg_core_fn_method_dmsgclient_issue_invitation_dns(`ptr`: Pointer,`issueId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+fun uniffi_dmsg_core_fn_method_dmsgclient_list_invitations_dns(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_login_dns(`ptr`: Pointer,`login`: RustBuffer.ByValue,`password`: RustBuffer.ByValue,`expectedDevice`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_mark_read(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,`throughLocalId`: Long,uniffi_out_err: UniffiRustCallStatus,
@@ -1062,6 +1082,8 @@ fun uniffi_dmsg_core_fn_method_dmsgclient_registration_policy_dns(`ptr`: Pointer
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_retry_dns(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
+fun uniffi_dmsg_core_fn_method_dmsgclient_revoke_invitation_dns(`ptr`: Pointer,`issueId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): Unit
 fun uniffi_dmsg_core_fn_method_dmsgclient_send_dns(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,`text`: RustBuffer.ByValue,`replyToLocalId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_set_contact_alias(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,`alias`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
@@ -1084,6 +1106,8 @@ fun uniffi_dmsg_core_fn_method_voicetransfer_advance(`ptr`: Pointer,uniffi_out_e
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_voicetransfer_cancel(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
 ): Unit
+fun uniffi_dmsg_core_fn_func_invitation_token(`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_func_page_limit(`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
 ): Int
 fun uniffi_dmsg_core_fn_func_qr_kind(`uri`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
@@ -1214,6 +1238,9 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 }
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
+    if (lib.uniffi_dmsg_core_checksum_func_invitation_token() != 50100.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_dmsg_core_checksum_func_page_limit() != 34852.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1295,6 +1322,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_invite_contact_qr() != 44484.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_issue_invitation_dns() != 4626.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_list_invitations_dns() != 20273.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_login_dns() != 16754.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1332,6 +1365,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_retry_dns() != 46819.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_revoke_invitation_dns() != 64743.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_send_dns() != 46136.toShort()) {
@@ -1879,6 +1915,10 @@ public interface DmsgClientInterface {
      */
     fun `inviteContactQr`(`uri`: kotlin.String): QrOutcome
 
+    fun `issueInvitationDns`(`issueId`: kotlin.ByteArray): IssuedInvitation
+
+    fun `listInvitationsDns`(): InvitationList
+
     fun `loginDns`(`login`: kotlin.String, `password`: kotlin.String, `expectedDevice`: kotlin.String?): LoginOutcome
 
     /**
@@ -1929,6 +1969,8 @@ public interface DmsgClientInterface {
     fun `registrationPolicyDns`(): RegistrationPolicy
 
     fun `retryDns`(): RetryReport
+
+    fun `revokeInvitationDns`(`issueId`: kotlin.ByteArray)
 
     fun `sendDns`(`contactId`: kotlin.String, `text`: kotlin.String, `replyToLocalId`: kotlin.Long?): kotlin.String
 
@@ -2407,6 +2449,32 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
 
 
 
+    @Throws(FfiException::class)override fun `issueInvitationDns`(`issueId`: kotlin.ByteArray): IssuedInvitation {
+            return FfiConverterTypeIssuedInvitation.lift(
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_issue_invitation_dns(
+        it, FfiConverterByteArray.lower(`issueId`),_status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(FfiException::class)override fun `listInvitationsDns`(): InvitationList {
+            return FfiConverterTypeInvitationList.lift(
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_list_invitations_dns(
+        it, _status)
+}
+    }
+    )
+    }
+
+
+
     @Throws(FfiException::class)override fun `loginDns`(`login`: kotlin.String, `password`: kotlin.String, `expectedDevice`: kotlin.String?): LoginOutcome {
             return FfiConverterTypeLoginOutcome.lift(
     callWithPointer {
@@ -2597,6 +2665,18 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
     }
     )
     }
+
+
+
+    @Throws(FfiException::class)override fun `revokeInvitationDns`(`issueId`: kotlin.ByteArray)
+        =
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_revoke_invitation_dns(
+        it, FfiConverterByteArray.lower(`issueId`),_status)
+}
+    }
+
 
 
 
@@ -3574,6 +3654,118 @@ public object FfiConverterTypeInboxRow: FfiConverterRustBuffer<InboxRow> {
 
 
 
+data class InvitationInfo (
+    var `issueId`: kotlin.ByteArray,
+    var `createdAt`: kotlin.Long,
+    var `expiresAt`: kotlin.Long
+) {
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeInvitationInfo: FfiConverterRustBuffer<InvitationInfo> {
+    override fun read(buf: ByteBuffer): InvitationInfo {
+        return InvitationInfo(
+            FfiConverterByteArray.read(buf),
+            FfiConverterLong.read(buf),
+            FfiConverterLong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: InvitationInfo) = (
+            FfiConverterByteArray.allocationSize(value.`issueId`) +
+            FfiConverterLong.allocationSize(value.`createdAt`) +
+            FfiConverterLong.allocationSize(value.`expiresAt`)
+    )
+
+    override fun write(value: InvitationInfo, buf: ByteBuffer) {
+            FfiConverterByteArray.write(value.`issueId`, buf)
+            FfiConverterLong.write(value.`createdAt`, buf)
+            FfiConverterLong.write(value.`expiresAt`, buf)
+    }
+}
+
+
+
+data class InvitationList (
+    var `serverNow`: kotlin.Long,
+    var `invitations`: List<InvitationInfo>
+) {
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeInvitationList: FfiConverterRustBuffer<InvitationList> {
+    override fun read(buf: ByteBuffer): InvitationList {
+        return InvitationList(
+            FfiConverterLong.read(buf),
+            FfiConverterSequenceTypeInvitationInfo.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: InvitationList) = (
+            FfiConverterLong.allocationSize(value.`serverNow`) +
+            FfiConverterSequenceTypeInvitationInfo.allocationSize(value.`invitations`)
+    )
+
+    override fun write(value: InvitationList, buf: ByteBuffer) {
+            FfiConverterLong.write(value.`serverNow`, buf)
+            FfiConverterSequenceTypeInvitationInfo.write(value.`invitations`, buf)
+    }
+}
+
+
+
+/**
+ * The phrase is an intentional secret export. UniFFI moves these fields during
+ * serialization; generated immutable JVM copies have their own lifetime.
+ */
+data class IssuedInvitation (
+    var `serverNow`: kotlin.Long,
+    var `invitation`: InvitationInfo,
+    var `state`: InvitationState,
+    var `phrase`: kotlin.String?
+) {
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeIssuedInvitation: FfiConverterRustBuffer<IssuedInvitation> {
+    override fun read(buf: ByteBuffer): IssuedInvitation {
+        return IssuedInvitation(
+            FfiConverterLong.read(buf),
+            FfiConverterTypeInvitationInfo.read(buf),
+            FfiConverterTypeInvitationState.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: IssuedInvitation) = (
+            FfiConverterLong.allocationSize(value.`serverNow`) +
+            FfiConverterTypeInvitationInfo.allocationSize(value.`invitation`) +
+            FfiConverterTypeInvitationState.allocationSize(value.`state`) +
+            FfiConverterOptionalString.allocationSize(value.`phrase`)
+    )
+
+    override fun write(value: IssuedInvitation, buf: ByteBuffer) {
+            FfiConverterLong.write(value.`serverNow`, buf)
+            FfiConverterTypeInvitationInfo.write(value.`invitation`, buf)
+            FfiConverterTypeInvitationState.write(value.`state`, buf)
+            FfiConverterOptionalString.write(value.`phrase`, buf)
+    }
+}
+
+
+
 /**
  * Страница outbox (queued + accepted): cursor — внутренний rowid.
  */
@@ -4105,6 +4297,12 @@ sealed class FfiException: kotlin.Exception() {
             get() = ""
     }
 
+    class InviteLimit(
+        ) : FfiException() {
+        override val message
+            get() = ""
+    }
+
     class AuthRateLimited(
         ) : FfiException() {
         override val message
@@ -4233,27 +4431,28 @@ public object FfiConverterTypeFfiError : FfiConverterRustBuffer<FfiException> {
             18 -> FfiException.InviteExpired()
             19 -> FfiException.InviteRevoked()
             20 -> FfiException.InviteUsed()
-            21 -> FfiException.AuthRateLimited()
-            22 -> FfiException.InvalidInput()
-            23 -> FfiException.Busy()
-            24 -> FfiException.BadText()
-            25 -> FfiException.MessageChanged()
-            26 -> FfiException.MessageUnavailable()
-            27 -> FfiException.VoiceSessionRequired()
-            28 -> FfiException.BadVoice()
-            29 -> FfiException.Transport(
+            21 -> FfiException.InviteLimit()
+            22 -> FfiException.AuthRateLimited()
+            23 -> FfiException.InvalidInput()
+            24 -> FfiException.Busy()
+            25 -> FfiException.BadText()
+            26 -> FfiException.MessageChanged()
+            27 -> FfiException.MessageUnavailable()
+            28 -> FfiException.VoiceSessionRequired()
+            29 -> FfiException.BadVoice()
+            30 -> FfiException.Transport(
                 FfiConverterString.read(buf),
                 )
-            30 -> FfiException.Store(
+            31 -> FfiException.Store(
                 FfiConverterString.read(buf),
                 )
-            31 -> FfiException.Crypto(
+            32 -> FfiException.Crypto(
                 FfiConverterString.read(buf),
                 )
-            32 -> FfiException.Protocol(
+            33 -> FfiException.Protocol(
                 FfiConverterString.read(buf),
                 )
-            33 -> FfiException.Server(
+            34 -> FfiException.Server(
                 FfiConverterString.read(buf),
                 )
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
@@ -4341,6 +4540,10 @@ public object FfiConverterTypeFfiError : FfiConverterRustBuffer<FfiException> {
                 4UL
             )
             is FfiException.InviteUsed -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
+            is FfiException.InviteLimit -> (
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
             )
@@ -4488,60 +4691,64 @@ public object FfiConverterTypeFfiError : FfiConverterRustBuffer<FfiException> {
                 buf.putInt(20)
                 Unit
             }
-            is FfiException.AuthRateLimited -> {
+            is FfiException.InviteLimit -> {
                 buf.putInt(21)
                 Unit
             }
-            is FfiException.InvalidInput -> {
+            is FfiException.AuthRateLimited -> {
                 buf.putInt(22)
                 Unit
             }
-            is FfiException.Busy -> {
+            is FfiException.InvalidInput -> {
                 buf.putInt(23)
                 Unit
             }
-            is FfiException.BadText -> {
+            is FfiException.Busy -> {
                 buf.putInt(24)
                 Unit
             }
-            is FfiException.MessageChanged -> {
+            is FfiException.BadText -> {
                 buf.putInt(25)
                 Unit
             }
-            is FfiException.MessageUnavailable -> {
+            is FfiException.MessageChanged -> {
                 buf.putInt(26)
                 Unit
             }
-            is FfiException.VoiceSessionRequired -> {
+            is FfiException.MessageUnavailable -> {
                 buf.putInt(27)
                 Unit
             }
-            is FfiException.BadVoice -> {
+            is FfiException.VoiceSessionRequired -> {
                 buf.putInt(28)
                 Unit
             }
-            is FfiException.Transport -> {
+            is FfiException.BadVoice -> {
                 buf.putInt(29)
-                FfiConverterString.write(value.v1, buf)
                 Unit
             }
-            is FfiException.Store -> {
+            is FfiException.Transport -> {
                 buf.putInt(30)
                 FfiConverterString.write(value.v1, buf)
                 Unit
             }
-            is FfiException.Crypto -> {
+            is FfiException.Store -> {
                 buf.putInt(31)
                 FfiConverterString.write(value.v1, buf)
                 Unit
             }
-            is FfiException.Protocol -> {
+            is FfiException.Crypto -> {
                 buf.putInt(32)
                 FfiConverterString.write(value.v1, buf)
                 Unit
             }
-            is FfiException.Server -> {
+            is FfiException.Protocol -> {
                 buf.putInt(33)
+                FfiConverterString.write(value.v1, buf)
+                Unit
+            }
+            is FfiException.Server -> {
+                buf.putInt(34)
                 FfiConverterString.write(value.v1, buf)
                 Unit
             }
@@ -4549,6 +4756,38 @@ public object FfiConverterTypeFfiError : FfiConverterRustBuffer<FfiException> {
     }
 
 }
+
+
+
+
+enum class InvitationState {
+
+    ACTIVE,
+    USED,
+    REVOKED,
+    EXPIRED;
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeInvitationState: FfiConverterRustBuffer<InvitationState> {
+    override fun read(buf: ByteBuffer) = try {
+        InvitationState.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: InvitationState) = 4UL
+
+    override fun write(value: InvitationState, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
 
 
 
@@ -5307,6 +5546,34 @@ public object FfiConverterSequenceTypeInboxRow: FfiConverterRustBuffer<List<Inbo
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeInvitationInfo: FfiConverterRustBuffer<List<InvitationInfo>> {
+    override fun read(buf: ByteBuffer): List<InvitationInfo> {
+        val len = buf.getInt()
+        return List<InvitationInfo>(len) {
+            FfiConverterTypeInvitationInfo.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<InvitationInfo>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeInvitationInfo.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<InvitationInfo>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeInvitationInfo.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeOutboxRow: FfiConverterRustBuffer<List<OutboxRow>> {
     override fun read(buf: ByteBuffer): List<OutboxRow> {
         val len = buf.getInt()
@@ -5356,6 +5623,19 @@ public object FfiConverterSequenceTypeReceivedMsg: FfiConverterRustBuffer<List<R
         }
     }
 }
+        /**
+         * Normalize a raw QR token or six-word phrase offline, without a client/store.
+         */
+    @Throws(FfiException::class) fun `invitationToken`(`input`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_func_invitation_token(
+        FfiConverterString.lower(`input`),_status)
+}
+    )
+    }
+
+
         /**
          * Кламп лимита страниц (контракт: 1..=100). Единая точка для Kotlin-зеркала.
          */ fun `pageLimit`(`limit`: kotlin.UInt): kotlin.UInt {

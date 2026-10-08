@@ -68,6 +68,36 @@ and message ID returns its persisted accepted/delivered status, even at full
 quota; changed retry ciphertext does not replace the original event or consume
 quota again.
 
+## Client-issued signup invitations
+
+Fresh schema7 supports account-owned `INVITE_ISSUE46/ISSUED47`,
+`INVITE_REVOKE48/REVOKED49` and `INVITE_LIST50/LISTED51` after account authentication.
+Every command rechecks the exact active/unblocked device and user under the DB lock.
+Wire layouts and the shared strict codec are in `docs/protocol.md` and
+`crates/protocol/src/invitation.rs`.
+
+Client issue ID is16 bytes, scoped to its owner. Same-ID recovery returns the
+original record before quota/rate/RNG, even after restart/use/revoke/expiry;
+only Active returns a phrase. Six uniform pinned EFF Long words derive one token:
+`SHA256(b"dmsg signup phrase v1\0" || canonical_phrase)`. QR is its existing raw43
+encoding; both use unchanged SIGNUP optional32 and consume one row atomically.
+Self-service entropy≈77.55bit; operator random32 remains256bit. Source/license:
+`crates/protocol/EFF-WORDLIST.md`.
+
+TTL24h, maximum8 active invitations/account. A separate rolling60s successful-commit
+budget permits8/account and32/global; replay is free and auth attempts are unchanged.
+Quota returns `ERR_INVITE_LIMIT14`, not mailbox quota; rate returns THROTTLED.
+LIST is bounded, own-active metadata only. Unknown/foreign revoke is uniformly BAD;
+own terminal revoke is no-op. Management state precedence is used/revoked/expired,
+without changing existing signup error ordering. Replacement/block of the issuing
+device prevents its new commands but does not automatically revoke account-owned
+invitations. Terminal rows are retained for durable idempotency: no invite GC or
+bounded-total-storage promise. Active phrases are bearer secrets in DB/backups.
+
+The existing private CLI bootstraps the first fresh invite-only account; routine
+issuance then happens in the client. Android PNG Share/image-picker acceptance is
+separate: `android/SELF_SERVICE_INVITATION_GATES.md`.
+
 ## Local control CLI
 
 Set `MSGCTL_SOCK` to the owner-only control socket when using a nondefault path.
@@ -121,9 +151,9 @@ environment/socket/data-volume names remain unchanged to preserve state/pins.
 
 ## Storage and verification
 
-Only fresh schema 6 is supported. Existing empty version 0 can initialize;
-nonempty version 0, versions 1–5, and future versions are rejected during a
-read-only preflight before writable open or WAL setup. Schema 6 has unique
+Only fresh schema 7 is supported. Existing empty version 0 can initialize;
+nonempty version 0, versions 1–6, and future versions are rejected during a
+read-only preflight before writable open or WAL setup. Schema 7 has unique
 non-null logins and password hashes, persisted registration mode, and a partial
 unique index allowing one nonretired device per account.
 
@@ -141,7 +171,7 @@ attempt bounds. `mailbox_probe`, `backup_probe`, `msgctl_probe`, and
 `noise_probe` retain the durable mailbox/GC/backup and transport/control gates.
 These are local server probes; DNS/Android acceptance is separate.
 
-## Opaque voice blobs (wire2, fresh server6)
+## Opaque voice blobs (wire2, fresh server7)
 
 `dmsg_protocol::blob` owns bounded payload builders/parsers and exact DTOs.
 RESERVE/RESERVED retain opcodes26/27; STATUS/RESP37/38, PUT/ACK39/40,

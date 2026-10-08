@@ -30,6 +30,7 @@ class InvitationOnboardingGatesTest {
         assertEquals("select exactly one method", "${javaClass.name}#${name.methodName}",
             InstrumentationRegistry.getArguments().getString("class"))
         assertFalse("foreground service must be off", DmsgService.running(app))
+        configureInvitationGateNetwork(app)
         return app
     }
 
@@ -93,7 +94,7 @@ class InvitationOnboardingGatesTest {
                     assertEquals(expectedRes?.let(it::getString) ?: "", it.findViewById<EditText>(R.id.auth_login).hint.toString())
                     assertTrue(it.findViewById<EditText>(R.id.auth_password).hint.isNullOrEmpty())
                 }
-                labelsAndHint(null)
+                labelsAndHint(R.string.signup_example)
                 scenario.onActivity { it.findViewById<Button>(R.id.btn_signup).performClick() }
                 labelsAndHint(R.string.signup_example)
                 scenario.onActivity { it.findViewById<Button>(R.id.btn_login).performClick() }
@@ -111,7 +112,7 @@ class InvitationOnboardingGatesTest {
                         humanError(it.resources, invalidLogin)
                 }
                 scenario.onActivity {
-                    assertTrue(it.findViewById<EditText>(R.id.auth_password).text.isEmpty())
+                    assertEquals("synthetic password", it.findViewById<EditText>(R.id.auth_password).text.toString())
                     assertFalse(memory(it).hasInvitation)
                     // Dispose the synthetic form context, never save it into the
                     // device's password manager when this test activity closes.
@@ -135,12 +136,12 @@ class InvitationOnboardingGatesTest {
             val monitor = instrumentation.addMonitor(ScannerActivity::class.java.name, null, false)
             try {
                 scenario.onActivity {
-                    assertEquals(AuthAction.Login, field(it, "action"))
+                    assertEquals(AuthAction.Signup, field(it, "action"))
                     assertEquals(View.VISIBLE, it.findViewById<View>(R.id.btn_invitation_scan).visibility)
                     it.findViewById<Button>(R.id.btn_invitation_scan).performClick()
                 }
                 val scanner = instrumentation.waitForMonitorWithTimeout(monitor, 10_000) as? ScannerActivity
-                assertNotNull("scanner opened from login", scanner)
+                assertNotNull("scanner opened from signup", scanner)
                 instrumentation.runOnMainSync {
                     ScannerActivity::class.java.getDeclaredMethod("onText", String::class.java)
                         .also { it.isAccessible = true }.invoke(scanner, "A".repeat(43))
@@ -196,6 +197,7 @@ class InvitationOnboardingGatesTest {
                 scenario.onActivity {
                     it.findViewById<Button>(R.id.btn_login).performClick()
                     assertFalse("action change wipes invitation", memory(it).hasInvitation)
+                    it.findViewById<Button>(R.id.btn_signup).performClick()
                 }
                 importFile()
                 scenario.onActivity {
