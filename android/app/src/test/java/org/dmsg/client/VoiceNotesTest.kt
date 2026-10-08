@@ -17,7 +17,7 @@ class VoiceNotesTest {
         voice = if (kind == MessageKind.VOICE) VoiceInfo(32_000u, byteArrayOf(20, 80), 200u, true) else null,
         text = if (kind == MessageKind.TEXT) "Text remains selectable" else "", localTimestampMs = id,
         deliveryState = DeliveryState.ACCEPTED, serverSeq = id, serverTimestampMs = id,
-        revision = 0uL, hiddenSelf = false, deletedAll = false, changeDeliveryState = null)
+        revision = 0uL, hiddenSelf = false, deletedAll = false, changeDeliveryState = null, reply = null)
     private fun facade() = FakeFacade().apply { dialogs.add(contact) }
 
     @Test fun holdReleaseLocksAndCancellationAreTerminalForTheGesture() {
@@ -64,10 +64,10 @@ class VoiceNotesTest {
     @Test fun onlyMissingSessionBootstrapsAndBootstrapFailureKeepsDraftUnwritten() {
         val f = facade().apply { sessionReady = false; sendFailure = DmsgError(R.string.error_transport, ErrorKind.Transport) }
         assertTrue(TextSendCoordinator.queueVoice(f, VoiceSendAttempt("P"), byteArrayOf(1)) is VoiceSendOutcome.NotSaved)
-        assertEquals(1, f.primeCalls); assertEquals(0, f.voiceQueueCalls); assertTrue(f.history.isEmpty())
+        assertEquals(1, f.primeCalls); assertEquals(1, f.voiceQueueCalls); assertTrue(f.history.isEmpty())
         f.sendFailure = null
         assertTrue(TextSendCoordinator.queueVoice(f, VoiceSendAttempt("P"), byteArrayOf(1)) is VoiceSendOutcome.Saved)
-        assertEquals(2, f.primeCalls); assertEquals(1, f.voiceQueueCalls)
+        assertEquals(2, f.primeCalls); assertEquals(3, f.voiceQueueCalls)
     }
 
     @Test fun postCommitExceptionUsesExactMidIncludingHiddenRowsAndNeverResends() {

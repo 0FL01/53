@@ -151,7 +151,7 @@ impl LiveMsgd {
         assert_eq!(
             conn.query_row::<i64, _, _>("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap(),
-            9
+            10
         );
         account
     }

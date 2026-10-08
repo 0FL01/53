@@ -76,12 +76,12 @@ interface DmsgFacade {
     fun markRead(id: String, throughLocalId: Long): Long
     fun inbox(cursor: Long, limit: Int): Pair<List<Msg>, Long?>
     fun outbox(cursor: Long, limit: Int): Pair<List<OutRow>, Long?>
-    fun send(id: String, text: String): String
+    fun send(id: String, text: String, replyToLocalId: Long? = null): String
     fun editMessage(contactId: String, localId: Long, expectedRevision: ULong, text: String): HistoryMessage
     fun deleteMessage(contactId: String, localId: Long, scope: DeleteScope): HistoryMessage
     fun voiceSessionReady(contactId: String): Boolean
     fun primeVoiceSession(contactId: String)
-    fun queueVoice(contactId: String, midHex: String, encodedBytes: ByteArray): HistoryMessage
+    fun queueVoice(contactId: String, midHex: String, encodedBytes: ByteArray, replyToLocalId: Long? = null): HistoryMessage
     fun historyMessageByMid(contactId: String, midHex: String): HistoryMessage?
     fun voiceData(contactId: String, localId: Long): ByteArray
     fun pendingVoiceUpload(): HistoryMessage?

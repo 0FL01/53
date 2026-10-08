@@ -18,18 +18,19 @@ internal fun sealedFixtureValue(key: ByteArray, field: String, plain: ByteArray)
     return "DMSG-S1".toByteArray(Charsets.US_ASCII) + nonce + cipher.doFinal(plain)
 }
 
-/** Strict schema9 incoming metadata fixture, not downloaded media or a network acceptance substitute. */
+/** Strict schema10 incoming metadata fixture, not downloaded media or a network acceptance substitute. */
 internal fun seedIncomingVoiceFixture(db: SQLiteDatabase, key: ByteArray, contactId: String,
-    mid: ByteArray, sampleCount: Int, plainLen: Int, waveform: ByteArray, seq: Long = 1) {
+    mid: ByteArray, sampleCount: Int, plainLen: Int, waveform: ByteArray, seq: Long = 1,
+    blob: ByteArray = ByteArray(16) { 11 }) {
     require(mid.size == 16 && waveform.size == 64 && sampleCount in 1..960_000 && plainLen in 1..122_880)
     val chunks = (plainLen + 8175) / 8176
     val bytes = plainLen + chunks * 16
     require(bytes <= 131_072)
-    val blob = ByteArray(16) { 11 }
+    require(blob.size == 16)
     val recipient = ByteArray(32) { 12 }
     // Core seals the complete strict E2E event, not just the 166-byte manifest body.
-    val manifest = ByteBuffer.allocate(50 + 166).order(ByteOrder.BIG_ENDIAN)
-        .put(1).put(4).put(mid).put(ByteArray(32) { 4 })
+    val manifest = ByteBuffer.allocate(51 + 166).order(ByteOrder.BIG_ENDIAN)
+        .put(2).put(4).put(mid).put(ByteArray(32) { 4 }).put(0)
         .put(1).put(1).put(blob).put(ByteArray(32) { 13 }).put(ByteArray(8) { 14 }).put(recipient)
         .putInt(plainLen).putInt(bytes).putInt(sampleCount).put(waveform).array()
     val sealed = sealedFixtureValue(key, "voice_manifest", manifest)

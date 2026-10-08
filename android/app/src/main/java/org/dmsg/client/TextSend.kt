@@ -11,7 +11,8 @@ private val attempts = AtomicLong()
 internal sealed interface TextSendOutcome {
     data class Saved(val messageId: String, val recoveredAfterError: Boolean = false) : TextSendOutcome
     data class NotSaved(val error: Throwable) : TextSendOutcome
-    data class Uncertain(val baseline: Long, val text: String, val attemptId: Long = attempts.incrementAndGet()) : TextSendOutcome
+    data class Uncertain(val baseline: Long, val text: String, val attemptId: Long = attempts.incrementAndGet(),
+        val replyToLocalId: Long? = null) : TextSendOutcome
 }
 
 internal sealed interface MessageActionCommand {
@@ -45,17 +46,21 @@ internal object TextSendCoordinator {
         unresolvedVoice?.let { if (reconcileVoice(f, it) is VoiceSendOutcome.Uncertain) return true }
         return false
     }
-    fun send(f: DmsgFacade, contactId: String, text: String): TextSendOutcome {
+    fun send(f: DmsgFacade, contactId: String, text: String, replyToLocalId: Long? = null): TextSendOutcome {
         if (blocked(f)) return TextSendOutcome.NotSaved(DmsgError(R.string.error_pending_send))
-        return sendTextSafely(f, contactId, text).also { if (it is TextSendOutcome.Uncertain) unresolved = contactId to it }
+        return sendTextSafely(f, contactId, text, replyToLocalId).also { if (it is TextSendOutcome.Uncertain) unresolved = contactId to it }
     }
     fun queueVoice(f: DmsgFacade, attempt: VoiceSendAttempt, bytes: ByteArray): VoiceSendOutcome {
         if (blocked(f)) return VoiceSendOutcome.NotSaved(DmsgError(R.string.error_pending_send))
-        // Session bootstrap is conditional: an existing session can queue entirely offline.
-        try { if (!f.voiceSessionReady(attempt.contactId)) f.primeVoiceSession(attempt.contactId) }
-        catch (e: Exception) { return VoiceSendOutcome.NotSaved(e) }
-        val result = try { VoiceSendOutcome.Saved(f.queueVoice(attempt.contactId, attempt.mid, bytes)) }
-            catch (e: Exception) { reconcileVoiceSend(f, attempt, e) }
+        // Native duplicate identity must run before any session/trust/availability precheck.
+        fun queue() = proveVoiceSend(attempt, f.queueVoice(attempt.contactId, attempt.mid, bytes, attempt.replyToLocalId))
+        val result = try { queue() } catch (first: Exception) {
+            if ((first as? DmsgError)?.kind == ErrorKind.VoiceSessionRequired) {
+                try { f.primeVoiceSession(attempt.contactId) }
+                catch (e: Exception) { return VoiceSendOutcome.NotSaved(e) }
+                try { queue() } catch (e: Exception) { voiceQueueFailure(f, attempt, e) }
+            } else voiceQueueFailure(f, attempt, first)
+        }
         if (result is VoiceSendOutcome.Uncertain) unresolvedVoice = result
         return result
     }
@@ -70,7 +75,7 @@ internal object TextSendCoordinator {
     }
     fun reconcile(f: DmsgFacade, contactId: String, attempt: TextSendOutcome.Uncertain): TextSendOutcome {
         completed[attempt]?.let { return it }
-        val result = reconcileTextSend(f, contactId, attempt.baseline, attempt.text)
+        val result = reconcileTextSend(f, contactId, attempt.baseline, attempt.text, replyToLocalId = attempt.replyToLocalId)
         if (result is TextSendOutcome.Uncertain) return attempt
         completed[attempt] = result
         if (unresolved?.first == contactId && unresolved?.second == attempt) unresolved = null
@@ -106,6 +111,10 @@ internal object TextSendCoordinator {
     }
 }
 
+private fun voiceQueueFailure(f: DmsgFacade, attempt: VoiceSendAttempt, error: Throwable): VoiceSendOutcome =
+    if ((error as? DmsgError)?.kind in setOf(ErrorKind.MessageUnavailable, ErrorKind.VoiceSessionRequired)) VoiceSendOutcome.NotSaved(error)
+    else reconcileVoiceSend(f, attempt, error)
+
 /** Delivery after durable completion cannot reclassify a saved edit/delete as not saved. */
 private fun deliverAction(f: DmsgFacade, command: MessageActionCommand, outcome: MessageActionOutcome): MessageActionOutcome {
     if (outcome !is MessageActionOutcome.Saved || (command is MessageActionCommand.Delete && command.scope == DeleteScope.SELF_ONLY)) return outcome
@@ -140,25 +149,29 @@ internal fun reconcileMessageAction(f: DmsgFacade, attempt: MessageActionAttempt
  * It is the Android plaintext writer; the FGS only retries existing ciphertext. Core send
  * can fail AFTER its transaction commits, so a failed network call is not proof of no row.
  */
-internal fun sendTextSafely(f: DmsgFacade, contactId: String, text: String): TextSendOutcome {
+internal fun sendTextSafely(f: DmsgFacade, contactId: String, text: String, replyToLocalId: Long? = null): TextSendOutcome {
     val baseline = try { f.historyPage(contactId, null, 1).rows.firstOrNull()?.localId ?: 0L }
         catch (e: Exception) { return TextSendOutcome.NotSaved(e) } // did not call send
-    return try { TextSendOutcome.Saved(f.send(contactId, text)) }
-        catch (e: Exception) { reconcileTextSend(f, contactId, baseline, text, e) }
+    return try { TextSendOutcome.Saved(f.send(contactId, text, replyToLocalId)) }
+        catch (e: Exception) {
+            if ((e as? DmsgError)?.kind == ErrorKind.MessageUnavailable) TextSendOutcome.NotSaved(e)
+            else reconcileTextSend(f, contactId, baseline, text, e, replyToLocalId)
+        }
 }
 
 internal fun reconcileTextSend(f: DmsgFacade, contactId: String, baseline: Long, text: String,
-    error: Throwable = DmsgError(R.string.error_send_not_saved)): TextSendOutcome {
+    error: Throwable = DmsgError(R.string.error_send_not_saved), replyToLocalId: Long? = null): TextSendOutcome {
     return try {
         var before: Long? = null
         do {
             val page = f.historyPage(contactId, before, 100)
             val fresh = page.rows.filter { it.localId > baseline }
-            val saved = fresh.firstOrNull { it.direction == MessageDirection.OUTGOING && it.kind == uniffi.dmsg_core.MessageKind.TEXT && it.text == text }
+            val saved = fresh.firstOrNull { it.contactId == contactId && it.direction == MessageDirection.OUTGOING &&
+                it.kind == uniffi.dmsg_core.MessageKind.TEXT && it.text == text && replyIdentityMatches(it, replyToLocalId) }
             if (saved != null) return TextSendOutcome.Saved(saved.messageIdHex, recoveredAfterError = true)
             if (page.rows.any { it.localId <= baseline }) break
             before = page.nextBeforeLocalId
         } while (before != null)
         TextSendOutcome.NotSaved(error)
-    } catch (_: Exception) { TextSendOutcome.Uncertain(baseline, text) }
+    } catch (_: Exception) { TextSendOutcome.Uncertain(baseline, text, replyToLocalId = replyToLocalId) }
 }

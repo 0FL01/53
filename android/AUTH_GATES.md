@@ -17,9 +17,55 @@ listed environment. Do not print inherited environment or provider credentials.
 
 ## Operator fixtures
 
+### Reply: fresh10 local phone + host E2E acceptance (2026-10-08)
+
+Current source is fresh core10 / strict E2Ev2 / server6 / outer wire2. Replies
+use original Noise device32 + MID16, not a local ID or quoted-content snapshot.
+TEXT/EDIT remain1–4000 raw Unicode scalar values; metadata does not count.
+Strict v2 rejects v1 and old schemas without migration/wipe. Fresh local DB does
+not clear retained v1 mailbox ciphertext; Main8/backend5 cutover is separate.
+
+Rebuild current native/bindings and APKs as above with `-PgateInstall=true`.
+Check `.gate`/`.gate.test` package IDs and arm64-v8a before `adb install -r`.
+Each method requires **no core.db before key/native open**, stopped FGS and one
+exact method per process. Repetition requires explicitly authorized clearing of
+only the owned disposable `org.dmsg.client.gate`, never Main. The tests reject
+an existing store rather than replacing it. Commands select only Moto:
+
+```sh
+adb -s ZY22JFJ5LP shell am instrument -w -r -e class \
+  'org.dmsg.client.ReplyGatesTest#freshReplyComposerAndQuoteNavigationOnlyInGatePackage' \
+  org.dmsg.client.gate.test/androidx.test.runner.AndroidJUnitRunner
+# Independently fresh owned .gate required before the second method.
+adb -s ZY22JFJ5LP shell am instrument -w -r -e class \
+  'org.dmsg.client.ReplyGatesTest#replyVoiceRecordingRetainsTargetOnlyInGatePackage' \
+  org.dmsg.client.gate.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+| Exact method | Actual Moto API35 evidence |
+|---|---|
+| `freshReplyComposerAndQuoteNavigationOnlyInGatePackage` | PASS34.235s: actual TEXT/VOICE holds in both directions; body-only system Copy clipboard after ticker; normal/Edit/Reply recreation and Cancel during read-only pending query; current hidden-target suppression; real quote tap beyond initial50 and175 hidden rows, opposite ingest/server order with native unread unchanged through prefetch/settling; pending jump cancelled by real touch drag, late callback cannot move viewport;200% landscape IME, reachable48dp Cancel |
+| `replyVoiceRecordingRetainsTargetOnlyInGatePackage` | PASS8.062s: real mic hold/lock/pause/resume/encoded preview and AudioTrack playback; frozen selector through background/recreation; target hidden by real Core SelfOnly, new queue blocked but audio retained; no lifecycle auto-send; Discard→Cancel escape |
+
+Both final methods PASS/zero skips; outbox unchanged by the local UI methods.
+Clipboard/font/orientation/automation flags restored; font1.0 and Main
+UID10420/versionCode2 confirmed. Only `.gate`/`.gate.test` installed/reset.
+Read-only ticker originally swallowed visible Reply actions; local selection now
+remains available without weakening existing Edit/Delete writer guards.
+
+The fresh keyed fixtures have **no authentic Olm session/DNS profile**. These
+methods prove local native UX and recording, not successful Android DNS Reply
+Send/VOICE delivery. Existing live host `message_actions`/`voice_notes` separately
+verify all eight kind/direction combinations, reopen, mutable target projection,
+late originals, real max prekey/normal wire fit and immutable ciphertext retries.
+Clean-env workspace222 PASS/two pre-existing explicit native-host ignores,
+official codegen/NDKr28c arm64, JVM113/zero skips, debug/release/test APK PASS.
+Contract: `docs/goals/2026-10-08-message-replies.md`. No backend/Main rollout.
+
 ### Markdown and 4000-scalar text: isolated acceptance (2026-10-08)
 
-Current core9/server6 source; strict TEXT/EDIT limit is **1–4000 Unicode scalar
+That checkpoint used core9/server6 (current source is Reply core10/E2Ev2 above);
+strict TEXT/EDIT limit is **1–4000 Unicode scalar
 values of the raw source**, not UTF-8 bytes, UTF-16 units or grapheme clusters.
 Markdown markers/spaces/newlines count; no trim/normalization/truncation.
 Native bubbles format Markdown; Edit uses the exact source and system Copy uses
@@ -59,12 +105,13 @@ Old byte-limit clients and retained pending ciphertext are incompatible in both
 directions; future cutover needs a separate pending/mailbox decision, no migration
 or legacy decoder was added. Contract: `docs/goals/2026-10-08-markdown-messages.md`.
 
-### Fresh9 voice notes: current isolated acceptance (2026-10-08)
+### Fresh9 voice notes: historical isolated acceptance (2026-10-08)
 
 Fresh core9/server6 only, fixed libopus1.6.1 mono16k/10k VBR/20ms,
 encoder10/NoLACE7. No comparative codec benchmark or manual SHA256 registry.
 Working server5/main8, Main and Pacman identities/data/install were not accessed
-or updated. Do not run the now-schema9 Main fixtures against that old installation.
+or updated. Current Main fixtures require schema10; do not run them against that
+preserved old installation.
 
 Parent clean-env Rust workspace/build PASS (core64 + one existing explicit
 ignore, protocol55, all live voice/blob/auth/actions); both existing native-host

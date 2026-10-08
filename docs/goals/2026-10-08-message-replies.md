@@ -17,26 +17,26 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Source: запрос Reply, подтверждённые TEXT/VOICE и исправленный после аудита план.
   - Acceptance: ответы на свои/входящие TEXT/VOICE, включая видимые own queued; reference сохраняется при reopen/Edit/Delete/retry. Цитата текущая, shallow; target edit обновляет preview; missing/hidden/deleted target не раскрывает старое содержимое. Missing inbound original не мешает сохранению/ACK. Raw text/4000 scalar limit, ratchet atomicity и byte-identical retry сохранены.
   - Primary evidence: existing protocol/Core/FFI/Olm tests и live message_actions/voice_notes с encrypted host pair.
-  - Status: pending
-  - Evidence: Reply runtime evidence пока нет; RECON/audit read-only.
+  - Status: verified
+  - Evidence: clean-env workspace 222 PASS / 2 existing native-gate ignores; live message_actions 2 PASS, voice_notes 5 PASS. Все восемь sender-relative комбинаций, реальные maximum prekey/normal SEND/FETCH, missing/late/current/terminal projection, atomicity и immutable retries проверены. Parent reviewed codec/header, schema guards, scoped JOIN/privacy и writer/duplicate paths.
 - R2: Native Android Reply actions/composer/recovery/quote navigation.
   - Source: Telegram-like hold → Reply и исправленный план.
   - Acceptance: настоящий long-press обоих directions/kinds, banner/Cancel без потери normal text, независимый Edit, recreation. TEXT submission/recovery фиксируют raw text + selector; VOICE фиксирует selector при начале записи. Saved потребляет только соответствующий draft; NotSaved/Uncertain сохраняют его. Недоступный target блокирует новый send, но не отменяет доказанный commit. Quote tap на local original вне initial page; prefetch не отмечает историю прочитанной. Copy body/Markdown/Edit/Delete/voice controls сохранены.
   - Primary evidence: existing JVM draft/recovery/paging tests и два exact-method fresh native phone gates.
-  - Status: pending
-  - Evidence: pending.
+  - Status: verified
+  - Evidence: final JVM113 PASS (14 suites, zero failures/errors/skips). Moto exact composer/navigation method PASS34.235s: real holds in all four direction/kind cases, body-only Copy, draft/Edit/recreation/Cancel, hidden target, deep gap/175-hidden-row quote jump with meaningful native unread suppression and delayed-callback cancellation,200% landscape IME/48dp Cancel. Real mic method PASS8.062s: frozen target/pause/preview/AudioTrack/background/recreation/unavailable original/Discard→Cancel, no auto-send.
 - R3: Актуальные сборки и изолированные тесты на доступном телефоне.
   - Source: последний запрос; AGENTS.md/AUTH_GATES.md.
   - Acceptance: clean-env Rust workspace/codegen/arm64/JVM/debug/release/test APK зелёные; два выбранных `.gate` метода PASS. Clipboard/font/orientation восстановлены; Main identity/install/data и backend не изменены.
   - Primary evidence: команды, package/ABI checks, manual exact-method instrumentation.
-  - Status: pending
-  - Evidence: pending; Moto ZY22JFJ5LP/API35 был доступен в предыдущей завершённой цели, доступ перепроверяется перед установкой.
+  - Status: verified
+  - Evidence: official host cdylib/codegen and NDKr28c arm64 PASS; final clean Gradle testDebugUnitTest/assembleDebug/assembleRelease/assembleDebugAndroidTest -PgateInstall=true PASS. Both exact fresh native methods PASS on Moto ZY22JFJ5LP/API35; aapt2 confirms.gate/.gate.test and arm64-v8a. Only owned.gate reset/installed; Main versionCode2/uid10420 unchanged, font1.0 restored; clipboard/orientation restored in finally. No backend/Main operations or Android DNS delivery claim.
 - R4: Копия исправленного плана, актуальные контракты, scoped commits/push и closure.
   - Source: последний запрос.
   - Acceptance: эта цель хранит plan/current evidence/closure; current contracts/runbook соответствуют source; только intended source/tests/docs/bindings committed/pushed, без private/build artifacts и чужого PNG.
   - Primary evidence: git status/diff/log, push и remote ref.
   - Status: in_progress
-  - Evidence: audited plan copied; commit pending.
+  - Evidence: goal commit22aedea pushed; current protocol/API/schema/runbook notes updated; feature/closure commits pending.
 
 ### Constraints
 - Fresh core schema10 напрямую, strict E2E v2, без миграций/legacy decoder/conversion/autowipe. Server6 и outer wire2 не меняются. Main8/backend5 сохраняются; fresh-DB разрешение применяется к owned disposable `.gate`, не Main.
@@ -69,24 +69,27 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 ## Material Decisions
 - 2026-10-08: fresh DB явно разрешена; safe scope — isolated `.gate`, Main/backend untouched. Strict E2Ev2/core10 без миграций; future mailbox cutover отдельный.
 - 2026-10-08: четыре general reviewers и focused read-only сверка разрешили VOICE duplicate identity/recovery, target content guard, Cancel/readiness и posted navigation fence. Received DTO expansion и соседний read-path overhaul исключены.
+- 2026-10-08: phone evidence exposed read-only ticker swallowing a visible Reply selection; local start/menu now use draft readiness, not read-only paging readiness. Edit/Delete retain their existing guards. Opposite-ingest fixture measures native unread via Core rather than a retained stale Android SQLite reader.
 
 ## Current Checkpoint
-- Closes: R4 plan; затем R1.
-- Smallest next action: scoped commit/push этой цели, implement E2E/schema/writers/history и host checks.
-- Expected evidence: goal remote commit; codec/real wire-fit/durable host Reply tests.
-- Stop or replan if: observed failure violates fixed frame/4000/atomicity contract; diagnose without weakening it.
+- Closes: R4.
+- Smallest next action: review/stage only intended source/tests/docs/generated binding; feature commit/push, then closure record/commit/push.
+- Expected evidence: scope-clean staged diff, remote ref matching pushed commits and final contract closure.
+- Stop or replan if: unintended/private/build files enter the diff or push exposes an external failure; preserve unrelated PNG and existing Main/backend.
 
 ## Current State
-- Resolved: RECON/audit и immutable finish line; source tracked worktree clean at baseline6068546.
-- Last relevant evidence: read-only actual code review; no Reply tests/build/device changes yet.
+- Resolved: R1–R3 verified; copied plan22aedea pushed. E2E/schema10/history/writers, generated ABI, native Android actions/banner/drafts/recovery/navigation implemented; current docs/runbook updated.
+- Last relevant evidence: host222 + final JVM113 + native arm64/debug/release/test APK PASS; two actual fresh Moto methods PASS. Complete E2Ev2 fixtures and schema10 assertions; no Main install/reset/backend or DNS-delivery acceptance claim.
 - Blocker: none.
-- Next: R1 native core and ABI, затем R2/R3 integration.
+- Next: scoped feature commit/push and closure.
 
 ## Checkpoint History
 - 2026-10-08: audited plan frozen/copy created after explicit implementation authorization; user PNG untouched.
+- 2026-10-08: R1 host/runtime checkpoint PASS; merged JVM/build checkpoint PASS. Phone remains independent evidence; no Main/backend changes or Android DNS delivery claim.
+- 2026-10-08: R2/R3 physical checkpoint PASS; final current JVM/debug/release/test build PASS. Main metadata unchanged; current contracts/runbook reviewed, R4 Git/closure checkpoint next.
 
 ## Completion
 - Resolved outcomes: pending.
-- Commands and artifacts: pending.
+- Commands and artifacts: clean cargo build msgd/workspace222; hostcore/codegen; NDKr28c arm64; final Gradle JVM113/debug/release/instrumentation; both manual selected ReplyGatesTest methods. Debug APK SHA256 `2c9ebd9be840ceb9f6af9a02a0ded245ba6ef4a4af3d6df6688698316b409c34`; unsigned release `3c21555fd633e4b4a6d1932de6d105d2cc8bad3a34bc8740327e8bc95b51437c`; test `9befcd7567cbc6a9f2190875ac5fa69dc1cc1ba383070c2a87f91fbcfcd6196c`; arm64 lib `fca631ee6c49face089c48a1f6c6620d462973c11001bfec80bcf07339a81538` (build artifacts not tracked).
 - Constraint and diff-scope check: pending.
 - Final status: active.

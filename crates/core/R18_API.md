@@ -40,6 +40,16 @@ MessageKind { Text, Voice }
 DeliveryState { Queued, Accepted, Delivered }
 DeleteScope { SelfOnly, Everyone }
 VoiceInfo { sample_count: u32, byte_len: u32, waveform: Vec<u8>, downloaded: bool }
+ReplyTargetState { Available, Missing, Hidden, Deleted }
+ReplyInfo {
+    target_local_id: Option<i64>,
+    state: ReplyTargetState,
+    target_revision: Option<u64>,
+    direction: Option<MessageDirection>,
+    kind: Option<MessageKind>,
+    preview: String,
+    voice_duration_ms: Option<u32>,
+}
 
 HistoryMessage {
     local_id: i64,
@@ -57,6 +67,7 @@ HistoryMessage {
     hidden_self: bool,
     deleted_all: bool,
     change_delivery_state: Option<DeliveryState>,
+    reply: Option<ReplyInfo>,
 }
 HistoryPage {
     rows: Vec<HistoryMessage>,
@@ -149,7 +160,7 @@ DialogsPage {
 
 ## Storage and atomicity
 
-Core schema **9** is fresh-only. One `core_messages` table holds base TEXT/VOICE and
+Core schema **10** is fresh-only. One `core_messages` table holds base TEXT/VOICE and
 internal EDIT/DELETE events, incoming dedup/pending controls and outgoing immutable
 ciphertext/status. No history/inbox/outbox aliases, schema upgrades, plain→sealed
 conversion or order backfill exist. Encrypted initialization creates marker and
@@ -162,7 +173,7 @@ Nullable sealed bodies are cleared logically; readers never unseal NULL. Text,
 voice manifests and aliases use separate authenticated field domains and are omitted from their Rust
 Debug views. This is not forensic erasure of SQLite/ciphertext/backups, nor snapshot
 rollback prevention. Wire2/auth/carrier are unchanged; blob-capable server6 is
-also fresh-only. Working server5/main8 are not upgraded by the voice gate.
+also fresh-only. Working server5/main8 are not upgraded by the Reply gate.
 
 Incoming crypto candidates, event/dedup and final projection commit together before
 ACK. Final FETCH report rereads the batch's visible effective TEXT/VOICE; controls never
@@ -170,6 +181,46 @@ count as new messages. Only unseen base messages need matching acceptance metada
 replays/controls use the current FETCH seq for ACK without persisting control order.
 Outgoing retry preserves MID/ciphertext and frozen full recipient binding, never
 re-encrypts for replacement pins, and progresses only that event's status.
+
+## Reply selection and history projection
+
+```rust
+// Existing exported commands append the same nullable last argument.
+send_dns(contact_id: String, text: String, reply_to_local_id: Option<i64>)
+    -> Result<String, FfiError>
+send_text(addr: String, server_pub: Vec<u8>, domain: String,
+    contact_id: String, text: String, reply_to_local_id: Option<i64>)
+    -> Result<String, FfiError>
+// Rust Core::send_text and queue_text_existing_session also append Option<i64>.
+// Ordinary sends pass None; Kotlin generated argument is replyToLocalId.
+```
+
+- A new selector must name a visible TEXT/VOICE BASE in the same contact,
+  either direction, including an own Queued row. Nonpositive, nonexistent,
+  foreign, control, hidden and deleted IDs return existing `MessageUnavailable`.
+  TEXT preflights before connect/bootstrap and repeats the check in its write TX.
+- Local IDs stay local. Strict E2Ev2 carries optional original Noise
+  `sender_device32 + message_id16`. `reply_ref` is nullable BLOB48 only on BASE,
+  distinct from `target_mid`, without an FK or new index. Ratchet, ciphertext and
+  reference commit together; controls never rewrite the reference. Retained BASE
+  tombstones preserve identity for quotes and duplicate attempt proofs.
+- `reply=None` means no reference; `Some(Missing)` is still a replied message.
+  Missing means all target optional fields `None`, empty preview. Known Hidden/
+  Deleted retain local ID/revision/direction/kind, empty preview and no duration;
+  Deleted takes precedence if both flags are set.
+- Available TEXT uses current effective raw body, at most 160 Unicode scalar
+  values, without Markdown rendering/normalization. Available VOICE uses empty
+  preview and `ceil(sample_count/16)` duration milliseconds; it needs no download.
+  UI supplies localized labels. Target edit/delete/late arrival is reflected on
+  the next read independently of the source revision.
+- Page and exact reads perform a scoped shallow LEFT JOIN on contact, original
+  Noise device, MID and BASE kind in one SQLite statement snapshot. They only
+  unseal target text/manifest while Available. No N+1 reads, recursive reply
+  expansion or stored quote snapshots. ReplyInfo/HistoryMessage Debug omit
+  private content. Received/ReceivedMsg/inbox and dialog summaries are unchanged.
+- Incoming references are annotations, not authorization. Missing originals
+  do not block event commit or ACK; no backfill/download is implied. Exact target
+  reads/paging do not mutate the read cursor.
 
 ## Own-message mutations
 
@@ -196,7 +247,8 @@ re-encrypts for replacement pins, and progresses only that event's status.
 ```rust
 voice_session_ready(contact_id: String) -> Result<bool, FfiError>
 prime_voice_session_dns(contact_id: String) -> Result<(), FfiError> // network
-queue_voice(contact_id: String, message_id_hex: String, encoded_note: Vec<u8>)
+queue_voice(contact_id: String, message_id_hex: String, encoded_note: Vec<u8>,
+    reply_to_local_id: Option<i64>)
     -> Result<HistoryMessage, FfiError> // local, stable-MID idempotent
 voice_data(contact_id: String, local_id: i64) -> Result<Vec<u8>, FfiError>
 pending_voice_upload() -> Result<Option<HistoryMessage>, FfiError>
@@ -217,6 +269,13 @@ VoiceTransfer::cancel()
   ratchet, immutable Olm event and AEAD chunks. Session bootstrap is explicit;
   first offline note without a session returns `VoiceSessionRequired`, retaining
   the memory preview. Existing pinned session supports offline durable queue.
+- A new VOICE attempt checks its supplied selector inside the queue TX before
+  `VoiceSessionRequired`; bootstrap is attempted only after that typed error.
+  Duplicate MID reconciles same contact/kind/reference identity before reading
+  audio, availability, current pins/trust or session. It returns the original
+  canonical row even after target hiding/deletion/replacement/block/session loss.
+  Changed selectors, including None/Some, return `MessageUnavailable`; matching
+  selectors compare retained target device/MID rather than visible/current pins.
 - `prepare` captures short storage state; `advance` reuses one private Noise
   stream outside Kotlin store-lock/DB transaction; `commit` persists receipts
   under the lock and rechecks epoch/tombstone. No ciphertext/key enters Kotlin.

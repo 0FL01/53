@@ -29,7 +29,7 @@ async fn two_cores_talk_e2e_through_live_msgd() {
     assert_eq!(a.on_reconnect(&mut ta).await.unwrap(), 16);
     assert_eq!(b.on_reconnect(&mut tb).await.unwrap(), 16);
     let mid = a
-        .send_text(&mut ta, &eb.contact_id, "hello bob")
+        .send_text(&mut ta, &eb.contact_id, "hello bob", None)
         .await
         .unwrap();
     let saved = a.outbox_ciphertext(&mid).unwrap();
@@ -73,7 +73,7 @@ async fn two_cores_talk_e2e_through_live_msgd() {
         } else {
             (&mut a, &mut b, &mut ta, &mut tb, &eb.contact_id)
         };
-        sender.send_text(send_t, id, text).await.unwrap();
+        sender.send_text(send_t, id, text, None).await.unwrap();
         let r = receiver.fetch_and_decrypt(recv_t).await.unwrap();
         assert_eq!(r.received.len(), 1);
         assert_eq!(r.received[0].text, text);
@@ -163,6 +163,7 @@ async fn two_cores_talk_e2e_through_live_msgd() {
             domain.clone(),
             eb.contact_id.clone(),
             "ffi roundtrip".into(),
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -204,6 +205,7 @@ async fn two_cores_talk_e2e_through_live_msgd() {
                 domain.clone(),
                 eb.contact_id.clone(),
                 "sealed ffi message".into(),
+                None,
             )
             .unwrap();
         assert_eq!(
@@ -240,7 +242,8 @@ async fn two_cores_talk_e2e_through_live_msgd() {
                 vec![42; 32],
                 domain.clone(),
                 eb.contact_id.clone(),
-                "must not queue".into()
+                "must not queue".into(),
+                None,
             ),
             Err(dmsg_core::ffi::FfiError::Transport(_))
         ));
@@ -255,6 +258,7 @@ async fn two_cores_talk_e2e_through_live_msgd() {
                 domain.clone(),
                 eb.contact_id.clone(),
                 "offline-to-online".into(),
+                None,
             )
             .unwrap();
         assert_eq!(
@@ -398,7 +402,7 @@ async fn replacement_warns_two_peers_retains_message_and_delivers_once_after_con
         (&mut p, &mut pt, &pa.contact_id),
         (&mut q, &mut qt, &qa.contact_id),
     ] {
-        old.send_text(&mut old_t, id, "old device message")
+        old.send_text(&mut old_t, id, "old device message", None)
             .await
             .unwrap();
         assert_eq!(peer.fetch_and_decrypt(t).await.unwrap().received.len(), 1);
@@ -449,7 +453,7 @@ async fn replacement_warns_two_peers_retains_message_and_delivers_once_after_con
     let mut nt = srv.connect(&new_db).await;
     new.on_reconnect(&mut nt).await.unwrap();
     let mid = new
-        .send_text(&mut nt, &pa.contact_id, "retained until confirm")
+        .send_text(&mut nt, &pa.contact_id, "retained until confirm", None)
         .await
         .unwrap();
     let ciphertext = new.outbox_ciphertext(&mid).unwrap();
@@ -481,14 +485,16 @@ async fn replacement_warns_two_peers_retains_message_and_delivers_once_after_con
         "warning cannot advance ratchet"
     );
     assert_eq!(
-        p.send_text(&mut pt, &old_account.contact_id, "stop").await,
+        p.send_text(&mut pt, &old_account.contact_id, "stop", None)
+            .await,
         Err(OlmError::IdentityMismatch)
     );
     assert_eq!(
         q.send_text(
             &mut qt,
             &old_account.contact_id,
-            "stop by directory refresh"
+            "stop by directory refresh",
+            None,
         )
         .await,
         Err(OlmError::IdentityMismatch)
@@ -540,12 +546,22 @@ async fn replacement_warns_two_peers_retains_message_and_delivers_once_after_con
         .unwrap()
         .received
         .is_empty());
-    p.send_text(&mut pt, &old_account.contact_id, "response new device")
-        .await
-        .unwrap();
-    q.send_text(&mut qt, &old_account.contact_id, "second peer new session")
-        .await
-        .unwrap();
+    p.send_text(
+        &mut pt,
+        &old_account.contact_id,
+        "response new device",
+        None,
+    )
+    .await
+    .unwrap();
+    q.send_text(
+        &mut qt,
+        &old_account.contact_id,
+        "second peer new session",
+        None,
+    )
+    .await
+    .unwrap();
     let r = new.fetch_and_decrypt(&mut nt).await.unwrap();
     assert_eq!(r.received.len(), 2);
     assert_eq!(r.skipped_mismatch, 0);
@@ -555,7 +571,7 @@ async fn replacement_warns_two_peers_retains_message_and_delivers_once_after_con
         .unwrap()
         .received
         .is_empty());
-    new.send_text(&mut nt, &qa.contact_id, "new message peer two")
+    new.send_text(&mut nt, &qa.contact_id, "new message peer two", None)
         .await
         .unwrap();
     assert_eq!(

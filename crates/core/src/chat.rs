@@ -364,11 +364,12 @@ impl Core {
         t: &mut impl Transport,
         contact_id: &str,
         text: &str,
+        reply_to_local_id: Option<i64>,
     ) -> Result<[u8; 16], OlmError> {
-        self.preflight_text(contact_id, text)?;
+        self.preflight_text(contact_id, text, reply_to_local_id)?;
         self.prime_voice_session(t, contact_id).await?;
         let (message_id, user_id, wire) = self
-            .persist_text(contact_id, text)?
+            .persist_text(contact_id, text, reply_to_local_id)?
             .ok_or(OlmError::Protocol("session disappeared"))?;
         self.send_stored(t, &user_id, &message_id, &wire).await?;
         Ok(message_id)
@@ -406,8 +407,14 @@ impl Core {
 
     /// Проверить локальные гейты до попытки подключиться: подмена не должна
     /// превращаться в успешную офлайн-очередь при сетевом отказе.
-    pub(crate) fn preflight_text(&self, contact_id: &str, text: &str) -> Result<(), OlmError> {
+    pub(crate) fn preflight_text(
+        &self,
+        contact_id: &str,
+        text: &str,
+        reply_to_local_id: Option<i64>,
+    ) -> Result<(), OlmError> {
         dmsg_protocol::e2e::validate_text(text).map_err(|_| OlmError::BadText)?;
+        crate::store::reply_target(&self.conn, contact_id, reply_to_local_id, true)?;
         let c = contacts::get(&self.conn, contact_id)?.ok_or(OlmError::UnknownContact)?;
         contacts::sendable(&c)?;
         let (_, _, peer_ed, peer_curve) = contact_keys(&c)?;
@@ -427,9 +434,12 @@ impl Core {
         &mut self,
         contact_id: &str,
         text: &str,
+        reply_to_local_id: Option<i64>,
     ) -> Result<Option<[u8; 16]>, OlmError> {
-        self.preflight_text(contact_id, text)?;
-        Ok(self.persist_text(contact_id, text)?.map(|(mid, _, _)| mid))
+        self.preflight_text(contact_id, text, reply_to_local_id)?;
+        Ok(self
+            .persist_text(contact_id, text, reply_to_local_id)?
+            .map(|(mid, _, _)| mid))
     }
 
     /// Одна и та же Olm-операция для online SEND и offline queue. IMMEDIATE
@@ -439,11 +449,13 @@ impl Core {
         &mut self,
         contact_id: &str,
         text: &str,
+        reply_to_local_id: Option<i64>,
     ) -> Result<Option<([u8; 16], [u8; 16], Vec<u8>)>, OlmError> {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| OlmError::Store(format!("tx: {e}")))?;
+        let reply_to = crate::store::reply_target(&tx, contact_id, reply_to_local_id, true)?;
         let c = contacts::get(&tx, contact_id)?.ok_or(OlmError::UnknownContact)?;
         contacts::sendable(&c)?;
         let (user_id, _, peer_ed, peer_curve) = contact_keys(&c)?;
@@ -462,6 +474,7 @@ impl Core {
         let event = dmsg_protocol::e2e::Event {
             message_id,
             sender_ed: olm::ed_identity(&self.account),
+            reply_to,
             body: dmsg_protocol::e2e::Body::Text(text.into()),
         };
         let plain = dmsg_protocol::e2e::encode(&event).map_err(OlmError::Protocol)?;
@@ -614,6 +627,7 @@ impl Core {
             let event = Event {
                 message_id: control_mid,
                 sender_ed: olm::ed_identity(&self.account),
+                reply_to: None,
                 body: match edit {
                     Some((_, text)) => Body::Edit {
                         target: mid,
@@ -1597,7 +1611,7 @@ mod tests {
         )
         .unwrap();
         let mid = a
-            .queue_text_existing_session("BOBB00000002", "original private text")
+            .queue_text_existing_session("BOBB00000002", "original private text", None)
             .unwrap()
             .unwrap();
         let wire = a.outbox_ciphertext(&mid).unwrap();
@@ -1631,6 +1645,242 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reply_selectors_preflight_tx_recheck_and_text_rollback_are_nonmutating() {
+        use crate::history::DeleteScope;
+        let (mut a, b, da, db, _, _, target) = action_pair("reply-preflight");
+        let cid = "BOBB00000002";
+        let own_queued = a
+            .queue_text_existing_session(cid, "own queued target", None)
+            .unwrap()
+            .unwrap();
+        let queued_id = a.history_page(cid, None, 1).unwrap().rows[0].local_id;
+        assert!(a
+            .queue_text_existing_session(cid, "reply to queued", Some(queued_id))
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            a.history_page(cid, None, 1).unwrap().rows[0]
+                .reply
+                .as_ref()
+                .unwrap()
+                .target_local_id,
+            Some(queued_id)
+        );
+        contacts::request_add(&a.conn, "CAROL0000003").unwrap();
+        let tx = a.conn.transaction().unwrap();
+        let event = dmsg_protocol::e2e::Event {
+            message_id: [71; 16],
+            sender_ed: [0; 32],
+            reply_to: None,
+            body: dmsg_protocol::e2e::Body::Text("foreign dialog".into()),
+        };
+        let foreign = crate::store::insert_outgoing(
+            &tx,
+            "CAROL0000003",
+            &[72; 32],
+            &[0; 32],
+            &event,
+            b"ciphertext",
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        a.edit_message(cid, target, 0, "target edited").unwrap();
+        let control = a
+            .conn
+            .query_row::<i64, _, _>(
+                "SELECT max(local_id) FROM core_messages WHERE kind='edit'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        a.preflight_text(cid, "already preflighted", Some(target))
+            .unwrap();
+        a.delete_message(cid, target, DeleteScope::SelfOnly)
+            .unwrap();
+        assert_eq!(
+            a.persist_text(cid, "raced with target hide", Some(target)),
+            Err(OlmError::MessageUnavailable)
+        );
+        let hidden = target;
+        let deleted = a
+            .queue_text_existing_session(cid, "deleted target", None)
+            .unwrap()
+            .unwrap();
+        crate::store::outbox_set_status_order(
+            &a.conn,
+            &deleted,
+            "accepted",
+            Some(dmsg_protocol::chronology::Order {
+                seq: 9,
+                timestamp_ms: 1000,
+            }),
+        )
+        .unwrap();
+        let deleted_id = a.history_page(cid, None, 1).unwrap().rows[0].local_id;
+        a.delete_message(cid, deleted_id, DeleteScope::Everyone)
+            .unwrap();
+        let session = crate::store::load_session(&a.conn, cid).unwrap();
+        let account = crate::store::load_olm(&a.conn).unwrap();
+        let rows = a
+            .conn
+            .query_row::<i64, _, _>("SELECT count(*) FROM core_messages", [], |r| r.get(0))
+            .unwrap();
+        let mut network = Fake::new(vec![]);
+        for id in [
+            i64::MIN,
+            -1,
+            0,
+            i64::MAX,
+            foreign,
+            control,
+            hidden,
+            deleted_id,
+        ] {
+            assert_eq!(
+                a.send_text(&mut network, cid, "valid body", Some(id)).await,
+                Err(OlmError::MessageUnavailable)
+            );
+            assert_eq!(
+                a.queue_text_existing_session(cid, "valid body", Some(id)),
+                Err(OlmError::MessageUnavailable)
+            );
+        }
+        assert!(network.sent.is_empty());
+        a.conn.execute_batch("CREATE TRIGGER reject_reply AFTER INSERT ON core_messages WHEN NEW.reply_ref IS NOT NULL BEGIN SELECT RAISE(ABORT,'test rollback'); END;").unwrap();
+        assert!(matches!(
+            a.queue_text_existing_session(cid, "rollback reply", Some(queued_id)),
+            Err(OlmError::Store(_))
+        ));
+        assert_eq!(crate::store::load_session(&a.conn, cid).unwrap(), session);
+        assert_eq!(crate::store::load_olm(&a.conn).unwrap(), account);
+        assert_eq!(
+            a.conn
+                .query_row::<i64, _, _>("SELECT count(*) FROM core_messages", [], |r| r.get(0))
+                .unwrap(),
+            rows
+        );
+        a.conn.execute_batch("DROP TRIGGER reject_reply").unwrap();
+        // An invalid new voice selector takes precedence over bootstrap/audio.
+        crate::store::delete_session(&a.conn, cid).unwrap();
+        assert_eq!(
+            a.queue_voice(cid, &[73; 16], &[], Some(hidden)),
+            Err(OlmError::MessageUnavailable)
+        );
+        assert!(!a.outbox_ciphertext(&own_queued).unwrap().is_empty());
+        drop(a);
+        drop(b);
+        std::fs::remove_dir_all(da).unwrap();
+        std::fs::remove_dir_all(db).unwrap();
+    }
+
+    #[tokio::test]
+    async fn replied_receive_rolls_back_then_acks_missing_target_and_resolves_late_original() {
+        use crate::history::{MessageDirection, ReplyTargetState};
+        let (mut a, mut b, da, db, target_mid, target_wire, target_id) =
+            action_pair("reply-late-original");
+        let reply_mid = a
+            .queue_text_existing_session("BOBB00000002", "durable reply", Some(target_id))
+            .unwrap()
+            .unwrap();
+        let reply_wire = a.outbox_ciphertext(&reply_mid).unwrap();
+        let source = RawEvent {
+            seq: 2,
+            sender: a.device_pub(),
+            sender_user: a.my_account().unwrap().0,
+            message_id: reply_mid,
+            ciphertext: reply_wire,
+        };
+        let replies = || {
+            Fake::new(vec![
+                authenticated_resp(),
+                count_resp(16),
+                (OP_FETCH_RESP, fetch_batch(&[&source])),
+                binding_resp(&a),
+                (OP_DELIVERY_ACK, 2u64.to_be_bytes().to_vec()),
+            ])
+        };
+        let session = crate::store::load_session(&b.conn, "ALICE0000001").unwrap();
+        let account = crate::store::load_olm(&b.conn).unwrap();
+        b.conn.execute_batch("CREATE TRIGGER reject_reply AFTER INSERT ON core_messages WHEN NEW.reply_ref IS NOT NULL BEGIN SELECT RAISE(ABORT,'test rollback'); END;").unwrap();
+        let mut t = replies();
+        assert!(matches!(
+            b.fetch_and_decrypt(&mut t).await,
+            Err(OlmError::Store(_))
+        ));
+        assert!(!t.sent.iter().any(|(op, _)| *op == OP_DELIVERY_ACK));
+        assert_eq!(
+            crate::store::load_session(&b.conn, "ALICE0000001").unwrap(),
+            session
+        );
+        assert_eq!(crate::store::load_olm(&b.conn).unwrap(), account);
+        assert!(b
+            .history_page("ALICE0000001", None, 100)
+            .unwrap()
+            .rows
+            .is_empty());
+        b.conn.execute_batch("DROP TRIGGER reject_reply").unwrap();
+        let mut t = replies();
+        let received = b.fetch_and_decrypt(&mut t).await.unwrap();
+        assert_eq!(received.received.len(), 1);
+        assert_eq!(received.received[0].text, "durable reply");
+        assert!(t
+            .sent
+            .iter()
+            .any(|(op, p)| *op == OP_DELIVERY_ACK && mp::parse_delivery_ack(p) == Some(vec![2])));
+        let source_id = b.history_page("ALICE0000001", None, 1).unwrap().rows[0].local_id;
+        let missing = exact(&b, "ALICE0000001", source_id).reply.unwrap();
+        assert_eq!(missing.state, ReplyTargetState::Missing);
+        assert_eq!(missing.target_local_id, None);
+        assert_eq!(missing.target_revision, None);
+        assert_eq!(missing.kind, None);
+        assert_eq!(missing.direction, None);
+        assert!(missing.preview.is_empty());
+        assert_eq!(missing.voice_duration_ms, None);
+        let persisted: Vec<u8> = b
+            .conn
+            .query_row(
+                "SELECT reply_ref FROM core_messages WHERE local_id=?1",
+                [source_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            persisted,
+            dmsg_protocol::e2e::ReplyRef {
+                sender_device: a.device_pub(),
+                message_id: target_mid
+            }
+            .encode()
+        );
+        let crypto = crate::store::load_session(&b.conn, "ALICE0000001").unwrap();
+        assert!(b.decrypt_event(&source).await.unwrap().is_none());
+        assert_eq!(
+            crate::store::load_session(&b.conn, "ALICE0000001").unwrap(),
+            crypto
+        );
+        b.decrypt_event(&RawEvent {
+            seq: 1,
+            sender: a.device_pub(),
+            sender_user: a.my_account().unwrap().0,
+            message_id: target_mid,
+            ciphertext: target_wire,
+        })
+        .await
+        .unwrap();
+        let quote = exact(&b, "ALICE0000001", source_id).reply.unwrap();
+        assert_eq!(quote.state, ReplyTargetState::Available);
+        assert_eq!(quote.direction, Some(MessageDirection::Incoming));
+        assert_eq!(quote.preview, "original private text");
+        drop(b);
+        let b = Core::open_encrypted(&db.join("core.db"), &[18; 32]).unwrap();
+        assert_eq!(exact(&b, "ALICE0000001", source_id).reply, Some(quote));
+        drop(a);
+        drop(b);
+        std::fs::remove_dir_all(da).unwrap();
+        std::fs::remove_dir_all(db).unwrap();
+    }
+
+    #[tokio::test]
     async fn editing_is_owned_cas_atomic_in_place_and_self_hide_is_local_even_blocked() {
         use crate::history::{DeleteScope, DeliveryState, HistoryError};
         let (mut a, mut b, da, db, mid, wire, id) = action_pair("actions-owned");
@@ -1644,11 +1894,12 @@ mod tests {
             "🦀".repeat(4001),
         ] {
             assert_eq!(
-                a.send_text(&mut no_network, "unknown", &invalid).await,
+                a.send_text(&mut no_network, "unknown", &invalid, None)
+                    .await,
                 Err(OlmError::BadText)
             );
             assert_eq!(
-                a.queue_text_existing_session("BOBB00000002", &invalid),
+                a.queue_text_existing_session("BOBB00000002", &invalid, None),
                 Err(OlmError::BadText)
             );
             assert_eq!(
@@ -1748,7 +1999,7 @@ mod tests {
         assert_eq!(crate::store::inbox_count(&b.conn).unwrap(), 1);
         assert_eq!(b.dialogs_page(None, 10).unwrap().rows[0].local_unread, 1);
         let queued = a
-            .queue_text_existing_session("BOBB00000002", "saved queued text")
+            .queue_text_existing_session("BOBB00000002", "saved queued text", None)
             .unwrap()
             .unwrap();
         let queued_row = a
@@ -2189,7 +2440,7 @@ mod tests {
         ]);
         fa.echo_send_ack = true;
         let mid = a
-            .send_text(&mut fa, "BOBB00000002", "hello bob")
+            .send_text(&mut fa, "BOBB00000002", "hello bob", None)
             .await
             .expect("send");
         // Outbox: ciphertext сохранён, статус accepted.
@@ -2393,7 +2644,7 @@ mod tests {
             count_resp(16),
             (OP_ERROR, vec![dmsg_protocol::ERR_NO_PREKEY]),
         ]);
-        let r = a.send_text(&mut fa, "BOBB00000002", "hi").await;
+        let r = a.send_text(&mut fa, "BOBB00000002", "hi", None).await;
         assert_eq!(r, Err(OlmError::NoPeerPrekeys));
         // Ничего не сохранено (шифровать было не для кого — нет сессии).
         assert!(crate::store::outbox_queued(&a.conn, 0, 32)
@@ -2438,7 +2689,7 @@ mod tests {
             handles.push(std::thread::spawn(move || {
                 let mut core = Core::open(&path).expect("reopen");
                 barrier.wait();
-                core.queue_text_existing_session("BOBB00000002", text)
+                core.queue_text_existing_session("BOBB00000002", text, None)
                     .expect("queued")
                     .expect("session")
             }));
@@ -2538,7 +2789,7 @@ mod tests {
         }
         let mut dead = Dead;
         assert_eq!(
-            a.send_text(&mut dead, "BOBB00000002", "hi").await,
+            a.send_text(&mut dead, "BOBB00000002", "hi", None).await,
             Err(OlmError::IdentityMismatch)
         );
         // Explicit confirm permits the RESUME + binding + COUNT path.
@@ -2559,7 +2810,7 @@ mod tests {
         // подпись не сойдётся с новым пином... точнее: серверный путь здесь
         // пропущен (double), claim-ответ соберём от имени нового identity:
         // проще assert, что дело дошло до сети (COUNT съеден, дальше CLAIM).
-        let r = a.send_text(&mut fa, "BOBB00000002", "hi").await;
+        let r = a.send_text(&mut fa, "BOBB00000002", "hi", None).await;
         assert!(
             matches!(r, Err(OlmError::Transport(_))),
             "must reach network after confirm, got {r:?}"
@@ -2628,7 +2879,7 @@ mod tests {
             (dmsg_protocol::OP_DEVICE_BINDING_RESP, changed),
         ]);
         assert_eq!(
-            a.send_text(&mut t, "BOBB00000002", "must stop").await,
+            a.send_text(&mut t, "BOBB00000002", "must stop", None).await,
             Err(OlmError::IdentityMismatch)
         );
         assert_eq!(
@@ -2670,9 +2921,10 @@ mod tests {
                 let mid = [40 + kind; 16];
                 // Bypass the new encoder: valid header/control/UTF-8, but an
                 // authenticated TEXT/EDIT with 4001 scalars inside the byte cap.
-                let mut plain = vec![1, kind];
+                let mut plain = vec![2, kind];
                 plain.extend_from_slice(&mid);
                 plain.extend_from_slice(&olm::ed_identity(&a.account));
+                plain.push(0);
                 if kind == 2 {
                     plain.extend_from_slice(&[1; 16]);
                     plain.extend_from_slice(&1u64.to_be_bytes());
@@ -2734,6 +2986,7 @@ mod tests {
             olm::outbound(&a.account, &olm::curve_identity(&b.account), &ot).unwrap();
         assert_invalid_source_retained(&a, &mut b, &outbound, 1, 0, 0).await;
         let mut event = dmsg_protocol::e2e::Event {
+            reply_to: None,
             message_id: [1; 16],
             sender_ed: olm::ed_identity(&a.account),
             body: dmsg_protocol::e2e::Body::Text("integrity message".into()),
@@ -2747,7 +3000,10 @@ mod tests {
             ciphertext: olm::encode_wire(&outbound.encrypt(&plaintext).unwrap()),
         };
         assert!(b.decrypt_event(&first).await.unwrap().is_some());
-        let reverse = b.persist_text("ALICE0000001", "response").unwrap().unwrap();
+        let reverse = b
+            .persist_text("ALICE0000001", "response", None)
+            .unwrap()
+            .unwrap();
         let _ = outbound
             .decrypt(&olm::decode_wire(&reverse.2).unwrap())
             .unwrap();
@@ -2850,7 +3106,7 @@ mod tests {
         // Fail AFTER ratchet, outbox and history writes, at the summary write.
         a.conn.execute_batch("CREATE TRIGGER reject_activity BEFORE UPDATE OF local_activity_ms ON core_contacts BEGIN SELECT RAISE(ABORT,'denied'); END;").unwrap();
         assert!(matches!(
-            a.queue_text_existing_session("BOBB00000002", "rollback text"),
+            a.queue_text_existing_session("BOBB00000002", "rollback text", None),
             Err(OlmError::Store(_))
         ));
         assert_eq!(
@@ -2877,7 +3133,7 @@ mod tests {
             .execute_batch("DROP TRIGGER reject_activity")
             .unwrap();
         let mid = a
-            .queue_text_existing_session("BOBB00000002", "rollback text")
+            .queue_text_existing_session("BOBB00000002", "rollback text", None)
             .unwrap()
             .unwrap();
         let wire = a.outbox_ciphertext(&mid).unwrap();

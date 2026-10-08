@@ -40,6 +40,36 @@ pub struct VoiceInfo {
     pub downloaded: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ReplyTargetState {
+    Available,
+    Missing,
+    Hidden,
+    Deleted,
+}
+
+/// Shallow current target projection; no persistent quoted-content snapshot.
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ReplyInfo {
+    pub target_local_id: Option<i64>,
+    pub state: ReplyTargetState,
+    pub target_revision: Option<u64>,
+    pub direction: Option<MessageDirection>,
+    pub kind: Option<MessageKind>,
+    pub preview: String,
+    pub voice_duration_ms: Option<u32>,
+}
+
+impl std::fmt::Debug for ReplyInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReplyInfo")
+            .field("target_local_id", &self.target_local_id)
+            .field("state", &self.state)
+            .field("target_revision", &self.target_revision)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Positive durable local ID identifies ingestion, not server presentation order.
 /// Incoming delivery_state is always None; outgoing status is a persisted
 /// server-ACK fact (or Queued).
@@ -60,6 +90,7 @@ pub struct HistoryMessage {
     pub hidden_self: bool,
     pub deleted_all: bool,
     pub change_delivery_state: Option<DeliveryState>,
+    pub reply: Option<ReplyInfo>,
 }
 
 impl std::fmt::Debug for HistoryMessage {
@@ -162,7 +193,16 @@ const MESSAGE_COLUMNS: &str = "m.local_id,m.message_id,m.direction,
    AND c.contact_id=m.contact_id AND c.sender_device=m.sender_device AND c.target_mid=m.message_id
     ORDER BY c.revision DESC,c.local_id DESC LIMIT 1),m.kind,
   CASE WHEN m.media_manifest IS NULL THEN NULL ELSE dmsg_unseal('voice_manifest',m.media_manifest) END,
-  coalesce((SELECT downloaded FROM core_blob_transfers b WHERE b.local_id=m.local_id),0)";
+   coalesce((SELECT downloaded FROM core_blob_transfers b WHERE b.local_id=m.local_id),0),
+   m.reply_ref,q.local_id,q.revision,q.direction,q.kind,q.hidden_self,q.deleted_all,
+   CASE WHEN q.hidden_self=0 AND q.deleted_all=0 AND q.kind='text' AND q.text IS NOT NULL
+     THEN CAST(dmsg_unseal('message_text',q.text) AS TEXT) ELSE '' END,
+   CASE WHEN q.hidden_self=0 AND q.deleted_all=0 AND q.kind='voice' AND q.media_manifest IS NOT NULL
+     THEN dmsg_unseal('voice_manifest',q.media_manifest) ELSE NULL END";
+
+const MESSAGE_FROM: &str = "core_messages m LEFT JOIN core_messages q
+ ON q.contact_id=m.contact_id AND q.sender_device=substr(m.reply_ref,1,32)
+ AND q.message_id=substr(m.reply_ref,33,16) AND q.kind IN ('text','voice')";
 
 fn require_contact(conn: &Connection, contact_id: &str) -> Result<(), HistoryError> {
     if !contacts::valid_contact_id(contact_id) {
@@ -238,7 +278,7 @@ fn page(
     let limit = limit.clamp(1, 100) as usize;
     let key = "(m.server_seq IS NULL)";
     let mut sql = format!(
-        "SELECT {MESSAGE_COLUMNS} FROM core_messages m WHERE m.contact_id=?1 AND m.kind IN ('text','voice')"
+        "SELECT {MESSAGE_COLUMNS} FROM {MESSAGE_FROM} WHERE m.contact_id=?1 AND m.kind IN ('text','voice')"
     );
     let anchor: Option<(i64, i64)> = if timeline {
         before_local_id.map(|id|tx.query_row(&format!("SELECT {key},coalesce(m.server_seq,m.local_id) FROM core_messages m WHERE m.local_id=?1 AND m.kind IN ('text','voice')"),[id],|r|Ok((r.get(0)?,r.get(1)?)))).transpose()?
@@ -335,7 +375,55 @@ fn read_message(row: &rusqlite::Row<'_>, contact_id: &str) -> Result<HistoryMess
             .as_deref()
             .map(state)
             .transpose()?,
+        reply: read_reply(row)?,
     })
+}
+
+fn read_reply(row: &rusqlite::Row<'_>) -> Result<Option<ReplyInfo>, HistoryError> {
+    let Some(reference) = row.get::<_, Option<Vec<u8>>>(15)? else {
+        return Ok(None);
+    };
+    dmsg_protocol::e2e::ReplyRef::decode(&reference).map_err(|_| HistoryError::Store)?;
+    let target_local_id: Option<i64> = row.get(16)?;
+    let state = if target_local_id.is_none() {
+        ReplyTargetState::Missing
+    } else if row.get::<_, bool>(21)? {
+        ReplyTargetState::Deleted
+    } else if row.get::<_, bool>(20)? {
+        ReplyTargetState::Hidden
+    } else {
+        ReplyTargetState::Available
+    };
+    let direction = row
+        .get::<_, Option<String>>(18)?
+        .map(|d| match d.as_str() {
+            "incoming" => Ok(MessageDirection::Incoming),
+            "outgoing" => Ok(MessageDirection::Outgoing),
+            _ => Err(HistoryError::Store),
+        })
+        .transpose()?;
+    let kind = row
+        .get::<_, Option<String>>(19)?
+        .as_deref()
+        .map(message_kind)
+        .transpose()?;
+    let voice_duration_ms = row
+        .get::<_, Option<Vec<u8>>>(23)?
+        .map(|bytes| {
+            crate::voice::decode_manifest(&bytes)
+                .map(|(_, m)| m.sample_count.div_ceil(16))
+                .map_err(|_| HistoryError::Store)
+        })
+        .transpose()?;
+    Ok(Some(ReplyInfo {
+        target_local_id,
+        state,
+        target_revision: row.get(17)?,
+        direction,
+        kind,
+        preview: row.get::<_, String>(22)?.chars().take(160).collect(),
+        voice_duration_ms,
+    }))
 }
 
 fn message_kind(value: &str) -> Result<MessageKind, HistoryError> {
@@ -391,7 +479,7 @@ pub(crate) fn message_row(
     contact_id: &str,
     local_id: i64,
 ) -> Result<HistoryMessage, HistoryError> {
-    let mut stmt = conn.prepare(&format!("SELECT {MESSAGE_COLUMNS} FROM core_messages m WHERE m.contact_id=?1 AND m.local_id=?2 AND m.kind IN ('text','voice')"))?;
+    let mut stmt = conn.prepare(&format!("SELECT {MESSAGE_COLUMNS} FROM {MESSAGE_FROM} WHERE m.contact_id=?1 AND m.local_id=?2 AND m.kind IN ('text','voice')"))?;
     let mut rows = stmt.query(params![contact_id, local_id])?;
     let row = rows.next()?.ok_or(HistoryError::InvalidInput)?;
     read_message(row, contact_id)
@@ -668,6 +756,7 @@ mod tests {
         let tx =
             Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate).unwrap();
         let event = dmsg_protocol::e2e::Event {
+            reply_to: None,
             message_id: mid,
             sender_ed: [0; 32],
             body: dmsg_protocol::e2e::Body::Text(text.into()),
@@ -690,6 +779,294 @@ mod tests {
         };
         tx.commit().unwrap();
         local_id
+    }
+
+    fn reference(conn: &Connection, id: i64) -> dmsg_protocol::e2e::ReplyRef {
+        store::reply_target(conn, A, Some(id), false)
+            .unwrap()
+            .unwrap()
+    }
+
+    fn set_reply(conn: &Connection, id: i64, reference: &dmsg_protocol::e2e::ReplyRef) {
+        conn.execute(
+            "UPDATE core_messages SET reply_ref=?2 WHERE local_id=?1",
+            params![id, reference.encode().as_slice()],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn reply_projection_is_scoped_shallow_current_and_resolves_a_late_original() {
+        use dmsg_protocol::e2e::{Body, Event, ReplyRef};
+        let (conn, dir) = fixture("reply-projection");
+        let raw = format!("  **raw**\r\n{}", "🦀e\u{301}".repeat(100));
+        let target = append(&conn, A, 1, false, &raw);
+        let source = append(&conn, A, 2, true, "reply body");
+        set_reply(&conn, source, &reference(&conn, target));
+        let missing_ref = ReplyRef {
+            sender_device: [7; 32],
+            message_id: [99; 16],
+        };
+        // A reply-to-reply quotes only this target's body, not its missing parent.
+        set_reply(&conn, target, &missing_ref);
+        let quote = history_message(&conn, A, source).unwrap().reply.unwrap();
+        assert_eq!(quote.state, ReplyTargetState::Available);
+        assert_eq!(quote.target_local_id, Some(target));
+        assert_eq!(quote.target_revision, Some(0));
+        assert_eq!(quote.direction, Some(MessageDirection::Outgoing));
+        assert_eq!(quote.kind, Some(MessageKind::Text));
+        assert_eq!(quote.preview, raw.chars().take(160).collect::<String>());
+        assert_eq!(quote.preview.chars().count(), 160);
+        assert_eq!(quote.voice_duration_ms, None);
+        assert!(!format!("{quote:?}").contains("raw"));
+        let foreign = append(&conn, B, 3, true, "other dialog reply");
+        set_reply(&conn, foreign, &reference(&conn, target));
+        let other_sender = append(&conn, A, 4, true, "different author reference");
+        let mut wrong_sender = reference(&conn, target);
+        wrong_sender.sender_device = [7; 32];
+        set_reply(&conn, other_sender, &wrong_sender);
+        let tx =
+            Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate).unwrap();
+        let control = Event {
+            message_id: [44; 16],
+            sender_ed: [0; 32],
+            reply_to: None,
+            body: Body::Edit {
+                target: [55; 16],
+                revision: 1,
+                text: "control content".into(),
+            },
+        };
+        store::receive_event(&tx, A, &[7; 32], &control, None).unwrap();
+        tx.commit().unwrap();
+        let control_reply = append(&conn, A, 5, true, "control reference");
+        set_reply(
+            &conn,
+            control_reply,
+            &ReplyRef {
+                sender_device: [7; 32],
+                message_id: control.message_id,
+            },
+        );
+        for (cid, id) in [
+            (A, target),
+            (B, foreign),
+            (A, other_sender),
+            (A, control_reply),
+        ] {
+            let q = history_message(&conn, cid, id).unwrap().reply.unwrap();
+            assert_eq!(
+                q,
+                ReplyInfo {
+                    target_local_id: None,
+                    state: ReplyTargetState::Missing,
+                    target_revision: None,
+                    direction: None,
+                    kind: None,
+                    preview: String::new(),
+                    voice_duration_ms: None
+                }
+            );
+        }
+        conn.execute("UPDATE core_messages SET revision=2,text=dmsg_seal('message_text',?2) WHERE local_id=?1",params![target,"  ## changed\n`source`  "]).unwrap();
+        let q = timeline_page(&conn, A, None, 100)
+            .unwrap()
+            .rows
+            .into_iter()
+            .find(|r| r.local_id == source)
+            .unwrap()
+            .reply
+            .unwrap();
+        assert_eq!(q.target_revision, Some(2));
+        assert_eq!(q.preview, "  ## changed\n`source`  ");
+        // A different MID with no matching original is an annotation, never a read error.
+        let late_source = append(&conn, A, 6, true, "late target source");
+        let mut late_mid = [0; 16];
+        late_mid[..4].copy_from_slice(&99u32.to_be_bytes());
+        set_reply(
+            &conn,
+            late_source,
+            &ReplyRef {
+                sender_device: [7; 32],
+                message_id: late_mid,
+            },
+        );
+        assert_eq!(
+            history_message(&conn, A, late_source)
+                .unwrap()
+                .reply
+                .unwrap()
+                .state,
+            ReplyTargetState::Missing
+        );
+        let late = append(&conn, A, 99, true, "arrived after reply");
+        let q = history_message(&conn, A, late_source)
+            .unwrap()
+            .reply
+            .unwrap();
+        assert_eq!(q.target_local_id, Some(late));
+        assert_eq!(q.state, ReplyTargetState::Available);
+        assert_eq!(q.preview, "arrived after reply");
+        assert_eq!(
+            dialogs_page(&conn, None, 100)
+                .unwrap()
+                .rows
+                .iter()
+                .find(|r| r.contact_id == A)
+                .unwrap()
+                .read_cursor,
+            0
+        );
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn hidden_deleted_reply_targets_retain_metadata_and_never_unseal_voice_content() {
+        use dmsg_protocol::e2e::{Body, Event, VoiceManifest};
+        let (conn, dir) = fixture("reply-privacy");
+        let text_target = append(&conn, A, 1, false, "private text target");
+        let text_source = append(&conn, A, 2, true, "text reply");
+        set_reply(&conn, text_source, &reference(&conn, text_target));
+        let tx =
+            Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate).unwrap();
+        let event = Event {
+            message_id: [33; 16],
+            sender_ed: [0; 32],
+            reply_to: None,
+            body: Body::Voice(VoiceManifest {
+                blob_id: [1; 16],
+                key: [2; 32],
+                nonce_prefix: [3; 8],
+                recipient_binding: [4; 32],
+                plain_len: 1,
+                byte_len: 17,
+                sample_count: 16001,
+                waveform: vec![5; 64],
+            }),
+        };
+        let voice_target =
+            store::insert_outgoing(&tx, A, &[8; 32], &[0; 32], &event, b"ciphertext").unwrap();
+        tx.commit().unwrap();
+        let voice_source = append(&conn, A, 3, true, "voice reply");
+        set_reply(&conn, voice_source, &reference(&conn, voice_target));
+        let q = history_message(&conn, A, voice_source)
+            .unwrap()
+            .reply
+            .unwrap();
+        assert_eq!(q.kind, Some(MessageKind::Voice));
+        assert_eq!(q.voice_duration_ms, Some(1001));
+        assert!(q.preview.is_empty());
+        let mut corrupt: Vec<u8> = conn
+            .query_row(
+                "SELECT media_manifest FROM core_messages WHERE local_id=?1",
+                [voice_target],
+                |r| r.get(0),
+            )
+            .unwrap();
+        *corrupt.last_mut().unwrap() ^= 1;
+        conn.execute(
+            "UPDATE core_messages SET media_manifest=?2 WHERE local_id=?1",
+            params![voice_target, corrupt],
+        )
+        .unwrap();
+        assert_eq!(
+            history_message(&conn, A, voice_source),
+            Err(HistoryError::Store)
+        );
+        conn.execute(
+            "UPDATE core_messages SET hidden_self=1,revision=3,text=NULL WHERE local_id=?1",
+            [text_target],
+        )
+        .unwrap();
+        // Own queued VOICE retains its playable manifest for retry. Even corrupt
+        // retained content cannot be touched through the hidden target JOIN.
+        conn.execute(
+            "UPDATE core_messages SET hidden_self=1,revision=4 WHERE local_id=?1",
+            [voice_target],
+        )
+        .unwrap();
+        for (source, target, revision, kind) in [
+            (text_source, text_target, 3, MessageKind::Text),
+            (voice_source, voice_target, 4, MessageKind::Voice),
+        ] {
+            let q = history_message(&conn, A, source).unwrap().reply.unwrap();
+            assert_eq!(q.state, ReplyTargetState::Hidden);
+            assert_eq!(q.target_local_id, Some(target));
+            assert_eq!(q.target_revision, Some(revision));
+            assert_eq!(q.direction, Some(MessageDirection::Outgoing));
+            assert_eq!(q.kind, Some(kind));
+            assert!(q.preview.is_empty());
+            assert_eq!(q.voice_duration_ms, None);
+            conn.execute("UPDATE core_messages SET deleted_all=1,revision=revision+1,media_manifest=NULL WHERE local_id=?1",[target]).unwrap();
+            let deleted = history_message(&conn, A, source).unwrap().reply.unwrap();
+            assert_eq!(deleted.state, ReplyTargetState::Deleted);
+            assert_eq!(deleted.target_local_id, Some(target));
+            assert_eq!(deleted.target_revision, Some(revision + 1));
+            assert!(deleted.preview.is_empty());
+            assert_eq!(deleted.voice_duration_ms, None);
+        }
+        drop(conn);
+        let conn = store::open_encrypted(&dir.join("core.db"), &KEY).unwrap();
+        assert_eq!(
+            history_message(&conn, A, voice_source)
+                .unwrap()
+                .reply
+                .unwrap()
+                .state,
+            ReplyTargetState::Deleted
+        );
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn fresh_reply_column_accepts_only_base_blob48_without_a_foreign_key() {
+        use dmsg_protocol::e2e::{Body, Event};
+        let (conn, dir) = fixture("reply-schema");
+        let id = append(&conn, A, 1, false, "base");
+        for len in [0, 47, 49] {
+            assert!(conn
+                .execute(
+                    "UPDATE core_messages SET reply_ref=?2 WHERE local_id=?1",
+                    params![id, vec![0u8; len]]
+                )
+                .is_err());
+        }
+        assert!(conn
+            .execute(
+                "UPDATE core_messages SET reply_ref=?2 WHERE local_id=?1",
+                params![id, "x".repeat(48)]
+            )
+            .is_err());
+        // Unknown target remains legal: no FK / required target availability.
+        conn.execute(
+            "UPDATE core_messages SET reply_ref=?2 WHERE local_id=?1",
+            params![id, [99u8; 48].as_slice()],
+        )
+        .unwrap();
+        assert_eq!(
+            history_message(&conn, A, id).unwrap().reply.unwrap().state,
+            ReplyTargetState::Missing
+        );
+        let tx =
+            Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate).unwrap();
+        let control = Event {
+            message_id: [1; 16],
+            sender_ed: [0; 32],
+            reply_to: Some(dmsg_protocol::e2e::ReplyRef {
+                sender_device: [0; 32],
+                message_id: [0; 16],
+            }),
+            body: Body::Delete {
+                target: [2; 16],
+                revision: 1,
+            },
+        };
+        assert!(store::insert_outgoing(&tx, A, &[8; 32], &[0; 32], &control, b"control").is_err());
+        drop(tx);
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

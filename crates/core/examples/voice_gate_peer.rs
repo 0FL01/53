@@ -358,7 +358,7 @@ fn run(args: &[String]) -> Result<()> {
         private_metadata(db, "db")?;
     }
     let key = storage_key(Path::new(&args[2]), signup)?;
-    // Reserve a fresh owner-only empty DB; core initializes fresh schema9.
+    // Reserve a fresh owner-only empty DB; core initializes fresh schema10.
     // Existing databases and secret inputs are never truncated or replaced.
     if signup {
         new_output(db, "db")?
@@ -432,7 +432,7 @@ fn run(args: &[String]) -> Result<()> {
             let encoded_bytes = note.bytes.len();
             let queued = core(
                 "queue_voice",
-                client.queue_voice(cid.clone(), mid_hex, note.bytes),
+                client.queue_voice(cid.clone(), mid_hex, note.bytes, None),
             )?;
             let voice = queued
                 .voice

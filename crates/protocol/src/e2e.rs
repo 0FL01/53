@@ -1,12 +1,13 @@
-//! Strict E2E plaintext v1: `[version:u8][kind:u8][message_id:16][sender_ed:32][body]`.
+//! Strict E2E plaintext v2: fixed51 header, optional48 reply identity, then body.
 //! Text is the remaining UTF-8 bytes; controls start with target16 + revision8 BE.
 
 use crate::{CIPHERTEXT_MAX, TEXT_CHAR_MAX, TEXT_UTF8_MAX};
 
-const VERSION: u8 = 1;
-const HEADER_LEN: usize = 1 + 1 + 16 + 32;
+const VERSION: u8 = 2;
+const HEADER_LEN: usize = 1 + 1 + 16 + 32 + 1;
+pub const REPLY_REF_LEN: usize = 48;
 const CONTROL_LEN: usize = 16 + 8;
-const ENVELOPE_MAX: usize = HEADER_LEN + CONTROL_LEN + TEXT_UTF8_MAX;
+const ENVELOPE_MAX: usize = HEADER_LEN + REPLY_REF_LEN + TEXT_UTF8_MAX;
 
 pub const VOICE_MANIFEST_LEN: usize = 166;
 pub const VOICE_SAMPLE_MAX: u32 = 960_000;
@@ -103,9 +104,39 @@ pub enum Kind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplyRef {
+    pub sender_device: [u8; 32],
+    pub message_id: [u8; 16],
+}
+
+impl ReplyRef {
+    pub fn encode(&self) -> [u8; REPLY_REF_LEN] {
+        let mut bytes = [0; REPLY_REF_LEN];
+        bytes[..32].copy_from_slice(&self.sender_device);
+        bytes[32..].copy_from_slice(&self.message_id);
+        bytes
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, &'static str> {
+        if bytes.len() != REPLY_REF_LEN {
+            return Err("invalid E2E reply reference length");
+        }
+        Ok(Self {
+            sender_device: bytes[..32]
+                .try_into()
+                .map_err(|_| "invalid E2E reply reference")?,
+            message_id: bytes[32..]
+                .try_into()
+                .map_err(|_| "invalid E2E reply reference")?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Event {
     pub message_id: [u8; 16],
     pub sender_ed: [u8; 32],
+    pub reply_to: Option<ReplyRef>,
     pub body: Body,
 }
 
@@ -137,6 +168,9 @@ impl Event {
 
 /// Validate the complete event before allocating its exact wire envelope.
 pub fn encode(event: &Event) -> Result<Vec<u8>, &'static str> {
+    if event.reply_to.is_some() && !matches!(event.kind(), Kind::Text | Kind::Voice) {
+        return Err("E2E control cannot reply");
+    }
     let body_len = match &event.body {
         Body::Text(text) => {
             validate_text(text)?;
@@ -156,13 +190,17 @@ pub fn encode(event: &Event) -> Result<Vec<u8>, &'static str> {
             CONTROL_LEN
         }
     };
-    let total = HEADER_LEN + body_len;
+    let total = HEADER_LEN + event.reply_to.as_ref().map_or(0, |_| REPLY_REF_LEN) + body_len;
     validate_envelope_len(total)?;
     let mut out = Vec::with_capacity(total);
     out.push(VERSION);
     out.push(event.kind() as u8);
     out.extend_from_slice(&event.message_id);
     out.extend_from_slice(&event.sender_ed);
+    out.push(u8::from(event.reply_to.is_some()));
+    if let Some(reference) = &event.reply_to {
+        out.extend_from_slice(&reference.encode());
+    }
     match &event.body {
         Body::Text(text) => out.extend_from_slice(text.as_bytes()),
         Body::Voice(manifest) => out.extend_from_slice(&manifest.encode()?),
@@ -189,7 +227,21 @@ pub fn decode(bytes: &[u8]) -> Result<Event, &'static str> {
     if bytes[0] != VERSION {
         return Err("unknown E2E version");
     }
-    let body_bytes = &bytes[HEADER_LEN..];
+    let (reply_to, body_offset) = match bytes[50] {
+        0 => (None, HEADER_LEN),
+        1 if matches!(bytes[1], 1 | 4) => {
+            let reference = bytes
+                .get(HEADER_LEN..HEADER_LEN + REPLY_REF_LEN)
+                .ok_or("truncated E2E reply reference")?;
+            (
+                Some(ReplyRef::decode(reference)?),
+                HEADER_LEN + REPLY_REF_LEN,
+            )
+        }
+        1 => return Err("E2E control cannot reply"),
+        _ => return Err("invalid E2E reply flag"),
+    };
+    let body_bytes = &bytes[body_offset..];
     let body = match bytes[1] {
         1 => Body::Text(decode_text(body_bytes)?),
         4 => Body::Voice(VoiceManifest::decode(body_bytes)?),
@@ -214,9 +266,10 @@ pub fn decode(bytes: &[u8]) -> Result<Event, &'static str> {
         message_id: bytes[2..18]
             .try_into()
             .map_err(|_| "truncated E2E header")?,
-        sender_ed: bytes[18..HEADER_LEN]
+        sender_ed: bytes[18..50]
             .try_into()
             .map_err(|_| "truncated E2E header")?,
+        reply_to,
         body,
     })
 }
@@ -297,30 +350,31 @@ mod tests {
     ];
     const REVISION: u64 = 0x0102_0304_0506_0708;
     const TEXT_VECTOR: &[u8] = &[
-        1, 1, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
+        2, 1, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
         0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c,
         0x2d, 0x2e, 0x2f, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b,
-        0x3c, 0x3d, 0x3e, 0x3f, 0x68, 0xc3, 0xa9,
+        0x3c, 0x3d, 0x3e, 0x3f, 0, 0x68, 0xc3, 0xa9,
     ];
     const EDIT_VECTOR: &[u8] = &[
-        1, 2, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
+        2, 2, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
         0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c,
         0x2d, 0x2e, 0x2f, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b,
-        0x3c, 0x3d, 0x3e, 0x3f, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a,
-        0x4b, 0x4c, 0x4d, 0x4e, 0x4f, 1, 2, 3, 4, 5, 6, 7, 8, 0xe4, 0xbf, 0xae,
+        0x3c, 0x3d, 0x3e, 0x3f, 0, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49,
+        0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f, 1, 2, 3, 4, 5, 6, 7, 8, 0xe4, 0xbf, 0xae,
     ];
     const DELETE_VECTOR: &[u8] = &[
-        1, 3, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
+        2, 3, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
         0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c,
         0x2d, 0x2e, 0x2f, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b,
-        0x3c, 0x3d, 0x3e, 0x3f, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a,
-        0x4b, 0x4c, 0x4d, 0x4e, 0x4f, 1, 2, 3, 4, 5, 6, 7, 8,
+        0x3c, 0x3d, 0x3e, 0x3f, 0, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49,
+        0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f, 1, 2, 3, 4, 5, 6, 7, 8,
     ];
 
     fn event(body: Body) -> Event {
         Event {
             message_id: MID,
             sender_ed: SENDER,
+            reply_to: None,
             body,
         }
     }
@@ -339,6 +393,58 @@ mod tests {
         let decoded = decode(bytes).unwrap();
         assert_eq!(decoded, event);
         assert_eq!(encode(&decoded).unwrap(), bytes);
+    }
+
+    #[test]
+    fn reply_reference_roundtrip_flags_controls_truncation_and_bounds() {
+        let reference = ReplyRef {
+            sender_device: SENDER,
+            message_id: TARGET,
+        };
+        assert_eq!(ReplyRef::decode(&reference.encode()).unwrap(), reference);
+        for len in [0, 47, 49] {
+            assert!(ReplyRef::decode(&vec![0; len]).is_err());
+        }
+        let mut e = event(Body::Text("🦀".repeat(TEXT_CHAR_MAX)));
+        e.reply_to = Some(reference.clone());
+        let bytes = encode(&e).unwrap();
+        assert_eq!(bytes.len(), ENVELOPE_MAX);
+        assert_eq!(bytes[50], 1);
+        assert_eq!(&bytes[18..50], &SENDER);
+        assert_eq!(&bytes[51..99], &reference.encode());
+        assert_eq!(decode(&bytes).unwrap(), e);
+        for len in HEADER_LEN..HEADER_LEN + REPLY_REF_LEN {
+            assert_eq!(decode(&bytes[..len]), Err("truncated E2E reply reference"));
+        }
+        for flag in [2, 255] {
+            let mut bad = bytes.clone();
+            bad[50] = flag;
+            assert_eq!(decode(&bad), Err("invalid E2E reply flag"));
+        }
+        for vector in [EDIT_VECTOR, DELETE_VECTOR] {
+            let mut bad = vector.to_vec();
+            bad[50] = 1;
+            assert_eq!(decode(&bad), Err("E2E control cannot reply"));
+            let mut control = decode(vector).unwrap();
+            control.reply_to = Some(reference.clone());
+            assert_eq!(encode(&control), Err("E2E control cannot reply"));
+        }
+        let mut legacy = TEXT_VECTOR.to_vec();
+        legacy[0] = 1;
+        legacy.remove(50);
+        assert_eq!(decode(&legacy), Err("unknown E2E version"));
+        let m = VoiceManifest {
+            blob_id: [1; 16],
+            key: [2; 32],
+            nonce_prefix: [3; 8],
+            recipient_binding: [4; 32],
+            plain_len: 1,
+            byte_len: 17,
+            sample_count: 1,
+            waveform: vec![5; 64],
+        };
+        e.body = Body::Voice(m);
+        assert_eq!(decode(&encode(&e).unwrap()).unwrap(), e);
     }
 
     #[test]
@@ -375,7 +481,7 @@ mod tests {
     fn text_and_edit_unicode_scalar_bounds_and_exact_source() {
         assert_eq!(TEXT_CHAR_MAX, 4000);
         assert_eq!(TEXT_UTF8_MAX, 16000);
-        assert_eq!(ENVELOPE_MAX, 16074);
+        assert_eq!(ENVELOPE_MAX, 16099);
         for text in [
             "x".to_owned(),
             " \0\n".to_owned(),
@@ -498,7 +604,7 @@ mod tests {
     #[test]
     fn unknown_version_and_kind_rejected() {
         for vector in [TEXT_VECTOR, EDIT_VECTOR, DELETE_VECTOR] {
-            for version in [0, 2, u8::MAX] {
+            for version in [0, 1, u8::MAX] {
                 let mut bytes = vector.to_vec();
                 bytes[0] = version;
                 assert_eq!(decode(&bytes), Err("unknown E2E version"));

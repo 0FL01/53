@@ -1,0 +1,11 @@
+<resources>
+    <string name="reply_whole_message">Ответить</string>
+    <string name="reply_author_you">Вы</string>
+    <string name="reply_author_peer">%1$s</string>
+    <string name="reply_voice_preview">Голосовое сообщение · %1$s</string>
+    <string name="reply_message_unavailable">Сообщение недоступно</string>
+    <string name="reply_open_original">Открыть исходное сообщение</string>
+    <string name="reply_banner_title">Ответ для %1$s</string>
+    <string name="cancel_reply">Отменить ответ</string>
+    <string name="reply_target_unavailable">Исходное сообщение недоступно. Отмените ответ, чтобы отправить новое сообщение.</string>
+</resources>

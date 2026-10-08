@@ -66,7 +66,9 @@ internal object NativeUi {
 internal class HistoryAdapter(private val context: Context, private val rows: List<HistoryMessage>,
     private val canEdit: (HistoryMessage) -> Boolean, private val onEdit: (Long) -> Unit,
     private val onDelete: (Long) -> Unit, private val onMenu: (Long) -> Unit,
-    private val bindVoice: (VoiceBubbleView, HistoryMessage) -> Unit) : BaseAdapter() {
+    private val bindVoice: (VoiceBubbleView, HistoryMessage) -> Unit,
+    private val onReply: (Long) -> Unit = {}, private val onQuote: (Long) -> Unit = {},
+    private val peerName: () -> String = { "" }) : BaseAdapter() {
     private val markdown = MessageMarkdown(context)
     var visibleRows: List<HistoryMessage> = rows.filter(::messageVisible)
         private set
@@ -105,6 +107,13 @@ internal class HistoryAdapter(private val context: Context, private val rows: Li
             setBackgroundColor(ContextCompat.getColor(c, if (outgoing) R.color.accent_soft else R.color.incoming))
         }
         val width = ((parent.width.takeIf { it > 0 } ?: c.resources.displayMetrics.widthPixels) - NativeUi.dp(c, 32)) * .86
+        val quote = message.reply?.let { info ->
+            replyQuoteView(c, info, peerName().ifBlank { message.contactId }, markdown, onQuote) { onMenu(message.localId) }
+        }
+        if (quote != null) bubble.addView(quote,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = NativeUi.dp(c, 8)
+            })
         val body: View = if (message.kind == uniffi.dmsg_core.MessageKind.VOICE) VoiceBubbleView(c).also { bindVoice(it, message) }
         else NativeUi.text(c).apply {
             markdown.setMarkdown(this, message.text)
@@ -112,7 +121,9 @@ internal class HistoryAdapter(private val context: Context, private val rows: Li
                 override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean { selectionActions(menu); return true }
                 override fun onPrepareActionMode(mode: ActionMode, menu: Menu): Boolean { selectionActions(menu); return true }
                 private fun selectionActions(menu: Menu) {
-                    menu.removeItem(R.id.action_edit); menu.removeItem(R.id.action_delete); menu.removeItem(R.id.action_open_link)
+                    menu.removeItem(R.id.action_reply); menu.removeItem(R.id.action_edit)
+                    menu.removeItem(R.id.action_delete); menu.removeItem(R.id.action_open_link)
+                    if (canReplyMessage(message)) menu.add(0, R.id.action_reply, 99, R.string.reply_whole_message)
                     if (canHideMessage(message)) {
                         if (canEdit(message)) menu.add(0, R.id.action_edit, 100, R.string.edit_whole_message)
                         menu.add(0, R.id.action_delete, 101, R.string.delete_whole_message)
@@ -121,6 +132,7 @@ internal class HistoryAdapter(private val context: Context, private val rows: Li
                         menu.add(0, R.id.action_open_link, 102, R.string.open_link)
                 }
                 override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean = when (item.itemId) {
+                    R.id.action_reply -> { mode.finish(); onReply(message.localId); true }
                     R.id.action_edit -> { mode.finish(); onEdit(message.localId); true }
                     R.id.action_delete -> { mode.finish(); onDelete(message.localId); true }
                     R.id.action_open_link -> {
@@ -135,9 +147,10 @@ internal class HistoryAdapter(private val context: Context, private val rows: Li
                 override fun onDestroyActionMode(mode: ActionMode) {}
             }
         }
+        body.id = R.id.message_body
         bubble.addView(body,
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        bubble.addView(NativeUi.text(c, 12f, true).apply {
+        val footer = NativeUi.text(c, 12f, true).apply {
             val time = when {
                 message.serverTimestampMs != null -> c.getString(R.string.server_timestamp, localTime(message.serverTimestampMs))
                 message.deliveryState == uniffi.dmsg_core.DeliveryState.QUEUED -> c.getString(R.string.pending_timestamp, localTime(message.localTimestampMs))
@@ -148,14 +161,23 @@ internal class HistoryAdapter(private val context: Context, private val rows: Li
                 if (outgoing) c.getString(R.string.edit_delivery, deliveryLabel(c.resources, message.changeDeliveryState)) else c.getString(R.string.message_edited)
             } else null
             text = listOfNotNull(original, change, time).joinToString(" · ")
-            if (canHideMessage(message)) setOnLongClickListener { onMenu(message.localId); true }
-        })
-        if (canHideMessage(message)) {
-            bubble.setOnLongClickListener { onMenu(message.localId); true }
-            root.setOnLongClickListener { onMenu(message.localId); true }
-            // Both actions refer to the whole stable-ID message, never the selected substring.
-            for (view in listOf(root, body)) {
-                ViewCompat.replaceAccessibilityAction(view, AccessibilityActionCompat(R.id.action_delete, c.getString(R.string.delete_whole_message)),
+        }
+        bubble.addView(footer)
+        val replyable = canReplyMessage(message)
+        val hideable = canHideMessage(message)
+        if (replyable || hideable) {
+            val hold = View.OnLongClickListener { onMenu(message.localId); true }
+            for (view in listOf(root, bubble, footer)) view.setOnLongClickListener(hold)
+            if (body is VoiceBubbleView) voiceMessageHold(body, hold)
+        }
+        // Actions always refer to the whole stable-ID source, never selected text or its quote target.
+        for (view in listOfNotNull(root, bubble, body, footer, quote)) {
+            if (replyable) ViewCompat.replaceAccessibilityAction(view,
+                AccessibilityActionCompat(R.id.action_reply, c.getString(R.string.reply_whole_message)),
+                c.getString(R.string.reply_whole_message)) { _, _ -> onReply(message.localId); true }
+            if (hideable) {
+                ViewCompat.replaceAccessibilityAction(view,
+                    AccessibilityActionCompat(R.id.action_delete, c.getString(R.string.delete_whole_message)),
                     c.getString(R.string.delete_whole_message)) { _, _ -> onDelete(message.localId); true }
                 if (canEdit(message)) ViewCompat.replaceAccessibilityAction(view,
                     AccessibilityActionCompat(R.id.action_edit, c.getString(R.string.edit_whole_message)),
@@ -164,6 +186,13 @@ internal class HistoryAdapter(private val context: Context, private val rows: Li
         }
         root.addView(bubble, LinearLayout.LayoutParams(width.toInt(), ViewGroup.LayoutParams.WRAP_CONTENT))
         return root
+    }
+
+    /** Real native holds on the body, label and blank containers; controls keep their own touches. */
+    private fun voiceMessageHold(view: View, hold: View.OnLongClickListener) {
+        if (view is Button || view is VoiceWaveformView || view.isClickable) return
+        view.setOnLongClickListener(hold)
+        if (view is ViewGroup) for (index in 0 until view.childCount) voiceMessageHold(view.getChildAt(index), hold)
     }
 }
 

@@ -156,6 +156,7 @@ impl Core {
         cid: &str,
         mid: &[u8; 16],
         encoded_note: &[u8],
+        reply_to_local_id: Option<i64>,
     ) -> Result<HistoryMessage, OlmError> {
         let device_pub = self.device_pub();
         let sender_ed = olm::ed_identity(&self.account);
@@ -163,14 +164,19 @@ impl Core {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| OlmError::Store("voice queue transaction failed".into()))?;
-        let old: Option<(i64,String,String)> = tx.query_row("SELECT local_id,contact_id,kind FROM core_messages WHERE direction='outgoing' AND message_id=?1",[mid.as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(|_|OlmError::Store("voice attempt lookup failed".into()))?;
-        if let Some((id, old_cid, kind)) = old {
+        let old: Option<(i64,String,String,Option<Vec<u8>>)> = tx.query_row("SELECT local_id,contact_id,kind,reply_ref FROM core_messages WHERE direction='outgoing' AND message_id=?1",[mid.as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(|_|OlmError::Store("voice attempt lookup failed".into()))?;
+        if let Some((id, old_cid, kind, old_reply)) = old {
             if old_cid != cid || kind != "voice" {
+                return Err(OlmError::MessageUnavailable);
+            }
+            let requested = crate::store::reply_target(&tx, cid, reply_to_local_id, false)?;
+            if old_reply != requested.as_ref().map(|r| r.encode().to_vec()) {
                 return Err(OlmError::MessageUnavailable);
             }
             return crate::history::message_row(&tx, cid, id)
                 .map_err(|_| OlmError::Store("voice attempt read failed".into()));
         }
+        let reply_to = crate::store::reply_target(&tx, cid, reply_to_local_id, true)?;
         let note = crate::voice_codec::parse(encoded_note).map_err(|_| OlmError::BadVoice)?;
         let c = contacts::get(&tx, cid)?.ok_or(OlmError::UnknownContact)?;
         contacts::sendable(&c)?;
@@ -201,6 +207,7 @@ impl Core {
         let event = Event {
             message_id: *mid,
             sender_ed,
+            reply_to,
             body: Body::Voice(manifest.clone()),
         };
         let envelope = dmsg_protocol::e2e::encode(&event).map_err(OlmError::Protocol)?;
@@ -907,6 +914,7 @@ mod tests {
     }
     fn event() -> Event {
         Event {
+            reply_to: None,
             message_id: [1; 16],
             sender_ed: [2; 32],
             body: Body::Voice(VoiceManifest {
@@ -971,6 +979,7 @@ mod tests {
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .unwrap();
             let control = Event {
+                reply_to: None,
                 message_id: [8; 16],
                 sender_ed: [2; 32],
                 body: if delete {
@@ -1006,6 +1015,7 @@ mod tests {
             assert_eq!(row.voice.is_none(), delete);
             assert_eq!(row.revision, if delete { 2 } else { 0 });
             let late_edit = Event {
+                reply_to: None,
                 message_id: [9; 16],
                 sender_ed: [2; 32],
                 body: Body::Edit {

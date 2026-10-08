@@ -1054,7 +1054,7 @@ fun uniffi_dmsg_core_fn_method_dmsgclient_prime_voice_session_dns(`ptr`: Pointer
 ): Unit
 fun uniffi_dmsg_core_fn_method_dmsgclient_profile_preview(`ptr`: Pointer,`qr`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
-fun uniffi_dmsg_core_fn_method_dmsgclient_queue_voice(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,`messageIdHex`: RustBuffer.ByValue,`encodedNote`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+fun uniffi_dmsg_core_fn_method_dmsgclient_queue_voice(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,`messageIdHex`: RustBuffer.ByValue,`encodedNote`: RustBuffer.ByValue,`replyToLocalId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_reconnect_dns(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
 ): Int
@@ -1062,7 +1062,7 @@ fun uniffi_dmsg_core_fn_method_dmsgclient_registration_policy_dns(`ptr`: Pointer
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_retry_dns(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
-fun uniffi_dmsg_core_fn_method_dmsgclient_send_dns(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,`text`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+fun uniffi_dmsg_core_fn_method_dmsgclient_send_dns(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,`text`: RustBuffer.ByValue,`replyToLocalId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_dmsgclient_set_contact_alias(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,`alias`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): Unit
@@ -1322,7 +1322,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_profile_preview() != 65288.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_queue_voice() != 64320.toShort()) {
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_queue_voice() != 49465.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_reconnect_dns() != 35785.toShort()) {
@@ -1334,7 +1334,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_retry_dns() != 46819.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_send_dns() != 10275.toShort()) {
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_send_dns() != 46136.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_set_contact_alias() != 24315.toShort()) {
@@ -1922,7 +1922,7 @@ public interface DmsgClientInterface {
      * Local-only commit. A first offline note returns VoiceSessionRequired;
      * caller keeps its memory-only preview and explicitly primes when online.
      */
-    fun `queueVoice`(`contactId`: kotlin.String, `messageIdHex`: kotlin.String, `encodedNote`: kotlin.ByteArray): HistoryMessage
+    fun `queueVoice`(`contactId`: kotlin.String, `messageIdHex`: kotlin.String, `encodedNote`: kotlin.ByteArray, `replyToLocalId`: kotlin.Long?): HistoryMessage
 
     fun `reconnectDns`(): kotlin.UInt
 
@@ -1930,7 +1930,7 @@ public interface DmsgClientInterface {
 
     fun `retryDns`(): RetryReport
 
-    fun `sendDns`(`contactId`: kotlin.String, `text`: kotlin.String): kotlin.String
+    fun `sendDns`(`contactId`: kotlin.String, `text`: kotlin.String, `replyToLocalId`: kotlin.Long?): kotlin.String
 
     fun `setContactAlias`(`contactId`: kotlin.String, `alias`: kotlin.String?)
 
@@ -2548,12 +2548,12 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
      * Local-only commit. A first offline note returns VoiceSessionRequired;
      * caller keeps its memory-only preview and explicitly primes when online.
      */
-    @Throws(FfiException::class)override fun `queueVoice`(`contactId`: kotlin.String, `messageIdHex`: kotlin.String, `encodedNote`: kotlin.ByteArray): HistoryMessage {
+    @Throws(FfiException::class)override fun `queueVoice`(`contactId`: kotlin.String, `messageIdHex`: kotlin.String, `encodedNote`: kotlin.ByteArray, `replyToLocalId`: kotlin.Long?): HistoryMessage {
             return FfiConverterTypeHistoryMessage.lift(
     callWithPointer {
     uniffiRustCallWithError(FfiException) { _status ->
     UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_queue_voice(
-        it, FfiConverterString.lower(`contactId`),FfiConverterString.lower(`messageIdHex`),FfiConverterByteArray.lower(`encodedNote`),_status)
+        it, FfiConverterString.lower(`contactId`),FfiConverterString.lower(`messageIdHex`),FfiConverterByteArray.lower(`encodedNote`),FfiConverterOptionalLong.lower(`replyToLocalId`),_status)
 }
     }
     )
@@ -2600,12 +2600,12 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
 
 
 
-    @Throws(FfiException::class)override fun `sendDns`(`contactId`: kotlin.String, `text`: kotlin.String): kotlin.String {
+    @Throws(FfiException::class)override fun `sendDns`(`contactId`: kotlin.String, `text`: kotlin.String, `replyToLocalId`: kotlin.Long?): kotlin.String {
             return FfiConverterString.lift(
     callWithPointer {
     uniffiRustCallWithError(FfiException) { _status ->
     UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_send_dns(
-        it, FfiConverterString.lower(`contactId`),FfiConverterString.lower(`text`),_status)
+        it, FfiConverterString.lower(`contactId`),FfiConverterString.lower(`text`),FfiConverterOptionalLong.lower(`replyToLocalId`),_status)
 }
     }
     )
@@ -3383,7 +3383,8 @@ data class HistoryMessage (
     var `revision`: kotlin.ULong,
     var `hiddenSelf`: kotlin.Boolean,
     var `deletedAll`: kotlin.Boolean,
-    var `changeDeliveryState`: DeliveryState?
+    var `changeDeliveryState`: DeliveryState?,
+    var `reply`: ReplyInfo?
 ) {
 
     companion object
@@ -3410,6 +3411,7 @@ public object FfiConverterTypeHistoryMessage: FfiConverterRustBuffer<HistoryMess
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterOptionalTypeDeliveryState.read(buf),
+            FfiConverterOptionalTypeReplyInfo.read(buf),
         )
     }
 
@@ -3428,7 +3430,8 @@ public object FfiConverterTypeHistoryMessage: FfiConverterRustBuffer<HistoryMess
             FfiConverterULong.allocationSize(value.`revision`) +
             FfiConverterBoolean.allocationSize(value.`hiddenSelf`) +
             FfiConverterBoolean.allocationSize(value.`deletedAll`) +
-            FfiConverterOptionalTypeDeliveryState.allocationSize(value.`changeDeliveryState`)
+            FfiConverterOptionalTypeDeliveryState.allocationSize(value.`changeDeliveryState`) +
+            FfiConverterOptionalTypeReplyInfo.allocationSize(value.`reply`)
     )
 
     override fun write(value: HistoryMessage, buf: ByteBuffer) {
@@ -3447,6 +3450,7 @@ public object FfiConverterTypeHistoryMessage: FfiConverterRustBuffer<HistoryMess
             FfiConverterBoolean.write(value.`hiddenSelf`, buf)
             FfiConverterBoolean.write(value.`deletedAll`, buf)
             FfiConverterOptionalTypeDeliveryState.write(value.`changeDeliveryState`, buf)
+            FfiConverterOptionalTypeReplyInfo.write(value.`reply`, buf)
     }
 }
 
@@ -3729,6 +3733,61 @@ public object FfiConverterTypeReceivedMsg: FfiConverterRustBuffer<ReceivedMsg> {
             FfiConverterOptionalTypeVoiceInfo.write(value.`voice`, buf)
             FfiConverterString.write(value.`messageIdHex`, buf)
             FfiConverterULong.write(value.`seq`, buf)
+    }
+}
+
+
+
+/**
+ * Shallow current target projection; no persistent quoted-content snapshot.
+ */
+data class ReplyInfo (
+    var `targetLocalId`: kotlin.Long?,
+    var `state`: ReplyTargetState,
+    var `targetRevision`: kotlin.ULong?,
+    var `direction`: MessageDirection?,
+    var `kind`: MessageKind?,
+    var `preview`: kotlin.String,
+    var `voiceDurationMs`: kotlin.UInt?
+) {
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeReplyInfo: FfiConverterRustBuffer<ReplyInfo> {
+    override fun read(buf: ByteBuffer): ReplyInfo {
+        return ReplyInfo(
+            FfiConverterOptionalLong.read(buf),
+            FfiConverterTypeReplyTargetState.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalTypeMessageDirection.read(buf),
+            FfiConverterOptionalTypeMessageKind.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ReplyInfo) = (
+            FfiConverterOptionalLong.allocationSize(value.`targetLocalId`) +
+            FfiConverterTypeReplyTargetState.allocationSize(value.`state`) +
+            FfiConverterOptionalULong.allocationSize(value.`targetRevision`) +
+            FfiConverterOptionalTypeMessageDirection.allocationSize(value.`direction`) +
+            FfiConverterOptionalTypeMessageKind.allocationSize(value.`kind`) +
+            FfiConverterString.allocationSize(value.`preview`) +
+            FfiConverterOptionalUInt.allocationSize(value.`voiceDurationMs`)
+    )
+
+    override fun write(value: ReplyInfo, buf: ByteBuffer) {
+            FfiConverterOptionalLong.write(value.`targetLocalId`, buf)
+            FfiConverterTypeReplyTargetState.write(value.`state`, buf)
+            FfiConverterOptionalULong.write(value.`targetRevision`, buf)
+            FfiConverterOptionalTypeMessageDirection.write(value.`direction`, buf)
+            FfiConverterOptionalTypeMessageKind.write(value.`kind`, buf)
+            FfiConverterString.write(value.`preview`, buf)
+            FfiConverterOptionalUInt.write(value.`voiceDurationMs`, buf)
     }
 }
 
@@ -4721,6 +4780,38 @@ public object FfiConverterTypeRegistrationPolicy: FfiConverterRustBuffer<Registr
 
 
 
+enum class ReplyTargetState {
+
+    AVAILABLE,
+    MISSING,
+    HIDDEN,
+    DELETED;
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeReplyTargetState: FfiConverterRustBuffer<ReplyTargetState> {
+    override fun read(buf: ByteBuffer) = try {
+        ReplyTargetState.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: ReplyTargetState) = 4UL
+
+    override fun write(value: ReplyTargetState, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
 /**
  * @suppress
  */
@@ -4746,6 +4837,38 @@ public object FfiConverterOptionalUInt: FfiConverterRustBuffer<kotlin.UInt?> {
         } else {
             buf.put(1)
             FfiConverterUInt.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalULong: FfiConverterRustBuffer<kotlin.ULong?> {
+    override fun read(buf: ByteBuffer): kotlin.ULong? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterULong.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.ULong?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterULong.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.ULong?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterULong.write(value, buf)
         }
     }
 }
@@ -4884,6 +5007,38 @@ public object FfiConverterOptionalTypeHistoryMessage: FfiConverterRustBuffer<His
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeReplyInfo: FfiConverterRustBuffer<ReplyInfo?> {
+    override fun read(buf: ByteBuffer): ReplyInfo? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeReplyInfo.read(buf)
+    }
+
+    override fun allocationSize(value: ReplyInfo?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeReplyInfo.allocationSize(value)
+        }
+    }
+
+    override fun write(value: ReplyInfo?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeReplyInfo.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeVoiceInfo: FfiConverterRustBuffer<VoiceInfo?> {
     override fun read(buf: ByteBuffer): VoiceInfo? {
         if (buf.get().toInt() == 0) {
@@ -4938,6 +5093,38 @@ public object FfiConverterOptionalTypeDeliveryState: FfiConverterRustBuffer<Deli
         } else {
             buf.put(1)
             FfiConverterTypeDeliveryState.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeMessageDirection: FfiConverterRustBuffer<MessageDirection?> {
+    override fun read(buf: ByteBuffer): MessageDirection? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeMessageDirection.read(buf)
+    }
+
+    override fun allocationSize(value: MessageDirection?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeMessageDirection.allocationSize(value)
+        }
+    }
+
+    override fun write(value: MessageDirection?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeMessageDirection.write(value, buf)
         }
     }
 }

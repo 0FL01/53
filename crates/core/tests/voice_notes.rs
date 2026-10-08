@@ -1,11 +1,11 @@
-//! Fresh core9/server6, actual Opus notes, and the opaque API used by Android.
+//! Fresh core10/server6, actual Opus notes, and the opaque API used by Android.
 //! Direct TCP is a host integration seam, not DNS/device acceptance evidence.
 mod support;
 
 use dmsg_core::{
     contacts,
     ffi::{DmsgClient, FfiError, VoiceTransfer},
-    history::{DeleteScope, DeliveryState, MessageKind},
+    history::{DeleteScope, DeliveryState, MessageDirection, MessageKind, ReplyTargetState},
     voice_codec::{VoiceDecoder, VoiceEncoder},
     Core,
 };
@@ -190,13 +190,372 @@ fn finish(client: &DmsgClient, transfer: Arc<VoiceTransfer>) {
 }
 
 #[test]
+fn replied_text_voice_all_target_kinds_directions_and_duplicate_identity_survive_reopen() {
+    let mut p = Pair::new("voice-reply-matrix");
+    let encoded = note(1);
+    assert_eq!(
+        p.a.queue_voice(
+            p.bid.clone(),
+            "99999999999999999999999999999999".into(),
+            encoded.clone(),
+            Some(-1)
+        ),
+        Err(FfiError::MessageUnavailable)
+    );
+    let send = |client: &DmsgClient, cid: &str, text: &str, target: Option<i64>| {
+        client
+            .send_text(
+                p.srv.addr.clone(),
+                p.srv.server_pub.to_vec(),
+                p.srv.domain.clone(),
+                cid.into(),
+                text.into(),
+                target,
+            )
+            .unwrap()
+    };
+    let fetch = |client: &DmsgClient| {
+        client
+            .fetch(
+                p.srv.addr.clone(),
+                p.srv.server_pub.to_vec(),
+                p.srv.domain.clone(),
+            )
+            .unwrap()
+    };
+    let retry = |client: &DmsgClient| {
+        client
+            .retry_queued(
+                p.srv.addr.clone(),
+                p.srv.server_pub.to_vec(),
+                p.srv.domain.clone(),
+            )
+            .unwrap()
+    };
+    let at = send(&p.a, &p.bid, "**own text target**", None);
+    fetch(&p.b);
+    let bt = send(&p.b, &p.aid, "  incoming text target\n", None);
+    fetch(&p.a);
+    let av =
+        p.a.queue_voice(
+            p.bid.clone(),
+            "10101010101010101010101010101010".into(),
+            encoded.clone(),
+            None,
+        )
+        .unwrap();
+    let bv =
+        p.b.queue_voice(
+            p.aid.clone(),
+            "11111111111111111111111111111111".into(),
+            encoded.clone(),
+            None,
+        )
+        .unwrap();
+    finish(&p.a, p.transfer(&p.a, &p.bid, av.local_id, false));
+    finish(&p.b, p.transfer(&p.b, &p.aid, bv.local_id, false));
+    retry(&p.a);
+    retry(&p.b);
+    fetch(&p.a);
+    fetch(&p.b);
+    retry(&p.a);
+    retry(&p.b);
+    let targets: Vec<_> = [
+        at.clone(),
+        bt.clone(),
+        av.message_id_hex.clone(),
+        bv.message_id_hex.clone(),
+    ]
+    .into_iter()
+    .map(|mid| {
+        p.a.history_message_by_mid(p.bid.clone(), mid)
+            .unwrap()
+            .unwrap()
+    })
+    .collect();
+    let ac = dmsg_core::store::open_encrypted(&p.da, &KA).unwrap();
+    let before: Vec<u8> = ac
+        .query_row("SELECT pickle FROM core_sessions", [], |r| r.get(0))
+        .unwrap();
+    let counts = || {
+        ["core_messages", "core_blob_transfers", "core_blob_chunks"].map(|table| {
+            ac.query_row::<i64, _, _>(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap()
+        })
+    };
+    let old_counts = counts();
+    ac.execute_batch("CREATE TRIGGER reject_replied_voice AFTER UPDATE ON core_sessions BEGIN SELECT RAISE(ABORT,'test rollback'); END;").unwrap();
+    assert!(matches!(
+        p.a.queue_voice(
+            p.bid.clone(),
+            "12121212121212121212121212121212".into(),
+            encoded.clone(),
+            Some(targets[0].local_id)
+        ),
+        Err(FfiError::Store(_))
+    ));
+    assert_eq!(counts(), old_counts);
+    assert_eq!(
+        ac.query_row::<Vec<u8>, _, _>("SELECT pickle FROM core_sessions", [], |r| r.get(0))
+            .unwrap(),
+        before
+    );
+    ac.execute_batch("DROP TRIGGER reject_replied_voice")
+        .unwrap();
+    let mut voice_attempts = vec![];
+    for (index, target) in targets.iter().enumerate() {
+        let peer_target =
+            p.b.history_message_by_mid(p.aid.clone(), target.message_id_hex.clone())
+                .unwrap()
+                .unwrap();
+        assert_eq!(target.kind, peer_target.kind);
+        assert_ne!(target.direction, peer_target.direction);
+        for voice in [false, true] {
+            let mid = if voice {
+                let row =
+                    p.a.queue_voice(
+                        p.bid.clone(),
+                        format!("{:032x}", 0x200 + index),
+                        encoded.clone(),
+                        Some(target.local_id),
+                    )
+                    .unwrap();
+                let cipher: Vec<u8> = ac
+                    .query_row(
+                        "SELECT ciphertext FROM core_messages WHERE local_id=?1",
+                        [row.local_id],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                voice_attempts.push((
+                    row.local_id,
+                    row.message_id_hex.clone(),
+                    target.local_id,
+                    cipher,
+                ));
+                let reopened =
+                    DmsgClient::open_encrypted(p.da.to_string_lossy().into(), KA.to_vec()).unwrap();
+                assert_eq!(
+                    reopened
+                        .queue_voice(
+                            p.bid.clone(),
+                            row.message_id_hex.clone(),
+                            vec![],
+                            Some(target.local_id)
+                        )
+                        .unwrap(),
+                    row
+                );
+                finish(
+                    &reopened,
+                    p.transfer(&reopened, &p.bid, row.local_id, false),
+                );
+                retry(&reopened);
+                let server = rusqlite::Connection::open_with_flags(
+                    p.srv.dir.join("data/msgd.db"),
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )
+                .unwrap();
+                let wire: Vec<u8> = server
+                    .query_row(
+                        "SELECT ciphertext FROM mailbox_events WHERE message_id=?1",
+                        [u128::from_str_radix(&row.message_id_hex, 16)
+                            .unwrap()
+                            .to_be_bytes()
+                            .as_slice()],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(wire, voice_attempts.last().unwrap().3);
+                row.message_id_hex
+            } else {
+                send(&p.a, &p.bid, "reply's own body", Some(target.local_id))
+            };
+            let received = fetch(&p.b);
+            assert_eq!(received.received.len(), 1);
+            let own =
+                p.a.history_message_by_mid(p.bid.clone(), mid.clone())
+                    .unwrap()
+                    .unwrap();
+            let peer =
+                p.b.history_message_by_mid(p.aid.clone(), mid.clone())
+                    .unwrap()
+                    .unwrap();
+            for (row, expected) in [(&own, target), (&peer, &peer_target)] {
+                let q = row.reply.as_ref().unwrap();
+                assert_eq!(q.state, ReplyTargetState::Available);
+                assert_eq!(q.target_local_id, Some(expected.local_id));
+                assert_eq!(q.target_revision, Some(0));
+                assert_eq!(q.direction, Some(expected.direction));
+                assert_eq!(q.kind, Some(expected.kind));
+                assert_eq!(q.preview, expected.text);
+                assert_eq!(
+                    q.voice_duration_ms,
+                    expected.voice.as_ref().map(|v| v.sample_count.div_ceil(16))
+                );
+                assert_eq!(
+                    row.kind,
+                    if voice {
+                        MessageKind::Voice
+                    } else {
+                        MessageKind::Text
+                    }
+                );
+            }
+            let bc = dmsg_core::store::open_encrypted(&p.db, &KB).unwrap();
+            let reference = |conn: &rusqlite::Connection, id| {
+                conn.query_row::<Vec<u8>, _, _>(
+                    "SELECT reply_ref FROM core_messages WHERE local_id=?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .unwrap()
+            };
+            assert_eq!(reference(&ac, own.local_id), reference(&bc, peer.local_id));
+            assert_eq!(reference(&ac, own.local_id).len(), 48);
+            if voice {
+                finish(&p.b, p.transfer(&p.b, &p.aid, peer.local_id, true));
+                assert_eq!(
+                    p.b.voice_data(p.aid.clone(), peer.local_id).unwrap(),
+                    encoded
+                );
+            }
+        }
+    }
+    retry(&p.a);
+    // Controls cannot retarget the original reference. Incoming original deletion
+    // also verifies identity against its retained author, not current contact pins.
+    p.a.delete_message(p.bid.clone(), targets[0].local_id, DeleteScope::SelfOnly)
+        .unwrap();
+    let b_text =
+        p.b.history_message_by_mid(p.aid.clone(), bt)
+            .unwrap()
+            .unwrap();
+    p.b.delete_message(p.aid.clone(), b_text.local_id, DeleteScope::Everyone)
+        .unwrap();
+    p.a.delete_message(p.bid.clone(), targets[2].local_id, DeleteScope::Everyone)
+        .unwrap();
+    p.b.delete_message(p.aid.clone(), bv.local_id, DeleteScope::Everyone)
+        .unwrap();
+    retry(&p.a);
+    retry(&p.b);
+    fetch(&p.a);
+    fetch(&p.b);
+    let (voice_id, voice_mid, _, _) = &voice_attempts[3];
+    let voice_ref: Vec<u8> = ac
+        .query_row(
+            "SELECT reply_ref FROM core_messages WHERE local_id=?1",
+            [voice_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    p.a.delete_message(p.bid.clone(), *voice_id, DeleteScope::Everyone)
+        .unwrap();
+    retry(&p.a);
+    fetch(&p.b);
+    let own_tombstone = p.a.history_message(p.bid.clone(), *voice_id).unwrap();
+    let peer_tombstone =
+        p.b.history_message_by_mid(p.aid.clone(), voice_mid.clone())
+            .unwrap()
+            .unwrap();
+    assert!(own_tombstone.deleted_all && own_tombstone.voice.is_none());
+    assert!(peer_tombstone.deleted_all && peer_tombstone.voice.is_none());
+    for (path, key, id) in [
+        (&p.da, &KA, *voice_id),
+        (&p.db, &KB, peer_tombstone.local_id),
+    ] {
+        let conn = dmsg_core::store::open_encrypted(path, key).unwrap();
+        assert_eq!(
+            conn.query_row::<Vec<u8>, _, _>(
+                "SELECT reply_ref FROM core_messages WHERE local_id=?1",
+                [id],
+                |r| r.get(0)
+            )
+            .unwrap(),
+            voice_ref
+        );
+    }
+    p.reopen();
+    // Actual recipient-epoch changes + no session + blocked must not prevent a
+    // proved duplicate commit from returning its original canonical row.
+    ac.execute("UPDATE core_contacts SET state='blocked',device_key=?2,ed_identity=?3,curve_identity=?4 WHERE contact_id=?1",rusqlite::params![p.bid,[93u8;32].as_slice(),[94u8;32].as_slice(),[95u8;32].as_slice()]).unwrap();
+    ac.execute("DELETE FROM core_sessions", []).unwrap();
+    let committed_counts = counts();
+    for (index, (id, mid, target_id, cipher)) in voice_attempts.iter().enumerate() {
+        let current = p.a.history_message(p.bid.clone(), *id).unwrap();
+        let q = current.reply.as_ref().unwrap();
+        assert_eq!(
+            q.state,
+            if index == 0 {
+                ReplyTargetState::Hidden
+            } else {
+                ReplyTargetState::Deleted
+            }
+        );
+        assert_eq!(q.target_local_id, Some(*target_id));
+        assert!(q.preview.is_empty());
+        assert_eq!(q.voice_duration_ms, None);
+        assert_eq!(
+            p.a.queue_voice(p.bid.clone(), mid.clone(), vec![], Some(*target_id))
+                .unwrap(),
+            current
+        );
+        for changed in [
+            None,
+            Some(targets[(index + 1) % 4].local_id),
+            Some(i64::MAX),
+        ] {
+            assert_eq!(
+                p.a.queue_voice(p.bid.clone(), mid.clone(), vec![], changed),
+                Err(FfiError::MessageUnavailable)
+            );
+        }
+        assert_eq!(
+            ac.query_row::<Vec<u8>, _, _>(
+                "SELECT ciphertext FROM core_messages WHERE local_id=?1",
+                [id],
+                |r| r.get(0)
+            )
+            .unwrap(),
+            *cipher
+        );
+    }
+    // None -> Some and a TEXT MID reused as VOICE are also conflicting attempts.
+    assert_eq!(
+        p.a.queue_voice(
+            p.bid.clone(),
+            av.message_id_hex.clone(),
+            vec![],
+            Some(targets[0].local_id)
+        ),
+        Err(FfiError::MessageUnavailable)
+    );
+    assert_eq!(
+        p.a.queue_voice(p.bid.clone(), at, vec![], None),
+        Err(FfiError::MessageUnavailable)
+    );
+    assert_eq!(counts(), committed_counts);
+    assert_eq!(
+        ac.query_row::<i64, _, _>("SELECT count(*) FROM core_sessions", [], |r| r.get(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        p.a.history_message(p.bid.clone(), targets[1].local_id)
+            .unwrap()
+            .direction,
+        MessageDirection::Incoming
+    );
+}
+
+#[test]
 fn first_voice_atomic_sealed_queue_upload_and_manual_download_resume_after_both_restarts() {
     let mut p = Pair::new("voice-first-resume");
     let encoded = note(12);
     let mid = "01010101010101010101010101010101".to_string();
     assert!(!p.a.voice_session_ready(p.bid.clone()).unwrap());
     assert_eq!(
-        p.a.queue_voice(p.bid.clone(), mid.clone(), encoded.clone()),
+        p.a.queue_voice(p.bid.clone(), mid.clone(), encoded.clone(), None),
         Err(FfiError::VoiceSessionRequired)
     );
     assert!(p
@@ -213,7 +572,7 @@ fn first_voice_atomic_sealed_queue_upload_and_manual_download_resume_after_both_
         .unwrap();
     before.execute_batch("CREATE TRIGGER fail_voice_queue AFTER UPDATE ON core_sessions BEGIN SELECT RAISE(ABORT,'test rollback'); END;").unwrap();
     assert!(matches!(
-        p.a.queue_voice(p.bid.clone(), mid.clone(), encoded.clone()),
+        p.a.queue_voice(p.bid.clone(), mid.clone(), encoded.clone(), None),
         Err(FfiError::Store(_))
     ));
     for table in ["core_messages", "core_blob_transfers", "core_blob_chunks"] {
@@ -235,7 +594,7 @@ fn first_voice_atomic_sealed_queue_upload_and_manual_download_resume_after_both_
         .unwrap();
     drop(before);
     let queued =
-        p.a.queue_voice(p.bid.clone(), mid.clone(), encoded.clone())
+        p.a.queue_voice(p.bid.clone(), mid.clone(), encoded.clone(), None)
             .unwrap();
     assert_eq!(queued.kind, MessageKind::Voice);
     assert!(queued.text.is_empty());
@@ -245,11 +604,12 @@ fn first_voice_atomic_sealed_queue_upload_and_manual_download_resume_after_both_
     assert_eq!(queued.delivery_state, Some(DeliveryState::Queued));
     // Stable attempt reconciliation does not parse/re-encrypt a retry payload.
     assert_eq!(
-        p.a.queue_voice(p.bid.clone(), mid.clone(), vec![]).unwrap(),
+        p.a.queue_voice(p.bid.clone(), mid.clone(), vec![], None)
+            .unwrap(),
         queued
     );
     assert_eq!(
-        p.a.queue_voice(p.aid.clone(), mid.clone(), vec![]),
+        p.a.queue_voice(p.aid.clone(), mid.clone(), vec![], None),
         Err(FfiError::MessageUnavailable)
     );
     assert_eq!(
@@ -436,6 +796,7 @@ fn first_voice_atomic_sealed_queue_upload_and_manual_download_resume_after_both_
             p.aid.clone(),
             "07070707070707070707070707070707".into(),
             note(1),
+            None,
         )
         .unwrap();
     assert_eq!(p.b.pending_voice_upload().unwrap(), Some(reply));
@@ -450,6 +811,7 @@ fn pending_upload_does_not_block_text_delete_and_hidden_queue_still_sends() {
             p.bid.clone(),
             "02020202020202020202020202020202".into(),
             note(1),
+            None,
         )
         .unwrap();
     finish(&p.a, p.transfer(&p.a, &p.bid, first.local_id, false));
@@ -460,6 +822,7 @@ fn pending_upload_does_not_block_text_delete_and_hidden_queue_still_sends() {
             p.bid.clone(),
             "03030303030303030303030303030303".into(),
             note(12),
+            None,
         )
         .unwrap();
     assert_eq!(
@@ -475,7 +838,7 @@ fn pending_upload_does_not_block_text_delete_and_hidden_queue_still_sends() {
             .unwrap();
     assert!(hidden.hidden_self && !hidden.deleted_all);
     assert_eq!(
-        p.a.queue_voice(p.bid.clone(), hidden.message_id_hex.clone(), vec![])
+        p.a.queue_voice(p.bid.clone(), hidden.message_id_hex.clone(), vec![], None)
             .unwrap(),
         hidden
     );
@@ -490,10 +853,11 @@ fn pending_upload_does_not_block_text_delete_and_hidden_queue_still_sends() {
             p.srv.domain.clone(),
             p.bid.clone(),
             "text bypasses bulk".into(),
+            None,
         )
         .unwrap();
     assert_eq!(
-        p.a.queue_voice(p.bid.clone(), text.clone(), vec![]),
+        p.a.queue_voice(p.bid.clone(), text.clone(), vec![], None),
         Err(FfiError::MessageUnavailable)
     );
     let retried = p.retry();
@@ -545,6 +909,7 @@ fn late_download_receipt_cannot_resurrect_everyone_deleted_voice_or_changed_epoc
             p.bid.clone(),
             "04040404040404040404040404040404".into(),
             note(12),
+            None,
         )
         .unwrap();
     finish(&p.a, p.transfer(&p.a, &p.bid, row.local_id, false));
@@ -588,6 +953,7 @@ fn late_download_receipt_cannot_resurrect_everyone_deleted_voice_or_changed_epoc
             p.bid.clone(),
             "05050505050505050505050505050505".into(),
             note(1),
+            None,
         )
         .unwrap();
     let transfer = p.transfer(&p.a, &p.bid, another.local_id, false);
@@ -620,6 +986,7 @@ fn cancellation_closes_only_the_bulk_stream_without_holding_the_store() {
             p.bid.clone(),
             "08080808080808080808080808080808".into(),
             note(1),
+            None,
         )
         .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -670,6 +1037,7 @@ fn cancellation_closes_only_the_bulk_stream_without_holding_the_store() {
             p.srv.domain.clone(),
             p.bid.clone(),
             "control while bulk is stalled".into(),
+            None,
         )
         .unwrap();
     assert_eq!(

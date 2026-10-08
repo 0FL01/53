@@ -21,7 +21,7 @@ use crate::auth::AuthError;
 use crate::contacts::{self, Contact};
 pub use crate::history::{
     DeleteScope, DeliveryState, DialogSummary, DialogsPage, HistoryMessage, HistoryPage,
-    MessageDirection, MessageKind, VoiceInfo,
+    MessageDirection, MessageKind, ReplyInfo, ReplyTargetState, VoiceInfo,
 };
 use crate::olm::OlmError;
 use crate::transport::TransportError;
@@ -708,11 +708,17 @@ impl DmsgClient {
         let p = self.dns_profile()?;
         self.retry_queued(self.dns_endpoint(&p)?, p.noise_pubkey.to_vec(), p.domain)
     }
-    pub fn send_dns(&self, contact_id: String, text: String) -> Result<String, FfiError> {
+    pub fn send_dns(
+        &self,
+        contact_id: String,
+        text: String,
+        reply_to_local_id: Option<i64>,
+    ) -> Result<String, FfiError> {
         dmsg_protocol::e2e::validate_text(&text).map_err(|_| FfiError::BadText)?;
         let p = self.dns_profile()?;
         let mut core = self.core()?;
-        core.preflight_text(&contact_id, &text).map_err(map_olm)?;
+        core.preflight_text(&contact_id, &text, reply_to_local_id)
+            .map_err(map_olm)?;
         match crate::dns::endpoint(&self.db_path, &p) {
             Ok(a) => self.send_text(
                 a.to_string(),
@@ -720,13 +726,14 @@ impl DmsgClient {
                 p.domain,
                 contact_id,
                 text,
+                reply_to_local_id,
             ),
             Err(
                 s @ (crate::dns::State::Connecting
                 | crate::dns::State::Backoff(_)
                 | crate::dns::State::Stopped),
             ) => core
-                .queue_text_existing_session(&contact_id, &text)
+                .queue_text_existing_session(&contact_id, &text, reply_to_local_id)
                 .map_err(map_olm)?
                 .map(|mid| hex(&mid))
                 .ok_or_else(|| dns_failure(s)),
@@ -933,10 +940,11 @@ impl DmsgClient {
         contact_id: String,
         message_id_hex: String,
         encoded_note: Vec<u8>,
+        reply_to_local_id: Option<i64>,
     ) -> Result<HistoryMessage, FfiError> {
         let mid = crate::history::parse_message_id(&message_id_hex).map_err(map_history)?;
         self.core()?
-            .queue_voice(&contact_id, &mid, &encoded_note)
+            .queue_voice(&contact_id, &mid, &encoded_note, reply_to_local_id)
             .map_err(map_olm)
     }
 
@@ -1161,6 +1169,7 @@ impl DmsgClient {
         domain: String,
         contact_id: String,
         text: String,
+        reply_to_local_id: Option<i64>,
     ) -> Result<String, FfiError> {
         if addr.is_empty() {
             return Err(FfiError::BadArgs("empty addr".into()));
@@ -1173,7 +1182,8 @@ impl DmsgClient {
             .map_err(|e| FfiError::Transport(format!("runtime: {e}")))?;
         rt.block_on(async {
             let mut core = self.core()?;
-            core.preflight_text(&contact_id, &text).map_err(map_olm)?;
+            core.preflight_text(&contact_id, &text, reply_to_local_id)
+                .map_err(map_olm)?;
             let mut t = match self.connect(&addr, &sp, &dom).await {
                 Ok(t) => t,
                 // Only a failed TCP connect is an offline send. A failed
@@ -1182,7 +1192,7 @@ impl DmsgClient {
                     if e.starts_with("connect: ") =>
                 {
                     return match core
-                        .queue_text_existing_session(&contact_id, &text)
+                        .queue_text_existing_session(&contact_id, &text, reply_to_local_id)
                         .map_err(map_olm)?
                     {
                         Some(mid) => Ok(hex(&mid)),
@@ -1192,7 +1202,7 @@ impl DmsgClient {
                 Err(e) => return Err(e.into_ffi()),
             };
             let mid = core
-                .send_text(&mut t, &contact_id, &text)
+                .send_text(&mut t, &contact_id, &text, reply_to_local_id)
                 .await
                 .map_err(map_olm)?;
             Ok(hex(&mid))
@@ -1405,6 +1415,7 @@ mod tests {
             "offline.test".into(),
             id.into(),
             text.into(),
+            None,
         )
     }
 
@@ -1490,7 +1501,7 @@ mod tests {
             // Valid DNS source passes policy to the existing profile gate;
             // actual persistence uses the offline DirectTCP fixture.
             assert_eq!(
-                c.send_dns(id.clone(), text.clone()),
+                c.send_dns(id.clone(), text.clone(), None),
                 Err(FfiError::BadArgs("DNS profile is not configured".into()))
             );
             let mid = offline_send(&c, &addr, &id, &text).unwrap();
@@ -1522,7 +1533,7 @@ mod tests {
                     Err(FfiError::BadText)
                 );
                 assert_eq!(
-                    c.send_dns(id.clone(), invalid.clone()),
+                    c.send_dns(id.clone(), invalid.clone(), None),
                     Err(FfiError::BadText)
                 );
                 assert_eq!(
@@ -1785,6 +1796,7 @@ mod tests {
             "x.test".into(),
             "ABCD1234EFGH".into(),
             "hi".into(),
+            None,
         );
         assert_eq!(
             r,
@@ -1799,6 +1811,7 @@ mod tests {
                     "x.test".into(),
                     "ABCD1234EFGH".into(),
                     text.clone(),
+                    None,
                 ),
                 Err(FfiError::BadText)
             );
@@ -1809,11 +1822,12 @@ mod tests {
                     "x.test".into(),
                     "ABCD1234EFGH".into(),
                     text.clone(),
+                    None,
                 ),
                 Err(FfiError::BadArgs("empty addr".into()))
             );
             assert_eq!(
-                c.send_dns("ABCD1234EFGH".into(), text.clone()),
+                c.send_dns("ABCD1234EFGH".into(), text.clone(), None),
                 Err(FfiError::BadText)
             );
             assert_eq!(

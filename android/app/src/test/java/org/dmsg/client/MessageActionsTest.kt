@@ -13,7 +13,7 @@ class MessageActionsTest {
         localId = id, messageIdHex = id.toString(16).padStart(32, '0'), contactId = "P", direction = MessageDirection.OUTGOING,
         text = "original", localTimestampMs = 1000, deliveryState = state, serverSeq = 10, serverTimestampMs = 2000,
         revision = 0uL, hiddenSelf = false, deletedAll = false, changeDeliveryState = null,
-        kind = uniffi.dmsg_core.MessageKind.TEXT, voice = null)
+        kind = uniffi.dmsg_core.MessageKind.TEXT, voice = null, reply = null)
     private fun facade() = FakeFacade().apply { dialogs.add(contact); history.add(row()) }
 
     @Test fun onlyVisibleOwnConfirmedMessagesOfferRemoteActionsAndSelfIsDefault() {

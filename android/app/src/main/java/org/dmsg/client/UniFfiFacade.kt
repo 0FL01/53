@@ -130,7 +130,7 @@ class UniFfiFacade(private val dbPath: String, key: ByteArray, private val conte
         }
     }
 
-    override fun send(id: String, text: String): String = dnsCommand { core.sendDns(id, text) }
+    override fun send(id: String, text: String, replyToLocalId: Long?): String = dnsCommand { core.sendDns(id, text, replyToLocalId) }
     // Local durable commands must work offline, before any DNS observation/application.
     override fun editMessage(contactId: String, localId: Long, expectedRevision: ULong, text: String) = wrap {
         core.editMessage(contactId, localId, expectedRevision, text)
@@ -140,8 +140,8 @@ class UniFfiFacade(private val dbPath: String, key: ByteArray, private val conte
     }
     override fun voiceSessionReady(contactId: String) = wrap { core.voiceSessionReady(contactId) }
     override fun primeVoiceSession(contactId: String) = dnsCommand { core.primeVoiceSessionDns(contactId) }
-    override fun queueVoice(contactId: String, midHex: String, encodedBytes: ByteArray) = wrap {
-        core.queueVoice(contactId, midHex, encodedBytes)
+    override fun queueVoice(contactId: String, midHex: String, encodedBytes: ByteArray, replyToLocalId: Long?) = wrap {
+        core.queueVoice(contactId, midHex, encodedBytes, replyToLocalId)
     }
     override fun historyMessageByMid(contactId: String, midHex: String) = wrap { core.historyMessageByMid(contactId, midHex) }
     override fun voiceData(contactId: String, localId: Long) = wrap { core.voiceData(contactId, localId) }

@@ -14,6 +14,8 @@ import uniffi.dmsg_core.MessageKind
 import uniffi.dmsg_core.VoiceInfo
 import uniffi.dmsg_core.VoiceTransferProgress
 import uniffi.dmsg_core.QrOutcome
+import uniffi.dmsg_core.ReplyInfo
+import uniffi.dmsg_core.ReplyTargetState
 
 /** In-memory fake for JVM unit tests and UI previews (no native lib). */
 class FakeFacade : DmsgFacade {
@@ -112,15 +114,16 @@ class FakeFacade : DmsgFacade {
     override fun historyPage(contactId: String, beforeLocalId: Long?, limit: Int): HistoryPage {
         val all = history.filter { it.contactId == contactId && (beforeLocalId == null || it.localId < beforeLocalId) }.sortedByDescending { it.localId }
         val page = all.take(limit.coerceIn(1, 100))
-        return HistoryPage(page.map { it.copy() }, if (all.size > page.size) page.last().localId else null)
+        return HistoryPage(page.map(::project), if (all.size > page.size) page.last().localId else null)
     }
     override fun messageStatus(mid: String) = controlStates[mid] ?: history.find { it.messageIdHex == mid && it.direction == MessageDirection.OUTGOING }?.deliveryState
-    override fun historyMessage(contactId: String, localId: Long) = history.single { it.contactId == contactId && it.localId == localId }.copy()
+    override fun historyMessage(contactId: String, localId: Long) = history.singleOrNull { it.contactId == contactId && it.localId == localId }?.let(::project)
+        ?: throw DmsgError(R.string.error_message_unavailable, ErrorKind.MessageUnavailable)
     override fun timelinePage(contactId: String, beforeLocalId: Long?, limit: Int): HistoryPage {
         val anchor = beforeLocalId?.let { historyMessage(contactId, it) }
         val all = history.filter { it.contactId == contactId && (anchor == null || historyComparator.compare(it, anchor) < 0) }.sortedWith(historyComparator.reversed())
         val page = all.take(limit.coerceIn(1, 100))
-        return HistoryPage(page.map { it.copy() }, if (all.size > page.size) page.last().localId else null)
+        return HistoryPage(page.map(::project), if (all.size > page.size) page.last().localId else null)
     }
     override fun dialogsPage(cursor: String?, limit: Int): DialogsPage {
         val summaries = dialogs.map { dialog ->
@@ -148,7 +151,8 @@ class FakeFacade : DmsgFacade {
         val next = (cursor + page.size).takeIf { it < controls.size }
         return page to next
     }
-    override fun send(id: String, text: String): String {
+    override fun send(id: String, text: String, replyToLocalId: Long?): String {
+        val reply = resolveReply(id, replyToLocalId)
         sendFailure?.let { throw it }
         if (!MessageTextPolicy.isValid(text)) throw DmsgError(R.string.error_bad_text, ErrorKind.BadText)
         lastSent = text
@@ -157,7 +161,7 @@ class FakeFacade : DmsgFacade {
         history.add(HistoryMessage(localId = localId, messageIdHex = mid, contactId = id, direction = MessageDirection.OUTGOING,
             text = text, localTimestampMs = localId, deliveryState = DeliveryState.QUEUED, serverSeq = null,
             serverTimestampMs = null, revision = 0uL, hiddenSelf = false, deletedAll = false, changeDeliveryState = null,
-            kind = MessageKind.TEXT, voice = null))
+            kind = MessageKind.TEXT, voice = null, reply = reply))
         if (failAfterInsert) throw DmsgError("fixture post-commit failure", ErrorKind.Transport)
         return mid
     }
@@ -196,22 +200,29 @@ class FakeFacade : DmsgFacade {
     override fun retry(): LongArray { retryCalls++; retryFailure?.let { throw it }; return longArrayOf(0, 0, 0, 0) }
     override fun voiceSessionReady(contactId: String) = sessionReady
     override fun primeVoiceSession(contactId: String) { primeCalls++; sendFailure?.let { throw it }; sessionReady = true }
-    override fun queueVoice(contactId: String, midHex: String, encodedBytes: ByteArray): HistoryMessage {
-        voiceQueueCalls++; sendFailure?.let { throw it }
-        history.firstOrNull { it.contactId == contactId && it.messageIdHex == midHex }?.let { return it }
+    override fun queueVoice(contactId: String, midHex: String, encodedBytes: ByteArray, replyToLocalId: Long?): HistoryMessage {
+        voiceQueueCalls++
+        history.firstOrNull { it.messageIdHex == midHex }?.let {
+            if (it.contactId != contactId || it.kind != MessageKind.VOICE || it.direction != MessageDirection.OUTGOING || !replyIdentityMatches(it, replyToLocalId))
+                throw DmsgError(R.string.error_message_unavailable, ErrorKind.MessageUnavailable)
+            return project(it)
+        }
+        val reply = resolveReply(contactId, replyToLocalId)
+        if (!sessionReady) throw DmsgError(R.string.voice_session_required, ErrorKind.VoiceSessionRequired)
+        sendFailure?.let { throw it }
         val localId = (history.maxOfOrNull { it.localId } ?: 0L) + 1
         val row = HistoryMessage(localId = localId, messageIdHex = midHex, contactId = contactId,
             direction = MessageDirection.OUTGOING, text = "", localTimestampMs = localId,
             deliveryState = DeliveryState.QUEUED, serverSeq = null, serverTimestampMs = null, revision = 0uL,
             hiddenSelf = false, deletedAll = false, changeDeliveryState = null, kind = MessageKind.VOICE,
-            voice = VoiceInfo(sampleCount = 16_000u, waveform = byteArrayOf(20, 80), byteLen = encodedBytes.size.toUInt(), downloaded = true))
+             voice = VoiceInfo(sampleCount = 16_000u, waveform = byteArrayOf(20, 80), byteLen = encodedBytes.size.toUInt(), downloaded = true), reply = reply)
         history.add(row); voiceBytes[midHex] = encodedBytes.copyOf()
         if (failAfterInsert) throw DmsgError(R.string.error_store, ErrorKind.Store)
         return row
     }
     override fun historyMessageByMid(contactId: String, midHex: String): HistoryMessage? {
         if (exactVoiceReadFailure) throw DmsgError(R.string.error_store, ErrorKind.Store)
-        return history.firstOrNull { it.contactId == contactId && it.messageIdHex == midHex }?.copy()
+        return history.firstOrNull { it.contactId == contactId && it.messageIdHex == midHex }?.let(::project)
     }
     override fun voiceData(contactId: String, localId: Long) = voiceBytes.getValue(historyMessage(contactId, localId).messageIdHex).copyOf()
     override fun pendingVoiceUpload() = history.firstOrNull { it.kind == MessageKind.VOICE && it.deliveryState == DeliveryState.QUEUED }
@@ -228,6 +239,23 @@ class FakeFacade : DmsgFacade {
         FetchRes(emptyList(), longArrayOf(0, 0, 0, 0), 0)
     override fun reconnect() = 16L
     override fun qrKind(uri: String) = QrGate.route(uri).getOrThrow()
+
+    private fun resolveReply(contactId: String, localId: Long?): ReplyInfo? {
+        if (localId == null) return null
+        val target = history.firstOrNull { it.contactId == contactId && it.localId == localId && canReplyMessage(it) }
+            ?: throw DmsgError(R.string.error_message_unavailable, ErrorKind.MessageUnavailable)
+        return targetInfo(target)
+    }
+    private fun targetInfo(row: HistoryMessage) = ReplyInfo(row.localId,
+        if (row.deletedAll) ReplyTargetState.DELETED else if (row.hiddenSelf) ReplyTargetState.HIDDEN else ReplyTargetState.AVAILABLE,
+        row.revision, row.direction, row.kind,
+        if (messageVisible(row) && row.kind == MessageKind.TEXT) row.text.substring(0, row.text.offsetByCodePoints(0, row.text.codePointCount(0, row.text.length).coerceAtMost(160))) else "",
+        if (messageVisible(row)) row.voice?.sampleCount?.div(16u) else null)
+    private fun project(row: HistoryMessage): HistoryMessage {
+        val reply = row.reply ?: return row.copy()
+        val target = history.firstOrNull { it.contactId == row.contactId && it.localId == reply.targetLocalId }
+        return row.copy(reply = target?.let(::targetInfo) ?: ReplyInfo(null, ReplyTargetState.MISSING, null, null, null, "", null))
+    }
 
     private fun replace(id: String, state: String) {
         val i = dialogs.indexOfFirst { it.contactId == id }

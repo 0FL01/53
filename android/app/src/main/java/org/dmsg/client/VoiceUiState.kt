@@ -17,11 +17,17 @@ internal class VoiceUiState {
     var sendOnFinish = false
     var generation = 0L
     var observer: (() -> Unit)? = null
+    var replyToLocalId: Long? = null
+        private set
+    var replyDraft: ReplyDraft? = null
+        private set
     val busy get() = mode != VoiceMode.Idle
     fun changed() { observer?.invoke() }
-    fun begin(locked: Boolean = false): Boolean {
+    fun begin(locked: Boolean = false, replyToLocalId: Long? = null): Boolean {
         if (busy) return false
         generation++; samples = 0; rms = 0f; sendOnFinish = false
+        this.replyToLocalId = replyToLocalId
+        replyDraft = replyToLocalId?.let(::ReplyDraft)
         mode = if (locked) VoiceMode.Locked else VoiceMode.Holding
         changed(); return true
     }
@@ -49,6 +55,13 @@ internal class VoiceUiState {
         generation++; bytes?.fill(0); bytes = null; waveform = byteArrayOf()
         samples = 0; rms = 0f; sendOnFinish = false; mode = VoiceMode.Idle; changed()
     }
+    fun restorePending(attempt: VoiceSendAttempt) {
+        // A live recording (including its deliberate NULL selector) owns its frozen tuple.
+        if (busy) return
+        replyToLocalId = attempt.replyToLocalId
+        replyDraft = attempt.replyToLocalId?.let(::ReplyDraft)
+        mode = VoiceMode.Queueing
+    }
 }
 
 internal fun voiceTime(samples: Int): String {
@@ -68,7 +81,7 @@ internal data class VoiceKey(val contactId: String, val localId: Long, val mid: 
     fun matches(row: HistoryMessage) = contactId == row.contactId && localId == row.localId && mid == row.messageIdHex &&
         row.kind == MessageKind.VOICE && messageVisible(row)
 }
-internal data class VoiceSendAttempt(val contactId: String, val mid: String = newVoiceMid())
+internal data class VoiceSendAttempt(val contactId: String, val mid: String = newVoiceMid(), val replyToLocalId: Long? = null)
 private fun newVoiceMid() = ByteArray(16).also { SecureRandom().nextBytes(it) }
     .joinToString("") { "%02x".format(java.util.Locale.ROOT, it.toInt() and 255) }
 internal sealed interface VoiceSendOutcome {
@@ -78,10 +91,20 @@ internal sealed interface VoiceSendOutcome {
 }
 
 /** Exact MID proof, including hidden queued rows. Never infer durability from upload success. */
+internal fun replyIdentityMatches(row: HistoryMessage, replyToLocalId: Long?) =
+    if (replyToLocalId == null) row.reply == null else row.reply != null && row.reply?.targetLocalId == replyToLocalId
+
+internal fun proveVoiceSend(attempt: VoiceSendAttempt, row: HistoryMessage, recovered: Boolean = false,
+    error: Throwable = DmsgError(R.string.error_store, ErrorKind.Store)): VoiceSendOutcome = when {
+    row.messageIdHex != attempt.mid || row.contactId != attempt.contactId || row.direction != uniffi.dmsg_core.MessageDirection.OUTGOING ->
+        VoiceSendOutcome.Uncertain(attempt, error) // An unrelated row proves neither commit nor rejection.
+    row.kind != MessageKind.VOICE || !replyIdentityMatches(row, attempt.replyToLocalId) ->
+        VoiceSendOutcome.NotSaved(DmsgError(R.string.error_message_unavailable, ErrorKind.MessageUnavailable))
+    else -> VoiceSendOutcome.Saved(row, recovered)
+}
+
 internal fun reconcileVoiceSend(f: DmsgFacade, attempt: VoiceSendAttempt, error: Throwable): VoiceSendOutcome = try {
     val row = f.historyMessageByMid(attempt.contactId, attempt.mid)
     if (row == null) VoiceSendOutcome.NotSaved(error)
-    else if (row.messageIdHex == attempt.mid && row.contactId == attempt.contactId && row.kind == MessageKind.VOICE &&
-        row.direction == uniffi.dmsg_core.MessageDirection.OUTGOING) VoiceSendOutcome.Saved(row, true)
-    else VoiceSendOutcome.Uncertain(attempt, error)
+    else proveVoiceSend(attempt, row, true, error)
 } catch (_: Exception) { VoiceSendOutcome.Uncertain(attempt, error) }

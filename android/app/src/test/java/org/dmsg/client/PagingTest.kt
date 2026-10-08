@@ -11,7 +11,7 @@ class PagingTest {
         HistoryMessage(localId = id, messageIdHex = id.toString(16).padStart(32, '0'), contactId = peer, direction = direction,
             text = "fixture", localTimestampMs = id, deliveryState = if (direction == MessageDirection.OUTGOING) DeliveryState.QUEUED else null,
             serverSeq = null, serverTimestampMs = null, revision = 0uL, hiddenSelf = false, deletedAll = false,
-            changeDeliveryState = null, kind = uniffi.dmsg_core.MessageKind.TEXT, voice = null)
+            changeDeliveryState = null, kind = uniffi.dmsg_core.MessageKind.TEXT, voice = null, reply = null)
 
     @Test fun boundedPerContactPagesPrependChronologicallyPast500() {
         val f = FakeFacade()

@@ -117,7 +117,7 @@ class MarkdownMessagesGatesTest {
             }
 
             val row = HistoryMessage(1, "01".repeat(16), peer, MessageDirection.OUTGOING, MessageKind.TEXT,
-                null, source, 1, DeliveryState.ACCEPTED, 1, 1, 0uL, false, false, null)
+                null, source, 1, DeliveryState.ACCEPTED, 1, 1, 0uL, false, false, null, null)
             for (outgoing in listOf(true, false)) {
                 val message = if (outgoing) row else row.copy(direction = MessageDirection.INCOMING, deliveryState = null)
                 val adapter = HistoryAdapter(context, listOf(message), { true }, {}, {}, {}, { _, _ -> })
@@ -176,7 +176,7 @@ class MarkdownMessagesGatesTest {
                     seedIncomingVoiceFixture(db, key, peer, ByteArray(16) { 10 }, 16000, 100, ByteArray(64) { 20 }, 3)
                     db.setTransactionSuccessful()
                 } finally { db.endTransaction() }
-                db.rawQuery("PRAGMA user_version", null).use { assertTrue(it.moveToFirst()); assertEquals(9, it.getInt(0)) }
+                db.rawQuery("PRAGMA user_version", null).use { assertTrue(it.moveToFirst()); assertEquals(10, it.getInt(0)) }
             }
         } finally { key.fill(0) }
     }

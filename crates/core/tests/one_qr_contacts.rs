@@ -27,7 +27,7 @@ async fn blocked_id_without_prior_qr_remains_terminal_and_acknowledges_drop() {
     a.on_reconnect(&mut ta).await.unwrap();
     b.fetch_and_decrypt(&mut tb).await.unwrap();
     let mid = a
-        .send_text(&mut ta, &eb.contact_id, "explicitly blocked")
+        .send_text(&mut ta, &eb.contact_id, "explicitly blocked", None)
         .await
         .unwrap();
     let dropped = b.fetch_and_decrypt(&mut tb).await.unwrap();
@@ -66,11 +66,11 @@ async fn simultaneous_first_sends_and_reopen_preserve_both_ratchets() {
     b.accept_contact(&ea.contact_id).unwrap();
     // Neither receiver has yet established an inbound session.
     let am = a
-        .send_text(&mut ta, &eb.contact_id, "simultaneous A")
+        .send_text(&mut ta, &eb.contact_id, "simultaneous A", None)
         .await
         .unwrap();
     let bm = b
-        .send_text(&mut tb, &ea.contact_id, "simultaneous B")
+        .send_text(&mut tb, &ea.contact_id, "simultaneous B", None)
         .await
         .unwrap();
     let ac = a.outbox_ciphertext(&am).unwrap();
@@ -100,11 +100,11 @@ async fn simultaneous_first_sends_and_reopen_preserve_both_ratchets() {
     assert!(dmsg_core::olm::unpickle_sessions(&invalid.to_string()).is_err());
     for round in 0..3 {
         let next_a = a
-            .send_text(&mut ta, &eb.contact_id, "next A")
+            .send_text(&mut ta, &eb.contact_id, "next A", None)
             .await
             .unwrap();
         let next_b = b
-            .send_text(&mut tb, &ea.contact_id, "next B")
+            .send_text(&mut tb, &ea.contact_id, "next B", None)
             .await
             .unwrap();
         if round > 0 {
@@ -172,7 +172,7 @@ async fn one_qr_request_survives_reopen_and_first_text_waits_for_acceptance() {
     // The request must reach it already, but text still requires published
     // prekeys and may not be stored as a plaintext/offline first message.
     assert_eq!(
-        a.send_text(&mut ta, &eb.contact_id, "not queued without prekeys")
+        a.send_text(&mut ta, &eb.contact_id, "not queued without prekeys", None)
             .await,
         Err(dmsg_core::olm::OlmError::NoPeerPrekeys)
     );
@@ -193,7 +193,7 @@ async fn one_qr_request_survives_reopen_and_first_text_waits_for_acceptance() {
     assert_eq!(incoming.state, "incoming");
     assert!(contacts::sendable(&incoming).is_err());
     let mid = a
-        .send_text(&mut ta, &eb.contact_id, "first text before consent")
+        .send_text(&mut ta, &eb.contact_id, "first text before consent", None)
         .await
         .unwrap();
     let cipher = a.outbox_ciphertext(&mid).unwrap();
@@ -232,7 +232,7 @@ async fn one_qr_request_survives_reopen_and_first_text_waits_for_acceptance() {
         Some(DeliveryState::Delivered)
     );
     assert_eq!(a.outbox_ciphertext(&mid).unwrap(), cipher);
-    b.send_text(&mut tb, &ea.contact_id, "reply without reverse QR")
+    b.send_text(&mut tb, &ea.contact_id, "reply without reverse QR", None)
         .await
         .unwrap();
     let r = a.fetch_and_decrypt(&mut ta).await.unwrap();

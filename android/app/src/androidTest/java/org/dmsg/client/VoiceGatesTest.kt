@@ -80,7 +80,7 @@ class VoiceGatesTest {
                         arrayOf(ByteArray(16) { 8 }, ByteArray(32) { 2 }, peer, sealedFixtureValue(key, "message_text", "Selectable text beside voice".toByteArray())))
                     db.setTransactionSuccessful()
                 } finally { db.endTransaction() }
-                db.rawQuery("PRAGMA user_version", null).use { assertTrue(it.moveToFirst()); assertEquals(9, it.getInt(0)) }
+                db.rawQuery("PRAGMA user_version", null).use { assertTrue(it.moveToFirst()); assertEquals(10, it.getInt(0)) }
                 db.rawQuery("SELECT media_manifest FROM core_messages WHERE kind='voice'", null).use {
                     assertTrue(it.moveToFirst()); assertEquals("DMSG-S1", String(it.getBlob(0).copyOfRange(0, 7), Charsets.US_ASCII))
                 }

@@ -6,6 +6,9 @@ import uniffi.dmsg_core.DeliveryState
 import uniffi.dmsg_core.HistoryMessage
 import uniffi.dmsg_core.HistoryPage
 import uniffi.dmsg_core.MessageDirection
+import uniffi.dmsg_core.MessageKind
+import uniffi.dmsg_core.ReplyInfo
+import uniffi.dmsg_core.ReplyTargetState
 
 /** No transport/debug-string interpretation. These are outcomes of actual worker calls. */
 data class ConnectionUiState(
@@ -80,6 +83,7 @@ internal fun compareHistoryOrder(a: Pair<Int, Long>, b: Pair<Int, Long>): Int =
     a.first.compareTo(b.first).takeIf { it != 0 } ?: a.second.compareTo(b.second)
 
 internal fun messageVisible(row: HistoryMessage) = !row.hiddenSelf && !row.deletedAll
+internal fun canReplyMessage(row: HistoryMessage) = messageVisible(row) && row.kind in setOf(MessageKind.TEXT, MessageKind.VOICE)
 internal fun canHideMessage(row: HistoryMessage) = messageVisible(row) && row.direction == MessageDirection.OUTGOING
 internal fun canChangeMessage(row: HistoryMessage, contact: Dialog?) = canHideMessage(row) &&
     row.deliveryState in setOf(DeliveryState.ACCEPTED, DeliveryState.DELIVERED) && contactCta(contact) == ContactCta.Chat
@@ -115,6 +119,29 @@ internal fun timelineChunk(before: Long?, fetch: (Long?) -> HistoryPage): List<H
     return pages
 }
 
+/** Target projection has its own revision, independent of the replying message's revision. */
+internal fun mergeReplyInfo(current: ReplyInfo?, fresh: ReplyInfo?): ReplyInfo? {
+    if (current == null) return fresh
+    if (fresh == null) return current // BASE reference is immutable.
+    if (current.state != ReplyTargetState.MISSING && fresh.state == ReplyTargetState.MISSING) return current
+    if (current.targetLocalId != null && fresh.targetLocalId == null) return current
+    if (current.targetLocalId != null && fresh.targetLocalId != current.targetLocalId) return current
+    val terminal = setOf(ReplyTargetState.HIDDEN, ReplyTargetState.DELETED)
+    if (current.state in terminal || fresh.state in terminal) {
+        // Privacy is terminal even when an older completion carries the hide/delete.
+        val unavailable = when {
+            current.state == ReplyTargetState.DELETED -> current
+            fresh.state == ReplyTargetState.DELETED -> fresh
+            current.state == ReplyTargetState.HIDDEN -> current
+            else -> fresh
+        }
+        val revision = listOfNotNull(current.targetRevision, fresh.targetRevision).maxOrNull()
+        return if (unavailable.targetRevision == revision) unavailable else unavailable.copy(targetRevision = revision)
+    }
+    if (current.targetRevision != null && (fresh.targetRevision == null || current.targetRevision!! > fresh.targetRevision!!)) return current
+    return if (current == fresh) current else fresh
+}
+
 /** Server-order window with stable local IDs; reads never move the local read cursor. */
 internal class HistoryWindow {
     val rows = mutableListOf<HistoryMessage>()
@@ -130,6 +157,7 @@ internal class HistoryWindow {
     var hiddenBefore: Long? = null
         private set
     val visibleRows: List<HistoryMessage> get() = rows.filter(::messageVisible)
+    val pagingExhausted get() = initialized && nextBefore == null && gapBefore == null && hiddenBefore == null
     private fun continuation(page: HistoryPage) {
         hiddenBefore = if (page.rows.none(::messageVisible)) page.nextBeforeLocalId else null
     }
@@ -175,7 +203,8 @@ internal class HistoryWindow {
     private fun mergeProjection(current: HistoryMessage?, row: HistoryMessage): HistoryMessage {
         if (current != null) {
             // A retained completion proves the write, but must not resurrect an older projection.
-            if (current.revision > row.revision) return current
+            val reply = mergeReplyInfo(current.reply, row.reply)
+            if (current.revision > row.revision) return if (reply == current.reply) current else current.copy(reply = reply)
             fun stateRank(state: DeliveryState?) = when (state) {
                 null -> 0
                 DeliveryState.QUEUED -> 1
@@ -190,7 +219,8 @@ internal class HistoryWindow {
                 deliveryState = if (stateRank(current.deliveryState) > stateRank(row.deliveryState)) current.deliveryState else row.deliveryState,
                 changeDeliveryState = if (current.revision == row.revision && stateRank(current.changeDeliveryState) > stateRank(row.changeDeliveryState)) current.changeDeliveryState else row.changeDeliveryState,
                 serverSeq = current.serverSeq ?: row.serverSeq,
-                serverTimestampMs = current.serverTimestampMs ?: row.serverTimestampMs)
+                serverTimestampMs = current.serverTimestampMs ?: row.serverTimestampMs,
+                reply = reply)
         }
         return row
     }
@@ -201,6 +231,25 @@ internal class HistoryWindow {
 
 internal data class EditDraft(val localId: Long, val expectedRevision: ULong, val baseline: String, var text: String,
     val unavailable: Boolean = false)
+
+/** Selector and current canonical body only; never persist a quoted snapshot. */
+internal data class ReplyDraft(val targetLocalId: Long, var target: HistoryMessage? = null, var failed: Boolean = false) {
+    val available get() = !failed && target?.let { it.localId == targetLocalId && canReplyMessage(it) } == true
+    fun refresh(row: HistoryMessage) {
+        if (row.localId != targetLocalId) { target = null; failed = true; return }
+        val old = target
+        if (old == null || !messageVisible(row) || (messageVisible(old) && row.revision >= old.revision)) target = row
+        failed = false
+    }
+    fun fail() { target = null; failed = true }
+}
+
+/** A cancel/reselect of the same ID is still a different intent. */
+internal fun applyReplyRefresh(current: ReplyDraft?, captured: ReplyDraft, result: Result<HistoryMessage>): Boolean {
+    if (current !== captured) return false
+    result.fold(captured::refresh) { captured.fail() }
+    return true
+}
 
 /** Both drafts are memory-only. A missing/hidden edit target never changes composer mode to Send. */
 internal class MessageComposer {
@@ -249,15 +298,36 @@ internal class MessageComposer {
 /** A successful durable send consumes only its submitted draft, even if status lookup fails later. */
 internal class OutgoingDraft {
     var text = ""
-    private var submitted: String? = null
+    var reply: ReplyDraft? = null
+    var submittedText: String? = null
+        private set
+    var submittedReplyLocalId: Long? = null
+        private set
     fun begin(): String? {
-        if (submitted != null || text.isEmpty()) return null
-        submitted = text
-        return submitted
+        if (submittedText != null || text.isEmpty()) return null
+        submittedText = text
+        submittedReplyLocalId = reply?.targetLocalId
+        return submittedText
+    }
+    fun restoreSubmitted(text: String, replyToLocalId: Long?) {
+        submittedText = text
+        submittedReplyLocalId = replyToLocalId
+        if (this.text.isEmpty() && reply == null) {
+            this.text = text
+            reply = replyToLocalId?.let(::ReplyDraft)
+        }
+    }
+    fun consumeReply(replyToLocalId: Long?) {
+        if (reply?.targetLocalId == replyToLocalId) reply = null
+    }
+    fun restorePendingReply(replyToLocalId: Long?) {
+        if (text.isEmpty() && reply == null) reply = replyToLocalId?.let(::ReplyDraft)
     }
     fun finish(durablySaved: Boolean) {
-        if (durablySaved && text == submitted) text = ""
-        submitted = null
+        if (durablySaved && submittedText != null && text == submittedText && reply?.targetLocalId == submittedReplyLocalId) {
+            text = ""; reply = null
+        }
+        submittedText = null; submittedReplyLocalId = null
     }
 }
 

@@ -35,15 +35,18 @@ async fn offline_pending_then_server_acceptance_late_receive_retry_and_restart()
     a.on_reconnect(&mut ta).await.unwrap();
     b.fetch_and_decrypt(&mut tb).await.unwrap();
     b.accept_contact(&aa.contact_id).unwrap();
-    let seed = a.send_text(&mut ta, &bb.contact_id, "seed").await.unwrap();
+    let seed = a
+        .send_text(&mut ta, &bb.contact_id, "seed", None)
+        .await
+        .unwrap();
     b.fetch_and_decrypt(&mut tb).await.unwrap();
     let offline = a
-        .queue_text_existing_session(&bb.contact_id, "queued earlier accepted later")
+        .queue_text_existing_session(&bb.contact_id, "queued earlier accepted later", None)
         .unwrap()
         .unwrap();
     let original = a.outbox_ciphertext(&offline).unwrap();
     let other = b
-        .send_text(&mut tb, &aa.contact_id, "accepted before offline A")
+        .send_text(&mut tb, &aa.contact_id, "accepted before offline A", None)
         .await
         .unwrap();
     a.fetch_and_decrypt(&mut ta).await.unwrap();

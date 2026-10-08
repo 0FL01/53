@@ -124,7 +124,7 @@ fn run(args: &[String]) -> Result<()> {
         Some("dns-send") if args.len()==4 => {
             let client=client(Path::new(&args[1]))?; let _guard=Guard(client.clone());
             let contact=peer_contact(&client,Path::new(&args[2]))?;
-            client.send_dns(contact,text(Path::new(&args[3]),true)?).map_err(|_| "DNS send failed")?; println!("dns send ok"); Ok(())
+            client.send_dns(contact,text(Path::new(&args[3]),true)?,None).map_err(|_| "DNS send failed")?; println!("dns send ok"); Ok(())
         }
         Some("dns-fetch") if args.len()==2 => {
             let client=client(Path::new(&args[1]))?; let _guard=Guard(client.clone());

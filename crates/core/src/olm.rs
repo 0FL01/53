@@ -552,6 +552,10 @@ mod tests {
             let ot = *bob.one_time_keys().values().next().unwrap().as_bytes();
             let mut sending = outbound(&alice, &curve_identity(&bob), &ot).unwrap();
             let event = e2e::Event {
+                reply_to: matches!(body, e2e::Body::Text(_)).then_some(e2e::ReplyRef {
+                    sender_device: [7; 32],
+                    message_id: [8; 16],
+                }),
                 message_id: [1; 16],
                 sender_ed: ed_identity(&alice),
                 body,
@@ -560,14 +564,14 @@ mod tests {
             assert_eq!(
                 plain.len(),
                 if event.kind() == e2e::Kind::Edit {
-                    16074
+                    16075
                 } else {
-                    16050
+                    16099
                 }
             );
             let assert_frames = |wire: &[u8], expected_type: u8| {
                 assert_eq!(wire[0], expected_type);
-                assert!(wire.len() <= 16244);
+                assert!(wire.len() <= 16276);
                 assert!(wire.len() <= dmsg_protocol::CIPHERTEXT_MAX);
                 let mut send = vec![3; 16];
                 send.extend_from_slice(&event.message_id);
@@ -606,6 +610,7 @@ mod tests {
             // A server SEND_ACK cannot confirm an Olm session: B sends a real
             // E2E reply and A decrypts it before either max-size normal message.
             let reply = e2e::Event {
+                reply_to: None,
                 message_id: [6; 16],
                 sender_ed: ed_identity(&bob),
                 body: e2e::Body::Text("reply".into()),

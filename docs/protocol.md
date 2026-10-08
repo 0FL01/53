@@ -1,6 +1,6 @@
 # dmsg wire v2: единая account-auth логика
 
-Реализованный путь: **доверенный профиль сервера → Войти / Создать аккаунт → диалоги**. Регистрация `invite_only` (default) или `open`; приглашение — только одноразовое разрешение signup. Wire2/auth сохранены; fresh server6/core9 добавляют VOICE/blob. Old-schema/plain→sealed conversion и legacy E2E decode отсутствуют. Working server5/main8 не обновлены; несовместимый cutover отдельно по явному разрешению. Ошибка не вызывает wipe/новую identity. ENROL/token replay/credential attach/admin invite-rebind отсутствуют.
+Реализованный путь: **доверенный профиль сервера → Войти / Создать аккаунт → диалоги**. Регистрация `invite_only` (default) или `open`; приглашение — только одноразовое разрешение signup. Wire2/auth и server6 сохраняются; fresh core10/E2Ev2 добавляют Reply к TEXT/VOICE. Old-schema/plain→sealed conversion и legacy E2E decode отсутствуют. Working server5/main8 не обновлены; несовместимый cutover отдельно по явному разрешению. Ошибка не вызывает wipe/новую identity. ENROL/token replay/credential attach/admin invite-rebind отсутствуют.
 
 ## Публичный профиль
 
@@ -46,12 +46,15 @@ Opcodes16–27: SEND16/ACK17, FETCH18/RESP19, DELIVERY_ACK20, UPLOAD_PREKEYS21, 
 
 Core обновляет binding известных контактов перед отправкой; смена Noise/Ed/Curve сохраняет warning и **STOP до explicit confirm**. Outgoing event фиксирует SHA256 domain-separated binding полного user/device/Ed/Curve tuple; confirm не делает старый ciphertext пригодным для новой identity. Inbound event со сменившимся sender связывается с известным user_id, не ACK/discard до подтверждения. Ratchet/event ciphertext одна TX, retry byte-identical. Undecryptable integrity failures не продвигают ratchet/ACK.
 
-## E2E v1: текст, голос и собственные изменения
+## E2E v2: текст, голос, Reply и собственные изменения
 
 Olm type0/1 framing не меняется. Plaintext строго кодируется `crates/protocol/src/e2e.rs`:
 
 ```text
-[version:u8=1][kind:u8][event_mid16][sender_ed32][body]
+[version:u8=2][kind:u8][event_mid16][sender_ed32][reply_flag:u8][optional_reply_ref48][body]
+fixed header51: version0, kind1, event_mid2..18, sender_ed18..50, reply_flag50
+flag0: body51; flag1: reply_ref51..99, body99
+reply_ref: original_sender_noise_device32 | original_message_id16
 TEXT   kind1: UTF-8 source, 1..4000 Unicode scalar values
 EDIT   kind2: target_mid16 | revision:u64 BE | same UTF-8 source contract
 DELETE kind3: target_mid16 | revision:u64 BE   (exact length)
@@ -64,11 +67,17 @@ Unicode scalar values, не UTF-8 bytes/UTF-16 units/grapheme clusters. Один
 `e2e::validate_text` обслуживает encode/decode и Core/FFI submission. Decode
 проверяет byte bound 16000 до borrowed UTF-8/scalar count и allocation; durable
 history не перепроверяется, retry отправляет прежний ciphertext.
-Максимальный исходник TEXT/EDIT проходит реальные Olm type0/type1 и SEND/FETCH
-frame-fit tests с pinned vodozemac0.11.0: ciphertext≤16244 при прежнем cap16304.
-Type1 подтверждается расшифрованным ответным E2E сообщением, не server ACK.
+Максимальный replied TEXT и обычный EDIT проходят обе реальные Olm формы и
+полные SEND/FETCH frames с pinned vodozemac0.11.0: ciphertext≤16276 при cap16304,
+frame≤16384. Type1 подтверждается расшифрованным E2E ответом, не server ACK.
+Reply metadata не входит в 4000 scalars / 16000 UTF-8 bytes. Static bound не
+заменяет real fit test; normal Olm проверяется после настоящего E2E ответа.
 
-Revision1..i64MAX, whole envelope≤16074; unknown version/kind, invalid UTF8/length,
+Reply flag только0/1, flag1 допустим только для TEXT/VOICE; control с reference
+отвергается. Reference — Noise device key автора **оригинала**, не Ed25519 key,
+local ID или current contact pins. Это shallow annotation внутри Olm; incoming
+reference не даёт новых прав и может указывать на отсутствующий original.
+Revision1..i64MAX, whole envelope≤16099; unknown version/kind/flag, invalid UTF8/length,
 legacy plaintext и trailing DELETE bytes отвергаются. MID выбирается до encrypt,
 inner MID должен совпадать с outer FETCH MID; Ed сверяется с закреплённым sender.
 EDIT target — TEXT; DELETE target — TEXT/VOICE того же contact/sender/MID,
@@ -86,10 +95,30 @@ applied/superseded bodies очищаются. Crypto/event/projection commit д�
 TTL/quota/Olm bounds сохраняются; indefinite convergence и lost-original recovery
 не обещаются. Участвующие отправители должны перейти согласованно, old E2E decode
 не вводится; backend не обязан стирать accounts/mailbox для этого формата.
-Новый scalar-limit несовместим со старым byte-limit в обе стороны, включая
-уже сохранённые pending/mailbox ciphertext. Приёмка использует fresh core9/server6;
-будущий cutover/pending drain требует отдельного решения. Schema, E2E version/layout,
-wire2 и frame/ciphertext bounds не меняются.
+Строгий E2Ev2 отвергает v1, включая уже сохранённые pending/mailbox ciphertext;
+fresh local DB сама по себе не удаляет retained v1 mailbox на сервере. Приёмка
+использует fresh core10/server6; будущий cutover/pending drain требует отдельного
+решения. Wire2 и frame/ciphertext bounds не меняются.
+
+Core10 хранит nullable `reply_ref` BLOB48 только на BASE TEXT/VOICE, отдельно от
+control `target_mid`, без FK/new index. Reference immutable при Edit/Delete и
+сохраняется атомарно с исходным event/ratchet. Новый local selector обязан быть
+видимым BASE того же contact, incoming/outgoing, включая own Queued; invalid,
+cross-contact, control, hidden/deleted → existing `MessageUnavailable`. TEXT
+проверяет selector до network/bootstrap и повторно в write TX; новый VOICE —
+в queue TX до `VoiceSessionRequired`. Доказанный duplicate VOICE того же MID,
+contact/kind/reference возвращает прежнюю canonical row до audio/trust/session
+проверок; сравнивается retained target identity, а не его availability/current pins.
+Смена selector или None/Some — конфликт `MessageUnavailable`.
+
+История разрешает reference одним scoped shallow LEFT JOIN contact+device+MID+BASE.
+Цитата текущая: target edit обновляет raw preview≤160 scalars. Known hidden/deleted
+targets сохраняют local ID/revision/direction/kind, но их text/manifest не unseal
+для preview/duration. Missing имеет пустой preview и все optional target fields
+None. Late original разрешается при следующем read; missing target не мешает
+durable receive/ACK. Recursive quotes и stored quoted-content snapshots отсутствуют.
+`HistoryMessage.reply` — единственная Reply DTO projection; received/inbox и
+dialog summaries не расширяются. Rust Debug не выводит preview.
 
 ## VOICE и encrypted blobs
 
@@ -129,7 +158,7 @@ BAD. Temp/sync/rename/parent-sync и durable DB receipt предшествуют
 FINISH проверяет все receipts/actual sizes. Quotas учитывают reserved+complete,
 TTL24h/7d, coherent blob/SQLite backup и orphan GC.
 
-Core9 хранит sealed manifest и encrypted chunks внутри core.db, одну canonical
+Core10 хранит sealed manifest и encrypted chunks внутри core.db, одну canonical
 VOICE row в core_messages. Queue атомарен с ratchet и immutable Olm event. После
 FINISH обычный control retry отправляет manifest; upload-pending не задерживает
 TEXT/DELETE. Получатель ACKed manifest без auto-download. Delivered не означает
@@ -171,7 +200,7 @@ Lookup разрешён только владельцу sender account либо 
 чужих сообщений. Неизвестный и чужой key одинаково возвращают `(0,0)`. Positive
 seq, nonnegative seconds и checked seconds→milliseconds conversion валидируются; partial,
 trailing, oversized или неверное число записей — ошибка. Transport/auth layouts
-не меняются; E2E v1 выше отдельный строгий формат. Metadata не означает прочтение.
+не меняются; E2E v2 выше отдельный строгий формат. Metadata не означает прочтение.
 
 Core проверяет durable replay до optional metadata lookup вне write-lock, затем
 decrypt один раз в disposable crypto state под IMMEDIATE. Только unseen TEXT/VOICE
