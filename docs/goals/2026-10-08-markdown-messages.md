@@ -1,6 +1,6 @@
 # Goal: Markdown и лимит 4000 символов в сообщениях
 
-Status: active
+Status: complete
 Source: пользователь: «добавлении поддержки markdown в сообщения», «лимит символов ... на 4к»; аудит плана; 2026-10-08: «Делай копию плана в цель и итеративно реализовать и коммит пуш и тесты на телефоне», «fresh db возможна, что бы не городить миграции».
 Last updated: 2026-10-08
 
@@ -35,8 +35,8 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Source: последний запрос.
   - Acceptance: эта цель содержит copied plan/current evidence/closure; protocol/product/runbook актуальны; intended изменения закоммичены и pushed, без user PNG, private fixtures, secrets/build outputs.
   - Primary evidence: git status/diff/log, push result и remote commit.
-  - Status: in_progress
-  - Evidence: plan34dd0e5 committed; remote .gitignore34a87ee preserved via ordinary mergec61ae62 and pushed to origin/master. Unrelated design PNG untouched; implementation commit/closure pending.
+  - Status: verified
+  - Evidence: plan34dd0e5 и implementation842f65c committed/pushed; git ls-remote origin refs/heads/master подтвердил842f65c5bca886882502ab20baeec696598ebbfd. Remote .gitignore34a87ee сохранён ordinary mergec61ae62. Reviewed30-file feature содержит только approved source/tests/contracts; unrelated PNG остаётся untracked, private/build artifacts не staged. Closure зафиксирован ниже.
 
 ### Constraints
 - 4000 = Unicode scalar values исходника, не bytes/UTF-16 units/grapheme clusters. Пробелы/newlines/Markdown markers входят в count; whitespace-only сохраняет прежнюю допустимость.
@@ -70,24 +70,30 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 - 2026-10-08: R3 gate воспроизвёл clipping после добавления counter при200%/landscape/IME. Минимальное расширение — native ChatFooterScrollView, измеряемый по remaining height, компактный vertical padding и baselineAligned=false у composer row. Notices/font scale/min48dp сохранены; final strict counter/full48dp visible checks PASS, требования не ослаблены.
 
 ## Current Checkpoint
-- Closes: R4.
-- Smallest next action: commit/push only reviewed feature/tests/contracts, then record closure after checking remote/worktree.
-- Expected evidence: scoped commit pushed to origin/master; no private/build/unrelated PNG in tracked changes.
-- Stop or replan if: конкретный required gate показывает нарушение frozen outcome; без расширения requirements.
+- Closes: R1–R4; closure check passed.
+- Smallest next action: none; завершённый objective, без следующего substantive checkpoint.
+- Evidence: required behavior/builds/phone gates verified, feature pushed и remote ref совпадает; только unrelated user PNG untracked.
 
 ## Current State
-- Resolved: R1–R3 verified, план committed/pushed; full host/JVM97/native/final APK builds и two final phone gates PASS. Current contracts/runbook updated.
-- Last relevant evidence: final renderer0.128s/composer11.342s, zero skips. Counter + input/Save/Cancel reachability at200%/landscape/IME green after bounded-footer/baseline fix. No Main reset/install; font/clipboard/orientation restored.
+- Resolved: R1–R4 verified; plan/implementation committed/pushed. Current contracts/runbook и closure актуальны.
+- Last relevant evidence: final renderer0.128s/composer11.342s, zero skips; host214/JVM97/native/debug/release green. Remote master842f65c совпадает с HEAD; tracked feature worktree clean перед closure update.
 - Blocker: none.
-- Next: scoped feature commit/push and one closure.
+- Next: none.
 
 ## Checkpoint History
 - 2026-10-08: цель active, audited plan copied; user fresh-DB authorization recorded, no migration/Main rollout.
 - 2026-10-08: plan34dd0e5/mergec61ae62 pushed; independent implementation merged, parent full host/JVM/build/native evidence green. Device discovery fixed without phone reset; next two isolated native gates.
 - 2026-10-08: actual phone gates RED→GREEN: landscape clipping diagnosed by visible bounds and fixed in production. Final strict renderer/composer executions PASS on final gated APK; final JVM/build/fmt/diff checks green. R1–R3 verified; next R4 commit/push/closure.
+- 2026-10-08: feature842f65c pushed, remote ref matched; closure сверил R1–R4 и affected constraints/envelope. Все required outcomes verified, objective complete; Main/backend rollout и Android DNS delivery не заявляются.
 
 ## Completion
-- Resolved outcomes: pending.
-- Commands and artifacts: pending.
-- Constraint and diff-scope check: pending.
-- Final status: active.
+- Resolved outcomes: R1/R2/R3/R4 verified; blockers none.
+- Commands and artifacts (clean allowlist environments):
+  - `cargo build -p msgd && cargo test --workspace`:214 PASS/two pre-existing explicit native-host ignores; `cargo fmt --all --check` и `git diff --check` PASS.
+  - NDKr28c `sh android/build-native.sh`: arm64 release PASS; no UniFFI API/checksum change, bindings не правились.
+  - `./gradlew --no-daemon --quiet testDebugUnitTest assembleDebug assembleRelease assembleDebugAndroidTest -PgateInstall=true`:97 JVM PASS/zero errors/failures/skips, APKs PASS.
+  - Exact-method `am instrument` на Moto API35: `rendererLinksAndRawFallbackOnlyInGatePackage` и `freshComposerMarkdownCopyAndActionsOnlyInGatePackage`, two PASS/zero skips на final gated APK.
+  - `android/app/build/outputs/apk/debug/app-debug.apk`: `.gate`, arm64-v8a; SHA256 `c383f95f80cbf83956c2ee7620292718407c73456f096f57b04fc23c75fbd3c8`.
+  - Native build artifact `android/app/build/nativeLibs/arm64-v8a/libdmsg_core.so`: SHA256 `8dc6dc9846284151fe1314734f365f32662c517fbffa0dcbdd75ee671bfbb59e`.
+- Constraint and diff-scope check: raw source/retry/TX/CAS/ACK/frame/schema/voice invariants retained; no migrations/legacy decoding/production changes. Only owned fresh .gate/.gate.test used; Main UID10420/versionCode2 unchanged, clipboard/font/orientation restored. Approved source/tests/docs only; user PNG untouched/untracked, no secrets/private DB/build outputs in commit. Host/local UI proofs are not Android DNS Send/Save acceptance.
+- Final status: complete.
