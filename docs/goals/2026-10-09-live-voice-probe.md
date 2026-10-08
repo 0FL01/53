@@ -29,8 +29,8 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Source: аудированный media-план; ARCHITECTURE §7–9.
   - Acceptance: один bidirectional media lane и один control lane на endpoint, независимые Noise states; RTP/SRTP AES_CM_128_HMAC_SHA1_80, SRTCP feedback. Один pending plaintext media packet + один committed frame; deadline drop до Noise, после commitment — finish ordered frame либо уничтожить lane. Remote-authenticated terminal progress ограничивает admitted bytes; local writes не считаются ACK. Relay не получает media keys и не декодирует звук. Fresh generation/Noise/SRTP keys/SSRC/codec/queues после coordinated fixture restart; старый material не replay.
   - Primary evidence: protected duplex/crypto/parser/queue/credit/generation tests и two-endpoint probe results.
-  - Status: pending
-  - Evidence:
+  - Status: in_progress
+  - Evidence: statically bundled libSRTP2.7.0, owned Send/!Sync contexts, whole-compound SRTCP, tamper/replay/ROC/fresh-generation tests: host12/fmt/clippy PASS; arm64/API26 compile PASS. Duplex/admission/relay still pending.
 - R4: Реальный foreground Android audio probe на разрешённом телефоне.
   - Source: последний запрос, аудированный Android atom; AGENTS.md/AUTH_GATES.md.
   - Acceptance: visible target-UID host только .gate, explicit mic permission, real AudioRecord/AudioTrack, bounded 10ms JNI batches и independent capture/render/media progress; VOICE_COMMUNICATION/focus/effects/route observations. Playback queue учтена в deadlines, clock correction измеряется, lifecycle cleanup/cancel не зависит от DB/Olm. Main/Pacman/их identity/data не изменяются.
@@ -73,16 +73,16 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 6. **Evidence-driven screening и длительный gate.** Сначала local codec/crypto/trace tests и protected timestamp traffic, затем коротко20/40/60ms на одном lane (cap12k соответственно50/100/150B; пересчитать overhead/window). Freeze один профиль. Доступные phone↔host DNS/audio проверки выполнить, не объявлять physical pair PASS. Для final pair:45min50 и80 profiles; silence/mute, external loss vs application drops, 100/300/1000ms bursts, bandwidth collapse/restore, admitted8KiB competitor и максимальный разрешённый TEXT-sized frame/backlog, coordinated restart, relative skew±100/500ppm. Competing frames моделируют нагрузку, не доказывают production bulk pause/TEXT durability. Sequence rollover и timestamp rollover тестировать near-boundary явно:43m41s относится к16-bit sequence, timestamp48k — около24h51m; DTX count не обеспечивает sequence wrap. Common-clock acoustic latency, source-active loss accounting, отдельно normal/outage scenarios и listening evidence. Нет новых branches/dependencies без измеренной причины.
 
 ## Current Checkpoint
-- Closes: R2 host part, затем R3.
-- Smallest next action: commit/push live codec checkpoint; integrate verified SRTP boundary and implement private duplex probe/relay.
+- Closes: R3.
+- Smallest next action: commit/push verified SRTP boundary; implement private duplex probe/relay and generation-bound feedback/credit.
 - Expected evidence: bounded live codec/unchanged notes; crypto and duplex/admission/generation tests; Android activation later in R4.
 - Stop or replan if: изменение требует production rollout/schema/carrier rewrite либо иной physical device permission.
 
 ## Current State
-- Resolved: frozen goal pushed; отдельный live codec host checkpoint green. Independent SRTP native boundary implemented and reviewed, not yet committed: host12 tests/fmt/clippy and arm64/API26 build PASS in isolated target/srtp-check.
+- Resolved: frozen goal and live codec4bc5df8 pushed; independent SRTP native boundary implemented and reviewed: host12 tests/fmt/clippy and arm64/API26 build PASS in isolated target/srtp-check.
 - Last relevant evidence: live test6+note regression6/core voice_codec6, isolated clippy/fmt PASS; adb devices -l показывает единственный разрешённый Moto.
 - Blocker: для R5 physical two-phone acceptance нужен второй явно разрешённый физический Android; это не блокирует R2–R4 и phone↔host evidence.
-- Next: live codec commit/push, protected duplex probe checkpoint.
+- Next: protected duplex probe checkpoint; debug Android owner compiled independently, packaged JNI/device verification follows native implementation.
 
 ## Material Decisions
 - 2026-10-09: последний user override разрешает implementation/commits/push/тесты на ZY22JFJ5LP; отменяет прежний read-only режим, не разрешает Main reset или production rollout.
@@ -92,9 +92,10 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 ## Checkpoint History
 - 2026-10-09: preflight/audit/contract freeze; implementation и tests ещё не выполнялись.
 - 2026-10-09: goal7a37e47 pushed; separate bounded LiveEncoder/LiveDecoder, valid tiny DTX, exact PLC and actual WB40 neural activation host tests PASS. Note contract unchanged. Fresh target/live-check avoids stale native CMake cache; no upstream build changes.
+- 2026-10-09: live codec4bc5df8 pushed. SRTP2.7.0 native boundary verified host12 and Android arm64/API26; upstream archive unchanged, licenses retained. Separate debug/.gate Android owner and exact-method tests compile, JVM122 PASS; no device run yet.
 
 ## Completion
 - Resolved outcomes: pending.
-- Commands and artifacts: only read-only Git/adb preflight so far.
-- Constraint and diff-scope check: no implementation/runtime changes yet; unrelated PNG retained.
+- Commands and artifacts: checkpoint evidence above; full closure checks pending.
+- Constraint and diff-scope check: implementation stays fixture-only; no Main/deployed backend/schema/identity changes; unrelated PNG retained.
 - Final status: active.

@@ -1,0 +1,22 @@
+cmake_minimum_required(VERSION 3.21)
+project(dmsg_srtp_boundary LANGUAGES C)
+
+set(CMAKE_C_STANDARD 99)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+add_subdirectory(../libsrtp-2.7.0 libsrtp)
+get_target_property(BUNDLED_SRTP_VERSION srtp2 VERSION)
+if(NOT BUNDLED_SRTP_VERSION VERSION_EQUAL "2.7.0")
+    message(FATAL_ERROR "dmsg requires Cisco libSRTP 2.7.0")
+endif()
+if(BUILD_SHARED_LIBS OR LIBSRTP_TEST_APPS OR ENABLE_OPENSSL OR ENABLE_MBEDTLS
+   OR ENABLE_NSS OR ENABLE_DEBUG_LOGGING OR ERR_REPORTING_STDOUT OR ERR_REPORTING_FILE)
+    message(FATAL_ERROR "dmsg requires static internal crypto without apps or logging")
+endif()
+
+add_library(dmsg_srtp_shim STATIC shim.c)
+target_include_directories(dmsg_srtp_shim PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/libsrtp)
+target_link_libraries(dmsg_srtp_shim PRIVATE srtp2)
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(dmsg_srtp_shim PRIVATE -Wall -Wextra -Werror)
+endif()
+install(TARGETS dmsg_srtp_shim DESTINATION lib)

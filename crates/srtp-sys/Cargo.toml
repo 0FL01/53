@@ -1,0 +1,10 @@
+[package]
+name = "dmsg-srtp-sys"
+version = "0.1.0"
+edition = "2021"
+links = "srtp2"
+description = "Owned SRTP/SRTCP boundary around bundled Cisco libSRTP 2.7.0"
+license = "BSD-3-Clause"
+
+[build-dependencies]
+cmake = "0.1"

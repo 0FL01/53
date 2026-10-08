@@ -8,6 +8,7 @@ COPY crates/server/ ./crates/server/
 COPY crates/core/ ./crates/core/
 COPY crates/slipstream-sys/ ./crates/slipstream-sys/
 COPY crates/opus-sys/ ./crates/opus-sys/
+COPY crates/srtp-sys/ ./crates/srtp-sys/
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/src/msgd/target,sharing=locked \
     cargo build --release --locked -p msgd && cp target/release/msgd /usr/src/msgd-bin
