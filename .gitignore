@@ -15,3 +15,40 @@ android/local.properties
 android/app/src/main/jniLibs/
 # Signing key copy for the container build (deploy/Dockerfile.apk); never in Git.
 android/keystore/
+
+# Local credentials and deployment secrets (keep placeholder templates tracked).
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+secrets/
+credentials/
+noise_key
+reset_seed.hex
+server-profile
+
+# Private keys, certificates and signing stores.
+*.key
+*.pem
+*.crt
+*.cer
+*.der
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa
+id_ecdsa
+id_ed25519
+id_dsa
+
+# Runtime stores and backups can contain identities and message contents.
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.bak
+backups/
