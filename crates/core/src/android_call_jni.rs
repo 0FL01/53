@@ -205,6 +205,15 @@ pub extern "system" fn Java_org_dmsg_client_CallProbeJni_sinkQueued(
     }
 }
 #[no_mangle]
+pub extern "system" fn Java_org_dmsg_client_CallProbeJni_sinkRate(
+    _env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    ppb: jlong,
+) -> jboolean {
+    u8::from(get(handle).is_some_and(|owner| owner.audio.sink_rate(ppb)))
+}
+#[no_mangle]
 pub extern "system" fn Java_org_dmsg_client_CallProbeJni_stats(
     mut env: JNIEnv<'_>,
     _class: JClass<'_>,

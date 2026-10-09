@@ -77,7 +77,7 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
         val communicationMode: Int, val restoredMode: Int, val aec: Effect, val ns: Effect,
         val playbackRate: Int, val requestedRate: Int, val underruns: Int,
         val captureClock: ClockPair, val playbackClock: ClockPair, val playbackHeadClock: ClockPair,
-        val nativeStats: String, val stopResult: String?
+        val nativeStats: String, val stopResult: String?, val playbackCompensation: String
     ) {
         fun json() = JSONObject().put("phase", phase).put("failure", failure ?: JSONObject.NULL)
             .put("stop_reason", stopReason ?: JSONObject.NULL).put("path", if (dns) "dns_fixture" else "local_memory_pair")
@@ -104,6 +104,7 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
             .put("underruns", underruns).put("capture_clock", captureClock.json())
             .put("playback_clock", playbackClock.json()).put("playback_head_clock", playbackHeadClock.json())
             .put("native", JSONObject(nativeStats)).put("native_stop", stopResult?.let(::JSONObject) ?: JSONObject.NULL)
+            .put("playback_compensation", JSONObject(playbackCompensation))
     }
 
     private val app = context.applicationContext
@@ -128,11 +129,13 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
     private val renderPeak = AtomicInteger(0)
     private val renderClipped = AtomicLong(0)
     private val requestedRate = AtomicInteger(SAMPLE_RATE)
+    private val manualRateOffset = AtomicInteger(0)
     private val playbackRate = AtomicInteger(0)
     private val captureClock = AtomicReference(ClockPair())
     private val playbackClock = AtomicReference(ClockPair())
     private val headClock = AtomicReference(ClockPair())
     private val nativeStats = AtomicReference("{}")
+    private val playbackCompensation = AtomicReference("{}")
     private val stopResult = AtomicReference<String?>(null)
     @Volatile private var captureThread: Thread? = null
     @Volatile private var renderThread: Thread? = null
@@ -170,9 +173,10 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
         LockSupport.unpark(owner)
     }
 
-    /** Experimental platform actuator only; no resampler or remote drift estimate. */
+    /** Explicit fixture actuator override; automatic correction resumes at zero. */
     fun setPlaybackRateOffsetHz(offset: Int) {
         require(offset in -8..8) { "Playback rate offset must be within +/-8 Hz" }
+        manualRateOffset.set(offset)
         requestedRate.set(SAMPLE_RATE + offset)
     }
 
@@ -183,7 +187,7 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
         renderPeak.get(), renderClipped.get(), recordMin, trackMin, recordFrames, trackFrames, trackCapacity, startThreshold,
         inputId, inputType, outputId, outputType, micMuted, silenced, silencingObservable, focusGranted, focusAbandoned,
         previousMode, communicationMode, restoredMode, aecState, nsState, playbackRate.get(), requestedRate.get(), underruns,
-        captureClock.get(), playbackClock.get(), headClock.get(), nativeStats.get(), stopResult.get())
+        captureClock.get(), playbackClock.get(), headClock.get(), nativeStats.get(), stopResult.get(), playbackCompensation.get())
 
     private class ProbeFailure(val diagnostic: String) : RuntimeException()
     private fun check(condition: Boolean, diagnostic: String) { if (!condition) throw ProbeFailure(diagnostic) }
@@ -204,7 +208,8 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
             "max_decode_us", "max_playout_tick_lateness_ms", "max_capture_age_us",
             "initial_capture_age_floor_us", "max_additional_capture_age_us", "max_capture_clock_observation_gap_us",
             "capture_age_unavailable_batches", "capture_age_rejected_batches", "max_sender_phase_advance_us",
-            "max_receiver_phase_advance_us", "future_rejected_packets", "max_future_lead_ms")
+            "max_receiver_phase_advance_us", "future_rejected_packets", "max_future_lead_ms",
+            "remote_clock_ticks", "remote_clock_ns", "remote_clock_rejected_reports")
             .forEach { field ->
                 val value = source.getLong(field)
                 check(value >= 0, "invalid_native_counter")
@@ -213,6 +218,8 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
         clean.put("ready", source.getBoolean("ready")).put("dns_carrier", source.getBoolean("dns_carrier"))
         clean.put("failed", source.getBoolean("failed")).put("stopped", source.getBoolean("stopped"))
         clean.put("capture_clock_calibrated", source.getBoolean("capture_clock_calibrated"))
+        clean.put("remote_clock_calibrated", source.getBoolean("remote_clock_calibrated"))
+        clean.put("remote_clock_valid", source.getBoolean("remote_clock_valid"))
         val error = source.optString("error")
         // Never forward arbitrary exceptions, fixture/config content, or path strings.
         val safeError = when (error) {
@@ -501,9 +508,19 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
         var valid = 0; var offset = 0
         var wrap = 0L; var previousHead = 0L
         var nextTimestamp = 0L
+        val compensation = CallProbePlaybackClock()
         try {
             Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
             while (!stopping.get()) {
+                val source = JSONObject(nativeStats.get())
+                val command = compensation.choose(System.nanoTime(), source.optLong("remote_clock_ticks"),
+                    source.optLong("remote_clock_ns"), source.optBoolean("remote_clock_valid"), manualRateOffset.get())
+                playbackCompensation.set(JSONObject().put("hardware_calibrated", command.calibrated)
+                    .put("healthy", command.healthy).put("selected_rate", command.rate)
+                    .put("sink_ppb", command.sinkPpb ?: JSONObject.NULL)
+                    .put("relative_ppm", command.relativePpm ?: JSONObject.NULL).toString())
+                requestedRate.set(command.rate)
+                command.sinkPpb?.let { check(CallProbeJni.sinkRate(nativeHandle, it), "sink_clock_rate_rejected") }
                 val rate = requestedRate.get()
                 if (playbackRate.get() != rate) {
                     check(track.setPlaybackRate(rate) == AudioTrack.SUCCESS, "playback_rate_failed")
@@ -527,6 +544,9 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
                 if (now >= nextTimestamp) {
                     observeClock(headClock, Clock(hardware, now))
                     val ok = track.getTimestamp(timestamp)
+                    if (ok) compensation.observe(timestamp.framePosition, timestamp.nanoTime, now,
+                        track.playbackRate, track.underrunCount)
+                    else compensation.observe(-1, -1, now, track.playbackRate, track.underrunCount)
                     observeClock(playbackClock, if (ok && timestamp.nanoTime > 0 && timestamp.framePosition >= 0)
                         Clock(timestamp.framePosition, timestamp.nanoTime) else null)
                     underruns = track.underrunCount

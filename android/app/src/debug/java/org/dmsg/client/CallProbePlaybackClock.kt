@@ -1,0 +1,83 @@
+package org.dmsg.client
+
+import kotlin.math.abs
+import kotlin.math.floor
+import kotlin.math.roundToLong
+
+/** Fixture-only hardware-rate calibration and fractional-Hz platform actuator.
+ * Network arrival/queue delay is deliberately absent. Route changes retire the owner.
+ */
+internal class CallProbePlaybackClock {
+    data class Output(val rate: Int, val sinkPpb: Long?, val calibrated: Boolean,
+        val healthy: Boolean, val relativePpm: Double?)
+    private data class Point(val frame: Long, val ns: Long, val rate: Int, val underruns: Int)
+    private var first: Point? = null
+    private var latest: Point? = null
+    private var neutralRatio: Double? = null
+    private var healthy = false
+    private var targetHz = 16_000.0
+    private var fraction = 0.0
+    private var nextActuationNs = 0L
+    private var selected = 16_000
+    private var relativePpm: Double? = null
+
+    fun observe(frame: Long, timestampNs: Long, nowNs: Long, actualRate: Int, underruns: Int) {
+        if (frame < 0 || timestampNs <= 0 || nowNs < timestampNs || nowNs - timestampNs > 500_000_000L ||
+            actualRate !in 15_992..16_008) {
+            first = null; healthy = false; return
+        }
+        val previous = latest
+        if (previous != null && (frame < previous.frame || timestampNs < previous.ns ||
+                ((frame == previous.frame) != (timestampNs == previous.ns)))) {
+            first = null; latest = null; healthy = false; return
+        }
+        if (previous != null && timestampNs == previous.ns) return
+        val point = Point(frame, timestampNs, actualRate, underruns)
+        latest = point
+        var anchor = first
+        // A rate change/underrun cannot certify a hardware-frequency sample.
+        if (anchor == null || anchor.rate != actualRate || anchor.underruns != underruns ||
+            timestampNs - anchor.ns > 60_000_000_000L) {
+            first = point; anchor = point
+        }
+        if (timestampNs - anchor.ns >= 20_000_000_000L && frame > anchor.frame) {
+            val ratio = (frame - anchor.frame).toDouble() * 1e9 / (timestampNs - anchor.ns) / actualRate
+            if (ratio.isFinite() && abs(ratio - 1.0) <= 0.001) {
+                // Freeze the first steady hardware ratio for this recording epoch.
+                // Later stalls must not grow a rate estimate or move a timeline.
+                if (neutralRatio == null) neutralRatio = ratio
+                healthy = true
+            } else healthy = false
+        }
+    }
+
+    fun choose(nowNs: Long, remoteTicks: Long, remoteNs: Long, remoteValid: Boolean,
+        manualOffset: Int = 0): Output {
+        require(manualOffset in -8..8)
+        val ratio = neutralRatio
+        val reference = latest
+        val hardwareFresh = healthy && reference != null && nowNs >= reference.ns && nowNs - reference.ns <= 500_000_000L
+        val valid = remoteValid && remoteTicks > 0 && remoteNs > 0 && ratio != null && hardwareFresh
+        if (valid) {
+            val desired = remoteTicks.toDouble() * 1e9 / remoteNs / 3.0 / ratio!!
+            relativePpm = (desired / 16_000.0 - 1.0) * 1e6
+            // Unsupported relative skew is observable, never silently clamped.
+            healthy = desired.isFinite() && desired in 15_992.0..16_008.0
+            if (healthy) targetHz = desired
+        }
+        if (manualOffset != 0) {
+            selected = 16_000 + manualOffset
+            nextActuationNs = 0L
+        } else if (nowNs >= nextActuationNs) {
+            val lower = floor(targetHz).toInt()
+            fraction += targetHz - lower
+            val extra = if (fraction >= 1.0) { fraction -= 1.0; 1 } else 0
+            selected = lower + extra
+            // One current command, not catch-up commands after a thread stall.
+            nextActuationNs = nowNs + 1_000_000_000L
+        }
+        val sink = ratio?.let { ((it * selected / 16_000.0 - 1.0) * 1e9).roundToLong() }
+        return Output(selected, sink?.takeIf { it in -1_000_000L..1_000_000L }, ratio != null,
+            valid && healthy, relativePpm)
+    }
+}

@@ -148,7 +148,9 @@ class CallMediaProbeGatesTest {
                     Thread.sleep(50)
                 }
                 val state = assertHealthy(host, audio)
-                assertEquals(16_000, state.playbackRate)
+                if (exerciseRate) assertEquals("explicit actuator restoration", 16_000, state.playbackRate)
+                else assertTrue("automatic platform correction remains within the supported +/-500ppm",
+                    state.playbackRate in 15_992..16_008)
                 assertTrue("real microphone sample count", state.capturedSamples >= 16_000)
                 assertTrue("continued real microphone progress", state.capturedSamples > (initialCapture ?: 0) + 16_000)
                 assertTrue("nonzero microphone signal (all-zero/muted input is not evidence)", state.capturePeak > 0)
@@ -163,6 +165,15 @@ class CallMediaProbeGatesTest {
                 assertTrue("protected inbound bytes", native.getLong("rx_bytes") > 0)
                 assertTrue("authenticated terminal feedback", native.getLong("terminal_feedback") > 0)
                 assertFalse(native.getBoolean("failed"))
+                if (fixture != null && durationMs >= 60_000) {
+                    assertTrue("normal long probe must establish authenticated source-clock rate",
+                        native.getBoolean("remote_clock_calibrated") && native.getBoolean("remote_clock_valid"))
+                    val compensation = JSONObject(state.playbackCompensation)
+                    assertTrue("actual AudioTrack clock must support the platform compensator",
+                        compensation.getBoolean("hardware_calibrated") && compensation.getBoolean("healthy"))
+                    assertTrue("actual sink-rate report stays within its validated range",
+                        compensation.getLong("sink_ppb") in -1_000_000L..1_000_000L)
+                }
                 if (fixture == null) {
                     assertEquals("synthetic capture must not lose source slots merely because its callback was late",
                         0L, native.getLong("fixture_peer_capture_gap_batches") - readyNative.getLong("fixture_peer_capture_gap_batches"))

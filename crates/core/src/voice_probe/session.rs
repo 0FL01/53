@@ -1,4 +1,5 @@
 use super::{
+    clock::{self, LocalClock, Rate, RemoteClock},
     fixture::{self, EndpointFixture, PublicConfig},
     lane::{Commit, SendRequest, OP_RTCP, OP_RTP},
     packet, relay,
@@ -9,7 +10,7 @@ use std::{
     collections::VecDeque,
     path::Path,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -27,7 +28,7 @@ const CAPTURE_MAX_AGE: Duration = Duration::from_millis(40);
 #[cfg(any(target_os = "android", test))]
 const CAPTURE_CALIBRATION_BATCHES: u8 = 20;
 
-#[derive(Clone, Default, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct Stats {
     pub encoded_packets: u64,
     pub decoded_packets: u64,
@@ -50,6 +51,11 @@ pub struct Stats {
     pub max_receiver_phase_advance_us: u64,
     pub future_rejected_packets: u64,
     pub max_future_lead_ms: u64,
+    pub remote_clock_ticks: u64,
+    pub remote_clock_ns: u64,
+    pub remote_clock_calibrated: bool,
+    pub remote_clock_valid: bool,
+    pub remote_clock_rejected_reports: u64,
     pub fixture_peer_encoded_packets: u64,
     pub fixture_peer_dropped_capture: u64,
     pub fixture_peer_capture_gap_batches: u64,
@@ -82,6 +88,63 @@ pub struct Stats {
     pub tx_soft_deadline_packets: u64,
 }
 
+impl Default for Stats {
+    fn default() -> Self {
+        Self {
+            encoded_packets: 0,
+            decoded_packets: 0,
+            received_rtp_packets: 0,
+            capture_gap_batches: 0,
+            max_capture_age_us: 0,
+            initial_capture_age_floor_us: 0,
+            max_additional_capture_age_us: 0,
+            max_capture_clock_observation_gap_us: 0,
+            capture_clock_calibrated: false,
+            capture_age_unavailable_batches: 0,
+            capture_age_rejected_batches: 0,
+            max_sender_phase_advance_us: 0,
+            max_receiver_phase_advance_us: 0,
+            future_rejected_packets: 0,
+            max_future_lead_ms: 0,
+            remote_clock_ticks: 48_000,
+            remote_clock_ns: 1_000_000_000,
+            remote_clock_calibrated: false,
+            remote_clock_valid: false,
+            remote_clock_rejected_reports: 0,
+            fixture_peer_encoded_packets: 0,
+            fixture_peer_dropped_capture: 0,
+            fixture_peer_capture_gap_batches: 0,
+            plc_slots: 0,
+            tx_bytes: 0,
+            rx_bytes: 0,
+            dropped_capture: 0,
+            dropped_render: 0,
+            terminal_feedback: 0,
+            late_packets: 0,
+            arrival_after_nominal_due_packets: 0,
+            late_before_nominal_due_packets: 0,
+            plc_before_nominal_due_slots: 0,
+            skipped_playout_slots: 0,
+            expired_render_samples: 0,
+            decode_after_nominal_due_slots: 0,
+            max_decode_us: 0,
+            max_playout_tick_lateness_ms: 0,
+            tiny_non_dtx_packets: 0,
+            max_unconfirmed_bytes: 0,
+            max_feedback_cycle_ms: 0,
+            sink_queue_samples: 0,
+            ready: false,
+            dns_carrier: false,
+            failed: false,
+            stopped: false,
+            error: String::new(),
+            stop_ms: 0,
+            native_stop_ms: 0,
+            tx_soft_deadline_packets: 0,
+        }
+    }
+}
+
 struct Captured {
     pcm: [i16; 160],
     len: usize,
@@ -94,6 +157,13 @@ struct Captured {
     capture_clock: Option<CaptureClockSpan>,
 }
 impl Captured {
+    fn source_time(&self) -> Option<Instant> {
+        // SR pairs the actual sample clock, not the application-age epoch above
+        // its observed floor. Native observation-bracket uncertainty remains.
+        self.hardware_age
+            .map_or(Some(self.at), |age| self.pushed_at.checked_sub(age))
+    }
+
     fn ages(&self, now: Instant) -> (Duration, Duration) {
         let additional = now.saturating_duration_since(self.at);
         let hardware = self.hardware_age.map_or(additional, |age| {
@@ -257,6 +327,7 @@ impl SendPhase {
 struct RenderQueue {
     pcm: VecDeque<i16>,
     end_due: Option<Instant>,
+    source_end: Option<u64>,
 }
 
 impl RenderQueue {
@@ -264,6 +335,7 @@ impl RenderQueue {
         Self {
             pcm: VecDeque::with_capacity(640),
             end_due: None,
+            source_end: None,
         }
     }
 
@@ -296,6 +368,7 @@ impl RenderQueue {
         }
         if self.pcm.is_empty() {
             self.end_due = None;
+            self.source_end = None;
         }
         (count, expired)
     }
@@ -306,6 +379,7 @@ impl RenderQueue {
         }
         self.pcm.clear();
         self.end_due = None;
+        self.source_end = None;
     }
 }
 
@@ -314,6 +388,8 @@ struct Port {
     position: AtomicU64,
     render: Mutex<RenderQueue>,
     sink_queue: AtomicU64,
+    sink_rate: AtomicI64,
+    remote_clock_fresh_until: Mutex<Option<Instant>>,
     stats: Mutex<Stats>,
     closed: AtomicBool,
     #[cfg(any(target_os = "android", test))]
@@ -321,6 +397,18 @@ struct Port {
 }
 
 impl Port {
+    fn snapshot(&self) -> Stats {
+        let fresh_until = *self
+            .remote_clock_fresh_until
+            .lock()
+            .expect("probe clock health owner");
+        let mut stats = self.stats.lock().expect("probe stats owner").clone();
+        stats.remote_clock_valid &= !stats.stopped
+            && !self.closed.load(Ordering::Relaxed)
+            && fresh_until.is_some_and(|until| Instant::now() <= until);
+        stats
+    }
+
     fn stats(&self, update: impl FnOnce(&mut Stats)) {
         update(&mut self.stats.lock().expect("probe stats owner"));
     }
@@ -498,6 +586,15 @@ impl AudioPort {
             .sink_queue
             .store(samples.min(640) as u64, Ordering::Relaxed);
     }
+
+    /// Actual sink consumption relative to nominal16k, not a requested actuator.
+    pub(crate) fn sink_rate(&self, ppb: i64) -> bool {
+        if !(-1_000_000..=1_000_000).contains(&ppb) || self.port.closed.load(Ordering::Relaxed) {
+            return false;
+        }
+        self.port.sink_rate.store(ppb, Ordering::Relaxed);
+        true
+    }
 }
 
 impl Probe {
@@ -526,6 +623,8 @@ impl Probe {
             position: AtomicU64::new(0),
             render: Mutex::new(RenderQueue::new()),
             sink_queue: AtomicU64::new(0),
+            sink_rate: AtomicI64::new(0),
+            remote_clock_fresh_until: Mutex::new(None),
             stats: Mutex::new(Stats::default()),
             closed: AtomicBool::new(false),
             #[cfg(any(target_os = "android", test))]
@@ -574,6 +673,10 @@ impl Probe {
         self.audio().sink_queued(samples)
     }
 
+    pub fn sink_rate(&self, ppb: i64) -> bool {
+        self.audio().sink_rate(ppb)
+    }
+
     pub(crate) fn audio(&self) -> AudioPort {
         AudioPort {
             port: self.port.clone(),
@@ -581,7 +684,7 @@ impl Probe {
     }
 
     pub fn snapshot(&self) -> Stats {
-        self.port.stats.lock().expect("probe stats owner").clone()
+        self.port.snapshot()
     }
 
     pub fn stop(&mut self) -> Stats {
@@ -719,6 +822,8 @@ async fn run(
             position: AtomicU64::new(0),
             render: Mutex::new(RenderQueue::new()),
             sink_queue: AtomicU64::new(0),
+            sink_rate: AtomicI64::new(0),
+            remote_clock_fresh_until: Mutex::new(None),
             stats: Mutex::new(Stats::default()),
             closed: AtomicBool::new(false),
             #[cfg(any(target_os = "android", test))]
@@ -1013,8 +1118,8 @@ impl PlayoutClock {
         slots
     }
 
-    fn can_prepare(&self, now: Instant, sink: usize, available: bool) -> bool {
-        let lead = Duration::from_nanos(sink as u64 * SAMPLE_NS);
+    fn can_prepare(&self, now: Instant, sink: usize, available: bool, ppb: i64) -> bool {
+        let lead = clock::sink_lead(sink, ppb);
         // Sink lead permits preparing PRESENT audio early. It cannot establish
         // loss. Missing audio gets only the fixed decode/write allowance.
         now + lead >= self.due && (available || now + PREPARATION >= self.due)
@@ -1026,9 +1131,55 @@ struct ReceiveState {
     timestamp: u64,
     encoded: VecDeque<Received>,
     playout: Option<PlayoutClock>,
+    remote_clock: RemoteClock,
+    first_playout: Option<(u64, Instant)>,
 }
 
 impl ReceiveState {
+    fn source_due(&self, timestamp: u64) -> Instant {
+        if !self.remote_clock.calibrated {
+            return self.playout.as_ref().unwrap().nominal_due(timestamp);
+        }
+        let (first, due) = self.first_playout.expect("probe playout source epoch");
+        let distance = self.remote_clock.rate.duration(timestamp.abs_diff(first));
+        if timestamp >= first {
+            due + distance
+        } else {
+            due - distance
+        }
+    }
+
+    fn synchronize_clock(&mut self, now: Instant, port: &Port) {
+        if let Some(clock) = &self.playout {
+            self.first_playout.get_or_insert((clock.cursor, clock.due));
+            let due = self.source_due(clock.cursor);
+            self.playout.as_mut().unwrap().due = due;
+            let mut render = port.render.lock().expect("probe render owner");
+            if let Some(timestamp) = render.source_end {
+                render.end_due = Some(self.source_due(timestamp));
+            }
+        }
+        *port
+            .remote_clock_fresh_until
+            .lock()
+            .expect("probe clock health owner") = self.remote_clock.fresh_until();
+        port.stats(|stats| {
+            stats.remote_clock_ticks = self.remote_clock.rate.ticks;
+            stats.remote_clock_ns = self.remote_clock.rate.ns;
+            stats.remote_clock_calibrated = self.remote_clock.calibrated;
+            stats.remote_clock_valid = self.remote_clock.valid(now);
+        });
+    }
+
+    fn report_clock(&mut self, report: packet::Feedback, now: Instant, port: &Port) {
+        if let Some(sender) = report.sender_clock {
+            if !self.remote_clock.observe(sender, now) {
+                port.stats(|stats| stats.remote_clock_rejected_reports += 1);
+            }
+        }
+        self.synchronize_clock(now, port);
+    }
+
     // The lane inbox has capacity one. Drain that ready item before a timer
     // can irreversibly conceal it; do not bias/starve capture or control select.
     fn drain_queued(
@@ -1097,11 +1248,13 @@ impl ReceiveState {
         feedback: &mut packet::Feedback,
         port: &Port,
     ) {
-        let clock = self.playout.get_or_insert(PlayoutClock {
+        self.playout.get_or_insert(PlayoutClock {
             cursor: timestamp,
             due: now + Duration::from_millis(80),
         });
-        let due = clock.nominal_due(timestamp);
+        self.synchronize_clock(now, port);
+        let clock = self.playout.as_ref().unwrap();
+        let due = self.source_due(timestamp);
         port.stats(|stats| {
             // due retains the first authenticated arrival +80ms forever.
             stats.max_receiver_phase_advance_us = stats.max_receiver_phase_advance_us.max(
@@ -1144,6 +1297,7 @@ impl ReceiveState {
         port: &Port,
     ) -> Result<(), String> {
         let tick_started = Instant::now();
+        self.synchronize_clock(now, port);
         let expired = port.render.lock().expect("probe render owner").expire(now);
         port.expired_render(expired);
         let Some(clock) = &mut self.playout else {
@@ -1151,7 +1305,18 @@ impl ReceiveState {
         };
         // A renderer stall must not freeze the source baseline. Skip fully elapsed
         // slots without decoding/playing a catch-up burst or rebasing due.
-        let skipped = clock.skip_expired(now, profile);
+        let rate = self.remote_clock.rate;
+        let (first_timestamp, first_due) = self.first_playout.unwrap();
+        let skipped = if self.remote_clock.calibrated {
+            let source_now =
+                first_timestamp + rate.ticks_at(now.saturating_duration_since(first_due));
+            let skipped = source_now.saturating_sub(clock.cursor) / u64::from(profile.rtp_ticks());
+            clock.cursor += skipped * u64::from(profile.rtp_ticks());
+            clock.due = first_due + rate.duration(clock.cursor - first_timestamp);
+            skipped
+        } else {
+            clock.skip_expired(now, profile)
+        };
         if skipped != 0 {
             feedback.playout = Some(clock.cursor);
             port.stats(|stats| stats.skipped_playout_slots += skipped);
@@ -1172,7 +1337,7 @@ impl ReceiveState {
             .is_some_and(|packet| packet.timestamp == clock.cursor);
         let sink = port.sink_queue.load(Ordering::Relaxed) as usize;
         port.stats(|stats| stats.sink_queue_samples = sink);
-        if !clock.can_prepare(now, sink, available)
+        if !clock.can_prepare(now, sink, available, port.sink_rate.load(Ordering::Relaxed))
             || !port
                 .render
                 .lock()
@@ -1204,10 +1369,14 @@ impl ReceiveState {
         });
         let mut render = port.render.lock().expect("probe render owner");
         render.enqueue(clock.due, output);
+        let end_timestamp = clock.cursor + u64::from(profile.rtp_ticks());
+        render.end_due = Some(first_due + rate.duration(end_timestamp - first_timestamp));
+        render.source_end = Some(end_timestamp);
         let expired = render.expire(completed);
         drop(render);
         port.expired_render(expired);
-        clock.advance(1, profile);
+        clock.cursor = end_timestamp;
+        clock.due = first_due + rate.duration(end_timestamp - first_timestamp);
         feedback.playout = Some(clock.cursor);
         Ok(())
     }
@@ -1289,6 +1458,12 @@ async fn endpoint(
     let mut frame_capture = Instant::now();
     let mut frame_pushed = frame_capture;
     let mut frame_clock = None;
+    let epoch = Instant::now();
+    let wall = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| "probe wall clock unavailable")?;
+    let mut local_clock =
+        LocalClock::new(epoch, clock::ntp_from_unix(wall), fixture.initial_timestamp);
     let mut sender_phase = SendPhase { first: None };
     let mut source_index = u64::from(fixture.initial_sequence);
     let mut received = ReceiveState {
@@ -1296,6 +1471,8 @@ async fn endpoint(
         timestamp: u64::from(fixture.peer_initial_timestamp),
         encoded: VecDeque::with_capacity(10),
         playout: None,
+        remote_clock: RemoteClock::default(),
+        first_playout: None,
     };
     let mut feedback = packet::Feedback::default();
     let mut ready = false;
@@ -1361,6 +1538,7 @@ async fn endpoint(
                         Err(error) => break Err(error),
                     }
                 }
+                received.report_clock(remote, Instant::now(), &port);
                 ready = true;
                 port.stats(|stats| { stats.ready = true; stats.rx_bytes += (cipher.len() + packet::FRAMING_BYTES) as u64; });
             }
@@ -1398,6 +1576,9 @@ async fn endpoint(
             // its sole encoded packet waits. RX/control/cancel remain selectable.
             captured = input.recv(), if admission.pending.is_none() && media.outgoing.capacity() > 0 && commits.len() < 2 => {
                 let Some(captured) = captured else { break Err("probe capture owner closed".into()); };
+                if let Some(source_at) = captured.source_time() {
+                    local_clock.observe(captured.position, source_at, captured.capture_clock.map(|span| Rate { ticks: span.frames * 3, ns: span.elapsed_ns }));
+                }
                 let (hardware_age, capture_age) = captured.ages(Instant::now());
                 port.stats(|stats| {
                     stats.max_capture_age_us = stats.max_capture_age_us.max(hardware_age.as_micros() as u64);
@@ -1447,10 +1628,8 @@ async fn endpoint(
                 if let Err(error) = received.drain_queued(&mut media.incoming, &mut receiver, &fixture, &mut feedback, &port) { break Err(error); }
                 if now >= report_due {
                     if control_commits.len() < 2 && control.outgoing.capacity() > 0 && budget.admit_feedback(now) {
-                        let wall = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_| "probe wall clock unavailable")?;
-                        let ntp = ((wall.as_secs() + 2_208_988_800) << 32) | ((u64::from(wall.subsec_nanos()) << 32) / 1_000_000_000);
                         let compound = packet::compound(packet::Report { sender_ssrc: fixture.ssrc_tx, peer_ssrc: fixture.ssrc_rx, cname: &fixture.cname,
-                            sender: sent.since_report.then_some((ntp, sent.timestamp, sent.packets, sent.octets)), feedback });
+                            sender: sent.since_report.then(|| local_clock.report(now, sent.packets, sent.octets)).flatten().map(|report| (report.ntp, report.rtp, report.packets, report.octets)), feedback });
                         let cipher = sender.protect_rtcp(&compound)?;
                         let (committed, receipt) = oneshot::channel();
                         control.outgoing.try_send(SendRequest { opcode: OP_RTCP, payload: cipher, deadline: Some(now + Duration::from_millis(200)), committed: Some(committed) })
@@ -1466,6 +1645,7 @@ async fn endpoint(
         }
     };
     admission.discard(profile, &port);
+    port.stats(|stats| stats.remote_clock_valid = false);
     media.joined_close().await;
     control.joined_close().await;
     outcome
@@ -1482,6 +1662,8 @@ mod tests {
             position: AtomicU64::new(0),
             render: Mutex::new(RenderQueue::new()),
             sink_queue: AtomicU64::new(0),
+            sink_rate: AtomicI64::new(0),
+            remote_clock_fresh_until: Mutex::new(None),
             stats: Mutex::new(Stats::default()),
             closed: AtomicBool::new(false),
             record_clock: Mutex::new(RecordClock::default()),
@@ -1494,6 +1676,8 @@ mod tests {
             timestamp: 0,
             encoded: VecDeque::new(),
             playout: None,
+            remote_clock: RemoteClock::default(),
+            first_playout: None,
         }
     }
 
@@ -3261,6 +3445,8 @@ mod tests {
                 cursor: u64::from(local.peer_initial_timestamp),
                 due,
             }),
+            remote_clock: RemoteClock::default(),
+            first_playout: None,
         };
         let mut sender = dmsg_srtp_sys::Sender::new(&peer.media_tx, peer.ssrc_tx).unwrap();
         let mut receiver = dmsg_srtp_sys::Receiver::new(&local.media_rx, local.ssrc_rx).unwrap();
@@ -3322,6 +3508,8 @@ mod tests {
             timestamp: u64::from(local.peer_initial_timestamp),
             encoded: VecDeque::new(),
             playout: None,
+            remote_clock: RemoteClock::default(),
+            first_playout: None,
         };
         let mut sender = dmsg_srtp_sys::Sender::new(&peer.media_tx, peer.ssrc_tx).unwrap();
         let mut receiver = dmsg_srtp_sys::Receiver::new(&local.media_rx, local.ssrc_rx).unwrap();
@@ -3630,6 +3818,380 @@ mod tests {
             assert_eq!(stats.decoded_packets + stats.plc_slots, slots);
             assert!(received.encoded.is_empty());
         }
+    }
+
+    #[test]
+    fn authenticated_reports_compensate_forty_five_minutes_without_arrival_rate_sampling() {
+        for profile in [LiveProfile::Ms20, LiveProfile::Ms40, LiveProfile::Ms60] {
+            for ppm in [-500i64, -100, 100, 500] {
+                let origin = Instant::now();
+                let measured = Rate {
+                    ticks: (48_000 * (1_000_000 + ppm)) as u64,
+                    ns: 1_000_000_000_000_000,
+                };
+                let slots = 45 * 60 * 1000 / u64::from(profile.duration_ms());
+                let first_timestamp = u64::from(u32::MAX - 1_000);
+                let mut local = LocalClock::new(origin, 1 << 32, first_timestamp as u32);
+                local.observe(
+                    0,
+                    origin - measured.duration(u64::from(profile.rtp_ticks()) - 480),
+                    Some(measured),
+                );
+                let mut sender = dmsg_srtp_sys::Sender::new(&[42; 30], 7).unwrap();
+                let mut receiver = dmsg_srtp_sys::Receiver::new(&[42; 30], 7).unwrap();
+                let port = Arc::new(test_port());
+                let audio = AudioPort { port: port.clone() };
+                let mut received = test_received();
+                let mut decoder = LiveDecoder::new(profile).unwrap();
+                let mut feedback = packet::Feedback::default();
+                let opus = [match profile {
+                    LiveProfile::Ms20 => 0x48,
+                    LiveProfile::Ms40 => 0x50,
+                    LiveProfile::Ms60 => 0x58,
+                }];
+                dmsg_opus_sys::live::validate_packet(profile, &opus).unwrap();
+                let (mut next_source, mut queued, mut remainder, mut previous_ns) =
+                    (0u64, 0u64, 0u128, 0u64);
+                let (mut max_encoded, mut max_native, mut consumed, mut written) =
+                    (0usize, 0usize, 0u64, 0u64);
+                let mut ppb = 0i64;
+                let mut last_cursor = first_timestamp;
+                let mut tick = 0u64;
+                loop {
+                    let ns = tick * 10_000_000;
+                    let now = origin + Duration::from_nanos(ns);
+                    let consumption =
+                        u128::from(ns - previous_ns) * 16_000 * (1_000_000_000 + ppb) as u128
+                            + remainder;
+                    let samples = (consumption / 1_000_000_000_000_000_000) as u64;
+                    remainder = consumption % 1_000_000_000_000_000_000;
+                    let drained = queued.min(samples);
+                    queued -= drained;
+                    consumed += drained;
+                    previous_ns = ns;
+                    // Independent source arrivals; arrival time does not feed
+                    // the estimator. Only protected, fully parsed SR deltas do.
+                    while next_source < slots
+                        && measured
+                            .duration(next_source * u64::from(profile.rtp_ticks()))
+                            .as_nanos()
+                            <= u128::from(ns)
+                    {
+                        let arrival = origin
+                            + measured.duration(next_source * u64::from(profile.rtp_ticks()));
+                        received.admit(
+                            first_timestamp + next_source * u64::from(profile.rtp_ticks()),
+                            &opus,
+                            arrival,
+                            profile,
+                            &mut feedback,
+                            &port,
+                        );
+                        next_source += 1;
+                        max_encoded = max_encoded.max(received.encoded.len());
+                    }
+                    if tick % 20 == 0 && next_source != 0 && next_source < slots {
+                        let report = local
+                            .report(now, next_source as u32, next_source as u32)
+                            .unwrap();
+                        let plain = packet::compound(packet::Report {
+                            sender_ssrc: 7,
+                            peer_ssrc: 8,
+                            cname: b"test0001",
+                            sender: Some((report.ntp, report.rtp, report.packets, report.octets)),
+                            feedback: packet::Feedback::default(),
+                        });
+                        assert_eq!(plain.len(), 116);
+                        let protected = sender.protect_rtcp(&plain).unwrap();
+                        assert_eq!(protected.len() + packet::FRAMING_BYTES, 152);
+                        let plain = receiver.unprotect_rtcp(&protected).unwrap();
+                        let report = packet::read_compound(&plain, 7, 8, b"test0001").unwrap();
+                        received.report_clock(report, now, &port);
+                        ppb = received.remote_clock.rate.ppb();
+                        assert!(audio.sink_rate(ppb));
+                    }
+                    port.sink_queue.store(queued, Ordering::Relaxed);
+                    if received.playout.as_ref().is_some_and(|clock| {
+                        clock.cursor < first_timestamp + slots * u64::from(profile.rtp_ticks())
+                    }) {
+                        received
+                            .tick(now, profile, &mut decoder, &mut feedback, &port)
+                            .unwrap();
+                    }
+                    let mut render = port.render.lock().unwrap();
+                    max_native = max_native.max(render.pcm.len());
+                    let mut batch = [0; 160];
+                    while queued + 160 <= 640 && !render.pcm.is_empty() {
+                        let (count, expired) = render.pull(now, &mut batch);
+                        assert_eq!(
+                            expired,
+                            0,
+                            "profile={} ppm={ppm} tick={tick}",
+                            profile.duration_ms()
+                        );
+                        queued += count as u64;
+                        written += count as u64;
+                    }
+                    assert!(queued <= 640 && render.pcm.len() <= profile.samples());
+                    drop(render);
+                    if let Some(clock) = &received.playout {
+                        assert!(clock.cursor >= last_cursor);
+                        last_cursor = clock.cursor;
+                        assert_eq!(
+                            received.first_playout,
+                            Some((first_timestamp, origin + Duration::from_millis(80)))
+                        );
+                    }
+                    assert!(received.encoded.len() <= 200 / profile.duration_ms() as usize + 1);
+                    if consumed == slots * profile.samples() as u64 {
+                        break;
+                    }
+                    // This is a finite virtual input, not another absent frame
+                    // after its declared end. A failed model must fail, not hang.
+                    assert!(ns < 2_705_000_000_000, "model did not finish profile={} ppm={ppm} source={next_source} written={written} consumed={consumed} stats={}", profile.duration_ms(), serde_json::to_string(&*port.stats.lock().unwrap()).unwrap());
+                    tick += 1;
+                }
+                let stats = port.stats.lock().unwrap();
+                assert_eq!(
+                    stats.decoded_packets,
+                    slots,
+                    "profile={} ppm={ppm}",
+                    profile.duration_ms()
+                );
+                assert_eq!(
+                    stats.plc_slots
+                        + stats.late_packets
+                        + stats.future_rejected_packets
+                        + stats.skipped_playout_slots
+                        + stats.dropped_render,
+                    0,
+                    "profile={} ppm={ppm}",
+                    profile.duration_ms()
+                );
+                assert!(stats.remote_clock_calibrated && stats.remote_clock_valid);
+                assert_eq!(stats.remote_clock_rejected_reports, 0);
+                assert_eq!(written, slots * profile.samples() as u64);
+                assert!(
+                    max_encoded <= 200 / profile.duration_ms() as usize + 1
+                        && max_native <= profile.samples()
+                );
+                assert!(
+                    received.encoded.is_empty()
+                        && port.render.lock().unwrap().pcm.is_empty()
+                        && queued == 0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sink_rate_bounds_default_health_and_lead_are_explicit() {
+        let stats = Stats::default();
+        assert_eq!(
+            (stats.remote_clock_ticks, stats.remote_clock_ns),
+            (48_000, 1_000_000_000)
+        );
+        assert!(!stats.remote_clock_calibrated && !stats.remote_clock_valid);
+        let (audio, _) = test_audio();
+        assert_eq!(audio.port.sink_rate.load(Ordering::Relaxed), 0);
+        for ppb in [-1_000_000, -500_000, 0, 500_000, 1_000_000] {
+            assert!(audio.sink_rate(ppb));
+            let lead = clock::sink_lead(640, ppb);
+            assert_eq!(
+                lead.as_nanos(),
+                (640u128 * 1_000_000_000 * 1_000_000_000)
+                    .div_ceil(16_000 * (1_000_000_000 + ppb) as u128)
+            );
+        }
+        assert!(!audio.sink_rate(-1_000_001) && !audio.sink_rate(1_000_001));
+        assert_eq!(audio.port.sink_rate.load(Ordering::Relaxed), 1_000_000);
+        audio.port.closed.store(true, Ordering::Relaxed);
+        assert!(!audio.sink_rate(0));
+    }
+
+    #[test]
+    fn sender_report_uses_absolute_sample_time_not_the_application_floor() {
+        let (audio, mut input) = test_audio();
+        calibrate_audio(&audio, &[50; 20]);
+        let entry = Instant::now();
+        let completed = entry + Duration::from_millis(8);
+        let mut timestamp = aged_record_timestamp(3_200, 80);
+        timestamp.observed_ns += 8_000_000;
+        assert!(audio.push_recorded_observed(&[1; 160], timestamp, entry, completed));
+        let captured = input.try_recv().unwrap();
+        assert_eq!(
+            captured.ages(completed),
+            (Duration::from_millis(88), Duration::from_millis(38))
+        );
+        assert_eq!(
+            captured.source_time(),
+            Some(completed - Duration::from_millis(88))
+        );
+        let span = captured.capture_clock.unwrap();
+        let mut local = LocalClock::new(completed, 1 << 32, 7);
+        local.observe(
+            captured.position,
+            captured.source_time().unwrap(),
+            Some(Rate {
+                ticks: span.frames * 3,
+                ns: span.elapsed_ns,
+            }),
+        );
+        assert!(local.report(completed, 7, 321).is_none());
+        // A later full hardware window enables SR. Keep the same measured
+        // ratio and original absolute source reference, not a newer age floor.
+        let elapsed = Duration::from_nanos(span.elapsed_ns * 99);
+        let now = completed + elapsed;
+        local.observe(
+            captured.position + span.frames * 99,
+            captured.source_time().unwrap() + elapsed,
+            Some(Rate {
+                ticks: span.frames * 3 * 100,
+                ns: span.elapsed_ns * 100,
+            }),
+        );
+        let report = local.report(now, 7, 321).unwrap();
+        assert_eq!(
+            report.rtp,
+            7 + 3_200 * 3 + 88 * 48 + Rate::default().ticks_at(elapsed) as u32
+        );
+        assert_eq!((report.packets, report.octets), (7, 321));
+        assert_eq!(
+            local
+                .report(now + Duration::from_millis(2), 7, 321)
+                .unwrap()
+                .rtp,
+            report.rtp + 96
+        );
+    }
+
+    #[test]
+    fn startup_hardware_quantization_waits_for_a_long_source_span_before_sr() {
+        let mut outcomes = Vec::new();
+        for ppm in [-500i64, -100, 100, 500] {
+            let origin = Instant::now();
+            let mut hardware = RecordClock::default();
+            let first = CaptureTimestamp {
+                read_position: 0,
+                frame_position: 800,
+                nano_time: 1_000_800_000,
+                observed_ns: 1_001_000_000,
+            };
+            assert!(hardware.observe(first, 0, 160).is_some());
+            let mut local = LocalClock::new(origin, 1 << 32, 7);
+            let mut remote = RemoteClock::default();
+            let mut sender = dmsg_srtp_sys::Sender::new(&[42; 30], 7).unwrap();
+            let mut receiver = dmsg_srtp_sys::Receiver::new(&[42; 30], 7).unwrap();
+            let (mut first_sr, mut first_valid, mut rejected) = (None, None, 0u64);
+            for millis in (0..=60_000u64).step_by(200) {
+                // Both raw hardware points pass the existing validity checks.
+                // <=0.8ms timestamp quantization over short startup spans is
+                // allowed by those checks, but is not a certified SR frequency.
+                let elapsed_ns = (millis + 200) * 1_000_000;
+                let frames = (u128::from(millis + 200) * 16_000 * (1_000_000 + ppm) as u128
+                    / 1_000_000_000) as u64;
+                let error = if millis < 3_000 {
+                    if millis % 400 == 0 {
+                        800_000
+                    } else {
+                        -800_000
+                    }
+                } else {
+                    0
+                };
+                let timestamp = CaptureTimestamp {
+                    read_position: frames as i64,
+                    frame_position: 800 + frames as i64,
+                    nano_time: 1_000_000_000 + elapsed_ns as i64 + error,
+                    observed_ns: 1_001_000_000 + elapsed_ns as i64,
+                };
+                let (age, _) = hardware.observe(timestamp, frames, 160).unwrap();
+                let span = hardware.span().unwrap();
+                let now = origin + Duration::from_millis(millis);
+                local.observe(
+                    frames,
+                    now - age,
+                    Some(Rate {
+                        ticks: span.frames * 3,
+                        ns: span.elapsed_ns,
+                    }),
+                );
+                let source = local.report(now, millis as u32 / 40 + 1, 123);
+                let plain = packet::compound(packet::Report {
+                    sender_ssrc: 7,
+                    peer_ssrc: 8,
+                    cname: b"test0001",
+                    sender: source
+                        .map(|report| (report.ntp, report.rtp, report.packets, report.octets)),
+                    feedback: packet::Feedback {
+                        terminal: Some(9),
+                        ..packet::Feedback::default()
+                    },
+                });
+                let expected = if source.is_some() { 116 } else { 96 };
+                assert_eq!(plain.len(), expected);
+                let protected = sender.protect_rtcp(&plain).unwrap();
+                assert_eq!(protected.len() + packet::FRAMING_BYTES, expected + 36);
+                let plain = receiver.unprotect_rtcp(&protected).unwrap();
+                let parsed = packet::read_compound(&plain, 7, 8, b"test0001").unwrap();
+                assert_eq!(parsed.terminal, Some(9));
+                if let Some(report) = parsed.sender_clock {
+                    first_sr.get_or_insert(millis);
+                    rejected += u64::from(!remote.observe(report, now));
+                    if remote.valid(now) {
+                        first_valid.get_or_insert(millis);
+                    }
+                }
+            }
+            outcomes.push((ppm, first_sr, first_valid, rejected, remote.rate.ppb()));
+            assert!(remote.valid(origin + Duration::from_secs(60)));
+        }
+        assert!(
+            outcomes.iter().all(|(ppm, sr, valid, rejected, ppb)| {
+                *sr == Some(20_000)
+                    && *valid == Some(40_000)
+                    && *rejected == 0
+                    && ppb.abs_diff(ppm * 1_000) <= 2_000
+            }),
+            "startup clock outcomes: {outcomes:?}"
+        );
+    }
+
+    #[test]
+    fn remote_clock_snapshot_expires_even_when_media_actor_is_not_ticking() {
+        let origin = Instant::now() - Duration::from_secs(25);
+        let mut local = LocalClock::new(origin, 1 << 32, 7);
+        local.observe(0, origin, None);
+        let port = test_port();
+        let mut received = test_received();
+        for millis in (0..=20_000).step_by(200) {
+            let now = origin + Duration::from_millis(millis);
+            let report = local.report(now, millis as u32 / 40 + 1, 123).unwrap();
+            received.report_clock(
+                packet::Feedback {
+                    sender_clock: Some(report),
+                    ..packet::Feedback::default()
+                },
+                now,
+                &port,
+            );
+        }
+        // The actor's cached sample was fresh at its virtual observation time.
+        assert!(port.stats.lock().unwrap().remote_clock_valid);
+        let snapshot = port.snapshot();
+        assert!(snapshot.remote_clock_calibrated && !snapshot.remote_clock_valid);
+        assert_eq!(
+            snapshot.remote_clock_ticks * 1_000_000_000 / snapshot.remote_clock_ns,
+            48_000
+        );
+        assert_eq!(snapshot.remote_clock_rejected_reports, 0);
+        *port.remote_clock_fresh_until.lock().unwrap() =
+            Some(Instant::now() + Duration::from_secs(1));
+        port.closed.store(true, Ordering::Relaxed);
+        assert!(
+            !port.snapshot().remote_clock_valid,
+            "retired owners cannot advertise a healthy clock"
+        );
     }
 
     #[test]

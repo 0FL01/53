@@ -17,6 +17,8 @@ object CallProbeJni {
         timestampFrame: Long, timestampNs: Long): Boolean
     external fun pull(handle: Long, pcm: ShortArray, valid: Int): Int
     external fun sinkQueued(handle: Long, samples: Int)
+    /** Actual sink frequency relative to nominal16k in parts per billion. */
+    external fun sinkRate(handle: Long, ppb: Long): Boolean
     external fun stats(handle: Long): String
     external fun stop(handle: Long): String
 }

@@ -437,7 +437,7 @@ drops; intentional teardown is scored separately. Absolute hardware age78737us,
 frozen floor39503us and clock-observation uncertainty4198us remain visible. No
 acoustic/source-active quality or latest two-phone PASS is inferred.
 
-### Latest 80k long record and remaining receive-clock limitation
+### Historical 80k long record and reproduced receive-clock limitation
 
 The **e98dd3a** Moto + synthetic Linux peer run completed2700021ms of the
 direct-authoritative DNS fixture with BBR and synthetic80k framed-ingress service.
@@ -491,10 +491,82 @@ deadline, security or codec behavior changed:
   meter is untouched. This test debits the existing meter, **not** actual competing
   C/QUIC streams, production bulk pause, TEXT durability or a new scheduler.
 
-The68 focused probe tests and formatting check pass. Passing these tests preserves
-their deliberately negative cases; it does not qualify the current receiver for
-arbitrary±100/500ppm. Next source work must address remote-rate versus actual sink
-consumption separately from network jitter, using the existing platform actuator
-where sufficient—not move the baseline or enlarge buffers to hide drift. Full
-two-Android, common-clock acoustic, listening and representative recursive-path
-acceptance remains open; Pacman is not operated while withdrawn by the user.
+The68-test checkpoint preserved these deliberately negative cases. The receiver
+correction below now adds a separate before/after model; it does not rewrite the
+old uncompensated result or claim that the historical80k run used the correction.
+
+### Authenticated receive clock and actual sink compensation
+
+The source SR now pairs monotonic NTP with the **currently projected RTP sample
+clock**, not the most recently committed packet's timestamp. The immutable source
+reference uses absolute sample time; the application capture-age floor is not an
+acoustic clock. Physical frequency derives only from validated hardware frame/time
+spans. Physical SR timing waits for a20-second span; until then the same protected
+RR/SDES/APP still carries terminal feedback. Synthetic nominal input can report
+immediately; missing physical timing never silently becomes nominal.
+
+That source readiness avoids a reproduced startup failure class: ±0.8ms hardware
+quantization over short spans produced15/16 rejected projected-clock reports. The
+long-span version emits its first SR at20s and establishes a valid remote clock
+at40s with zero rejections for each modeled±100/500ppm case. This is not causal
+attribution of all previous Moto rejections or proof of HAL timestamp accuracy.
+
+Only after whole-compound SRTCP authentication and strict profile validation does
+the receiver expose typed NTP/RTP deltas. Its20-second rate window uses source
+timing, **never packet-arrival slopes**. Reversed, discontinuous, stale or unsupported
+reports freeze the established ratio and require a fresh healthy window. Health
+expires after2s and is false for retired owners; unknown/default timing remains
+48000ticks/1e9ns with calibrated/valid false. Supported±500ppm has a2ppm quantization
+allowance; subsequent supported corrections are bounded to100ppm per window.
+RTCP sizes remain116/96 plaintext and152/132 framed bytes; key/nonce/replay policy
+and terminal admission semantics are unchanged.
+
+The first authenticated RTP arrival+80ms phase remains immutable. Source-rate
+projection now drives decode/skip/end deadlines and future validation; sink lead
+uses actual consumption rate. Cursors never rewind. The protected-report model
+covers45min ×20/40/60ms ×±100/500ppm:990000 source frames decode once with zero
+late/PLC/future rejection/skipped slots/render loss. Encoded, native and sink queues
+retain their original caps. Delay/burst/HOL100/300/1000ms, stale timing, transitions,
+rollover, authentication tamper and retirement regressions remain passing.
+
+Android separately calibrates actual AudioTrack frame/time progression over a
+steady20-second window, rejecting underrun/rate-discontinuity samples. The platform
+actuator chooses15992–16008Hz; fractional-Hz targets are averaged through one current
+command per second, rather than accumulating the62.5ppm integer-Hz residual.
+Unsupported relative clocks and missing/stale hardware references remain explicit.
+Manual fixture override and restore remain tested. No custom resampler, route
+authority, production call API or new packet format was added. The Linux fixture
+sink follows the authenticated ratio with exact fractional accounting but remains
+**virtual**, not hardware/acoustic evidence.
+
+Current checks:79 focused probe tests,2 CLI tests,334 workspace tests and126 JVM
+tests pass; the same two explicit native ignores remain. Formatting, arm64/API26,
+debug/release and instrumentation builds pass. The latest normal DNS gate≥60s
+also requires calibrated/healthy authenticated source timing and actual AudioTrack
+compensation rather than merely logging those fields.
+
+Available Moto+host actual DNS records use the private direct-authoritative LAN,
+existing BBR selection and **synthetic50k framed-ingress service**. Declared F0=600ms
+and capacity are not measured recursive-DNS safe capacity. Pre-teardown counters:
+
+| Run | Moto decoded / late / PLC | Moto capture / render expiry | Last healthy host late / PLC | Clock observations |
+| --- | --- | --- | --- | --- |
+| Initial correction120s | 3004 /0 /0 | 4480 /0 | 30 /32 | Both valid by end;14 host clock rejects retained |
+| Before source readiness60s | 1504 /0 /0 | 31360 /0 | 27 /71 | Host still uncalibrated after14 rejects; negative result retained |
+| Latest source-ready60s | 1504 /0 /0 | 3840 /0 | 41 /42 | Both calibrated/valid, zero clock rejects; actual hardware compensator healthy |
+
+Latest capture3840 includes3200 calibration plus640 additional loss; neither is
+hidden. Moto has one AudioTrack underrun and710B max unconfirmed media; terminal
+cycle423ms. Latest model read/authenticated140162/140162 and205557/205557 bytes
+at61336ms, no live/retired partial tails. Probe cleanup4ms/native join<1ms rounded;
+retired clock health is false. Intentional teardown PCM discard and expected host
+progress expiry are separate from the healthy interval. These packet/PCM counters
+are **not** source-active speech percentages, mouth-to-ear or listening scores.
+
+The implementation and available source/model/foreground-device checks are now
+complete. Full latest-build two-Android50/80 long, common-clock acoustic, actual
+source-active loss/listening/double-talk and representative recursive-path gates
+are not qualified. Pacman remains withdrawn by the user; a synthetic host is not
+an authorized second Android. The goal records that physical-gate dependency as
+blocked, not a successful conversational-voice acceptance. Moto-owned fixtures
+and microphone permission were cleaned after results; Main and identities remain.

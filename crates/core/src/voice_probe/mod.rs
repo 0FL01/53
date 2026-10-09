@@ -1,4 +1,5 @@
 //! Opt-in, memory-only M1-V fixture. No DB, account API, Olm or production calls.
+mod clock;
 pub mod fixture;
 mod lane;
 mod packet;

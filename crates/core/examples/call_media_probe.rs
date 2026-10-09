@@ -17,11 +17,18 @@ use zeroize::{Zeroize, Zeroizing};
 struct FixturePlayback {
     consumed: u128,
     queued: usize,
+    elapsed: Duration,
+    units: u128,
+    rate_ppb: i64,
 }
 
 impl FixturePlayback {
     fn advance(&mut self, elapsed: Duration) {
-        let consumed = elapsed.as_nanos() / 62_500; // exact nominal16k source clock
+        self.units += elapsed.saturating_sub(self.elapsed).as_nanos()
+            * 16_000
+            * (1_000_000_000 + self.rate_ppb) as u128;
+        self.elapsed = self.elapsed.max(elapsed);
+        let consumed = self.units / 1_000_000_000_000_000_000;
         let delta = consumed.saturating_sub(self.consumed);
         self.consumed = consumed;
         self.queued = self
@@ -31,6 +38,21 @@ impl FixturePlayback {
 
     fn render(&mut self, elapsed: Duration, probe: &Probe, output: &mut [i16; 160]) {
         self.advance(elapsed);
+        let state = probe.snapshot();
+        if state.remote_clock_valid {
+            let denominator = i128::from(state.remote_clock_ns) * 48_000;
+            let ppb = (i128::from(state.remote_clock_ticks) * 1_000_000_000 - denominator)
+                * 1_000_000_000
+                / denominator;
+            if (-1_000_000..=1_000_000).contains(&ppb) {
+                self.rate_ppb = ppb as i64;
+            }
+        }
+        // This virtual actuator follows authenticated source rate, not packet arrivals.
+        // It is not hardware, DSP, or mouth-to-ear evidence.
+        if !probe.sink_rate(self.rate_ppb) {
+            return; // The session's sanitized failure/retirement is reported by its owner.
+        }
         probe.sink_queued(self.queued);
         for _ in 0..4 {
             let capacity = (640 - self.queued).min(output.len());
@@ -256,6 +278,7 @@ mod tests {
         let mut sink = FixturePlayback {
             consumed: 0,
             queued: 640,
+            ..FixturePlayback::default()
         };
         sink.advance(Duration::from_micros(10_001));
         assert_eq!(sink.queued, 480);
@@ -268,5 +291,23 @@ mod tests {
         sink.advance(Duration::from_secs(4));
         assert_eq!(sink.queued, 0); // a stall cannot accumulate historical output
         assert_eq!(sink.consumed, 64_000);
+    }
+
+    #[test]
+    fn virtual_sink_integrates_each_rate_epoch_without_phase_reset() {
+        for ppm in [-500, -100, 100, 500] {
+            let mut sink = FixturePlayback {
+                rate_ppb: ppm * 1000,
+                ..FixturePlayback::default()
+            };
+            for tenth in 1..=27_000 {
+                sink.advance(Duration::from_millis(tenth * 100));
+            }
+            assert_eq!(sink.consumed, (43_200_000i64 + 43_200 * ppm / 1000) as u128);
+            let before = sink.consumed;
+            sink.rate_ppb = -sink.rate_ppb;
+            sink.advance(Duration::from_secs(2701));
+            assert!(sink.consumed > before);
+        }
     }
 }

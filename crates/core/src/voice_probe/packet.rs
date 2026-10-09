@@ -48,12 +48,23 @@ pub fn extend(previous: u64, low: u64, bits: u32) -> u64 {
 
 #[derive(Default, Clone, Copy)]
 pub struct Feedback {
+    // Internal parsed metadata, never another APP field. Read only after the
+    // complete authenticated compound has passed all profile checks.
+    pub sender_clock: Option<SenderClock>,
     pub terminal: Option<u64>,
     pub playout: Option<u64>,
     pub muted: bool,
     pub dtx: bool,
     pub late: u32,
     pub plc: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SenderClock {
+    pub ntp: u64,
+    pub rtp: u32,
+    pub packets: u32,
+    pub octets: u32,
 }
 
 pub struct Report<'a> {
@@ -151,6 +162,12 @@ pub fn read_compound(
         return Err("invalid fixture RTCP cursor".into());
     }
     Ok(Feedback {
+        sender_clock: sr.then(|| SenderClock {
+            ntp: u64::from_be_bytes(packet[8..16].try_into().unwrap()),
+            rtp: u32::from_be_bytes(packet[16..20].try_into().unwrap()),
+            packets: u32::from_be_bytes(packet[20..24].try_into().unwrap()),
+            octets: u32::from_be_bytes(packet[24..28].try_into().unwrap()),
+        }),
         terminal: (app[13] & 1 != 0).then_some(terminal),
         playout: (app[13] & 2 != 0).then_some(playout),
         muted: app[13] & 4 != 0,
@@ -346,6 +363,15 @@ mod tests {
             let report = read_compound(&decoded, 7, 8, b"test0001").unwrap();
             assert_eq!(report.terminal, Some(65537));
             assert_eq!(report.playout, Some(0x1_0000_0010));
+            assert_eq!(
+                report.sender_clock,
+                sr.then_some(SenderClock {
+                    ntp: 0,
+                    rtp: 0,
+                    packets: 1,
+                    octets: 60
+                })
+            );
             assert!(read_compound(&decoded, 7, 9, b"test0001").is_err());
             for len in 0..decoded.len() {
                 assert!(read_compound(&decoded[..len], 7, 8, b"test0001").is_err());
@@ -364,6 +390,41 @@ mod tests {
         ledger.commit(65537, 104, now).unwrap();
         assert!(ledger.check(now + Duration::from_millis(721), 0).is_err());
         assert!(ledger.acknowledge(65535, now).is_err());
+    }
+
+    #[test]
+    fn sender_clock_metadata_requires_authenticated_whole_profile() {
+        let mut sender = dmsg_srtp_sys::Sender::new(&[42; 30], 7).unwrap();
+        let mut receiver = dmsg_srtp_sys::Receiver::new(&[42; 30], 7).unwrap();
+        let plain = compound(Report {
+            sender_ssrc: 7,
+            peer_ssrc: 8,
+            cname: b"test0001",
+            sender: Some((1 << 32, 960_000, 500, 30_000)),
+            feedback: Feedback::default(),
+        });
+        let cipher = sender.protect_rtcp(&plain).unwrap();
+        let mut corrupt = cipher.clone();
+        *corrupt.last_mut().unwrap() ^= 1;
+        assert!(receiver.unprotect_rtcp(&corrupt).is_err());
+        let decoded = receiver.unprotect_rtcp(&cipher).unwrap();
+        assert_eq!(
+            read_compound(&decoded, 7, 8, b"test0001")
+                .unwrap()
+                .sender_clock
+                .unwrap()
+                .rtp,
+            960_000
+        );
+        // Even a correctly authenticated SR prefix is insufficient: CNAME and
+        // APP must pass before any typed sender timing metadata is returned.
+        for offset in [52 + 10, 52 + 20 + 12, 52 + 20 + 16] {
+            let mut malformed = plain.clone();
+            malformed[offset] ^= 1;
+            let cipher = sender.protect_rtcp(&malformed).unwrap();
+            let decoded = receiver.unprotect_rtcp(&cipher).unwrap();
+            assert!(read_compound(&decoded, 7, 8, b"test0001").is_err());
+        }
     }
 
     #[test]
