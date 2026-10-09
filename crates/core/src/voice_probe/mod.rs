@@ -7,7 +7,7 @@ mod session;
 
 #[cfg(target_os = "android")]
 pub(crate) use session::AudioPort;
-pub use session::{Probe, Stats};
+pub use session::{Probe, Stats, DECODE_WRITE_PREPARATION_MS};
 
 use dmsg_opus_sys::live::{LiveDecoder, LiveEncoder, LiveProfile};
 use serde::Serialize;

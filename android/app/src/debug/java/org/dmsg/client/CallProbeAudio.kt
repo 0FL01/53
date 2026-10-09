@@ -198,7 +198,10 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
             clean.put(field, value)
         }
         listOf("received_rtp_packets", "capture_gap_batches", "fixture_peer_encoded_packets",
-            "fixture_peer_dropped_capture", "fixture_peer_capture_gap_batches", "tiny_non_dtx_packets")
+            "fixture_peer_dropped_capture", "fixture_peer_capture_gap_batches", "tiny_non_dtx_packets",
+            "arrival_after_nominal_due_packets", "late_before_nominal_due_packets", "plc_before_nominal_due_slots",
+            "skipped_playout_slots", "expired_render_samples", "decode_after_nominal_due_slots",
+            "max_decode_us", "max_playout_tick_lateness_ms")
             .forEach { clean.put(it, source.getLong(it)) }
         clean.put("ready", source.getBoolean("ready")).put("dns_carrier", source.getBoolean("dns_carrier"))
         clean.put("failed", source.getBoolean("failed")).put("stopped", source.getBoolean("stopped"))

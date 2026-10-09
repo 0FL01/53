@@ -185,7 +185,43 @@ congestion control, jitter target or progress window was changed to hide failure
 Actual native stop/join was observed at1–8ms on the phone and25–42ms on the host;
 fresh-generation setup succeeded and all owned listeners/phone fixtures were
 removed. This does not prove prompt per-lane abort or sibling preservation.
-The selected baseline remains an **unqualified engineering candidate**. Physical
-acceptance is blocked by the missing second authorized Android and common-clock,
-representative50/80kbit/s recursive-DNS measurement fixture; a host cannot replace
-those requirements. See the durable goal for remaining evidence and artifact hashes.
+The selected baseline remains an **unqualified engineering candidate**. The
+second-phone limitation of this historical checkpoint was subsequently removed;
+the continuation below supersedes that blocker, not the negative observations.
+See the durable goal for remaining evidence and checkpoint artifact hashes.
+
+## Two-physical-phone continuation
+
+Moto/API35 and Pacman/API36 are explicitly authorized; only their `.gate` packages
+are installed/tested, never Main or its identity. Deterministic source regressions
+showed that full sink lead must not declare a missing packet lost early, and a
+ready authenticated lane packet must be consumed before timer-first concealment.
+Native PCM expires as a whole remaining frame at its immutable source-frame end;
+partial JNI pulls do not move that end. Only fully elapsed source slots are skipped
+after a renderer stall, with no baseline rebase or historical catch-up burst.
+Fixed80ms jitter, queue caps, codec profile and crypto/admission checks are unchanged.
+
+The26 focused tests include forced timer-first ordering, decode/tick latency within
+an active frame, partial pulls and a four-second renderer stall. Both actual local
+8-second gates pass the unchanged active zero-drop assertion: Moto decoded200,
+Pacman199, with0 active PLC/late/capture drops/render drops/skips/expiry/underruns.
+Measurement emits the authenticated-ready baseline so startup and retirement are
+not silently included in, or removed from, active loss accounting.
+
+Both physical phones then ran the40ms profile for20seconds through real C carriers,
+Noise/SRTP/SRTCP and the private relay. The direct-authoritative LAN control bypassed
+the Python DNS forwarder after its nonblocking send failed with EAGAIN; that is a
+fixture infrastructure failure, not a phone or Slipstream quality verdict.
+
+| Direct-authoritative physical endpoint | Incoming RTP | Decoded | Late / PLC | Native render expiry samples |
+|---|---:|---:|---:|---:|
+| Moto |498 |411 |87 /87 |160 |
+| Pacman |500 |500 |0 /0 |480 |
+
+All87 Moto late arrivals were after their nominal due, not the corrected early-PLC
+race. Both authenticated topology/lifecycle gates passed and native owners joined;
+render expiry is counted, not disabled. No common-clock acoustic latency, listening
+pass, measured narrow DNS capacity or poll-query count is claimed for this bypass
+run. The declared50kbit/s admission/F0=600ms remain uncalibrated fixture inputs.
+Continue isolating the asymmetric transport/CPU timing before profile selection;
+absence of an acoustic measurement does not stop available engineering diagnosis.

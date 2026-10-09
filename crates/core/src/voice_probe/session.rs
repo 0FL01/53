@@ -3,7 +3,7 @@ use super::{
     lane::{Commit, SendRequest, OP_RTCP, OP_RTP},
     packet, relay,
 };
-use dmsg_opus_sys::live::{LiveDecoder, LiveEncoder};
+use dmsg_opus_sys::live::{LiveDecoder, LiveEncoder, LiveProfile};
 use serde::Serialize;
 use std::{
     collections::VecDeque,
@@ -17,6 +17,11 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use zeroize::{Zeroize, Zeroizing};
+
+/// Fixed early missing-packet preparation allowance, not a render/skip SLA.
+pub const DECODE_WRITE_PREPARATION_MS: u64 = 10;
+const PREPARATION: Duration = Duration::from_millis(DECODE_WRITE_PREPARATION_MS);
+const SAMPLE_NS: u64 = 1_000_000_000 / 16_000;
 
 #[derive(Clone, Default, Serialize)]
 pub struct Stats {
@@ -34,6 +39,14 @@ pub struct Stats {
     pub dropped_render: u64,
     pub terminal_feedback: u64,
     pub late_packets: u64,
+    pub arrival_after_nominal_due_packets: u64,
+    pub late_before_nominal_due_packets: u64,
+    pub plc_before_nominal_due_slots: u64,
+    pub skipped_playout_slots: u64,
+    pub expired_render_samples: u64,
+    pub decode_after_nominal_due_slots: u64,
+    pub max_decode_us: u64,
+    pub max_playout_tick_lateness_ms: u64,
     pub tiny_non_dtx_packets: u64,
     pub max_unconfirmed_bytes: usize,
     pub max_feedback_cycle_ms: u64,
@@ -60,10 +73,65 @@ impl Drop for Captured {
     }
 }
 
+struct RenderQueue {
+    pcm: VecDeque<i16>,
+    end_due: Option<Instant>,
+}
+
+impl RenderQueue {
+    fn new() -> Self {
+        Self {
+            pcm: VecDeque::with_capacity(640),
+            end_due: None,
+        }
+    }
+
+    fn enqueue(&mut self, due: Instant, pcm: Vec<i16>) {
+        debug_assert!(self.pcm.is_empty()); // One decoded frame, including PLC.
+        self.end_due = Some(due + Duration::from_nanos(pcm.len() as u64 * SAMPLE_NS));
+        self.pcm.extend(pcm);
+    }
+
+    // JNI transfers whole batches, not samples at their nominal presentation
+    // instants. Expire the remaining frame at its immutable source end, rather
+    // than trimming prefixes using the unrelated early-PLC preparation reserve.
+    fn expire(&mut self, now: Instant) -> usize {
+        let Some(end) = self.end_due else {
+            return 0;
+        };
+        if now < end {
+            return 0;
+        }
+        let count = self.pcm.len();
+        self.clear();
+        count
+    }
+
+    fn pull(&mut self, now: Instant, pcm: &mut [i16]) -> (usize, usize) {
+        let expired = self.expire(now);
+        let count = pcm.len().min(self.pcm.len());
+        for sample in &mut pcm[..count] {
+            *sample = self.pcm.pop_front().unwrap();
+        }
+        if self.pcm.is_empty() {
+            self.end_due = None;
+        }
+        (count, expired)
+    }
+
+    fn clear(&mut self) {
+        for sample in self.pcm.iter_mut() {
+            sample.zeroize();
+        }
+        self.pcm.clear();
+        self.end_due = None;
+    }
+}
+
 struct Port {
     input: mpsc::Sender<Captured>,
     position: AtomicU64,
-    render: Mutex<VecDeque<i16>>,
+    render: Mutex<RenderQueue>,
     sink_queue: AtomicU64,
     stats: Mutex<Stats>,
     closed: AtomicBool,
@@ -74,11 +142,15 @@ impl Port {
         update(&mut self.stats.lock().expect("probe stats owner"));
     }
     fn clear(&self) {
-        let mut render = self.render.lock().expect("probe render owner");
-        for sample in render.iter_mut() {
-            sample.zeroize();
+        self.render.lock().expect("probe render owner").clear();
+    }
+    fn expired_render(&self, samples: usize) {
+        if samples != 0 {
+            self.stats(|stats| {
+                stats.expired_render_samples += samples as u64;
+                stats.dropped_render += samples as u64;
+            });
         }
-        render.clear();
     }
 }
 
@@ -125,10 +197,9 @@ impl AudioPort {
         let Ok(mut queue) = self.port.render.try_lock() else {
             return 0;
         };
-        let count = pcm.len().min(queue.len());
-        for sample in &mut pcm[..count] {
-            *sample = queue.pop_front().unwrap();
-        }
+        let (count, expired) = queue.pull(Instant::now(), pcm);
+        drop(queue);
+        self.port.expired_render(expired);
         count
     }
 
@@ -163,7 +234,7 @@ impl Probe {
         let port = Arc::new(Port {
             input,
             position: AtomicU64::new(0),
-            render: Mutex::new(VecDeque::with_capacity(640)),
+            render: Mutex::new(RenderQueue::new()),
             sink_queue: AtomicU64::new(0),
             stats: Mutex::new(Stats::default()),
             closed: AtomicBool::new(false),
@@ -352,7 +423,7 @@ async fn run(
         let peer = Arc::new(Port {
             input: peer_input,
             position: AtomicU64::new(0),
-            render: Mutex::new(VecDeque::with_capacity(640)),
+            render: Mutex::new(RenderQueue::new()),
             sink_queue: AtomicU64::new(0),
             stats: Mutex::new(Stats::default()),
             closed: AtomicBool::new(false),
@@ -430,6 +501,227 @@ struct Received {
     timestamp: u64,
     opus: Zeroizing<Vec<u8>>,
 }
+
+struct PlayoutClock {
+    cursor: u64,
+    due: Instant,
+}
+
+impl PlayoutClock {
+    fn nominal_due(&self, timestamp: u64) -> Instant {
+        let ticks = timestamp.abs_diff(self.cursor);
+        let distance = Duration::from_secs(ticks / 48_000)
+            + Duration::from_nanos(ticks % 48_000 * 1_000_000_000 / 48_000);
+        if timestamp >= self.cursor {
+            self.due + distance
+        } else {
+            self.due - distance
+        }
+    }
+
+    fn advance(&mut self, slots: u64, profile: LiveProfile) {
+        self.cursor += slots * u64::from(profile.rtp_ticks());
+        self.due += Duration::from_millis(slots * u64::from(profile.duration_ms()));
+    }
+
+    fn skip_expired(&mut self, now: Instant, profile: LiveProfile) -> u64 {
+        let Some(elapsed) = now.checked_duration_since(self.due) else {
+            return 0;
+        };
+        // Only wholly elapsed source frames are obsolete. Tick/decode lateness
+        // inside the active frame is still accounted, not converted into loss.
+        let slots = (elapsed.as_nanos() / (u128::from(profile.duration_ms()) * 1_000_000)) as u64;
+        self.advance(slots, profile);
+        slots
+    }
+
+    fn can_prepare(&self, now: Instant, sink: usize, available: bool) -> bool {
+        let lead = Duration::from_nanos(sink as u64 * SAMPLE_NS);
+        // Sink lead permits preparing PRESENT audio early. It cannot establish
+        // loss. Missing audio gets only the fixed decode/write allowance.
+        now + lead >= self.due && (available || now + PREPARATION >= self.due)
+    }
+}
+
+struct ReceiveState {
+    index: u64,
+    timestamp: u64,
+    encoded: VecDeque<Received>,
+    playout: Option<PlayoutClock>,
+}
+
+impl ReceiveState {
+    // The lane inbox has capacity one. Drain that ready item before a timer
+    // can irreversibly conceal it; do not bias/starve capture or control select.
+    fn drain_queued(
+        &mut self,
+        incoming: &mut mpsc::Receiver<Result<(u8, Vec<u8>), String>>,
+        receiver: &mut dmsg_srtp_sys::Receiver,
+        fixture: &EndpointFixture,
+        feedback: &mut packet::Feedback,
+        port: &Port,
+    ) -> Result<(), String> {
+        match incoming.try_recv() {
+            Ok(Ok(frame)) => self.receive(frame, receiver, fixture, feedback, port),
+            Err(mpsc::error::TryRecvError::Empty) => Ok(()),
+            _ => Err("probe media lane failed".into()),
+        }
+    }
+
+    fn receive(
+        &mut self,
+        frame: (u8, Vec<u8>),
+        receiver: &mut dmsg_srtp_sys::Receiver,
+        fixture: &EndpointFixture,
+        feedback: &mut packet::Feedback,
+        port: &Port,
+    ) -> Result<(), String> {
+        let (op, cipher) = frame;
+        if op != OP_RTP {
+            return Err("probe media opcode rejected".into());
+        }
+        let plain = Zeroizing::new(receiver.unprotect_rtp(&cipher)?);
+        let (seq, timestamp, opus) = packet::read_rtp(&plain, fixture.ssrc_rx)?;
+        let profile = fixture::profile(fixture.profile_ms)?;
+        dmsg_opus_sys::live::validate_packet(profile, opus)?;
+        let index = packet::extend(self.index, u64::from(seq), 16);
+        let timestamp = packet::extend(self.timestamp, u64::from(timestamp), 32);
+        if feedback.terminal.is_some_and(|old| index <= old) {
+            return Err("unordered fixture media frontier".into());
+        }
+        // Authentication and the immutable ordered source clock precede every
+        // deadline drop, including across the 32-bit RTP timestamp rollover.
+        if timestamp < u64::from(fixture.peer_initial_timestamp)
+            || (timestamp - u64::from(fixture.peer_initial_timestamp))
+                % u64::from(profile.rtp_ticks())
+                != 0
+            || (feedback.terminal.is_some() && timestamp <= self.timestamp)
+        {
+            return Err("invalid fixture source clock".into());
+        }
+        self.index = index;
+        self.timestamp = timestamp;
+        feedback.terminal = Some(index); // terminal receipt, even for late drop
+        port.stats(|stats| {
+            stats.rx_bytes += (cipher.len() + packet::FRAMING_BYTES) as u64;
+            stats.received_rtp_packets += 1;
+        });
+        self.admit(timestamp, opus, Instant::now(), profile, feedback, port);
+        Ok(())
+    }
+
+    fn admit(
+        &mut self,
+        timestamp: u64,
+        opus: &[u8],
+        now: Instant,
+        profile: LiveProfile,
+        feedback: &mut packet::Feedback,
+        port: &Port,
+    ) {
+        let clock = self.playout.get_or_insert(PlayoutClock {
+            cursor: timestamp,
+            due: now + Duration::from_millis(80),
+        });
+        let due = clock.nominal_due(timestamp);
+        let after_due = now > due;
+        if timestamp < clock.cursor || after_due {
+            feedback.late = feedback.late.saturating_add(1);
+            port.stats(|stats| {
+                stats.late_packets += 1;
+                stats.arrival_after_nominal_due_packets += u64::from(after_due);
+                stats.late_before_nominal_due_packets += u64::from(now < due);
+            });
+        } else if timestamp - clock.cursor <= 48_000 / 5
+            && self.encoded.len() < 200 / profile.duration_ms() as usize + 1
+        {
+            self.encoded.push_back(Received {
+                timestamp,
+                opus: Zeroizing::new(opus.to_vec()),
+            });
+        } else {
+            port.stats(|stats| stats.dropped_render += profile.samples() as u64);
+        }
+    }
+
+    fn tick(
+        &mut self,
+        now: Instant,
+        profile: LiveProfile,
+        decoder: &mut LiveDecoder,
+        feedback: &mut packet::Feedback,
+        port: &Port,
+    ) -> Result<(), String> {
+        let tick_started = Instant::now();
+        let expired = port.render.lock().expect("probe render owner").expire(now);
+        port.expired_render(expired);
+        let Some(clock) = &mut self.playout else {
+            return Ok(());
+        };
+        // A renderer stall must not freeze the source baseline. Skip fully elapsed
+        // slots without decoding/playing a catch-up burst or rebasing due.
+        let skipped = clock.skip_expired(now, profile);
+        if skipped != 0 {
+            feedback.playout = Some(clock.cursor);
+            port.stats(|stats| stats.skipped_playout_slots += skipped);
+            // Discard stale predictive state once, not one PLC job per old slot.
+            *decoder = LiveDecoder::new(profile)?;
+        }
+        while self
+            .encoded
+            .front()
+            .is_some_and(|packet| packet.timestamp < clock.cursor)
+        {
+            self.encoded.pop_front();
+            port.stats(|stats| stats.dropped_render += profile.samples() as u64);
+        }
+        let available = self
+            .encoded
+            .front()
+            .is_some_and(|packet| packet.timestamp == clock.cursor);
+        let sink = port.sink_queue.load(Ordering::Relaxed) as usize;
+        port.stats(|stats| stats.sink_queue_samples = sink);
+        if !clock.can_prepare(now, sink, available)
+            || !port
+                .render
+                .lock()
+                .expect("probe render owner")
+                .pcm
+                .is_empty()
+        {
+            return Ok(());
+        }
+        let started = Instant::now();
+        let output = if available {
+            let packet = self.encoded.pop_front().unwrap();
+            let pcm = decoder.decode(&packet.opus)?;
+            port.stats(|stats| stats.decoded_packets += 1);
+            pcm
+        } else {
+            feedback.plc = feedback.plc.saturating_add(1);
+            port.stats(|stats| {
+                stats.plc_slots += 1;
+                stats.plc_before_nominal_due_slots += u64::from(now < clock.due);
+            });
+            decoder.conceal()?
+        };
+        let elapsed = started.elapsed();
+        let completed = now + tick_started.elapsed();
+        port.stats(|stats| {
+            stats.max_decode_us = stats.max_decode_us.max(elapsed.as_micros() as u64);
+            stats.decode_after_nominal_due_slots += u64::from(completed > clock.due);
+        });
+        let mut render = port.render.lock().expect("probe render owner");
+        render.enqueue(clock.due, output);
+        let expired = render.expire(completed);
+        drop(render);
+        port.expired_render(expired);
+        clock.advance(1, profile);
+        feedback.playout = Some(clock.cursor);
+        Ok(())
+    }
+}
+
 struct SendCounters {
     timestamp: u32,
     packets: u32,
@@ -502,11 +794,13 @@ async fn endpoint(
     let mut frame_position = 0u64;
     let mut frame_capture = Instant::now();
     let mut source_index = u64::from(fixture.initial_sequence);
-    let mut last_received_index = u64::from(fixture.peer_initial_sequence);
-    let mut last_timestamp = u64::from(fixture.peer_initial_timestamp);
+    let mut received = ReceiveState {
+        index: u64::from(fixture.peer_initial_sequence),
+        timestamp: u64::from(fixture.peer_initial_timestamp),
+        encoded: VecDeque::with_capacity(10),
+        playout: None,
+    };
     let mut feedback = packet::Feedback::default();
-    let mut encoded: VecDeque<Received> = VecDeque::with_capacity(10);
-    let mut next_playout: Option<(u64, Instant)> = None;
     let mut ready = false;
     let mut sent = SendCounters {
         since_report: false,
@@ -572,35 +866,8 @@ async fn endpoint(
                 port.stats(|stats| { stats.ready = true; stats.rx_bytes += (cipher.len() + packet::FRAMING_BYTES) as u64; });
             }
             packet = media.incoming.recv() => {
-                let (op, cipher) = match packet { Some(Ok(frame)) => frame, _ => break Err("probe media lane failed".into()) };
-                if op != OP_RTP { break Err("probe media opcode rejected".into()); }
-                let plain = match receiver.unprotect_rtp(&cipher) { Ok(packet) => Zeroizing::new(packet), Err(error) => break Err(error) };
-                let (seq, timestamp, opus) = match packet::read_rtp(&plain, fixture.ssrc_rx) { Ok(packet) => packet, Err(error) => break Err(error) };
-                if let Err(error) = dmsg_opus_sys::live::validate_packet(profile, opus) { break Err(error); }
-                let index = packet::extend(last_received_index, u64::from(seq), 16);
-                let timestamp = packet::extend(last_timestamp, u64::from(timestamp), 32);
-                if feedback.terminal.is_some_and(|old| index <= old) { break Err("unordered fixture media frontier".into()); }
-                // One immutable ordered source clock keeps the future queue bounded,
-                // including across a 32-bit RTP timestamp rollover.
-                if timestamp < u64::from(fixture.peer_initial_timestamp)
-                    || (timestamp - u64::from(fixture.peer_initial_timestamp)) % u64::from(profile.rtp_ticks()) != 0
-                    || (feedback.terminal.is_some() && timestamp <= last_timestamp)
-                { break Err("invalid fixture source clock".into()); }
-                last_received_index = index;
-                last_timestamp = timestamp;
-                feedback.terminal = Some(index); // authenticated terminal receipt, even for late drop
-                port.stats(|stats| {
-                    stats.rx_bytes += (cipher.len() + packet::FRAMING_BYTES) as u64;
-                    stats.received_rtp_packets += 1;
-                });
-                let (cursor, _) = *next_playout.get_or_insert((timestamp, Instant::now() + Duration::from_millis(80)));
-                if timestamp < cursor {
-                    feedback.late = feedback.late.saturating_add(1);
-                    port.stats(|stats| stats.late_packets += 1);
-                } else if timestamp - cursor <= 48_000 / 5
-                    && encoded.len() < 200 / usize::from(fixture.profile_ms) + 1 {
-                    encoded.push_back(Received { timestamp, opus: Zeroizing::new(opus.to_vec()) });
-                } else { port.stats(|stats| stats.dropped_render += profile.samples() as u64); }
+                let frame = match packet { Some(Ok(frame)) => frame, _ => break Err("probe media lane failed".into()) };
+                if let Err(error) = received.receive(frame, &mut receiver, &fixture, &mut feedback, &port) { break Err(error); }
             }
             captured = input.recv() => {
                 let Some(captured) = captured else { break Err("probe capture owner closed".into()); };
@@ -646,8 +913,10 @@ async fn endpoint(
                 commits.push_back(PendingCommit { index: source_index, timestamp, opus_bytes: encoded_packet.bytes.len(), submitted: Instant::now(), receipt });
                 source_index += 1;
             }
-            _ = timer.tick() => {
+            scheduled = timer.tick() => {
                 let now = Instant::now();
+                port.stats(|stats| stats.max_playout_tick_lateness_ms = stats.max_playout_tick_lateness_ms.max(now.saturating_duration_since(scheduled.into_std()).as_millis() as u64));
+                if let Err(error) = received.drain_queued(&mut media.incoming, &mut receiver, &fixture, &mut feedback, &port) { break Err(error); }
                 if now >= report_due {
                     if control_commits.len() < 2 && control.outgoing.capacity() > 0 && budget.admit(packet::FEEDBACK_FRAMED_MAX, now) {
                         let wall = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_| "probe wall clock unavailable")?;
@@ -664,33 +933,7 @@ async fn endpoint(
                     }
                     report_due = now + Duration::from_millis(200); // coalesce missed ticks
                 }
-                if let Some((cursor, due)) = next_playout {
-                    let sink = port.sink_queue.load(Ordering::Relaxed) as usize;
-                    port.stats(|stats| stats.sink_queue_samples = sink);
-                    let lead = Duration::from_micros(sink as u64 * 1_000_000 / 16000);
-                    // Do not retire a new slot into a full one-frame PCM queue.
-                    // AudioTrack lead can otherwise advance decoding while the
-                    // preceding native frame is still waiting for the renderer.
-                    if now + lead >= due && port.render.lock().expect("probe render owner").is_empty() {
-                        while encoded.front().is_some_and(|packet| packet.timestamp < cursor) { encoded.pop_front(); }
-                        let output = if encoded.front().is_some_and(|packet| packet.timestamp == cursor) {
-                            let packet = encoded.pop_front().unwrap();
-                            let pcm = decoder.decode(&packet.opus)?;
-                            port.stats(|stats| stats.decoded_packets += 1);
-                            pcm
-                        } else {
-                            feedback.plc = feedback.plc.saturating_add(1);
-                            port.stats(|stats| stats.plc_slots += 1);
-                            decoder.conceal()?
-                        };
-                        let mut render = port.render.lock().expect("probe render owner");
-                        if render.len() + output.len() <= profile.samples() {
-                            render.extend(output);
-                        } else { port.stats(|stats| stats.dropped_render += output.len() as u64); }
-                        feedback.playout = Some(cursor + u64::from(profile.rtp_ticks()));
-                        next_playout = Some((cursor + u64::from(profile.rtp_ticks()), due + Duration::from_millis(u64::from(fixture.profile_ms))));
-                    }
-                }
+                if let Err(error) = received.tick(Instant::now(), profile, &mut decoder, &mut feedback, &port) { break Err(error); }
             }
         }
     };
@@ -702,6 +945,368 @@ async fn endpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_port() -> Port {
+        let (input, _) = mpsc::channel(4);
+        Port {
+            input,
+            position: AtomicU64::new(0),
+            render: Mutex::new(RenderQueue::new()),
+            sink_queue: AtomicU64::new(0),
+            stats: Mutex::new(Stats::default()),
+            closed: AtomicBool::new(false),
+        }
+    }
+
+    fn test_received() -> ReceiveState {
+        ReceiveState {
+            index: 0,
+            timestamp: 0,
+            encoded: VecDeque::new(),
+            playout: None,
+        }
+    }
+
+    fn opus40() -> Vec<u8> {
+        LiveEncoder::new(LiveProfile::Ms40)
+            .unwrap()
+            .encode(&super::super::test_tone(0, 640))
+            .unwrap()
+            .bytes
+    }
+
+    #[test]
+    fn sink_table_waits_for_missing_packet_then_prepares_present_packet_early() {
+        let profile = LiveProfile::Ms40;
+        let origin = Instant::now();
+        let at = |ms| origin + Duration::from_millis(ms);
+        let port = test_port();
+        let mut received = test_received();
+        let mut decoder = LiveDecoder::new(profile).unwrap();
+        let mut feedback = packet::Feedback::default();
+        let opus = opus40();
+        received.admit(0, &opus, at(0), profile, &mut feedback, &port);
+        received
+            .tick(at(80), profile, &mut decoder, &mut feedback, &port)
+            .unwrap();
+        port.clear(); // A has transferred into the real sink model.
+        port.sink_queue.store(640, Ordering::Relaxed);
+        assert_eq!(received.playout.as_ref().unwrap().due, at(120));
+
+        port.sink_queue.store(480, Ordering::Relaxed); // 30ms at t=90
+        received
+            .tick(at(90), profile, &mut decoder, &mut feedback, &port)
+            .unwrap();
+        assert_eq!(received.playout.as_ref().unwrap().cursor, 1920);
+        assert_eq!(port.stats.lock().unwrap().plc_slots, 0);
+
+        received.admit(1920, &opus, at(100), profile, &mut feedback, &port);
+        port.sink_queue.store(320, Ordering::Relaxed); // 20ms at t=100
+        received
+            .tick(at(100), profile, &mut decoder, &mut feedback, &port)
+            .unwrap();
+        let stats = port.stats.lock().unwrap();
+        assert_eq!(stats.decoded_packets, 2);
+        assert_eq!(stats.plc_slots, 0);
+        assert_eq!(stats.late_packets, 0);
+        assert_eq!(stats.arrival_after_nominal_due_packets, 0);
+        assert_eq!(received.playout.as_ref().unwrap().due, at(160));
+        assert_eq!(port.render.lock().unwrap().end_due, Some(at(160)));
+    }
+
+    #[test]
+    fn missing_packet_gets_only_fixed_preparation_reserve_and_retires_once() {
+        let profile = LiveProfile::Ms40;
+        let origin = Instant::now();
+        let at = |ms| origin + Duration::from_millis(ms);
+        let port = test_port();
+        let mut received = test_received();
+        received.playout = Some(PlayoutClock {
+            cursor: 1920,
+            due: at(120),
+        });
+        let mut decoder = LiveDecoder::new(profile).unwrap();
+        let mut feedback = packet::Feedback::default();
+        port.sink_queue.store(640, Ordering::Relaxed);
+        for ms in [80, 90, 100, 109] {
+            received
+                .tick(at(ms), profile, &mut decoder, &mut feedback, &port)
+                .unwrap();
+            assert_eq!(feedback.plc, 0);
+            assert_eq!(received.playout.as_ref().unwrap().cursor, 1920);
+        }
+        port.sink_queue.store(160, Ordering::Relaxed);
+        received
+            .tick(at(110), profile, &mut decoder, &mut feedback, &port)
+            .unwrap();
+        received
+            .tick(at(110), profile, &mut decoder, &mut feedback, &port)
+            .unwrap();
+        assert_eq!(feedback.plc, 1);
+        assert_eq!(received.playout.as_ref().unwrap().due, at(160));
+        assert_eq!(port.stats.lock().unwrap().plc_before_nominal_due_slots, 1);
+
+        received.admit(1920, &opus40(), at(115), profile, &mut feedback, &port);
+        let stats = port.stats.lock().unwrap();
+        assert_eq!(stats.late_packets, 1);
+        assert_eq!(stats.late_before_nominal_due_packets, 1);
+        assert_eq!(stats.arrival_after_nominal_due_packets, 0);
+        assert!(received.encoded.is_empty());
+    }
+
+    #[tokio::test]
+    async fn queued_authenticated_media_is_drained_even_if_timer_wins_select() {
+        let (local, peer, _, _) = fixture::pair(PublicConfig {
+            relay_addr: "127.0.0.1:1".into(),
+            domain: "m1v.fixture".into(),
+            profile_ms: 40,
+            healthy_cycle_ms: 600,
+            capacity_bps: 50_000,
+            carriers: [None, None],
+        })
+        .unwrap();
+        let profile = LiveProfile::Ms40;
+        let port = test_port();
+        // Synthetic deadline; real runtime wakeup latency must not affect the
+        // forced timer-first ordering or this test's packet classification.
+        let due = Instant::now() + Duration::from_secs(60);
+        let mut received = ReceiveState {
+            index: u64::from(local.peer_initial_sequence),
+            timestamp: u64::from(local.peer_initial_timestamp),
+            encoded: VecDeque::new(),
+            playout: Some(PlayoutClock {
+                cursor: u64::from(local.peer_initial_timestamp),
+                due,
+            }),
+        };
+        let mut sender = dmsg_srtp_sys::Sender::new(&peer.media_tx, peer.ssrc_tx).unwrap();
+        let mut receiver = dmsg_srtp_sys::Receiver::new(&local.media_rx, local.ssrc_rx).unwrap();
+        let cipher = sender
+            .protect_rtp(&packet::rtp(
+                peer.ssrc_tx,
+                u64::from(peer.initial_sequence),
+                peer.initial_timestamp,
+                &opus40(),
+            ))
+            .unwrap();
+        let (tx, mut incoming) = mpsc::channel(1);
+        tx.try_send(Ok((OP_RTP, cipher))).unwrap();
+        let mut timer = tokio::time::interval(Duration::from_millis(10));
+        let ready_tick = timer.tick().await;
+        let mut feedback = packet::Feedback::default();
+        let mut decoder = LiveDecoder::new(profile).unwrap();
+        port.sink_queue.store(160, Ordering::Relaxed);
+        tokio::select! {
+            biased;
+            _ = std::future::ready(ready_tick) => {
+                received.drain_queued(&mut incoming, &mut receiver, &local, &mut feedback, &port).unwrap();
+                received.tick(due - PREPARATION, profile, &mut decoder, &mut feedback, &port).unwrap();
+            }
+            _ = incoming.recv() => panic!("test must force the timer-first ordering"),
+        }
+        let stats = port.stats.lock().unwrap();
+        assert_eq!(stats.received_rtp_packets, 1);
+        assert_eq!(stats.decoded_packets, 1);
+        assert_eq!(stats.plc_slots, 0);
+        assert_eq!(stats.late_packets, 0);
+        assert_eq!(feedback.terminal, Some(u64::from(peer.initial_sequence)));
+        assert!(matches!(
+            incoming.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn renderer_stall_rejects_nominally_late_arrival_and_skips_without_rebase() {
+        let profile = LiveProfile::Ms40;
+        let origin = Instant::now();
+        let at = |ms| origin + Duration::from_millis(ms);
+        let port = test_port();
+        let mut received = test_received();
+        let mut decoder = LiveDecoder::new(profile).unwrap();
+        let mut feedback = packet::Feedback::default();
+        let opus = opus40();
+        received.admit(0, &opus, at(0), profile, &mut feedback, &port);
+        received
+            .tick(at(80), profile, &mut decoder, &mut feedback, &port)
+            .unwrap(); // native A is left undrained
+        received.admit(1920, &opus, at(100), profile, &mut feedback, &port);
+        received.admit(3840, &opus, at(161), profile, &mut feedback, &port);
+        assert_eq!(received.playout.as_ref().unwrap().cursor, 1920);
+        assert_eq!(received.encoded.len(), 1); // timely B only, late C rejected
+        received
+            .tick(at(200), profile, &mut decoder, &mut feedback, &port)
+            .unwrap();
+        let stats = port.stats.lock().unwrap();
+        assert_eq!(stats.arrival_after_nominal_due_packets, 1);
+        assert_eq!(stats.late_before_nominal_due_packets, 0);
+        assert_eq!(stats.late_packets, 1);
+        assert_eq!(stats.skipped_playout_slots, 2);
+        assert_eq!(stats.expired_render_samples, 640);
+        assert_eq!(stats.dropped_render, 1280); // native A + queued encoded B
+        assert_eq!(stats.decoded_packets, 1);
+        assert_eq!(stats.plc_slots, 1); // current D only, no PLC jobs for obsolete B/C
+        assert!(received.encoded.is_empty());
+        let render = port.render.lock().unwrap();
+        assert_eq!(render.pcm.len(), 640); // one current frame, not a replay backlog
+        assert_eq!(render.end_due, Some(at(240)));
+        let clock = received.playout.as_ref().unwrap();
+        assert_eq!(clock.cursor, 7680);
+        assert_eq!(clock.due, at(240)); // original 80 + 4*40, never now+80
+        assert_eq!(feedback.playout, Some(7680));
+    }
+
+    #[test]
+    fn native_frame_end_deadline_is_immutable_through_partial_pulls() {
+        let origin = Instant::now();
+        let at = |ms| origin + Duration::from_millis(ms);
+        let mut queue = RenderQueue::new();
+        queue.enqueue(at(120), (0..640).collect());
+        let mut output = [0; 160];
+        assert_eq!(queue.pull(at(130), &mut output), (160, 0));
+        assert_eq!(output.as_slice(), (0..160).collect::<Vec<i16>>());
+        assert_eq!(queue.end_due, Some(at(160)));
+        assert_eq!(queue.expire(at(150)), 0);
+        assert_eq!(queue.pcm.front(), Some(&160));
+        assert_eq!(queue.end_due, Some(at(160)));
+        assert_eq!(queue.expire(at(160)), 480);
+        assert!(queue.pcm.is_empty());
+        assert_eq!(queue.end_due, None);
+    }
+
+    #[test]
+    fn expired_native_pcm_is_not_returned_by_audio_port() {
+        let port = Arc::new(test_port());
+        {
+            let mut queue = port.render.lock().unwrap();
+            queue.enqueue(Instant::now() - Duration::from_millis(200), vec![123; 640]);
+        }
+        let audio = AudioPort { port: port.clone() };
+        let mut output = [77; 160];
+        assert_eq!(audio.pull(&mut output), 0);
+        assert_eq!(output, [77; 160]);
+        let stats = port.stats.lock().unwrap();
+        assert_eq!(stats.expired_render_samples, 640);
+        assert_eq!(stats.dropped_render, 640);
+    }
+
+    #[test]
+    fn fixed_baseline_and_skip_boundaries_hold_for_all_diagnostic_profiles() {
+        for profile in [LiveProfile::Ms20, LiveProfile::Ms40, LiveProfile::Ms60] {
+            let origin = Instant::now();
+            let mut clock = PlayoutClock {
+                cursor: u64::from(u32::MAX) - 1000,
+                due: origin + Duration::from_millis(80),
+            };
+            let first_timestamp = clock.cursor;
+            let first_due = clock.due;
+            let frame = Duration::from_millis(u64::from(profile.duration_ms()));
+            assert_eq!(
+                clock.skip_expired(first_due + frame - Duration::from_nanos(1), profile),
+                0
+            );
+            assert_eq!(
+                clock.skip_expired(
+                    first_due + frame * 4 + PREPARATION + Duration::from_nanos(1),
+                    profile
+                ),
+                4
+            );
+            assert_eq!(
+                clock.cursor,
+                first_timestamp + u64::from(profile.rtp_ticks()) * 4
+            );
+            assert_eq!(clock.due, first_due + frame * 4);
+            assert_eq!(clock.nominal_due(first_timestamp), first_due);
+        }
+    }
+
+    #[test]
+    fn decode_latency_and_batched_sink_space_do_not_trim_valid_native_pcm() {
+        let origin = Instant::now();
+        let due = origin + Duration::from_millis(120);
+        let mut queue = RenderQueue::new();
+        queue.enqueue(due, (0..640).collect());
+        // Decode finishes 8.6ms late; the renderer's next poll has 320 samples
+        // of sink space. It submits two batches, then one per 10ms of playback.
+        let decoded_at = due + Duration::from_micros(8_600);
+        assert_eq!(queue.expire(decoded_at), 0);
+        let mut output = Vec::new();
+        for offset_us in [14_125, 14_125, 24_125, 34_125] {
+            let pull_at = due + Duration::from_micros(offset_us);
+            let mut batch = [0; 160];
+            assert_eq!(queue.pull(pull_at, &mut batch), (160, 0));
+            output.extend_from_slice(&batch);
+        }
+        assert_eq!(output, (0..640).collect::<Vec<i16>>());
+        assert!(queue.pcm.is_empty());
+    }
+
+    #[test]
+    fn delayed_tick_prepares_timely_packet_without_skipping_its_active_frame() {
+        let profile = LiveProfile::Ms40;
+        let origin = Instant::now();
+        let at = |ms| origin + Duration::from_millis(ms);
+        let port = test_port();
+        let mut received = test_received();
+        let mut decoder = LiveDecoder::new(profile).unwrap();
+        let mut feedback = packet::Feedback::default();
+        received.admit(0, &opus40(), at(0), profile, &mut feedback, &port);
+        received
+            .tick(at(96), profile, &mut decoder, &mut feedback, &port)
+            .unwrap(); // 16ms timer lateness is within A's 80..120ms frame.
+        let stats = port.stats.lock().unwrap();
+        assert_eq!(stats.skipped_playout_slots, 0);
+        assert_eq!(stats.dropped_render, 0);
+        assert_eq!(stats.expired_render_samples, 0);
+        assert_eq!(stats.decoded_packets, 1);
+        assert_eq!(stats.decode_after_nominal_due_slots, 1);
+        assert_eq!(stats.plc_slots, 0);
+        assert_eq!(stats.late_packets, 0);
+        let clock = received.playout.as_ref().unwrap();
+        assert_eq!(clock.cursor, 1920);
+        assert_eq!(clock.due, at(120));
+        let render = port.render.lock().unwrap();
+        assert_eq!(render.pcm.len(), 640);
+        assert_eq!(render.end_due, Some(at(120))); // no completion-time rebase
+    }
+
+    #[test]
+    fn seconds_of_renderer_stall_expire_backlog_and_prepare_only_current_slot() {
+        let profile = LiveProfile::Ms40;
+        let origin = Instant::now();
+        let at = |ms| origin + Duration::from_millis(ms);
+        let port = test_port();
+        let mut received = test_received();
+        let mut decoder = LiveDecoder::new(profile).unwrap();
+        let mut feedback = packet::Feedback::default();
+        let opus = opus40();
+        received.admit(0, &opus, at(0), profile, &mut feedback, &port);
+        received
+            .tick(at(80), profile, &mut decoder, &mut feedback, &port)
+            .unwrap();
+        // Fill the existing <=200ms future queue while leaving native A pending.
+        for slot in 1..=6 {
+            received.admit(slot * 1920, &opus, at(100), profile, &mut feedback, &port);
+        }
+        received
+            .tick(at(4_080), profile, &mut decoder, &mut feedback, &port)
+            .unwrap();
+        let stats = port.stats.lock().unwrap();
+        assert_eq!(stats.skipped_playout_slots, 99);
+        assert_eq!(stats.expired_render_samples, 640);
+        assert_eq!(stats.dropped_render, 7 * 640); // native A and six encoded frames
+        assert_eq!(stats.decoded_packets, 1); // no historical packet replay
+        assert_eq!(stats.plc_slots, 1); // one current slot, not 99 catch-up jobs
+        assert!(received.encoded.is_empty());
+        let render = port.render.lock().unwrap();
+        assert_eq!(render.pcm.len(), 640);
+        assert_eq!(render.end_due, Some(at(4_120)));
+        let clock = received.playout.as_ref().unwrap();
+        assert_eq!(clock.cursor, 101 * 1920);
+        assert_eq!(clock.due, at(4_120));
+        assert_eq!(feedback.playout, Some(clock.cursor));
+    }
 
     #[test]
     fn protected_local_pair_and_complete_retirement() {

@@ -110,6 +110,8 @@ class CallMediaProbeGatesTest {
                 }
                 val audio = owner!!
                 val host = activity!!
+                val readyNative = JSONObject(audio.snapshot().nativeStats)
+                evidence("call_probe_ready", JSONObject().put("native", readyNative))
                 val started = SystemClock.elapsedRealtime()
                 var initialFrames: Long? = null
                 var initialCapture: Long? = null
@@ -154,9 +156,9 @@ class CallMediaProbeGatesTest {
                 assertFalse(native.getBoolean("failed"))
                 if (fixture == null) {
                     assertEquals("synthetic capture must not lose source slots merely because its callback was late",
-                        0L, native.getLong("fixture_peer_capture_gap_batches"))
+                        0L, native.getLong("fixture_peer_capture_gap_batches") - readyNative.getLong("fixture_peer_capture_gap_batches"))
                     assertEquals("live native PCM must not overwrite a still-waiting render frame",
-                        0L, native.getLong("dropped_render"))
+                        0L, native.getLong("dropped_render") - readyNative.getLong("dropped_render"))
                 }
                 assertTrue("actual submitted playback PCM", state.submittedSamples > 0)
                 assertTrue("actual hardware playback frame-position progress", state.hardwareFrames > (initialFrames ?: 0))
@@ -180,6 +182,7 @@ class CallMediaProbeGatesTest {
                     assertTrue(it.created); assertEquals(0, it.enableResult); assertTrue(it.enabled); assertTrue(it.control)
                 }
                 report = JSONObject().put("duration_ms", SystemClock.elapsedRealtime() - started)
+                    .put("ready_native", readyNative)
                     .put("running", state.json()).put("rate_experiment", rateEvidence ?: JSONObject.NULL)
                     .put("playback_timestamp_available", state.playbackClock.latest != null)
                     .put("capture_timestamp_available", state.captureClock.latest != null)
