@@ -201,10 +201,18 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
             "fixture_peer_dropped_capture", "fixture_peer_capture_gap_batches", "tiny_non_dtx_packets",
             "arrival_after_nominal_due_packets", "late_before_nominal_due_packets", "plc_before_nominal_due_slots",
             "skipped_playout_slots", "expired_render_samples", "decode_after_nominal_due_slots",
-            "max_decode_us", "max_playout_tick_lateness_ms")
-            .forEach { clean.put(it, source.getLong(it)) }
+            "max_decode_us", "max_playout_tick_lateness_ms", "max_capture_age_us",
+            "initial_capture_age_floor_us", "max_additional_capture_age_us", "max_capture_clock_observation_gap_us",
+            "capture_age_unavailable_batches", "capture_age_rejected_batches", "max_sender_phase_advance_us",
+            "max_receiver_phase_advance_us", "future_rejected_packets", "max_future_lead_ms")
+            .forEach { field ->
+                val value = source.getLong(field)
+                check(value >= 0, "invalid_native_counter")
+                clean.put(field, value)
+            }
         clean.put("ready", source.getBoolean("ready")).put("dns_carrier", source.getBoolean("dns_carrier"))
         clean.put("failed", source.getBoolean("failed")).put("stopped", source.getBoolean("stopped"))
+        clean.put("capture_clock_calibrated", source.getBoolean("capture_clock_calibrated"))
         val error = source.optString("error")
         // Never forward arbitrary exceptions, fixture/config content, or path strings.
         val safeError = when (error) {
@@ -424,13 +432,22 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
         val pcm = ShortArray(BATCH_SAMPLES)
         val timestamp = AudioTimestamp()
         var valid = 0
+        var readPosition = 0L
         var nextTimestamp = 0L
         try {
             Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
             while (!stopping.get()) {
                 val count = record.read(pcm, valid, pcm.size - valid, AudioRecord.READ_BLOCKING)
-                if (stopping.get()) break
+                if (stopping.get()) {
+                    // stop() may return the last partial read. It still owns
+                    // source positions and is counted as loss below, not played.
+                    if (count > 0 && count <= pcm.size - valid) {
+                        captured.addAndGet(count.toLong()); readPosition += count; valid += count
+                    }
+                    break
+                }
                 check(count >= 0, "capture_read_failed")
+                check(count <= pcm.size - valid, "capture_read_invalid")
                 if (count == 0) { LockSupport.parkNanos(2_000_000); continue }
                 var peak = 0; var clipped = 0L; var zeros = 0L
                 for (i in valid until valid + count) {
@@ -440,23 +457,42 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
                 }
                 capturePeak.accumulateAndGet(peak, ::max)
                 captureClipped.addAndGet(clipped); captureZero.addAndGet(zeros)
-                captured.addAndGet(count.toLong()); valid += count
+                captured.addAndGet(count.toLong()); readPosition += count; valid += count
                 if (valid == pcm.size) {
-                    // A rejected batch is dropped, never retained/retried in a PCM FIFO.
-                    if (!CallProbeJni.push(nativeHandle, pcm, valid)) rejected.incrementAndGet()
-                    valid = 0
-                }
-                val now = System.nanoTime()
-                if (now >= nextTimestamp) {
+                    // The documented frame epoch resets at startRecording, not
+                    // at the first successful timestamp or complete JNI batch.
+                    // Poll before each handoff: old/unavailable anchors cannot
+                    // certify buffered PCM as fresh. Native validates age using
+                    // System.nanoTime and the oldest sample across partial reads.
                     val ok = record.getTimestamp(timestamp, AudioTimestamp.TIMEBASE_MONOTONIC) == AudioRecord.SUCCESS
-                    observeClock(captureClock, if (ok && timestamp.nanoTime > 0 && timestamp.framePosition >= 0)
-                        Clock(timestamp.framePosition, timestamp.nanoTime) else null)
-                    nextTimestamp = now + 100_000_000
+                    val clock = if (ok && timestamp.nanoTime > 0 && timestamp.framePosition >= 0)
+                        Clock(timestamp.framePosition, timestamp.nanoTime) else null
+                    val now = System.nanoTime()
+                    if (now >= nextTimestamp) {
+                        observeClock(captureClock, clock)
+                        nextTimestamp = now + 100_000_000
+                    }
+                    // A rejected batch is dropped, never retained/retried in a PCM FIFO.
+                    val batch = valid
+                    valid = 0 // Ownership transfers once, even if JNI throws.
+                    if (!CallProbeJni.push(nativeHandle, pcm, batch, readPosition - batch,
+                            clock?.frame ?: -1L, clock?.nanoTime ?: -1L)) rejected.incrementAndGet()
+                    pcm.fill(0)
                 }
             }
         } catch (e: ProbeFailure) { if (!stopping.get()) fail(e.diagnostic) }
         catch (_: Throwable) { if (!stopping.get()) fail("capture_worker_failed") }
-        finally { pcm.fill(0) }
+        finally {
+            if (valid > 0) {
+                // The owner joins capture before retiring the handle. An
+                // incomplete batch has no certified age and cannot be sent.
+                try {
+                    CallProbeJni.push(nativeHandle, pcm, valid, readPosition - valid, -1L, -1L)
+                    rejected.incrementAndGet()
+                } catch (_: Throwable) { failure.compareAndSet(null, "capture_discard_failed") }
+            }
+            pcm.fill(0)
+        }
     }
 
     private fun render(track: AudioTrack, nativeHandle: Long) {

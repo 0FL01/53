@@ -1,5 +1,5 @@
 //! Debug-feature JNI: opaque finite probe handles, never PCM through UniFFI.
-use crate::voice_probe::{AudioPort, Probe};
+use crate::voice_probe::{AudioPort, CaptureTimestamp, Probe};
 use jni::{
     objects::{JClass, JShortArray, JString},
     sys::{jboolean, jint, jlong, jstring},
@@ -9,6 +9,7 @@ use std::{
     collections::BTreeMap,
     path::Path,
     sync::{Arc, Mutex, OnceLock},
+    time::Instant,
 };
 use zeroize::Zeroize;
 
@@ -117,11 +118,14 @@ pub extern "system" fn Java_org_dmsg_client_CallProbeJni_startDns(
 }
 #[no_mangle]
 pub extern "system" fn Java_org_dmsg_client_CallProbeJni_push(
-    env: JNIEnv<'_>,
+    mut env: JNIEnv<'_>,
     _class: JClass<'_>,
     handle: jlong,
     pcm: JShortArray<'_>,
     valid: jint,
+    read_position: jlong,
+    timestamp_frame: jlong,
+    timestamp_ns: jlong,
 ) -> jboolean {
     if valid <= 0 || valid > 160 || !env.get_array_length(&pcm).is_ok_and(|len| len >= valid) {
         return 0;
@@ -129,6 +133,15 @@ pub extern "system" fn Java_org_dmsg_client_CallProbeJni_push(
     let Some(owner) = get(handle) else {
         return 0;
     };
+    // Query AudioRecord's Java timebase, then pair its age with the completed
+    // native observation. The bracket bounds uncertainty; entry time would
+    // count acquisition twice when native waiting is added at dequeue.
+    let observation_started = Instant::now();
+    let observed_ns = env
+        .call_static_method("java/lang/System", "nanoTime", "()J", &[])
+        .and_then(|value| value.j())
+        .unwrap_or(-1);
+    let observation_completed = Instant::now();
     let mut samples = [0i16; 160];
     if env
         .get_short_array_region(&pcm, 0, &mut samples[..valid as usize])
@@ -136,7 +149,17 @@ pub extern "system" fn Java_org_dmsg_client_CallProbeJni_push(
     {
         return 0;
     }
-    let accepted = owner.audio.push(&samples[..valid as usize]);
+    let accepted = owner.audio.push_recorded_observed(
+        &samples[..valid as usize],
+        CaptureTimestamp {
+            read_position,
+            frame_position: timestamp_frame,
+            nano_time: timestamp_ns,
+            observed_ns,
+        },
+        observation_started,
+        observation_completed,
+    );
     samples.zeroize();
     u8::from(accepted)
 }

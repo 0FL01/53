@@ -105,6 +105,8 @@ class CallMediaProbeGatesTest {
                     owner?.snapshot()?.let { state ->
                         val native = JSONObject(state.nativeStats)
                         state.phase == "running" && native.optBoolean("ready") &&
+                            native.optBoolean("capture_clock_calibrated") &&
+                            native.optLong("encoded_packets") > 0 && native.optLong("decoded_packets") > 0 &&
                             (fixture == null || native.optBoolean("dns_carrier"))
                     } == true
                 }
@@ -118,6 +120,7 @@ class CallMediaProbeGatesTest {
                 var rateRaised = false
                 var rateRestored = false
                 var rateEvidence: JSONObject? = null
+                var nextProgressMs = 10_000L
                 while (SystemClock.elapsedRealtime() - started < durationMs) {
                     val elapsed = SystemClock.elapsedRealtime() - started
                     val state = assertHealthy(host, audio)
@@ -125,6 +128,10 @@ class CallMediaProbeGatesTest {
                     assertTrue("independent capture worker", state.captureAlive)
                     assertTrue("independent render worker", state.renderAlive)
                     assertTrue("bounded actual AudioTrack queue", state.maxQueueSamples <= CallProbeAudio.QUEUE_BOUND_SAMPLES)
+                    if (elapsed >= nextProgressMs) {
+                        evidence("call_probe_progress", JSONObject().put("elapsed_ms", elapsed).put("running", state.json()))
+                        nextProgressMs = elapsed + 10_000 // one current snapshot, never catch-up reports
+                    }
                     if (elapsed >= 2_000 && initialFrames == null) {
                         initialFrames = state.hardwareFrames; initialCapture = state.capturedSamples
                     }
@@ -147,6 +154,8 @@ class CallMediaProbeGatesTest {
                 assertTrue("nonzero microphone signal (all-zero/muted input is not evidence)", state.capturePeak > 0)
                 val native = JSONObject(state.nativeStats)
                 assertTrue("authenticated peer readiness", native.getBoolean("ready"))
+                assertTrue("frozen recording-clock observation is required before measurement",
+                    native.getBoolean("capture_clock_calibrated"))
                 assertEquals("explicit topology must match the native carrier", fixture != null, native.getBoolean("dns_carrier"))
                 assertTrue("real live encoder packets", native.getLong("encoded_packets") > 0)
                 assertTrue("real protected decoder packets", native.getLong("decoded_packets") > 0)

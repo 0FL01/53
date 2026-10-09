@@ -57,6 +57,12 @@ For host-only DirectTCP fixtures, use `carriers: [null, null]` and do not label 
 result DNS. Profiles 20/40/60ms are immutable per run; their codec caps are
 50/100/150 bytes respectively, not the same cap at different packet rates.
 
+Each carrier optionally selects `"congestion_control": "dcubic"` or `"bbr"`;
+omission preserves `dcubic`. This selects an existing pinned native configuration,
+not a scheduler/algorithm modification. BBR is a direct-path diagnostic recommended
+by the pinned usage documentation; a LAN result does not choose the recursive-path
+configuration. Keep the choice fixed and record it per run.
+
 The example commands are:
 
 ```text
@@ -141,6 +147,11 @@ The last method requires an explicit private `probe_fixture_path` and
 `probe_duration_seconds`6–3600, allowing the planned45-minute gate. Missing fixtures
 fail, never pass as a skip. Measurement starts only after authenticated peer
 readiness; DNS mode also requires the native carrier flag, not just Activity start.
+It also waits for the frozen recording-clock observation and actual encoder/decoder
+progress. `call_probe_ready` retains the startup baseline; `call_probe_progress`
+emits a current sanitized snapshot every10s without catch-up messages. The host
+example similarly emits structured `probe_ready`/`probe_progress` records before
+its final stop result, separating healthy peer operation from the retirement tail.
 Install only the APKs built with `-PgateInstall=true`; never reset/install Main.
 Permission grant precedes instrumentation; revocation is separate because it can
 kill the runner UID. Lifecycle pause ends audio and joins its native owner.
@@ -225,3 +236,79 @@ pass, measured narrow DNS capacity or poll-query count is claimed for this bypas
 run. The declared50kbit/s admission/F0=600ms remain uncalibrated fixture inputs.
 Continue isolating the asymmetric transport/CPU timing before profile selection;
 absence of an acoustic measurement does not stop available engineering diagnosis.
+
+## Source-clock and admission continuation (Moto + host)
+
+The user temporarily took Pacman back; do not run new commands/tests on it until
+explicit return. Independent source corrections and Moto/host measurements continue.
+
+- Android JNI carries the oldest batch position and a valid monotonic AudioRecord
+  frame/time reference. Reading buffered microphone PCM does not give it a fresh
+  capture time. Invalid, unknown, stale or regressing references remain counted
+  losses; source positions advance rather than repeating encoder input.
+- Absolute observed hardware age is separate from the40ms application backlog cap.
+  A local physical run proved that an absolute40ms cutoff rejected all actual Moto
+  microphone input (hardware age up to74.271ms). The initial20 valid full160-sample
+  observations freeze a minimum observed age floor; those calibration samples are
+  counted startup drops. Only additional age above that fixed floor plus native
+  waiting consumes the40ms cap. Later delays cannot grow the floor. This observation
+  is not claimed intrinsic or acoustic device latency; absolute age remains visible.
+- Integer bit-nanosecond credits reserve the6.08kbit/s feedback share **inside**
+  the same75%-capacity allowance and original burst. A reproduced20ms capped-media
+  load starved control at200ms with the old greedy shared bucket. Media may wait/drop,
+  but cannot consume the reserved feedback share. At declared50k the remaining media
+  allowance is31.42kbit/s; no new total allowance or guaranteed TEXT share is added.
+- One waiting codec packet owns the original capacity-one lane permit, not an extra
+  queue. Admission precedes SRTP/Noise and respects both encode age and source age.
+  Pacing uses an immutable absolute source grid, at most one admission per slot.
+  A deterministic500-frame test reproduced45 deadline drops from relative pacing
+  under only1ms service jitter; the absolute grid admits all500 in-budget frames.
+  Delayed commits do not move the epoch or authorize replaying old source slots.
+
+After these corrections,52 focused probe tests and the307-test workspace pass
+(two pre-existing explicit native ignores unchanged). Linked arm64 and full Android
+builds/JVM122 pass. The frozen-floor local Moto gate has actual encoder/decoder
+progress with no active capture/render drop or PLC/late; calibration remains visible.
+
+| Direct-authoritative Moto + synthetic host,20s, existing BBR | Phone decoded | Phone late / PLC | Phone render expiry | Source limitation |
+|---|---:|---:|---:|---|
+|20ms, declared50k |1007 |2 /2 |0 |Small capture-age/alignment losses; capped envelope may exceed allowance |
+|40ms, declared50k |502 |0 /0 |0 |Only initial3200 calibration samples dropped; zero active rejection/underrun |
+|60ms, declared50k |335 |0 /0 |0 |Outgoing capture drops41280/rejected batches39; do not promote from incoming alone |
+
+These are packet counters, not source-active loss percentages. Host final counters
+include the expected shutdown tail and are not the healthy-interval loss rate.
+Declared50k/F0=600ms are still not measured useful DNS capacity or healthy calibration.
+There is no observer/query-count claim in the direct bypass, no common-clock acoustic
+latency/listening pass, and no replacement of two-physical acceptance with this host.
+The40ms engineering candidate now enters a45-minute bounded-queue/drift measurement.
+
+### Clock-pair and bounded host-sink correction
+
+The first planned45-minute run was interrupted at roughly742seconds; it is **not**
+a completed stability gate. Its host consumer discarded one160-sample batch per
+10ms without reporting sink depth. A deterministic reproduction shows that the
+last160samples of a valid40ms decoded frame can expire at its unchanged frame end.
+The CLI now models a virtual nominal16k sink with at most640submitted samples,
+absolute fractional-clock consumption and up to four bounded pulls. It reports
+that virtual depth to the existing playout API. This is not hardware/acoustic
+playback, and the native queue/deadline has not been enlarged.
+
+JNI brackets Java `System.nanoTime()` with native observations and uses the
+completed observation as the capture-age origin. Copying and real native waiting
+still consume the application budget; the observation bracket is reported because
+this pairing can underestimate its tail. The frozen initial floor is unchanged.
+
+These corrections have54 focused tests plus one CLI sink test; the workspace has
+309 passing tests and the same two explicit native ignores. Native arm64 and full
+Android/JVM122 builds pass. Actual local Moto input still exposes small capture-age
+loss rather than hiding it; no absolute latency is inferred from the floor.
+
+A fresh120s direct-authoritative Moto/host BBR run passed the authenticated topology
+and cleanup gate: phone decoded2997, late6/PLC6, future rejection0, render expiry0,
+underrun0. Capture drops4480 include3200initial calibration and1280additional
+samples; hardware age maximum86954us/frozen floor46384us are observable. The host
+healthy122s snapshot had late22/PLC24 and **zero** render expiry; final post-phone
+shutdown counters are separate. These are packet/fixture counters, not source-active
+quality percentages, acoustic latency or measured DNS capacity. A fresh45-minute
+run continues with the corrected sink and clock pair.

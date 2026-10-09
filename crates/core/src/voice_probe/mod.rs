@@ -6,7 +6,7 @@ pub mod relay;
 mod session;
 
 #[cfg(target_os = "android")]
-pub(crate) use session::AudioPort;
+pub(crate) use session::{AudioPort, CaptureTimestamp};
 pub use session::{Probe, Stats, DECODE_WRITE_PREPARATION_MS};
 
 use dmsg_opus_sys::live::{LiveDecoder, LiveEncoder, LiveProfile};

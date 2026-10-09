@@ -238,32 +238,84 @@ impl Ledger {
 }
 
 pub struct Budget {
-    rate_bytes: f64,
-    tokens: f64,
-    burst: f64,
+    media_rate_bps: u128,
+    media_credit: u128,
+    media_burst: u128,
+    feedback_credit: u128,
     at: Instant,
 }
 
 impl Budget {
+    // Bit-nanosecond credit: one byte costs exactly this many units. Integral
+    // credit avoids an exact 200ms report becoming 151.999999... bytes after
+    // repeated small timer refills and being incorrectly denied.
+    const BYTE_CREDIT: u128 = 8_000_000_000;
+    const FEEDBACK_RATE_BPS: u128 = FEEDBACK_FRAMED_MAX as u128 * 8 * 5;
+    const FEEDBACK_BURST: u128 = FEEDBACK_FRAMED_MAX as u128 * Self::BYTE_CREDIT;
+
     pub fn new(capacity_bps: u32, maximum_frame: usize, now: Instant) -> Self {
-        let burst = (maximum_frame + FEEDBACK_FRAMED_MAX) as f64;
+        // The fixed 200ms protected feedback cadence has priority over media.
+        // Total refill and burst remain the original 75% admission envelope;
+        // media cannot consume the bytes reserved for authenticated progress.
+        let media_burst = maximum_frame as u128 * Self::BYTE_CREDIT;
         Self {
-            rate_bytes: f64::from(capacity_bps) * 0.75 / 8.0,
-            tokens: burst,
-            burst,
+            media_rate_bps: (u128::from(capacity_bps) * 3 / 4)
+                .saturating_sub(Self::FEEDBACK_RATE_BPS),
+            media_credit: media_burst,
+            media_burst,
+            feedback_credit: Self::FEEDBACK_BURST,
             at: now,
         }
     }
 
-    pub fn admit(&mut self, bytes: usize, now: Instant) -> bool {
-        self.tokens = (self.tokens
-            + now.saturating_duration_since(self.at).as_secs_f64() * self.rate_bytes)
-            .min(self.burst);
-        self.at = now;
-        if self.tokens < bytes as f64 {
+    fn refill(&mut self, now: Instant) {
+        let elapsed = now.saturating_duration_since(self.at).as_nanos();
+        self.media_credit = self
+            .media_credit
+            .saturating_add(elapsed.saturating_mul(self.media_rate_bps))
+            .min(self.media_burst);
+        self.feedback_credit = self
+            .feedback_credit
+            .saturating_add(elapsed.saturating_mul(Self::FEEDBACK_RATE_BPS))
+            .min(Self::FEEDBACK_BURST);
+        self.at = self.at.max(now);
+    }
+
+    pub fn admit_media(&mut self, bytes: usize, now: Instant) -> bool {
+        self.refill(now);
+        let cost = bytes as u128 * Self::BYTE_CREDIT;
+        if self.media_credit < cost {
             return false;
         }
-        self.tokens -= bytes as f64;
+        self.media_credit -= cost;
+        true
+    }
+
+    /// Earliest credit availability for the single waiting media packet. This
+    /// only refills existing credit; it neither reserves bytes nor grows burst.
+    pub fn media_ready_at(&mut self, bytes: usize, now: Instant) -> Option<Instant> {
+        self.refill(now);
+        let cost = bytes as u128 * Self::BYTE_CREDIT;
+        if cost > self.media_burst {
+            return None;
+        }
+        if cost <= self.media_credit {
+            return Some(now);
+        }
+        if self.media_rate_bps == 0 {
+            return None;
+        }
+        let deficit = cost - self.media_credit;
+        let nanos = deficit.div_ceil(self.media_rate_bps);
+        now.checked_add(Duration::from_nanos(u64::try_from(nanos).ok()?))
+    }
+
+    pub fn admit_feedback(&mut self, now: Instant) -> bool {
+        self.refill(now);
+        if self.feedback_credit < Self::FEEDBACK_BURST {
+            return false;
+        }
+        self.feedback_credit -= Self::FEEDBACK_BURST;
         true
     }
 }
@@ -324,11 +376,12 @@ mod tests {
         }
         assert!(ledger.commit(20, 1, now).is_err());
         let mut budget = Budget::new(50_000, 144, now);
-        assert!(budget.admit(152, now));
-        assert!(budget.admit(144, now));
-        assert!(!budget.admit(1, now));
-        assert!(budget.admit(144, now + Duration::from_secs(10)));
-        assert!(!budget.admit(153, now + Duration::from_secs(10))); // no accumulated seconds of credit
+        assert!(budget.admit_feedback(now));
+        assert!(budget.admit_media(144, now));
+        assert!(!budget.admit_media(1, now));
+        assert!(!budget.admit_feedback(now));
+        assert!(budget.admit_media(144, now + Duration::from_secs(10)));
+        assert!(!budget.admit_media(153, now + Duration::from_secs(10))); // no accumulated seconds of credit
         assert_eq!(extend(65535, 0, 16), 65536);
         assert_eq!(extend(65536, 65535, 16), 65535);
         assert_eq!(extend(u64::from(u32::MAX), 1919, 32), (1 << 32) + 1919);
@@ -336,5 +389,62 @@ mod tests {
             extend((1 << 32) + 1919, u64::from(u32::MAX), 32),
             u64::from(u32::MAX)
         );
+    }
+
+    #[test]
+    fn feedback_cannot_be_starved_by_continuous_media_admission() {
+        let start = Instant::now();
+        let mut budget = Budget::new(50_000, 94, start);
+        for millis in (0..2_000).step_by(20) {
+            let now = start + Duration::from_millis(millis);
+            // Media may be dropped under an over-budget peak envelope; the
+            // authenticated progress report must retain its priority instead.
+            let _ = budget.admit_media(94, now);
+            if millis % 200 == 0 {
+                assert!(budget.admit_feedback(now), "feedback starved at {millis}ms");
+            }
+        }
+    }
+
+    #[test]
+    fn feedback_reservation_preserves_total_rate_burst_and_profile_budget() {
+        for (capacity, frame_ms, size) in [(50_000, 40, 144), (50_000, 60, 194), (80_000, 20, 94)] {
+            let start = Instant::now();
+            let mut budget = Budget::new(capacity, size, start);
+            let mut admitted = 0usize;
+            for millis in (0..2_000).step_by(10) {
+                let now = start + Duration::from_millis(millis);
+                if millis % frame_ms == 0 {
+                    assert!(budget.admit_media(size, now));
+                    admitted += size;
+                }
+                if millis % 200 == 0 {
+                    assert!(budget.admit_feedback(now));
+                    admitted += FEEDBACK_FRAMED_MAX;
+                }
+                let allowance = (size + FEEDBACK_FRAMED_MAX) as f64
+                    + f64::from(capacity) * 0.75 / 8.0 * millis as f64 / 1_000.0;
+                assert!(admitted as f64 <= allowance);
+            }
+        }
+    }
+
+    #[test]
+    fn timely_twenty_ms_burst_needs_credit_wait_not_a_larger_bucket() {
+        let start = Instant::now();
+        let mut budget = Budget::new(50_000, 94, start);
+        // 30-byte Opus + 44 framing: 29.6kbit/s media + 6.08 feedback,
+        // less than 37.5kbit/s. A lawful batched handoff is not sustained excess.
+        assert_eq!(74 * 8 * 50 + 152 * 8 * 5, 35_680);
+        assert!(budget.admit_feedback(start));
+        assert!(budget.admit_media(74, start));
+        let burst = start + Duration::from_millis(1);
+        assert!(!budget.admit_media(74, burst)); // Existing endpoint dropped here.
+        let ready = budget.media_ready_at(74, burst).unwrap();
+        assert_eq!(ready, start + Duration::from_nanos(13_749_205));
+        assert!(!budget.admit_media(74, ready - Duration::from_nanos(1)));
+        assert!(budget.admit_media(74, ready));
+        assert_eq!(budget.media_ready_at(95, ready), None);
+        assert!(budget.admit_feedback(start + Duration::from_millis(200)));
     }
 }

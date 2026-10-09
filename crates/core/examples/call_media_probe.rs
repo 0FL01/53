@@ -4,7 +4,44 @@ use std::{
     path::Path,
     time::{Duration, Instant},
 };
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
+
+/// A bounded virtual sink, not hardware playback or acoustic evidence.
+/// Match the Android40ms submitted queue; throwing away only one batch per tick
+/// leaves valid decoded tails waiting until their source-frame end.
+#[derive(Default)]
+struct FixturePlayback {
+    consumed: u128,
+    queued: usize,
+}
+
+impl FixturePlayback {
+    fn advance(&mut self, elapsed: Duration) {
+        let consumed = elapsed.as_nanos() / 62_500; // exact nominal16k source clock
+        let delta = consumed.saturating_sub(self.consumed);
+        self.consumed = consumed;
+        self.queued = self
+            .queued
+            .saturating_sub(delta.min(usize::MAX as u128) as usize);
+    }
+
+    fn render(&mut self, elapsed: Duration, probe: &Probe, output: &mut [i16; 160]) {
+        self.advance(elapsed);
+        probe.sink_queued(self.queued);
+        for _ in 0..4 {
+            let capacity = (640 - self.queued).min(output.len());
+            if capacity == 0 {
+                break;
+            }
+            let count = probe.pull(&mut output[..capacity]);
+            if count == 0 {
+                break;
+            }
+            self.queued += count;
+            probe.sink_queued(self.queued);
+        }
+    }
+}
 
 fn write_pair(dir: &Path, pair: fixture::FixturePair) -> Result<(), String> {
     let (a, b, route, key) = pair;
@@ -97,16 +134,38 @@ fn execute() -> Result<(), String> {
             let mut output = [0; 160];
             let mut position = 0;
             let start = Instant::now();
+            let mut playback = FixturePlayback::default();
+            let mut ready_observed = false;
+            let mut next_progress = start;
             while start.elapsed() < Duration::from_secs(seconds) {
                 probe.push(&test_tone(position, 160));
-                probe.pull(&mut output);
+                playback.render(start.elapsed(), &probe, &mut output);
                 position += 160;
-                if probe.snapshot().failed {
+                let state = probe.snapshot();
+                if state.failed {
                     break;
+                }
+                if state.ready
+                    && state.encoded_packets > 0
+                    && state.decoded_packets > 0
+                    && (!ready_observed || Instant::now() >= next_progress)
+                {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "kind": if ready_observed { "probe_progress" } else { "probe_ready" },
+                            "elapsed_ms": start.elapsed().as_millis(),
+                            "stats": state,
+                        })
+                    );
+                    ready_observed = true;
+                    next_progress = Instant::now() + Duration::from_secs(10);
                 }
                 let due = start + Duration::from_micros(position as u64 * 1_000_000 / 16000);
                 std::thread::sleep(due.saturating_duration_since(Instant::now()));
             }
+            probe.sink_queued(0);
+            output.zeroize();
             let result = probe.stop();
             println!(
                 "{}",
@@ -119,11 +178,16 @@ fn execute() -> Result<(), String> {
         Some("local") if args.len() == 2 => {
             let mut probe = Probe::start_local()?;
             let mut output = [0; 160];
+            let mut playback = FixturePlayback::default();
+            let start = Instant::now();
             for i in 0..300 {
                 probe.push(&test_tone(i * 160, 160));
-                probe.pull(&mut output);
-                std::thread::sleep(Duration::from_millis(10));
+                playback.render(start.elapsed(), &probe, &mut output);
+                let due = start + Duration::from_millis((i + 1) as u64 * 10);
+                std::thread::sleep(due.saturating_duration_since(Instant::now()));
             }
+            probe.sink_queued(0);
+            output.zeroize();
             let result = probe.stop();
             println!(
                 "{}",
@@ -139,4 +203,28 @@ fn execute() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn virtual_sink_keeps_fractional_clock_progress_and_bounds_waiting_pcm() {
+        let mut sink = FixturePlayback {
+            consumed: 0,
+            queued: 640,
+        };
+        sink.advance(Duration::from_micros(10_001));
+        assert_eq!(sink.queued, 480);
+        sink.advance(Duration::from_micros(10_020));
+        assert_eq!(sink.queued, 480);
+        sink.advance(Duration::from_micros(10_063));
+        assert_eq!(sink.queued, 479);
+        sink.advance(Duration::from_millis(40));
+        assert_eq!(sink.queued, 0);
+        sink.advance(Duration::from_secs(4));
+        assert_eq!(sink.queued, 0); // a stall cannot accumulate historical output
+        assert_eq!(sink.consumed, 64_000);
+    }
 }

@@ -3,12 +3,32 @@ use serde::{Deserialize, Serialize};
 use std::{fs, io::Write, path::Path};
 use zeroize::{Zeroize, Zeroizing};
 
+/// Existing pinned carrier choices; this fixture never replaces the algorithm.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CarrierCongestion {
+    #[default]
+    Dcubic,
+    Bbr,
+}
+
+impl CarrierCongestion {
+    pub fn native(self) -> slipstream_sys::CongestionControl {
+        match self {
+            Self::Dcubic => slipstream_sys::CongestionControl::Dcubic,
+            Self::Bbr => slipstream_sys::CongestionControl::Bbr,
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CarrierFixture {
     pub domain: String,
     pub resolvers: Vec<String>,
     pub certificate_path: String,
+    #[serde(default)]
+    pub congestion_control: CarrierCongestion,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -282,6 +302,35 @@ pub fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixture_selects_only_existing_carrier_algorithms_and_preserves_default() {
+        let carrier = |algorithm: Option<&str>| {
+            let mut value = serde_json::json!({
+                "domain": "fixture.test",
+                "resolvers": ["127.0.0.1:5353"],
+                "certificate_path": "private-cert.pem"
+            });
+            if let Some(algorithm) = algorithm {
+                value["congestion_control"] = algorithm.into();
+            }
+            serde_json::from_value::<CarrierFixture>(value)
+        };
+        assert_eq!(
+            carrier(None).unwrap().congestion_control.native(),
+            slipstream_sys::CongestionControl::Dcubic
+        );
+        assert_eq!(
+            carrier(Some("bbr")).unwrap().congestion_control.native(),
+            slipstream_sys::CongestionControl::Bbr
+        );
+        assert_eq!(
+            carrier(Some("dcubic")).unwrap().congestion_control.native(),
+            slipstream_sys::CongestionControl::Dcubic
+        );
+        assert!(carrier(Some("newreno")).is_err());
+        assert!(carrier(Some("BBR")).is_err());
+    }
 
     #[test]
     fn fresh_epoch_keeps_pins_but_never_reuses_media_keys() {
