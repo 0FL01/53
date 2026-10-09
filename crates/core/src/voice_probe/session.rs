@@ -91,6 +91,7 @@ struct Captured {
     pushed_at: Instant,
     // Absolute physical age at handoff stays separate from application admission.
     hardware_age: Option<Duration>,
+    capture_clock: Option<CaptureClockSpan>,
 }
 impl Captured {
     fn ages(&self, now: Instant) -> (Duration, Duration) {
@@ -149,9 +150,44 @@ impl CaptureTimestamp {
     }
 }
 
+// A measured span of validated recording-clock frames, not transport/service
+// time. Keep the ratio integral: rounding a sample period accumulates over hours.
+#[derive(Clone, Copy)]
+struct CaptureClockSpan {
+    frames: u64,
+    elapsed_ns: u64,
+}
+
+impl Default for CaptureClockSpan {
+    fn default() -> Self {
+        Self {
+            frames: 1,
+            elapsed_ns: SAMPLE_NS,
+        }
+    }
+}
+
+impl CaptureClockSpan {
+    fn duration(self, frames: u64) -> Option<Duration> {
+        let ns =
+            (u128::from(frames) * u128::from(self.elapsed_ns)).div_ceil(u128::from(self.frames));
+        Some(Duration::new(
+            u64::try_from(ns / 1_000_000_000).ok()?,
+            (ns % 1_000_000_000) as u32,
+        ))
+    }
+
+    fn slot(self, elapsed: Duration, samples: usize) -> u64 {
+        let slot = elapsed.as_nanos().saturating_mul(u128::from(self.frames))
+            / (samples as u128 * u128::from(self.elapsed_ns));
+        slot.min(u128::from(u64::MAX)) as u64
+    }
+}
+
 #[cfg(any(target_os = "android", test))]
 #[derive(Default)]
 struct RecordClock {
+    first: Option<(i64, i64)>,
     latest: Option<(i64, i64)>,
     initial_batches: u8,
     initial_floor: Option<Duration>,
@@ -159,6 +195,21 @@ struct RecordClock {
 
 #[cfg(any(target_os = "android", test))]
 impl RecordClock {
+    fn span(&self) -> Option<CaptureClockSpan> {
+        // The first validated hardware observation is immutable, including
+        // across rejected PCM and native/transport stalls. No admission time
+        // or producer-handoff interval contributes to this measured ratio.
+        let (first_frame, first_ns) = self.first?;
+        let (frame, ns) = self.latest?;
+        if frame <= first_frame || ns <= first_ns {
+            return None;
+        }
+        Some(CaptureClockSpan {
+            frames: (frame - first_frame) as u64,
+            elapsed_ns: (ns - first_ns) as u64,
+        })
+    }
+
     fn frozen_floor(&self) -> Option<Duration> {
         if self.initial_batches == CAPTURE_CALIBRATION_BATCHES {
             self.initial_floor
@@ -175,6 +226,8 @@ impl RecordClock {
     ) -> Option<(Duration, Option<Duration>)> {
         let age = timestamp.age(position, samples, self.latest)?;
         self.latest = Some((timestamp.frame_position, timestamp.nano_time));
+        self.first
+            .get_or_insert((timestamp.frame_position, timestamp.nano_time));
         // Even observation 20 is startup loss. PCM admission begins with the
         // next valid batch; no buffered calibration audio can be replayed.
         let floor = self.frozen_floor();
@@ -306,7 +359,7 @@ impl AudioPort {
             .position
             .fetch_add(pcm.len() as u64, Ordering::Relaxed);
         let now = Instant::now();
-        self.push_at(pcm, position, now, now, None)
+        self.push_at(pcm, position, now, now, None, None)
     }
 
     #[cfg(any(target_os = "android", test))]
@@ -347,14 +400,14 @@ impl AudioPort {
             .port
             .position
             .fetch_add(pcm.len() as u64, Ordering::Relaxed);
-        let (observation, frozen_floor) = {
+        let (observation, frozen_floor, capture_clock) = {
             let mut clock = self
                 .port
                 .record_clock
                 .lock()
                 .expect("probe capture clock owner");
             let observation = clock.observe(timestamp, position, pcm.len());
-            (observation, clock.frozen_floor())
+            (observation, clock.frozen_floor(), clock.span())
         };
         if let Some(floor) = frozen_floor {
             self.port.stats(|stats| {
@@ -397,7 +450,7 @@ impl AudioPort {
             });
             return false;
         };
-        self.push_at(pcm, position, at, pushed_at, Some(age))
+        self.push_at(pcm, position, at, pushed_at, Some(age), capture_clock)
     }
 
     fn push_at(
@@ -407,6 +460,7 @@ impl AudioPort {
         at: Instant,
         pushed_at: Instant,
         hardware_age: Option<Duration>,
+        capture_clock: Option<CaptureClockSpan>,
     ) -> bool {
         let mut chunk = Captured {
             pcm: [0; 160],
@@ -415,6 +469,7 @@ impl AudioPort {
             at,
             pushed_at,
             hardware_age,
+            capture_clock,
         };
         chunk.pcm[..pcm.len()].copy_from_slice(pcm);
         if self.port.input.try_send(chunk).is_err() {
@@ -696,7 +751,7 @@ async fn run(
                         // this runtime misses a tick. Use the exact scheduled slot:
                         // flooring wall-clock jitter can repeat a source position.
                         let position = (scheduled.duration_since(origin).as_micros() as usize / 10_000) * 160;
-                        let mut chunk = Captured { pcm: [0; 160], len: 160, position: position as u64, at: scheduled.into_std(), pushed_at: Instant::now(), hardware_age: None };
+                        let mut chunk = Captured { pcm: [0; 160], len: 160, position: position as u64, at: scheduled.into_std(), pushed_at: Instant::now(), hardware_age: None, capture_clock: None };
                         chunk.pcm.copy_from_slice(&super::test_tone(position, 160));
                         if tone_peer.input.try_send(chunk).is_err() {
                             tone_peer.stats(|stats| stats.dropped_capture += 160);
@@ -745,6 +800,7 @@ struct WaitingPacket {
     pushed_at: Instant,
     encoded_at: Instant,
     deadline: Instant,
+    capture_clock: Option<CaptureClockSpan>,
 }
 
 impl WaitingPacket {
@@ -761,6 +817,7 @@ impl WaitingPacket {
             position,
             pushed_at,
             encoded_at,
+            capture_clock: None,
             // Waiting and Noise admission share these original age limits.
             // Submission cannot give an already encoded packet another 40ms.
             deadline: (encoded_at + CAPTURE_MAX_AGE).min(
@@ -784,6 +841,8 @@ struct MediaAdmission {
     pending: Option<(WaitingPacket, mpsc::OwnedPermit<SendRequest>)>,
     first: Option<(u64, Instant)>,
     last: Option<Instant>,
+    capture_clock: CaptureClockSpan,
+    next_slot: u64,
 }
 
 impl MediaAdmission {
@@ -811,6 +870,9 @@ impl MediaAdmission {
                 return Err("probe media admission owner closed".into());
             }
         };
+        if let Some(clock) = packet.capture_clock {
+            self.capture_clock = clock;
+        }
         self.pending = Some((packet, permit));
         Ok(())
     }
@@ -820,20 +882,32 @@ impl MediaAdmission {
             return now;
         };
         let samples = position.saturating_sub(first_position);
-        let source_due = first_at
-            + Duration::from_secs(samples / 16_000)
-            + Duration::from_nanos(samples % 16_000 * SAMPLE_NS);
-        // One admission per immutable source slot, including the slot occupied
-        // by a delayed Noise commit. Service jitter inside that slot must not
+        let source_due = self
+            .capture_clock
+            .duration(samples)
+            .and_then(|elapsed| first_at.checked_add(elapsed));
+        // One admission per source-clock slot at the immutable source epoch.
+        // Keep consumed slot ordinals across updated hardware spans, including
+        // slots occupied by delayed Noise commits. Service jitter must not
         // accumulate into last+duration drift. Byte credit still bounds sends
         // near adjacent slot boundaries; obsolete packets keep their deadline.
-        self.last.map_or(source_due, |last| {
-            let period = Duration::from_millis(u64::from(profile.duration_ms()));
-            let remainder = Duration::from_nanos(
-                (last.duration_since(first_at).as_nanos() % period.as_nanos()) as u64,
-            );
-            source_due.max(last + (period - remainder))
-        })
+        let next_slot = self.last.map_or(self.next_slot, |last| {
+            self.next_slot.max(
+                self.capture_clock
+                    .slot(last.saturating_duration_since(first_at), profile.samples())
+                    .saturating_add(1),
+            )
+        });
+        let slot_due = next_slot
+            .checked_mul(profile.samples() as u64)
+            .and_then(|samples| self.capture_clock.duration(samples))
+            .and_then(|elapsed| first_at.checked_add(elapsed));
+        match (source_due, slot_due) {
+            (Some(source), Some(slot)) => source.max(slot),
+            // An unrepresentable projection cannot admit before the existing
+            // encode deadline. It does not reset or enlarge that deadline.
+            _ => now + CAPTURE_MAX_AGE,
+        }
     }
 
     fn wake_at(
@@ -873,6 +947,11 @@ impl MediaAdmission {
         let pending = self.pending.take().unwrap();
         self.first.get_or_insert((pending.0.position, now));
         self.last = Some(now);
+        self.next_slot = self.next_slot.max(
+            self.capture_clock
+                .slot(now.duration_since(self.first.unwrap().1), profile.samples())
+                .saturating_add(1),
+        );
         Some(pending)
     }
 
@@ -882,10 +961,17 @@ impl MediaAdmission {
         }
     }
 
-    fn committed(&mut self, at: Instant) {
+    fn committed(&mut self, at: Instant, samples: usize) {
         // Socket backpressure can postpone a queued packet's Noise commitment.
         // Consume its absolute slot, not another full period of relative delay.
         self.last = Some(self.last.map_or(at, |last| last.max(at)));
+        if let Some((_, first_at)) = self.first {
+            self.next_slot = self.next_slot.max(
+                self.capture_clock
+                    .slot(at.saturating_duration_since(first_at), samples)
+                    .saturating_add(1),
+            );
+        }
     }
 }
 
@@ -1146,7 +1232,7 @@ fn reap_commits(
         match pending.receipt.try_recv() {
             Ok(Commit::Committed { framed_bytes, at }) => {
                 ledger.commit(pending.index, framed_bytes, at)?;
-                admission.committed(at);
+                admission.committed(at, samples);
                 counters.timestamp = pending.timestamp;
                 counters.packets = counters.packets.wrapping_add(1);
                 counters.octets = counters.octets.wrapping_add(pending.opus_bytes as u32);
@@ -1202,6 +1288,7 @@ async fn endpoint(
     let mut frame_position = 0u64;
     let mut frame_capture = Instant::now();
     let mut frame_pushed = frame_capture;
+    let mut frame_clock = None;
     let mut sender_phase = SendPhase { first: None };
     let mut source_index = u64::from(fixture.initial_sequence);
     let mut received = ReceiveState {
@@ -1340,6 +1427,7 @@ async fn endpoint(
                     frame_position = captured.position + offset as u64;
                     frame_capture = captured.at;
                     frame_pushed = captured.pushed_at;
+                    frame_clock = captured.capture_clock;
                 }
                 port.stats(|stats| stats.dropped_capture += offset as u64);
                 pcm.extend_from_slice(&captured.pcm[offset..captured.len]);
@@ -1349,7 +1437,8 @@ async fn endpoint(
                 port.stats(|stats| { stats.encoded_packets += 1; if encoded_packet.bytes.len() <= 2 && !encoded_packet.in_dtx { stats.tiny_non_dtx_packets += 1; } });
                 feedback.dtx = encoded_packet.in_dtx;
                 let encoded_at = Instant::now();
-                let waiting = WaitingPacket::new(encoded_packet.bytes, frame_position, frame_capture, frame_pushed, encoded_at, profile);
+                let mut waiting = WaitingPacket::new(encoded_packet.bytes, frame_position, frame_capture, frame_pushed, encoded_at, profile);
+                waiting.capture_clock = frame_clock;
                 if let Err(error) = admission.stage(waiting, &media.outgoing, commits.len(), encoded_at, profile, &port) { break Err(error); }
             }
             scheduled = timer.tick() => {
@@ -1720,7 +1809,7 @@ mod tests {
                 drop(permit);
                 max_source_lag = max_source_lag.max(now.duration_since(captured_at));
                 worker_at = now + Duration::from_millis(1);
-                admission.committed(worker_at);
+                admission.committed(worker_at, profile.samples());
             } else {
                 assert!(admission.pending.is_none()); // No unbounded waiting or retry.
                 if expired && first_deadline_drop.is_none() {
@@ -1743,6 +1832,336 @@ mod tests {
         assert_eq!(max_capture_wait, Duration::ZERO);
         assert_eq!(max_source_lag, Duration::from_millis(1));
         assert_eq!(outgoing.capacity(), 1);
+    }
+
+    #[test]
+    fn forty_five_minutes_of_punctual_capture_skew_do_not_expire_media() {
+        let mut evidence = Vec::new();
+        for profile in [LiveProfile::Ms20, LiveProfile::Ms40, LiveProfile::Ms60] {
+            for ppm in [-500i64, -100, 100, 500] {
+                let origin = Instant::now();
+                let captured = |samples: u64| {
+                    origin
+                        + Duration::from_nanos(
+                            (u128::from(samples) * u128::from(SAMPLE_NS) * 1_000_000
+                                / (1_000_000 + ppm) as u128) as u64,
+                        )
+                };
+                let port = test_port();
+                let (outgoing, _requests) = mpsc::channel(1);
+                let mut admission = MediaAdmission::default();
+                let maximum = profile.packet_cap() + packet::MEDIA_OVERHEAD;
+                let mut budget = packet::Budget::new(50_000, maximum, origin);
+                let mut phase = SendPhase { first: None };
+                let mut worker_at = origin;
+                let mut report_due = origin;
+                let mut admitted = 0u64;
+                let mut bytes = 0u128;
+                let mut max_wait = Duration::ZERO;
+                let mut max_service_lag = Duration::ZERO;
+                let mut max_phase = 0;
+                let mut first_drop_ms = None;
+                let mut clock = RecordClock::default();
+                let timestamp = |position: u64| {
+                    let frame_position = position + 800;
+                    let nano_time = 1_000_000_000
+                        + captured(frame_position).duration_since(origin).as_nanos() as i64;
+                    CaptureTimestamp {
+                        read_position: position as i64,
+                        frame_position: frame_position as i64,
+                        nano_time,
+                        observed_ns: nano_time,
+                    }
+                };
+                for batch in 0..20 {
+                    let position = batch * 160;
+                    clock.observe(timestamp(position), position, 160).unwrap();
+                }
+                assert_eq!(clock.frozen_floor(), Some(Duration::from_millis(50)));
+                let slots = 45 * 60 * 1000 / u64::from(profile.duration_ms());
+                for slot in 0..slots {
+                    let position = slot * profile.samples() as u64;
+                    let recording_position = 3200 + position;
+                    clock
+                        .observe(timestamp(recording_position), recording_position, 160)
+                        .unwrap();
+                    let captured_at = captured(position);
+                    // Each 160-sample read is punctual. A complete frame is
+                    // available at its last batch, with the actual source clock.
+                    let available_at = captured(position + profile.samples() as u64 - 160);
+                    let encoded_at = available_at.max(worker_at);
+                    max_wait = max_wait.max(encoded_at.duration_since(available_at));
+                    let mut waiting = WaitingPacket::new(
+                        vec![7; profile.duration_ms() as usize * 3 / 2],
+                        position,
+                        captured_at,
+                        captured_at,
+                        encoded_at,
+                        profile,
+                    );
+                    waiting.capture_clock = clock.span();
+                    admission
+                        .stage(waiting, &outgoing, 0, encoded_at, profile, &port)
+                        .unwrap();
+                    let due = admission
+                        .wake_at(&mut budget, encoded_at, profile)
+                        .unwrap_or(encoded_at);
+                    let now = due + Duration::from_millis(u64::from(slot != 0));
+                    if now >= report_due {
+                        assert!(budget.admit_feedback(now));
+                        bytes += packet::FEEDBACK_FRAMED_MAX as u128;
+                        report_due = now + Duration::from_millis(200);
+                    }
+                    if let Some((waiting, permit)) =
+                        admission.take_ready(&mut budget, now, profile, &port)
+                    {
+                        admitted += 1;
+                        bytes += waiting.bytes() as u128;
+                        max_phase = max_phase.max(phase.observe(position, captured_at));
+                        max_service_lag = max_service_lag.max(now.duration_since(available_at));
+                        drop(permit);
+                        worker_at = now + Duration::from_millis(1);
+                        admission.committed(worker_at, profile.samples());
+                    } else {
+                        assert!(admission.pending.is_none());
+                        first_drop_ms
+                            .get_or_insert_with(|| available_at.duration_since(origin).as_millis());
+                        worker_at = now;
+                    }
+                    assert!(
+                        bytes * 8 * 1_000_000_000
+                            <= (maximum + packet::FEEDBACK_FRAMED_MAX) as u128 * 8 * 1_000_000_000
+                                + 37_500 * now.duration_since(origin).as_nanos()
+                    );
+                    assert_eq!(outgoing.capacity(), 1);
+                    assert_eq!(
+                        admission.first,
+                        Some((0, captured(profile.samples() as u64 - 160)))
+                    );
+                }
+                let dropped = port.stats.lock().unwrap().dropped_capture;
+                assert_eq!(max_wait, Duration::ZERO);
+                assert!(max_service_lag < Duration::from_millis(2));
+                let last_position = (slots - 1) * profile.samples() as u64;
+                let expected_phase = (u128::from(last_position) * u128::from(SAMPLE_NS))
+                    .saturating_sub(captured(last_position).duration_since(origin).as_nanos())
+                    / 1000;
+                assert_eq!(u128::from(max_phase), expected_phase);
+                evidence.push((
+                    profile.duration_ms(),
+                    ppm,
+                    slots,
+                    admitted,
+                    dropped,
+                    first_drop_ms,
+                    max_wait.as_micros(),
+                    max_phase,
+                ));
+            }
+        }
+        assert!(
+            evidence.iter().all(|row| row.2 == row.3 && row.4 == 0),
+            "profile/ppm/slots/admitted/dropped/first-drop-ms/max-wait-us/sender-phase-us: {evidence:?}"
+        );
+    }
+
+    #[test]
+    fn physical_clock_span_survives_queue_wait_and_invalid_observations() {
+        let (audio, mut captured) = test_audio();
+        let origin = Instant::now();
+        let hardware_ns =
+            |frame: u64| 1_000_000_000 + (u128::from(frame) * 62_500_000_000 / 1_000_500) as i64;
+        let timestamp = |position: u64| CaptureTimestamp {
+            read_position: position as i64,
+            frame_position: (position + 800) as i64,
+            nano_time: hardware_ns(position + 800),
+            observed_ns: hardware_ns(position + 800),
+        };
+        for batch in 0..20 {
+            assert!(!audio.push_recorded(&[1; 160], timestamp(batch * 160), origin));
+        }
+        assert!(audio.push_recorded(&[1; 160], timestamp(3200), origin));
+        let chunk = captured.try_recv().unwrap();
+        let span = chunk.capture_clock.unwrap();
+        let first = audio.port.record_clock.lock().unwrap().first;
+        assert_eq!(first, Some((800, hardware_ns(800))));
+        assert_eq!(span.frames, 3200);
+        assert_eq!(
+            span.elapsed_ns,
+            (hardware_ns(4000) - hardware_ns(800)) as u64
+        );
+        let initial = audio.port.record_clock.lock().unwrap().latest;
+        let mut invalid = timestamp(3360);
+        invalid.observed_ns = -1;
+        assert!(!audio.push_recorded(&[1; 160], invalid, origin + Duration::from_millis(10)));
+        assert_eq!(audio.port.record_clock.lock().unwrap().first, first);
+        assert_eq!(audio.port.record_clock.lock().unwrap().latest, initial);
+        assert_eq!(
+            chunk.ages(origin + Duration::from_millis(40)).1,
+            CAPTURE_MAX_AGE
+        );
+        assert_eq!(chunk.capture_clock.unwrap().elapsed_ns, span.elapsed_ns);
+        assert!(audio.push_recorded(
+            &[1; 160],
+            timestamp(3520),
+            origin + Duration::from_millis(20)
+        ));
+        let next = captured.try_recv().unwrap();
+        let grown = next.capture_clock.unwrap();
+        assert_eq!(grown.frames, 3520);
+        assert_eq!(audio.port.record_clock.lock().unwrap().first, first);
+        assert_eq!(
+            audio
+                .port
+                .stats
+                .lock()
+                .unwrap()
+                .initial_capture_age_floor_us,
+            50_000
+        );
+        assert_eq!(
+            audio
+                .port
+                .stats
+                .lock()
+                .unwrap()
+                .capture_age_unavailable_batches,
+            1
+        );
+        assert_eq!(audio.port.position.load(Ordering::Relaxed), 3680);
+    }
+
+    #[test]
+    fn physical_source_slots_keep_late_commit_and_backpressure_bounds() {
+        for ppm in [-500i64, -100, 100, 500] {
+            let profile = LiveProfile::Ms20;
+            let samples = profile.samples() as u64;
+            let clock = CaptureClockSpan {
+                frames: (1_000_000 + ppm) as u64,
+                elapsed_ns: 62_500_000_000,
+            };
+            let origin = Instant::now();
+            let at = |slot: u64| origin + clock.duration(slot * samples).unwrap();
+            let waiting = |slot: u64, encoded_at| {
+                let mut packet = waiting20(slot * samples, at(slot), encoded_at);
+                packet.capture_clock = Some(clock);
+                packet
+            };
+            let port = test_port();
+            let (outgoing, _requests) = mpsc::channel(1);
+            let mut admission = MediaAdmission::default();
+            let mut budget = packet::Budget::new(50_000, 94, origin);
+            for (slot, encoded_at, admitted_at, committed_at) in [
+                (0, origin, origin, origin + Duration::from_millis(1)),
+                (
+                    1,
+                    at(1) + Duration::from_millis(10),
+                    at(2) - Duration::from_millis(2),
+                    at(3) + Duration::from_millis(5),
+                ),
+            ] {
+                admission
+                    .stage(
+                        waiting(slot, encoded_at),
+                        &outgoing,
+                        0,
+                        encoded_at,
+                        profile,
+                        &port,
+                    )
+                    .unwrap();
+                let (packet, permit) = admission
+                    .take_ready(&mut budget, admitted_at, profile, &port)
+                    .unwrap();
+                assert!(committed_at < packet.deadline);
+                drop(permit);
+                admission.committed(committed_at, profile.samples());
+            }
+            assert_eq!(admission.due(2 * samples, profile, at(3)), at(4));
+            assert_eq!(admission.due(10 * samples, profile, at(3)), at(10));
+            let encoded_at = at(3) + Duration::from_millis(6);
+            admission
+                .stage(
+                    waiting(2, encoded_at),
+                    &outgoing,
+                    0,
+                    encoded_at,
+                    profile,
+                    &port,
+                )
+                .unwrap();
+            assert!(admission
+                .take_ready(&mut budget, at(4) - Duration::from_nanos(1), profile, &port)
+                .is_none());
+            let (_, permit) = admission
+                .take_ready(&mut budget, at(4), profile, &port)
+                .unwrap();
+            drop(permit);
+            admission.committed(at(4) + Duration::from_millis(1), profile.samples());
+            let encoded_at = at(4) + Duration::from_millis(2);
+            admission
+                .stage(
+                    waiting(3, encoded_at),
+                    &outgoing,
+                    0,
+                    encoded_at,
+                    profile,
+                    &port,
+                )
+                .unwrap();
+            assert_eq!(outgoing.capacity(), 0);
+            let stalled_at = origin + Duration::from_secs(4);
+            assert!(admission
+                .take_ready(&mut budget, stalled_at, profile, &port)
+                .is_none());
+            assert_eq!(outgoing.capacity(), 1);
+            assert_eq!(port.stats.lock().unwrap().dropped_capture, samples);
+            assert_eq!(budget.media_ready_at(94, stalled_at), Some(stalled_at));
+            let current_slot = clock.slot(Duration::from_secs(4), profile.samples());
+            admission
+                .stage(
+                    waiting(current_slot, stalled_at),
+                    &outgoing,
+                    0,
+                    stalled_at,
+                    profile,
+                    &port,
+                )
+                .unwrap();
+            let (_, permit) = admission
+                .take_ready(&mut budget, stalled_at, profile, &port)
+                .unwrap();
+            drop(permit);
+            assert_eq!(admission.first, Some((0, origin)));
+            assert_eq!(
+                admission.due((current_slot + 1) * samples, profile, stalled_at),
+                at(current_slot + 1)
+            );
+            // The extended hardware span has the same ratio and cannot rebase
+            // source slots to the late service/receipt time.
+            let next_slot = admission.next_slot;
+            let mut next = waiting(current_slot + 1, at(current_slot + 1));
+            next.capture_clock = Some(CaptureClockSpan {
+                frames: clock.frames * 2,
+                elapsed_ns: clock.elapsed_ns * 2,
+            });
+            let next_at = at(current_slot + 1);
+            let credit_at = budget.media_ready_at(next.bytes(), next_at).unwrap();
+            admission
+                .stage(next, &outgoing, 0, next_at, profile, &port)
+                .unwrap();
+            assert_eq!(admission.next_slot, next_slot);
+            assert_eq!(
+                admission.wake_at(&mut budget, next_at, profile),
+                Some(next_at.max(credit_at))
+            );
+            let (_, permit) = admission
+                .take_ready(&mut budget, next_at.max(credit_at), profile, &port)
+                .unwrap();
+            drop(permit);
+            assert_eq!(admission.first, Some((0, origin)));
+            assert_eq!(port.stats.lock().unwrap().dropped_capture, samples);
+        }
     }
 
     #[test]
@@ -1770,7 +2189,7 @@ mod tests {
                 .unwrap();
             assert!(at(committed_ms) < waiting.deadline);
             drop(permit);
-            admission.committed(at(committed_ms));
+            admission.committed(at(committed_ms), profile.samples());
         }
         // The 39ms admission's valid 69ms commit crosses both 40 and 60ms.
         // Reaping that receipt at 70ms consumes slot 3; it does not rebase to
@@ -1847,7 +2266,7 @@ mod tests {
             .take_ready(&mut budget, origin, profile, &port)
             .unwrap();
         drop(permit);
-        admission.committed(at(1));
+        admission.committed(at(1), profile.samples());
         admission
             .stage(
                 waiting20(320, at(20), at(20)),
@@ -1954,7 +2373,7 @@ mod tests {
                     .unwrap();
                 assert_eq!(waiting.position, position);
                 drop(permit);
-                admission.committed(at(admitted_ms + 1));
+                admission.committed(at(admitted_ms + 1), profile.samples());
                 assert_eq!(admission.first, Some((first_position, origin)));
             }
             assert_eq!(

@@ -310,8 +310,8 @@ underrun0. Capture drops4480 include3200initial calibration and1280additional
 samples; hardware age maximum86954us/frozen floor46384us are observable. The host
 healthy122s snapshot had late22/PLC24 and **zero** render expiry; final post-phone
 shutdown counters are separate. These are packet/fixture counters, not source-active
-quality percentages, acoustic latency or measured DNS capacity. A fresh45-minute
-run continues with the corrected sink and clock pair.
+quality percentages, acoustic latency or measured DNS capacity. The subsequent
+45-minute records are described below, including their negative source counters.
 
 ### Opt-in synthetic useful-byte service
 
@@ -365,3 +365,74 @@ meter—not phone/DNS qualification—gave:
 Both role byte accounts matched authenticated frames with no retired partial
 bytes; setup was excluded and aggregate service bounds held. These component
 results do not replace applying the labelled model to the actual DNS fixture.
+
+### Completed long records and bounded impairment
+
+Two45-minute **Moto + synthetic Linux peer** direct-authoritative BBR records
+completed the authenticated DNS/cleanup instrumentation. They used the published
+pre-hardware-span sender grid; they are not latest two-Android, acoustic, continuous
+speech, measured recursive capacity or source-active quality acceptance.
+
+| 40ms run | Phone decoded / received RTP | Late / PLC | Native render expiry samples | Total captured samples dropped |
+| --- | --- | --- | --- | --- |
+| Default relay, no byte-service meter | 67137 /67502 | 363 /366 | 2720 | 549760 |
+| Synthetic50k framed-byte service | 67483 /67504 | 18 /18 | 1120 | 21760 |
+
+These are pre-teardown cumulative counters, including3200initial calibration
+samples in capture drops. The host's last healthy snapshots were late373/PLC1220
+and late501/PLC530 respectively, with native render expiry0 in both. Post-phone
+shutdown progress expiry is excluded from the healthy interval. The first versus
+last roughly five-minute source-drop deltas in the default run were33280/204800;
+the50k-meter run had8960/640. Workloads/hardware clocks differ between runs, so
+this is not causal proof that the meter fixes drift or latency.
+
+The50k model finished at2701153ms: role read/authenticated/retired-partial bytes
+were5478168/5478168/0 and9008966/9008869/97, with live partial0. The partial tail
+remains charged. Declared50k/F0=600ms is not a measured DNS safe-capacity or feedback
+calibration, and observer bypass provides no query-rate claim.
+
+Actual DNS30s modelled50/80 baselines and a50k→20k300ms collapse also completed:
+phone late/PLC19/19,1/1 and4/4, native render expiry0. They remain small counter
+records, not active-speech percentages or normal/recovery latency percentiles.
+Separate protected **DirectTCP component-only** zero-service tests produced:
+
+| 50k service interruption | Decoded A/B | PLC A/B | Result |
+| --- | --- | --- | --- |
+| 0bps100ms | 191/192 | 3/2 | Bounded continuation |
+| 0bps300ms | 180/181 | 14/13 | Bounded continuation |
+| 0bps1000ms | 73/73 | 14/14 | Expected terminal progress expiry |
+| Fresh generation after1000ms case | 194/194 | 0/0 | Same Noise trust pins, new media keys/SSRC/state |
+
+The1000ms case charged consumed partial frames without refund; fresh generation
+does not replay them. This is component retirement, not production reconnect or
+an acoustic recovery-time guarantee.
+
+### Hardware-clock-aware sender admission
+
+The nominal16000 sender grid had a separate deterministic defect: valid punctual
+capture at+100/+500ppm gradually waited past unchanged plaintext deadlines. A
+45-minute simulated capture test reproduced first drops at490.020/98.020s for
+20ms and490.060/98.060s for40ms; the60ms limits were390.070/78.070s. Slower capture
+was already loss-free. This source proof does not attribute the physical records
+above to that defect.
+
+Admission now projects the immutable source epoch using integral hardware
+frame/nanosecond spans from validated AudioRecord observations. Invalid references
+cannot move those anchors; transport/encoding/Noise receipt time does not estimate
+the source frequency. Consumed source-slot ordinals remain monotonic through span
+updates and delayed commits. Host synthetic input retains nominal timing.
+
+All990000 modeled20/40/60ms frame attempts across±100/500ppm now admit without
+deadline drops or cumulative ready waiting. Positive nominal source phase remains
+observable, not rebased away. Byte allowances, fixed80 receiver, capture floor,
+age bounds, queues, one pending lane reservation, feedback and crypto are unchanged.
+This is sender correctness, **not** end-to-end skew compensation or a resampler.
+
+Latest checks:64 focused probe tests, CLI sink test and319 workspace tests pass;
+the same two explicit native ignores remain. Arm64/API26 and full Android/JVM122
+builds pass. Actual local Moto8s gate has decoded210/PLC0/late0, no active capture
+or render loss, and cleanup. A fresh60s actual-DNS synthetic50k run has decoded1501,
+late1/PLC1, future rejection0, native render expiry0, and only3200calibration capture
+drops; intentional teardown is scored separately. Absolute hardware age78737us,
+frozen floor39503us and clock-observation uncertainty4198us remain visible. No
+acoustic/source-active quality or latest two-phone PASS is inferred.
