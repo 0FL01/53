@@ -502,6 +502,59 @@ mod tests {
     }
 
     #[test]
+    fn admitted_bulk_and_maximum_send_debt_cannot_be_hidden_from_voice_service() {
+        use dmsg_protocol::{blob, encode_frame, mailbox};
+
+        let bulk_payload = blob::build_put(&[1; 16], 0, &vec![0; blob::CHUNK_MAX]).unwrap();
+        assert_eq!(blob::parse_put(&bulk_payload).unwrap().bytes.len(), 8192);
+        let bulk = encode_frame(dmsg_protocol::OP_BLOB_PUT, &bulk_payload).unwrap();
+        let mut send_payload = vec![1; 32]; // Recipient and message ID, not test secrets.
+        send_payload.extend(vec![0; dmsg_protocol::CIPHERTEXT_MAX]);
+        assert_eq!(
+            mailbox::parse_send(&send_payload).unwrap().ciphertext.len(),
+            dmsg_protocol::CIPHERTEXT_MAX
+        );
+        let send = encode_frame(dmsg_protocol::OP_SEND, &send_payload).unwrap();
+        // Application header is already in encode_frame; add Noise tag16/prefix2
+        // once. The opaque SEND is the protocol ceiling, not a shorter ping or
+        // a claim that a specific TEXT/Olm message necessarily reaches it.
+        let bulk_bytes = bulk.len() + 18;
+        let send_bytes = send.len() + 18;
+        assert_eq!((bulk_bytes, send_bytes), (8234, 16358));
+
+        for bps in [50_000, 80_000] {
+            for competitor_bytes in [bulk_bytes, send_bytes, 3 * send_bytes] {
+                let model = SyntheticServiceModel::new(config(bps), 40).unwrap();
+                let epoch = Instant::now();
+                model.arm(epoch).unwrap();
+                let mut role = model.0.roles[0].lock().unwrap();
+                let mut now = epoch;
+                // A conservative FIFO debt model: already-admitted competitor
+                // bytes consume A's existing service before its next voice byte.
+                // No production lane, packet queue, scheduler or refund is added.
+                for _ in 0..competitor_bytes {
+                    now = role.meter.ready_at(now);
+                    assert_eq!(role.meter.allowance(now), 1);
+                    role.meter.consume(1);
+                }
+                let serialization_ns =
+                    (competitor_bytes as u128 * BYTE_CREDIT).div_ceil(u128::from(bps));
+                assert_eq!(now.duration_since(epoch).as_nanos(), serialization_ns);
+                assert_eq!(role.meter.allowance(now), 0);
+                // Even one full admitted competitor can outlast the frozen720ms
+                // media-progress allowance. This is negative coexistence evidence,
+                // not proof of how C/QUIC schedules concurrent production streams.
+                assert!(serialization_ns > 720_000_000);
+                let mut ledger = super::super::packet::Ledger::new(100, 40, 600);
+                ledger.commit(1, 144, epoch).unwrap();
+                assert!(ledger.check(now, 0).is_err());
+                let mut other = model.0.roles[1].lock().unwrap();
+                assert_eq!(other.meter.allowance(now), 152); // B was not debited.
+            }
+        }
+    }
+
+    #[test]
     fn collapse_resets_credit_bounds_low_service_and_wakes_zero_restoration() {
         for low_bps in [0, 20_000] {
             let mut cfg = config(50_000);

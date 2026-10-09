@@ -436,3 +436,65 @@ late1/PLC1, future rejection0, native render expiry0, and only3200calibration ca
 drops; intentional teardown is scored separately. Absolute hardware age78737us,
 frozen floor39503us and clock-observation uncertainty4198us remain visible. No
 acoustic/source-active quality or latest two-phone PASS is inferred.
+
+### Latest 80k long record and remaining receive-clock limitation
+
+The **e98dd3a** Moto + synthetic Linux peer run completed2700021ms of the
+direct-authoritative DNS fixture with BBR and synthetic80k framed-ingress service.
+Instrumentation and cleanup passed; phone NativeClient stop/join took2ms (probe3ms).
+Its pre-teardown counters were decoded67382/RTP67506, late122/PLC122,
+capture drops95360 (including3200calibration), native render expiry640 samples,
+future rejection0 and7 AudioTrack underruns. These are counters, **not** active
+speech loss or an acoustic-latency result. The host's last healthy snapshot was
+late200/PLC344, capture drops25600 (unchanged from readiness) and render expiry0;
+the expected post-phone progress expiry is not part of the healthy interval.
+
+Final service accounting at2701321ms was read/authenticated6072748/6072748 and
+9009587/9009587 bytes, live/retired partial0 for both roles. The model charges only
+framed application ingress after DNS transit; it does not measure recursive DNS
+capacity. First/last roughly five-minute phone late deltas were1/49, while capture
+drop deltas were24320/4480. Host late deltas were51/0. Different workloads and
+clock observations prevent causal comparison with the earlier50k run.
+
+Four additional deterministic scenarios use existing seams; no runtime, queue,
+deadline, security or codec behavior changed:
+
+- **Protected rollover:** SRTP-authenticated SEQ65534/65535/0 and
+  RTP timestamp0xfffff880/0/1920 reach `ReceiveState::receive` with increasing
+  extended counters, three accepted packets, no late/future rejection.
+- **Known active/zero/DTX accounting:** continuous Opus/SRTP processes20 active
+  and100 intentional-zero40ms slots. A deliberately expired active packet is
+  dropped before encryption;119 transmitted packets decode, one PLC slot retires
+  once, and legal tiny DTX packets remain valid. The known active denominator is
+ 800ms; the intentional40ms source loss is5%, not0% just because all sent packets
+  decoded. This synthetic material is not a listening/intelligibility test.
+- **Independent relative clocks:** a45-minute virtual40ms source and nominal sink
+  retain the current fixed80ms receive mapping and200ms future bound. Sender
+  admission correction alone does **not** compensate remote receive-clock drift:
+
+  | Source relative to sink | First late/future rejection | First PLC | Rejected frames / PLC slots |
+  | --- | --- | --- | --- |
+  | −500ppm | Late160.040020010s | 160.040s | 63501 |
+  | −100ppm | Late800.040004000s | 800.040s | 47501 |
+  | +100ppm | Future1600s | 1600.240s | 27496 |
+  | +500ppm | Future320s | 320.240s | 59496 |
+
+  Encoded occupancy stays at most six packets and native PCM one640-sample frame;
+  bounded memory is **not** successful skew acceptance. Virtual arrivals use
+  `admit`/`tick`; authentication is covered by the separate protected scenario.
+- **Already-admitted competitor debt:** existing protocol builders/parsers yield
+ 8234 framed bytes for an8192-byte BLOB_PUT and16358 for a maximum permitted opaque
+  SEND (Noise16/prefix2 included once). Under a conservative FIFO debt model,
+  serialization takes1.31744/2.61728s at50k and0.8234/1.6358s at80k; three maximum
+  SENDs take7.85184/4.9074s. All can exceed the frozen720ms progress limit, so the
+  negative case must retire rather than silently enlarge credit. The other role's
+  meter is untouched. This test debits the existing meter, **not** actual competing
+  C/QUIC streams, production bulk pause, TEXT durability or a new scheduler.
+
+The68 focused probe tests and formatting check pass. Passing these tests preserves
+their deliberately negative cases; it does not qualify the current receiver for
+arbitrary±100/500ppm. Next source work must address remote-rate versus actual sink
+consumption separately from network jitter, using the existing platform actuator
+where sufficient—not move the baseline or enlarge buffers to hide drift. Full
+two-Android, common-clock acoustic, listening and representative recursive-path
+acceptance remains open; Pacman is not operated while withdrawn by the user.

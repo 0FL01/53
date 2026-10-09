@@ -3300,6 +3300,339 @@ mod tests {
     }
 
     #[test]
+    fn protected_rtp_sequence_and_timestamp_rollover() {
+        let (mut local, mut peer, _, _) = fixture::pair(PublicConfig {
+            relay_addr: "127.0.0.1:1".into(),
+            domain: "m1v.fixture".into(),
+            profile_ms: 40,
+            healthy_cycle_ms: 600,
+            capacity_bps: 50_000,
+            carriers: [None, None],
+        })
+        .unwrap();
+        // Diagnostic near-wrap origins: both 16-bit SEQ and 32-bit 48 kHz TS
+        // cross zero inside three authenticated packets.
+        peer.initial_sequence = 65_534;
+        peer.initial_timestamp = 0xffff_f880;
+        local.peer_initial_sequence = peer.initial_sequence;
+        local.peer_initial_timestamp = peer.initial_timestamp;
+        let port = test_port();
+        let mut received = ReceiveState {
+            index: u64::from(local.peer_initial_sequence),
+            timestamp: u64::from(local.peer_initial_timestamp),
+            encoded: VecDeque::new(),
+            playout: None,
+        };
+        let mut sender = dmsg_srtp_sys::Sender::new(&peer.media_tx, peer.ssrc_tx).unwrap();
+        let mut receiver = dmsg_srtp_sys::Receiver::new(&local.media_rx, local.ssrc_rx).unwrap();
+        let mut feedback = packet::Feedback::default();
+        let mut previous = None;
+        for step in 0..3u64 {
+            let index = u64::from(peer.initial_sequence) + step;
+            let timestamp = peer.initial_timestamp.wrapping_add(1920 * step as u32);
+            let cipher = sender
+                .protect_rtp(&packet::rtp(peer.ssrc_tx, index, timestamp, &opus40()))
+                .unwrap();
+            received
+                .receive(
+                    (OP_RTP, cipher),
+                    &mut receiver,
+                    &local,
+                    &mut feedback,
+                    &port,
+                )
+                .unwrap();
+            assert_eq!(feedback.terminal, Some(index));
+            assert_eq!(
+                received.timestamp,
+                u64::from(peer.initial_timestamp) + 1920 * step
+            );
+            assert!(previous.is_none_or(|old| index > old));
+            previous = Some(index);
+        }
+        assert_eq!(feedback.terminal, Some(65_536));
+        assert_eq!(received.timestamp, 0x1_0000_0780);
+        let stats = port.stats.lock().unwrap();
+        assert_eq!(stats.received_rtp_packets, 3);
+        assert_eq!(stats.late_packets, 0);
+        assert_eq!(stats.future_rejected_packets, 0);
+        assert_eq!(received.encoded.len(), 3);
+    }
+
+    #[test]
+    fn protected_active_silence_dtx_and_application_drop_accounting() {
+        let (local, peer, _, _) = fixture::pair(PublicConfig {
+            relay_addr: "127.0.0.1:1".into(),
+            domain: "m1v.fixture".into(),
+            profile_ms: 40,
+            healthy_cycle_ms: 600,
+            capacity_bps: 50_000,
+            carriers: [None, None],
+        })
+        .unwrap();
+        let profile = LiveProfile::Ms40;
+        // receive() uses wall time; a future origin keeps its authenticated
+        // admission deterministic while tick/pull use this virtual timeline.
+        let origin = Instant::now() + Duration::from_secs(60);
+        let first_timestamp = u64::from(peer.initial_timestamp);
+        let source = test_port();
+        let port = test_port();
+        let mut received = test_received();
+        received.index = u64::from(peer.initial_sequence);
+        received.timestamp = first_timestamp;
+        received.playout = Some(PlayoutClock {
+            cursor: first_timestamp,
+            due: origin + Duration::from_millis(80),
+        });
+        let mut encoder = LiveEncoder::new(profile).unwrap();
+        let mut decoder = LiveDecoder::new(profile).unwrap();
+        let mut sender = dmsg_srtp_sys::Sender::new(&peer.media_tx, peer.ssrc_tx).unwrap();
+        let mut receiver = dmsg_srtp_sys::Receiver::new(&local.media_rx, local.ssrc_rx).unwrap();
+        let mut feedback = packet::Feedback::default();
+        let (outgoing, _requests) = mpsc::channel(1);
+        let mut admission = MediaAdmission::default();
+        let mut budget = packet::Budget::new(50_000, 144, origin);
+        let mut index = u64::from(peer.initial_sequence);
+        let (mut active_decoded, mut silent_decoded, mut active_plc) = (0, 0, 0);
+        let (mut tiny_dtx, mut framed_bytes, mut rendered_samples) = (0, 0, 0);
+        for slot in 0..120u64 {
+            // Activity is fixture truth, not an encoder/VAD/decoded-PCM guess.
+            let active = !(10..110).contains(&slot);
+            let position = slot as usize * profile.samples();
+            let pcm = if active {
+                super::super::test_tone(position, profile.samples())
+            } else {
+                vec![0; profile.samples()]
+            };
+            let encoded = encoder.encode(&pcm).unwrap(); // Continuous, including the drop.
+            if encoded.in_dtx && encoded.bytes.len() <= 2 {
+                assert!(!active);
+                assert_eq!(encoded.info.concealed_samples, 640);
+                tiny_dtx += 1;
+            }
+            if slot == 4 {
+                let at = origin + Duration::from_millis(slot * 40);
+                let waiting =
+                    WaitingPacket::new(encoded.bytes, position as u64, at, at, at, profile);
+                let deadline = waiting.deadline;
+                admission
+                    .stage(waiting, &outgoing, 0, at, profile, &source)
+                    .unwrap();
+                assert!(admission
+                    .take_ready(&mut budget, deadline, profile, &source)
+                    .is_none());
+                assert_eq!(outgoing.capacity(), 1); // Drop precedes SRTP/sequence use.
+                active_plc += 1;
+            } else {
+                if slot == 5 {
+                    assert_eq!(index, u64::from(peer.initial_sequence) + 4);
+                    assert_eq!(received.timestamp, first_timestamp + 3 * 1920);
+                }
+                let timestamp = peer.initial_timestamp.wrapping_add((position * 3) as u32);
+                let cipher = sender
+                    .protect_rtp(&packet::rtp(peer.ssrc_tx, index, timestamp, &encoded.bytes))
+                    .unwrap();
+                framed_bytes += (cipher.len() + packet::FRAMING_BYTES) as u64;
+                received
+                    .receive(
+                        (OP_RTP, cipher),
+                        &mut receiver,
+                        &local,
+                        &mut feedback,
+                        &port,
+                    )
+                    .unwrap();
+                assert_eq!(feedback.terminal, Some(index));
+                assert_eq!(received.timestamp, first_timestamp + slot * 1920);
+                index += 1;
+                active_decoded += u64::from(active);
+                silent_decoded += u64::from(!active);
+            }
+            let due = origin + Duration::from_millis(80 + slot * 40);
+            let before = port.stats.lock().unwrap().clone();
+            received
+                .tick(
+                    due - Duration::from_nanos(1),
+                    profile,
+                    &mut decoder,
+                    &mut feedback,
+                    &port,
+                )
+                .unwrap();
+            assert_eq!(
+                received.playout.as_ref().unwrap().cursor,
+                first_timestamp + slot * 1920
+            );
+            received
+                .tick(due, profile, &mut decoder, &mut feedback, &port)
+                .unwrap();
+            {
+                let stats = port.stats.lock().unwrap();
+                assert_eq!(
+                    stats.decoded_packets - before.decoded_packets,
+                    u64::from(slot != 4)
+                );
+                assert_eq!(stats.plc_slots - before.plc_slots, u64::from(slot == 4));
+            }
+            let mut batch = [0; 160];
+            for _ in 0..4 {
+                assert_eq!(port.render.lock().unwrap().pull(due, &mut batch), (160, 0));
+                rendered_samples += batch.len();
+            }
+            received
+                .tick(due, profile, &mut decoder, &mut feedback, &port)
+                .unwrap(); // Draining cannot decode/conceal the same slot again.
+            let stats = port.stats.lock().unwrap();
+            assert_eq!(stats.decoded_packets, active_decoded + silent_decoded);
+            assert_eq!(stats.plc_slots, active_plc);
+            assert_eq!(feedback.playout, Some(first_timestamp + (slot + 1) * 1920));
+        }
+        assert_eq!((active_decoded, silent_decoded, active_plc), (19, 100, 1));
+        assert!(
+            tiny_dtx > 10,
+            "intentional zero PCM must exercise legal tiny DTX"
+        );
+        assert_eq!(rendered_samples, 120 * 640);
+        assert_eq!(source.stats.lock().unwrap().dropped_capture, 640);
+        let stats = port.stats.lock().unwrap();
+        assert_eq!(stats.received_rtp_packets, 119);
+        assert_eq!(stats.rx_bytes, framed_bytes);
+        assert_eq!((feedback.late, feedback.plc), (0, 1));
+        assert_eq!(stats.plc_before_nominal_due_slots, 0);
+        assert_eq!(stats.late_packets + stats.future_rejected_packets, 0);
+        assert_eq!(stats.dropped_render + stats.skipped_playout_slots, 0);
+        assert!(received.encoded.is_empty() && port.render.lock().unwrap().pcm.is_empty());
+        // The known active denominator is 20*40ms: one intentional 40ms/5%
+        // source-active loss, even though every transmitted packet decoded.
+    }
+
+    #[test]
+    fn relative_source_sink_skew_preserves_fixed_receive_bounds_and_negative_results() {
+        let profile = LiveProfile::Ms40;
+        let slots = 45 * 60 * 1000 / 40;
+        // (relative source ppm, first failed source slot, first arrival ns,
+        //  first PLC due ns, maximum observed future lead ms, maximum queue).
+        for (ppm, first_failed, first_arrival_ns, first_plc_ns, max_lead, max_queue) in [
+            (
+                -500i64,
+                3999u64,
+                160_040_020_010u64,
+                160_040_000_000u64,
+                40,
+                2,
+            ),
+            (-100, 19999, 800_040_004_000, 800_040_000_000, 40, 2),
+            (100, 40004, 1_600_000_000_000, 1_600_240_000_000, 320, 6),
+            (500, 8004, 320_000_000_000, 320_240_000_000, 1400, 6),
+        ] {
+            let origin = Instant::now();
+            let due = |slot| origin + Duration::from_millis(80 + slot * 40);
+            let port = test_port();
+            let mut received = test_received();
+            let mut decoder = LiveDecoder::new(profile).unwrap();
+            let mut feedback = packet::Feedback::default();
+            // Legal WB40 DTX exercises actual decode/PLC cheaply. Authentication
+            // is covered above; admit() supplies explicit virtual arrival time.
+            let opus = [0x50];
+            dmsg_opus_sys::live::validate_packet(profile, &opus).unwrap();
+            let mut first_late = None;
+            let mut first_future = None;
+            let mut first_plc = None;
+            let mut observed_queue = 0;
+            let mut next_sink_slot = 0;
+            let mut render_slot = |received: &mut ReceiveState,
+                                   decoder: &mut LiveDecoder,
+                                   feedback: &mut packet::Feedback,
+                                   slot| {
+                let before = feedback.plc;
+                received
+                    .tick(due(slot), profile, decoder, feedback, &port)
+                    .unwrap();
+                if feedback.plc != before && first_plc.is_none() {
+                    first_plc = Some((slot, due(slot).duration_since(origin).as_nanos() as u64));
+                }
+                let mut batch = [0; 160];
+                for _ in 0..4 {
+                    assert_eq!(
+                        port.render.lock().unwrap().pull(due(slot), &mut batch),
+                        (160, 0)
+                    );
+                }
+                let clock = received.playout.as_ref().unwrap();
+                assert_eq!(clock.cursor, (slot + 1) * 1920);
+                assert_eq!(clock.due, due(slot + 1)); // No remote-rate compensation/rebase.
+            };
+            for slot in 0..slots {
+                // Sink is exactly nominal16k/48k; only the independent source
+                // advances at (1+ppm/1e6). No sender/admission-clock reuse.
+                let arrival_ns = slot * 40_000_000 * 1_000_000 / (1_000_000 + ppm) as u64;
+                let arrival = origin + Duration::from_nanos(arrival_ns);
+                // Ready arrivals win exact ties with the sink tick, as on-lane
+                // drain-before-tick does. Both clocks otherwise progress independently.
+                while next_sink_slot < slots && due(next_sink_slot) < arrival {
+                    render_slot(&mut received, &mut decoder, &mut feedback, next_sink_slot);
+                    next_sink_slot += 1;
+                }
+                let before = port.stats.lock().unwrap().clone();
+                received.admit(slot * 1920, &opus, arrival, profile, &mut feedback, &port);
+                let stats = port.stats.lock().unwrap();
+                if stats.late_packets != before.late_packets && first_late.is_none() {
+                    first_late = Some((slot, arrival_ns));
+                }
+                if stats.future_rejected_packets != before.future_rejected_packets
+                    && first_future.is_none()
+                {
+                    first_future = Some((slot, arrival_ns));
+                }
+                observed_queue = observed_queue.max(received.encoded.len());
+                assert!(received.encoded.len() <= 6); // Existing200ms+current bound.
+                assert!(port.render.lock().unwrap().pcm.is_empty());
+            }
+            while next_sink_slot < slots {
+                render_slot(&mut received, &mut decoder, &mut feedback, next_sink_slot);
+                next_sink_slot += 1;
+            }
+            let failure = Some((first_failed, first_arrival_ns));
+            assert_eq!(
+                first_late,
+                if ppm < 0 { failure } else { None },
+                "ppm={ppm}"
+            );
+            assert_eq!(
+                first_future,
+                if ppm > 0 { failure } else { None },
+                "ppm={ppm}"
+            );
+            assert_eq!(first_plc, Some((first_failed, first_plc_ns)), "ppm={ppm}");
+            let stats = port.stats.lock().unwrap();
+            assert_eq!(stats.decoded_packets, first_failed, "ppm={ppm}");
+            assert_eq!(stats.plc_slots, slots - first_failed, "ppm={ppm}");
+            assert_eq!(
+                stats.late_packets,
+                if ppm < 0 { slots - first_failed } else { 0 }
+            );
+            assert_eq!(
+                stats.future_rejected_packets,
+                if ppm > 0 { slots - first_failed } else { 0 }
+            );
+            assert_eq!(stats.arrival_after_nominal_due_packets, stats.late_packets);
+            assert_eq!(
+                stats.late_before_nominal_due_packets + stats.plc_before_nominal_due_slots,
+                0
+            );
+            assert_eq!(stats.dropped_render, stats.future_rejected_packets * 640);
+            assert_eq!(stats.max_future_lead_ms, max_lead);
+            assert_eq!(observed_queue, max_queue);
+            assert_eq!(
+                stats.expired_render_samples + stats.skipped_playout_slots,
+                0
+            );
+            assert_eq!(stats.decoded_packets + stats.plc_slots, slots);
+            assert!(received.encoded.is_empty());
+        }
+    }
+
+    #[test]
     fn renderer_stall_rejects_nominally_late_arrival_and_skips_without_rebase() {
         let profile = LiveProfile::Ms40;
         let origin = Instant::now();
