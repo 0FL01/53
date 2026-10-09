@@ -1,6 +1,7 @@
 //! Fixture source clocks. Arrival time is a health check, never a rate sample.
 use super::packet::SenderClock;
-use std::time::{Duration, Instant};
+use std::cell::Cell;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const NTP_SECOND: u128 = 1 << 32;
 const SECOND_NS: u128 = 1_000_000_000;
@@ -42,6 +43,7 @@ impl Rate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::voice_probe::packet;
 
     fn rate(ppm: i64) -> Rate {
         Rate {
@@ -92,6 +94,270 @@ mod tests {
         assert_eq!((after.packets, after.octets), (7, 321));
         assert!(remote.valid(origin + Duration::from_secs(40)));
         assert_eq!(remote.rate.ppb(), 500_000);
+    }
+
+    #[test]
+    fn authenticated_peer_epochs_and_wall_jumps_do_not_change_frequency() {
+        // UTC offsets are deliberately included in the seeded wall epochs as
+        // a stronger case than display-only timezones. No OS clock is changed.
+        let cases = [
+            (
+                Duration::from_secs(31_536_000 - 12 * 3_600),
+                Duration::from_secs(6_307_200_000 + 14 * 3_600),
+                [-100, 100],
+            ),
+            (
+                Duration::new(u64::from(u32::MAX) - 2_208_988_800, 500_000_001),
+                Duration::from_secs(1_787_000_000 + 20_700),
+                [-500, 500],
+            ),
+        ];
+        for (wall_a, wall_b, ppm) in cases {
+            let origin = Instant::now();
+            let epochs = [ntp_from_unix(wall_a), ntp_from_unix(wall_b)];
+            assert_ne!(epochs[0], epochs[1]);
+            let mut locals = [
+                LocalClock::new(origin, epochs[0], u32::MAX - 1_000),
+                LocalClock::new(origin, epochs[1], u32::MAX - 2_000),
+            ];
+            let mut peers = [RemoteClock::default(), RemoteClock::default()];
+            let keys = [[42; 30], [43; 30]];
+            let mut senders = [
+                dmsg_srtp_sys::Sender::new(&keys[0], 7).unwrap(),
+                dmsg_srtp_sys::Sender::new(&keys[1], 8).unwrap(),
+            ];
+            let mut receivers = [
+                dmsg_srtp_sys::Receiver::new(&keys[0], 7).unwrap(),
+                dmsg_srtp_sys::Receiver::new(&keys[1], 8).unwrap(),
+            ];
+            let mut rejected = [0u64; 2];
+            for role in 0..2 {
+                locals[role].observe(0, origin, Some(rate(ppm[role])));
+            }
+            for millis in (0..=40_000u64).step_by(200) {
+                let now = origin + Duration::from_millis(millis);
+                for role in 0..2 {
+                    // Model new SystemTime readbacks jumping backwards/forwards
+                    // mid-session. LocalClock retains its single captured epoch;
+                    // report() takes only monotonic time, not these readbacks.
+                    let wall_readback = if millis < 20_000 {
+                        [wall_a, wall_b][role] + Duration::from_millis(millis)
+                    } else if millis < 30_000 {
+                        Duration::from_secs(1 + role as u64 * 3_600)
+                    } else {
+                        Duration::from_secs(7_200_000_000 + role as u64 * 50_400)
+                    };
+                    locals[role].observe(
+                        millis * 16,
+                        now - Duration::from_millis(3),
+                        Some(rate(ppm[role])),
+                    );
+                    let count = (u32::MAX - 10).wrapping_add(millis as u32 / 40 + 1);
+                    let source = locals[role].report(now, count, 321).unwrap();
+                    assert_eq!(
+                        source.ntp,
+                        epochs[role].wrapping_add((u128::from(millis) * NTP_SECOND / 1_000) as u64)
+                    );
+                    if millis >= 20_000 {
+                        assert_ne!(source.ntp, ntp_from_unix(wall_readback));
+                    }
+                    let ssrc = 7 + role as u32;
+                    let plain = packet::compound(packet::Report {
+                        sender_ssrc: ssrc,
+                        peer_ssrc: 15 - ssrc,
+                        cname: b"test0001",
+                        sender: Some((source.ntp, source.rtp, source.packets, source.octets)),
+                        feedback: packet::Feedback {
+                            terminal: Some(9),
+                            ..packet::Feedback::default()
+                        },
+                    });
+                    assert_eq!(plain.len(), 116);
+                    let cipher = senders[role].protect_rtcp(&plain).unwrap();
+                    assert_eq!(cipher.len() + packet::FRAMING_BYTES, 152);
+                    let plain = receivers[role].unprotect_rtcp(&cipher).unwrap();
+                    let parsed =
+                        packet::read_compound(&plain, ssrc, 15 - ssrc, b"test0001").unwrap();
+                    assert_eq!(parsed.terminal, Some(9));
+                    assert_eq!(parsed.sender_clock, Some(source));
+                    rejected[role] +=
+                        u64::from(!peers[role].observe(parsed.sender_clock.unwrap(), now));
+                    assert_eq!(locals[role].source, Some((0, origin)));
+                }
+            }
+            assert_eq!(rejected, [0, 0]);
+            for role in 0..2 {
+                assert!(peers[role].valid(origin + Duration::from_secs(40)));
+                assert_eq!(peers[role].rate.ppb(), ppm[role] * 1_000);
+                assert_eq!(peers[role].rejection_mask, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn signed_system_wall_epochs_preserve_ntp_fraction_and_era() {
+        let unix_ntp = 2_208_988_800u64 << 32;
+        for duration in [
+            Duration::ZERO,
+            Duration::from_nanos(1),
+            Duration::new(1, 999_999_999),
+            Duration::new(u64::from(u32::MAX) - 2_208_988_800, 500_000_001),
+        ] {
+            assert_eq!(
+                ntp_from_system_time(UNIX_EPOCH + duration),
+                ntp_from_unix(duration)
+            );
+        }
+        for (before, expected) in [
+            (Duration::from_nanos(1), unix_ntp - 5),
+            (Duration::from_millis(500), unix_ntp - (1 << 31)),
+            (Duration::new(1, 500_000_000), unix_ntp - 3 * (1 << 31)),
+            (Duration::new(0, 999_999_999), unix_ntp - (1 << 32) + 4),
+            (Duration::from_secs(2_208_988_800), 0),
+            (Duration::new(2_208_988_800, 1), u64::MAX - 4),
+            (Duration::new(2_208_988_799, 999_999_999), 4),
+            (Duration::from_secs(2_208_988_800 + (1 << 32)), 0),
+        ] {
+            assert_eq!(ntp_from_system_time(UNIX_EPOCH - before), expected);
+        }
+        let era = UNIX_EPOCH + Duration::from_secs((1 << 32) - 2_208_988_800);
+        for (wall, expected) in [
+            (era - Duration::from_nanos(1), u64::MAX - 4),
+            (era, 0),
+            (era + Duration::from_nanos(1), 4),
+        ] {
+            assert_eq!(ntp_from_system_time(wall), expected);
+        }
+    }
+
+    #[test]
+    fn authenticated_pre_unix_peers_calibrate_with_zero_epoch_rr() {
+        let ntp_epoch = UNIX_EPOCH - Duration::from_secs(2_208_988_800);
+        let previous_era = ntp_epoch - Duration::from_secs(1 << 32);
+        let next_era = UNIX_EPOCH + Duration::from_secs((1 << 32) - 2_208_988_800);
+        let cases = [
+            (
+                UNIX_EPOCH - Duration::from_nanos(1),
+                UNIX_EPOCH + Duration::from_secs(1_787_000_000),
+                [-100, 100],
+            ),
+            (
+                UNIX_EPOCH - Duration::new(1, 500_000_000),
+                UNIX_EPOCH - Duration::from_secs(31_536_000),
+                [-500, 500],
+            ),
+            (ntp_epoch, next_era, [-500, 500]),
+            (
+                previous_era - Duration::from_nanos(1),
+                ntp_epoch + Duration::from_nanos(1),
+                [-100, 100],
+            ),
+        ];
+        for (wall_a, wall_b, ppm) in cases {
+            let origin = Instant::now();
+            let epochs = [ntp_from_system_time(wall_a), ntp_from_system_time(wall_b)];
+            let mut locals = [
+                LocalClock::new(origin, epochs[0], u32::MAX - 1_000),
+                LocalClock::new(origin, epochs[1], u32::MAX - 2_000),
+            ];
+            let mut peers = [RemoteClock::default(), RemoteClock::default()];
+            let keys = [[44; 30], [45; 30]];
+            let mut senders = [
+                dmsg_srtp_sys::Sender::new(&keys[0], 7).unwrap(),
+                dmsg_srtp_sys::Sender::new(&keys[1], 8).unwrap(),
+            ];
+            let mut receivers = [
+                dmsg_srtp_sys::Receiver::new(&keys[0], 7).unwrap(),
+                dmsg_srtp_sys::Receiver::new(&keys[1], 8).unwrap(),
+            ];
+            let mut first_sr = [None; 2];
+            let mut first_valid = [None; 2];
+            for role in 0..2 {
+                locals[role].observe(0, origin, Some(rate(ppm[role])));
+            }
+            for millis in (0..=40_400u64).step_by(200) {
+                let now = origin + Duration::from_millis(millis);
+                for role in 0..2 {
+                    let count = (u32::MAX - 10).wrapping_add(millis as u32 / 40 + 1);
+                    let report = locals[role].report(now, count, 321);
+                    let expected_ntp =
+                        epochs[role].wrapping_add((u128::from(millis) * NTP_SECOND / 1_000) as u64);
+                    assert_eq!(report.is_some(), expected_ntp != 0);
+                    if let Some(report) = report {
+                        assert_eq!(report.ntp, expected_ntp);
+                        assert_eq!((report.packets, report.octets), (count, 321));
+                        first_sr[role].get_or_insert(millis);
+                    }
+                    let ssrc = 7 + role as u32;
+                    let plain = packet::compound(packet::Report {
+                        sender_ssrc: ssrc,
+                        peer_ssrc: 15 - ssrc,
+                        cname: b"test0001",
+                        sender: report.map(|r| (r.ntp, r.rtp, r.packets, r.octets)),
+                        feedback: packet::Feedback {
+                            terminal: Some(9),
+                            ..packet::Feedback::default()
+                        },
+                    });
+                    assert_eq!(plain.len(), if report.is_some() { 116 } else { 96 });
+                    let cipher = senders[role].protect_rtcp(&plain).unwrap();
+                    assert_eq!(
+                        cipher.len() + packet::FRAMING_BYTES,
+                        if report.is_some() { 152 } else { 132 }
+                    );
+                    let plain = receivers[role].unprotect_rtcp(&cipher).unwrap();
+                    let parsed =
+                        packet::read_compound(&plain, ssrc, 15 - ssrc, b"test0001").unwrap();
+                    assert_eq!(parsed.terminal, Some(9));
+                    assert_eq!(parsed.sender_clock, report);
+                    if let Some(report) = parsed.sender_clock {
+                        assert!(peers[role].observe(report, now));
+                    }
+                    if peers[role].valid(now) {
+                        first_valid[role].get_or_insert(millis);
+                    }
+                    assert_eq!(locals[role].source, Some((0, origin)));
+                }
+            }
+            for role in 0..2 {
+                let delay = if epochs[role] == 0 { 200 } else { 0 };
+                assert_eq!(first_sr[role], Some(delay));
+                assert_eq!(first_valid[role], Some(delay + 20_000));
+                assert!(peers[role].valid(origin + Duration::from_millis(40_400)));
+                assert_eq!(peers[role].rate.ppb(), ppm[role] * 1_000);
+                assert_eq!(peers[role].rejection_mask, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn zero_ntp_instant_keeps_rr_feedback_and_strict_receiver_guard() {
+        let origin = Instant::now();
+        let mut remote = RemoteClock::default();
+        assert!(!remote.observe(
+            SenderClock {
+                ntp: 0,
+                rtp: 7,
+                packets: 1,
+                octets: 321,
+            },
+            origin
+        ));
+        assert_eq!(remote.rejection_mask, Rejection::ZeroNtp.bit());
+        assert!(!remote.calibrated);
+
+        let mut local = LocalClock::new(origin, 0, 7);
+        local.observe(0, origin, None);
+        assert!(local.report(origin, 7, 321).is_none());
+        let first = local
+            .report(origin + Duration::from_nanos(1), 7, 321)
+            .unwrap();
+        assert_eq!(
+            (first.ntp, first.rtp, first.packets, first.octets),
+            (4, 7, 7, 321)
+        );
+        assert_eq!(local.source, Some((0, origin)));
+        assert_eq!(local.ntp, 0);
     }
 
     #[test]
@@ -146,6 +412,96 @@ mod tests {
         let mut synthetic = LocalClock::new(origin, 1 << 32, 7);
         synthetic.observe(0, origin, None);
         assert_eq!(synthetic.report(origin, 7, 321).unwrap().rtp, 7);
+    }
+
+    #[test]
+    fn source_frequency_changes_integrate_without_rewriting_published_phase() {
+        let origin = Instant::now();
+        let mut local = LocalClock::new(origin, 1 << 32, 7);
+        local.observe(
+            0,
+            origin,
+            Some(Rate {
+                ticks: 960_000,
+                ns: 20_000_000_000,
+            }),
+        );
+        for millis in (20_200..40_000u64).step_by(200) {
+            // A real continuous +500ppm clock after its first nominal 20s.
+            // Hardware deltas, not callback/capture-delivery time, carry rate.
+            let ticks = millis * 48 + (millis - 20_000) * 24 / 1_000;
+            local.observe(
+                ticks / 3,
+                origin + Duration::from_millis(millis - 60),
+                Some(Rate {
+                    ticks,
+                    ns: millis * 1_000_000,
+                }),
+            );
+        }
+        let now = origin + Duration::from_secs(40);
+        let before = local.report(now, 7, 321).unwrap();
+        let hardware = Rate {
+            ticks: 1_920_480,
+            ns: 40_000_000_000,
+        };
+        // The just-delivered oldest sample precedes an already published point.
+        // A frequency change must not retroactively change that point or epoch.
+        local.observe(640_160, now - Duration::from_millis(60), Some(hardware));
+        assert_eq!(local.report(now, 7, 321), Some(before));
+        assert_eq!(local.projection.as_ref().unwrap().rate.ppb(), 500_000);
+        let after = local.report(now + Duration::from_secs(20), 7, 321).unwrap();
+        assert_eq!(after.rtp.wrapping_sub(before.rtp), 960_480);
+        assert_eq!((after.packets, after.octets), (7, 321));
+        assert_eq!(local.source, Some((0, origin)));
+        assert_eq!(local.ntp, 1 << 32);
+
+        local.observe(640_320, now, None);
+        assert!(local
+            .report(now + Duration::from_secs(20), 7, 321)
+            .is_none());
+        local.observe(640_480, now, Some(hardware));
+        assert_eq!(
+            local.report(now + Duration::from_secs(20), 7, 321),
+            Some(after)
+        );
+        assert_eq!(local.source, Some((0, origin)));
+    }
+
+    #[test]
+    fn hardware_mean_windows_cancel_anchor_error_and_ignore_duplicate_callbacks() {
+        for ppm in [-500i64, -100, 100, 500] {
+            let mut hardware = HardwareWindow::default();
+            let mut fits = Vec::new();
+            for millis in (200..=60_200u64).step_by(200) {
+                // Constant first-anchor error cancels in differences of means;
+                // ongoing opposite quantization must not alias a lone endpoint.
+                let error = if millis % 400 == 0 {
+                    800_000i64
+                } else {
+                    -800_000
+                };
+                let point = Rate {
+                    ticks: (u128::from(millis) * 48_000 * (1_000_000 + ppm) as u128 / 1_000_000_000)
+                        as u64,
+                    ns: (millis as i64 * 1_000_000 + error - 800_000) as u64,
+                };
+                if let Some(fit) = hardware.observe(point) {
+                    fits.push(fit.ppb());
+                }
+                let counts = (hardware.early.count, hardware.late.count);
+                // Twenty reads of the same hardware point are still one point.
+                for _ in 0..20 {
+                    assert!(hardware.observe(point).is_none());
+                }
+                assert_eq!((hardware.early.count, hardware.late.count), counts);
+            }
+            assert_eq!(fits.len(), 3);
+            assert!(
+                fits.iter().all(|ppb| ppb.abs_diff(ppm * 1_000) <= 2_000),
+                "hardware mean fits at {ppm}ppm: {fits:?}"
+            );
+        }
     }
 
     #[test]
@@ -268,6 +624,91 @@ mod tests {
         assert!(remote.valid(origin + Duration::from_secs(120)));
         assert!((416_660..=416_670).contains(&remote.rate.ppb()));
     }
+
+    #[test]
+    fn rejection_mask_identifies_existing_checks_without_changing_freeze() {
+        let origin = Instant::now();
+        let mut local = LocalClock::new(origin, 1 << 32, 7);
+        local.observe(0, origin, None);
+        let before = clock_report(&local, origin, 0);
+        let normal = clock_report(&local, origin, 200);
+        let cases = [
+            (SenderClock { ntp: 0, ..normal }, 200, Rejection::ZeroNtp),
+            (
+                SenderClock {
+                    ntp: before.ntp,
+                    ..normal
+                },
+                200,
+                Rejection::SourceInterval,
+            ),
+            (
+                SenderClock {
+                    rtp: before.rtp,
+                    ..normal
+                },
+                200,
+                Rejection::RtpProgress,
+            ),
+            (
+                SenderClock {
+                    packets: before.packets,
+                    ..normal
+                },
+                200,
+                Rejection::PacketProgress,
+            ),
+            (normal, 20, Rejection::ArrivalInterval),
+            (normal, 900, Rejection::ArrivalSourceGap),
+            (
+                SenderClock {
+                    rtp: normal.rtp + 48,
+                    ..normal
+                },
+                200,
+                Rejection::ShortRate,
+            ),
+        ];
+        let mut accumulated = 0;
+        for (report, arrival_ms, reason) in cases {
+            let mut remote = RemoteClock::default();
+            assert!(remote.observe(before, origin));
+            assert!(!remote.observe(report, origin + Duration::from_millis(arrival_ms)));
+            assert_eq!(remote.rejection_mask, reason.bit());
+            assert_eq!(remote.rate, Rate::default());
+            assert!(!remote.calibrated && !remote.valid(origin));
+            accumulated |= remote.rejection_mask;
+        }
+        let mut unsupported = LocalClock::new(origin, 1 << 32, 7);
+        unsupported.observe(0, origin, Some(rate(2_000)));
+        let mut remote = RemoteClock::default();
+        for millis in (0..=20_000u64).step_by(200) {
+            let accepted = remote.observe(
+                clock_report(&unsupported, origin, millis),
+                origin + Duration::from_millis(millis),
+            );
+            assert_eq!(accepted, millis < 20_000);
+        }
+        assert_eq!(remote.rejection_mask, Rejection::LongRate.bit());
+        assert_eq!(remote.rate, Rate::default());
+        assert!(!remote.calibrated);
+        // Recovery clears health/window, not the bounded diagnostic history.
+        for millis in (20_200..=40_200).step_by(200) {
+            let report = clock_report(&local, origin, millis);
+            // Return to nominal frequency continuously: retain the 1,920 RTP
+            // ticks gained during the first twenty seconds at +2,000ppm.
+            remote.observe(
+                SenderClock {
+                    rtp: report.rtp.wrapping_add(1_920),
+                    ..report
+                },
+                origin + Duration::from_millis(millis),
+            );
+        }
+        assert!(remote.valid(origin + Duration::from_millis(40_200)));
+        assert_eq!(remote.rejection_mask, Rejection::LongRate.bit());
+        assert_eq!(accumulated | remote.rejection_mask, 0xff);
+    }
 }
 
 pub(super) fn sink_lead(samples: usize, ppb: i64) -> Duration {
@@ -281,12 +722,121 @@ pub(super) fn ntp_from_unix(unix: Duration) -> u64 {
         | ((u64::from(unix.subsec_nanos()) << 32) / 1_000_000_000)
 }
 
+pub(super) fn ntp_from_system_time(wall: SystemTime) -> u64 {
+    match wall.duration_since(UNIX_EPOCH) {
+        Ok(unix) => ntp_from_unix(unix),
+        Err(before) => {
+            // Floor the signed fixed-point timestamp: subtracting a negative
+            // fractional Unix duration needs ceil, not truncation towards zero.
+            // Wrapping preserves the standard 32-bit NTP seconds/era semantics.
+            let ticks = (before.duration().as_nanos() * NTP_SECOND).div_ceil(SECOND_NS);
+            ntp_from_unix(Duration::ZERO).wrapping_sub(ticks as u64)
+        }
+    }
+}
+
+#[derive(Default)]
+struct HardwareMean {
+    ticks: u128,
+    ns: u128,
+    count: u64,
+}
+
+impl HardwareMean {
+    fn add(&mut self, point: Rate) {
+        self.ticks += u128::from(point.ticks);
+        self.ns += u128::from(point.ns);
+        self.count += 1;
+    }
+}
+
+#[derive(Default)]
+struct HardwareWindow {
+    start_ns: u64,
+    early: HardwareMean,
+    late: HardwareMean,
+    latest: Option<Rate>,
+}
+
+impl HardwareWindow {
+    fn observe(&mut self, point: Rate) -> Option<Rate> {
+        // Repeated AudioRecord readbacks are one hardware point, regardless of
+        // how many PCM callbacks drain it. Callback time never enters this fit.
+        if self.latest == Some(point) {
+            return None;
+        }
+        self.latest = Some(point);
+        let window_ns = WINDOW.as_nanos() as u64;
+        let mut fitted = None;
+        if point.ns >= self.start_ns + window_ns {
+            if self.early.count != 0 && self.late.count != 0 {
+                // Difference of the two mean hardware points cancels the
+                // first timestamp's constant error and averages quantization.
+                let ticks = self.late.ticks * u128::from(self.early.count)
+                    - self.early.ticks * u128::from(self.late.count);
+                let ns = self.late.ns * u128::from(self.early.count)
+                    - self.early.ns * u128::from(self.late.count);
+                if ticks != 0 && ns != 0 {
+                    let (mut a, mut b) = (ticks, ns);
+                    while b != 0 {
+                        (a, b) = (b, a % b);
+                    }
+                    fitted = u64::try_from(ticks / a)
+                        .ok()
+                        .zip(u64::try_from(ns / a).ok())
+                        .map(|(ticks, ns)| Rate { ticks, ns });
+                }
+            }
+            self.start_ns = point.ns / window_ns * window_ns;
+            self.early = HardwareMean::default();
+            self.late = HardwareMean::default();
+        }
+        if point.ns - self.start_ns < window_ns / 2 {
+            self.early.add(point);
+        } else {
+            self.late.add(point);
+        }
+        fitted
+    }
+}
+
+struct SourceProjection {
+    at: Instant,
+    // Fractional RTP ticks: carry sub-tick progress across frequency changes.
+    phase: u128,
+    rate: Rate,
+}
+
+impl SourceProjection {
+    fn phase_at(&self, now: Instant) -> Option<u128> {
+        let product = now
+            .checked_duration_since(self.at)?
+            .as_nanos()
+            .checked_mul(u128::from(self.rate.ticks))?;
+        let ns = u128::from(self.rate.ns);
+        let whole = (product / ns).checked_mul(NTP_SECOND)?;
+        self.phase
+            .checked_add(whole.checked_add(product % ns * NTP_SECOND / ns)?)
+    }
+
+    fn set_rate(&mut self, at: Instant, rate: Rate) -> Option<()> {
+        let phase = self.phase_at(at)?;
+        self.at = at;
+        self.phase = phase;
+        self.rate = rate;
+        Some(())
+    }
+}
+
 pub(super) struct LocalClock {
     epoch: Instant,
     ntp: u64,
     initial_timestamp: u32,
     source: Option<(u64, Instant)>,
-    rate: Option<Rate>,
+    projection: Option<SourceProjection>,
+    hardware: HardwareWindow,
+    available: bool,
+    published: Cell<Option<Instant>>,
     physical: bool,
 }
 
@@ -297,7 +847,10 @@ impl LocalClock {
             ntp,
             initial_timestamp,
             source: None,
-            rate: None,
+            projection: None,
+            hardware: HardwareWindow::default(),
+            available: false,
+            published: Cell::new(None),
             physical: false,
         }
     }
@@ -307,32 +860,79 @@ impl LocalClock {
         // encoding/admission/Noise callback time. Later observations cannot
         // move the phase reference or contribute callback jitter to frequency.
         self.source.get_or_insert((position, captured_at));
-        self.rate = match rate {
+        let qualified = match rate {
             Some(rate) => {
                 self.physical = true;
                 // ns is the validated hardware span, not callback uptime. A
                 // short-span ratio can turn sub-ms timestamp quantization into
                 // discontinuous projected RTP. Keep RR/APP feedback until the
                 // source has a full long window; do not publish nominal timing.
-                (rate.ticks != 0 && u128::from(rate.ns) >= WINDOW.as_nanos()).then_some(rate)
+                if rate.ticks == 0 || rate.ns == 0 {
+                    self.available = false;
+                    return;
+                }
+                let fitted = self.hardware.observe(rate);
+                if u128::from(rate.ns) < WINDOW.as_nanos() {
+                    self.available = false;
+                    return;
+                }
+                // A first already-long span is usable without callback history.
+                // Subsequently apply only complete hardware-window fits, not a
+                // noisy endpoint ratio reprojected over the entire source age.
+                fitted.or_else(|| self.projection.is_none().then_some(rate))
             }
             None if !self.physical => Some(Rate::default()), // Declared synthetic input.
             None => None, // Missing physical metadata is not a nominal clock.
         };
+        self.available = !self.physical || rate.is_some();
+        if let Some(rate) = qualified {
+            if let Some(projection) = self.projection.as_mut() {
+                if u128::from(rate.ticks) * u128::from(projection.rate.ns)
+                    != u128::from(projection.rate.ticks) * u128::from(rate.ns)
+                {
+                    // Integrate forward at real capture time, never rewrite an
+                    // already published point. Publication only bounds where a
+                    // measured frequency takes effect; it does not measure it.
+                    let at = captured_at
+                        .max(projection.at)
+                        .max(self.published.get().unwrap_or(projection.at));
+                    if projection.set_rate(at, rate).is_none() {
+                        self.available = false;
+                    }
+                }
+            } else {
+                self.projection = Some(SourceProjection {
+                    at: self.source.unwrap().1,
+                    phase: 0,
+                    rate,
+                });
+            }
+        }
     }
 
     pub fn report(&self, now: Instant, packets: u32, octets: u32) -> Option<SenderClock> {
-        let rate = self.rate?;
+        if !self.available {
+            return None;
+        }
         let (position, captured_at) = self.source?;
-        let elapsed = now.checked_duration_since(captured_at)?;
+        now.checked_duration_since(captured_at)?;
+        let phase = self.projection.as_ref()?.phase_at(now)?;
         let ntp_elapsed =
             now.checked_duration_since(self.epoch)?.as_nanos() * NTP_SECOND / SECOND_NS;
+        let ntp = self.ntp.wrapping_add(ntp_elapsed as u64);
+        // Zero means unavailable in this profile. Keep protected RR/APP at
+        // that instant; do not shift the epoch or weaken the receiver's guard.
+        if ntp == 0 {
+            return None;
+        }
+        self.published
+            .set(Some(self.published.get().map_or(now, |last| last.max(now))));
         Some(SenderClock {
-            ntp: self.ntp.wrapping_add(ntp_elapsed as u64),
+            ntp,
             rtp: self.initial_timestamp.wrapping_add(
                 (position
                     .wrapping_mul(3)
-                    .wrapping_add(rate.ticks_at(elapsed))) as u32,
+                    .wrapping_add((phase / NTP_SECOND) as u64)) as u32,
             ),
             packets,
             octets,
@@ -347,10 +947,32 @@ struct Observation {
     ticks: u64,
 }
 
+// Static diagnostic bits, not wire fields or an alternative acceptance policy.
+// A rejection records the first failing check, matching the original OR order.
+#[derive(Clone, Copy)]
+#[repr(u8)]
+enum Rejection {
+    ZeroNtp = 0,
+    SourceInterval = 1,
+    RtpProgress = 2,
+    PacketProgress = 3,
+    ArrivalInterval = 4,
+    ArrivalSourceGap = 5,
+    ShortRate = 6,
+    LongRate = 7,
+}
+
+impl Rejection {
+    fn bit(self) -> u64 {
+        1 << self as u8
+    }
+}
+
 #[derive(Default)]
 pub(super) struct RemoteClock {
     pub rate: Rate,
     pub calibrated: bool,
+    pub rejection_mask: u64,
     first: Option<Observation>,
     latest: Option<Observation>,
     updated_ntp: Option<u64>,
@@ -373,18 +995,19 @@ impl RemoteClock {
             })
     }
 
-    fn freeze(&mut self) -> bool {
+    fn freeze(&mut self, reason: Rejection) -> bool {
         // Keep the established rate and timeline. Recovery needs another full
         // healthy window; it never follows a delayed arrival baseline.
         self.first = None;
         self.healthy = None;
         self.updated_ntp = None;
+        self.rejection_mask |= reason.bit();
         false
     }
 
     pub fn observe(&mut self, report: SenderClock, arrival: Instant) -> bool {
         if report.ntp == 0 {
-            return self.freeze();
+            return self.freeze(Rejection::ZeroNtp);
         }
         let ticks = if let Some(previous) = self.latest {
             let delta_ntp = report.ntp.wrapping_sub(previous.report.ntp);
@@ -392,25 +1015,36 @@ impl RemoteClock {
             let delta_ticks = report.rtp.wrapping_sub(previous.report.rtp);
             let packet_progress = report.packets.wrapping_sub(previous.report.packets);
             let arrival_gap = arrival.checked_duration_since(previous.arrival);
-            if ns < 50_000_000 || ns > FRESH.as_nanos()
-                || delta_ticks == 0 || delta_ticks >= 1 << 31
-                || packet_progress == 0 || packet_progress >= 1 << 31
-                || arrival_gap.is_none_or(|gap| gap < Duration::from_millis(50) || gap > FRESH)
-                || arrival_gap.is_some_and(|gap| {
-                    gap.abs_diff(Duration::from_nanos(ns.min(u128::from(u64::MAX)) as u64))
-                        > Duration::from_millis(500)
-                })
-                // Short intervals have one-tick quantization. This is solely a
-                // discontinuity check, not the long-window frequency estimate.
-                || (i128::from(delta_ticks) * 1_000_000_000 - ns as i128 * 48_000).abs()
-                    * 1_000_000 > ns as i128 * 48_000 * 2_500
+            // The final short-rate guard has one-tick quantization. It is a
+            // discontinuity check, not the long-window frequency estimate.
+            let rejected = if ns < 50_000_000 || ns > FRESH.as_nanos() {
+                Some(Rejection::SourceInterval)
+            } else if delta_ticks == 0 || delta_ticks >= 1 << 31 {
+                Some(Rejection::RtpProgress)
+            } else if packet_progress == 0 || packet_progress >= 1 << 31 {
+                Some(Rejection::PacketProgress)
+            } else if arrival_gap.is_none_or(|gap| gap < Duration::from_millis(50) || gap > FRESH) {
+                Some(Rejection::ArrivalInterval)
+            } else if arrival_gap.is_some_and(|gap| {
+                gap.abs_diff(Duration::from_nanos(ns.min(u128::from(u64::MAX)) as u64))
+                    > Duration::from_millis(500)
+            }) {
+                Some(Rejection::ArrivalSourceGap)
+            } else if (i128::from(delta_ticks) * 1_000_000_000 - ns as i128 * 48_000).abs()
+                * 1_000_000
+                > ns as i128 * 48_000 * 2_500
             {
+                Some(Rejection::ShortRate)
+            } else {
+                None
+            };
+            if let Some(reason) = rejected {
                 self.latest = Some(Observation {
                     report,
                     arrival,
                     ticks: u64::from(report.rtp),
                 });
-                return self.freeze();
+                return self.freeze(reason);
             }
             previous.ticks + u64::from(delta_ticks)
         } else {
@@ -440,7 +1074,7 @@ impl RemoteClock {
         // Tested +/-500ppm plus <=2ppm endpoint quantization at twenty seconds.
         // Reject, rather than clamp, a discontinuity or an unsupported clock.
         if candidate.ppb().abs() > 502_000 {
-            return self.freeze();
+            return self.freeze(Rejection::LongRate);
         }
         self.rate = if self.calibrated && candidate.ppb().abs_diff(self.rate.ppb()) > 100_000 {
             // A supported continuous clock can change slowly. Limit correction

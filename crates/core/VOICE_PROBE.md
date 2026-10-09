@@ -563,10 +563,58 @@ retired clock health is false. Intentional teardown PCM discard and expected hos
 progress expiry are separate from the healthy interval. These packet/PCM counters
 are **not** source-active speech percentages, mouth-to-ear or listening scores.
 
-The implementation and available source/model/foreground-device checks are now
+The implementation and available source/model/foreground-device checks at61d0b80 were
 complete. Full latest-build two-Android50/80 long, common-clock acoustic, actual
 source-active loss/listening/double-talk and representative recursive-path gates
 are not qualified. Pacman remains withdrawn by the user; a synthetic host is not
 an authorized second Android. The goal records that physical-gate dependency as
 blocked, not a successful conversational-voice acceptance. Moto-owned fixtures
 and microphone permission were cleaned after results; Main and identities remain.
+
+### Moto + Mi A2 Lite continuation: wall clocks and continuous source phase
+
+The user supplied a new API30/arm64 Mi A2 Lite and explicitly requires operation
+with intentionally incorrect device time and different timezones. Device clocks
+and timezones are **not changed**. Deadlines remain monotonic; rate estimation uses
+authenticated deltas from the same source, never cross-device absolute UTC. Signed
+standard NTP conversion also permits pre-Unix dates, fractional negatives and NTP
+era wrap. Exact zero timing still sends protected RR/APP, not fabricated SR timing.
+Protected regressions cover different wall epochs and later forward/backward jumps.
+
+Two physical60s attempts exposed persistent ShortRate64 failures (54/8 reports),
+not an absolute-time or NTP-zero error. Ongoing valid±0.8ms hardware quantization
+reproduced a publisher defect: applying each newest frequency to the entire prior
+timeline rewrote already-published phase. A continuous fractional RTP accumulator
+now integrates the old frequency to the change boundary, then changes only the
+future slope. Two fixed hardware-point mean windows reject duplicates and cancel
+first-anchor error; callback/network timing does not establish frequency. The
+45-minute±100/500ppm traces authenticate54004 compounds with zero rejected reports,
+frequency error≤2ppm and source-phase error≤48 ticks(1ms). Strict2500ppm short and
+502ppm long guards, original media phase/budgets/queues and crypto remain unchanged.
+
+Android discards an invalid initial20s hardware window and collects a new one,
+instead of poisoning calibration with a transient advancing-but-stalled startup.
+An established neutral ratio stays frozen. Timestamp observations are timed after
+the API readback. Whole-measurement progress compares actual hardware timestamps
+across platform-rate changes, not whether the latest-rate telemetry segment has
+already accumulated two observations. Static first-failure rate/arrival masks
+are observations, not alternative validation or a wire change.
+
+Checks:87 focused,342 workspace,127 JVM; two unchanged explicit native ignores.
+Formatting, arm64/API26 and complete debug/release/instrumentation builds pass.
+Mi's packaged codec and local8s microphone/actuator/cleanup gates pass, as do Moto's
+local gates. Actual two-Android120s direct-authoritative LAN/BBR with synthetic50k
+framed-ingress service passes clock/lifecycle checks on both. Pre-teardown:
+
+| Endpoint | Encoded / decoded / late / PLC | Capture ready→running | Render expiry | Remote clock rejects | Cleanup |
+| --- | --- | --- | --- | --- | --- |
+| Moto | 2996 /3000 /3 /3 | 33280→40960 | 0 | 0 | complete, native join35ms |
+| Mi | 3002 /2576 /415 /427 | 3200→3200 | 0 | 2 ArrivalInterval16 | complete, native join1ms |
+
+All415 Mi late packets are admitted after nominal deadline, not early sink PLC.
+Their admission instant follows lane delivery/SRTP parsing, so this is not physical
+DNS-arrival telemetry or proof of one transit cause. Clock calibration succeeds;
+the asymmetric delivery is explicitly **not quality PASS**. A comparable80k service
+attempt fails Mi's unchanged nonzero-microphone assertion (all-zero PCM), not crypto
+or a claimed bitrate result. Capacity/F0 remain declared inputs, the byte-service
+meter is synthetic, and acoustic/source-active/listening acceptance remains open.

@@ -117,6 +117,7 @@ class CallMediaProbeGatesTest {
                 val started = SystemClock.elapsedRealtime()
                 var initialFrames: Long? = null
                 var initialCapture: Long? = null
+                var initialPlaybackTimestamp: CallProbeAudio.Clock? = null
                 var rateRaised = false
                 var rateRestored = false
                 var rateEvidence: JSONObject? = null
@@ -124,6 +125,7 @@ class CallMediaProbeGatesTest {
                 while (SystemClock.elapsedRealtime() - started < durationMs) {
                     val elapsed = SystemClock.elapsedRealtime() - started
                     val state = assertHealthy(host, audio)
+                    if (initialPlaybackTimestamp == null) initialPlaybackTimestamp = state.playbackClock.latest
                     assertTrue("foreground microphone must be active", state.microphoneActive)
                     assertTrue("independent capture worker", state.captureAlive)
                     assertTrue("independent render worker", state.renderAlive)
@@ -184,9 +186,14 @@ class CallMediaProbeGatesTest {
                 assertTrue("actual hardware playback frame-position progress", state.hardwareFrames > (initialFrames ?: 0))
                 assertTrue("actual hardware playback frames", state.hardwareFrames > 0)
                 if (state.playbackClock.latest != null) {
+                    // The current-rate telemetry segment resets on a real
+                    // platform rate change. Check physical timestamp progress
+                    // across measurement, not whether that latest segment has
+                    // happened to accumulate two readbacks at the final instant.
+                    val before = initialPlaybackTimestamp
                     assertTrue("available hardware AudioTrack timestamp advances",
-                        state.playbackClock.latest.frame > state.playbackClock.first!!.frame &&
-                            state.playbackClock.latest.nanoTime > state.playbackClock.first.nanoTime)
+                        before != null && state.playbackClock.latest.frame > before.frame &&
+                            state.playbackClock.latest.nanoTime > before.nanoTime)
                 }
                 if (state.captureClock.latest != null) {
                     assertTrue("available monotonic AudioRecord timestamp advances",

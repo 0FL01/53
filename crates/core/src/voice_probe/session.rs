@@ -56,6 +56,8 @@ pub struct Stats {
     pub remote_clock_calibrated: bool,
     pub remote_clock_valid: bool,
     pub remote_clock_rejected_reports: u64,
+    /// Cumulative first-failing clock-check bits; see the private clock module.
+    pub remote_clock_rejection_mask: u64,
     pub fixture_peer_encoded_packets: u64,
     pub fixture_peer_dropped_capture: u64,
     pub fixture_peer_capture_gap_batches: u64,
@@ -111,6 +113,7 @@ impl Default for Stats {
             remote_clock_calibrated: false,
             remote_clock_valid: false,
             remote_clock_rejected_reports: 0,
+            remote_clock_rejection_mask: 0,
             fixture_peer_encoded_packets: 0,
             fixture_peer_dropped_capture: 0,
             fixture_peer_capture_gap_batches: 0,
@@ -1168,6 +1171,7 @@ impl ReceiveState {
             stats.remote_clock_ns = self.remote_clock.rate.ns;
             stats.remote_clock_calibrated = self.remote_clock.calibrated;
             stats.remote_clock_valid = self.remote_clock.valid(now);
+            stats.remote_clock_rejection_mask = self.remote_clock.rejection_mask;
         });
     }
 
@@ -1459,11 +1463,8 @@ async fn endpoint(
     let mut frame_pushed = frame_capture;
     let mut frame_clock = None;
     let epoch = Instant::now();
-    let wall = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| "probe wall clock unavailable")?;
-    let mut local_clock =
-        LocalClock::new(epoch, clock::ntp_from_unix(wall), fixture.initial_timestamp);
+    let wall = clock::ntp_from_system_time(std::time::SystemTime::now());
+    let mut local_clock = LocalClock::new(epoch, wall, fixture.initial_timestamp);
     let mut sender_phase = SendPhase { first: None };
     let mut source_index = u64::from(fixture.initial_sequence);
     let mut received = ReceiveState {
@@ -4154,6 +4155,123 @@ mod tests {
                     && ppb.abs_diff(ppm * 1_000) <= 2_000
             }),
             "startup clock outcomes: {outcomes:?}"
+        );
+    }
+
+    #[test]
+    fn ongoing_hardware_quantization_does_not_jump_authenticated_source_phase() {
+        let mut outcomes = Vec::new();
+        for ppm in [-500i64, -100, 100, 500] {
+            let origin = Instant::now();
+            let mut hardware = RecordClock::default();
+            assert!(hardware
+                .observe(
+                    CaptureTimestamp {
+                        read_position: 0,
+                        frame_position: 800,
+                        nano_time: 1_000_000_000,
+                        observed_ns: 1_001_000_000,
+                    },
+                    0,
+                    160,
+                )
+                .is_some());
+            let mut local = LocalClock::new(origin, 1 << 32, u32::MAX - 1_000);
+            let mut remote = RemoteClock::default();
+            let mut sender = dmsg_srtp_sys::Sender::new(&[44; 30], 7).unwrap();
+            let mut receiver = dmsg_srtp_sys::Receiver::new(&[44; 30], 7).unwrap();
+            let (mut rejected, mut first_valid, mut max_phase_error) = (0u64, None, 0u64);
+            let mut source_reference = None;
+            for millis in (0..=2_700_000u64).step_by(200) {
+                // Continue valid sub-ms hardware quantization after source
+                // readiness. It is neither a wall jump nor a delivery burst.
+                let elapsed_ns = (millis + 200) * 1_000_000;
+                let frames = (u128::from(millis + 200) * 16_000 * (1_000_000 + ppm) as u128
+                    / 1_000_000_000) as u64;
+                let error = if millis <= 20_000 {
+                    0
+                } else if millis % 400 == 0 {
+                    800_000
+                } else {
+                    -800_000
+                };
+                let (age, _) = hardware
+                    .observe(
+                        CaptureTimestamp {
+                            read_position: frames as i64,
+                            frame_position: 800 + frames as i64,
+                            nano_time: 1_000_000_000 + elapsed_ns as i64 + error,
+                            observed_ns: 1_001_000_000 + elapsed_ns as i64,
+                        },
+                        frames,
+                        160,
+                    )
+                    .unwrap();
+                let span = hardware.span().unwrap();
+                let now = origin + Duration::from_millis(millis);
+                let (first_position, first_capture) =
+                    *source_reference.get_or_insert((frames, now - age));
+                local.observe(
+                    frames,
+                    now - age,
+                    Some(Rate {
+                        ticks: span.frames * 3,
+                        ns: span.elapsed_ns,
+                    }),
+                );
+                let source = local.report(now, millis as u32 / 40 + 1, 321);
+                let plain = packet::compound(packet::Report {
+                    sender_ssrc: 7,
+                    peer_ssrc: 8,
+                    cname: b"test0001",
+                    sender: source.map(|r| (r.ntp, r.rtp, r.packets, r.octets)),
+                    feedback: packet::Feedback {
+                        terminal: Some(9),
+                        ..packet::Feedback::default()
+                    },
+                });
+                assert_eq!(plain.len(), if source.is_some() { 116 } else { 96 });
+                let protected = sender.protect_rtcp(&plain).unwrap();
+                let plain = receiver.unprotect_rtcp(&protected).unwrap();
+                let parsed = packet::read_compound(&plain, 7, 8, b"test0001").unwrap();
+                assert_eq!(parsed.terminal, Some(9));
+                if let Some(report) = parsed.sender_clock {
+                    let true_ticks = (now.duration_since(first_capture).as_nanos()
+                        * (48_000 * (1_000_000 + ppm)) as u128
+                        / 1_000_000_000_000_000) as u64;
+                    let expected =
+                        (u32::MAX - 1_000).wrapping_add((first_position * 3 + true_ticks) as u32);
+                    let error = i64::from(report.rtp.wrapping_sub(expected) as i32).unsigned_abs();
+                    max_phase_error = max_phase_error.max(error);
+                    rejected += u64::from(!remote.observe(report, now));
+                    if remote.valid(now) {
+                        first_valid.get_or_insert(millis);
+                    }
+                }
+            }
+            outcomes.push((
+                ppm,
+                rejected,
+                remote.rejection_mask,
+                first_valid,
+                remote.rate.ppb(),
+                remote.valid(origin + Duration::from_secs(2_700)),
+                max_phase_error,
+            ));
+        }
+        assert!(
+            outcomes
+                .iter()
+                .all(|(ppm, rejected, mask, first, ppb, valid, phase_error)| {
+                    *rejected == 0
+                    && *mask == 0
+                    // The first exact 20s hardware span is at monotonic 19.8s.
+                    && *first == Some(39_800)
+                    && ppb.abs_diff(ppm * 1_000) <= 2_000
+                    && *valid
+                    && *phase_error <= 48
+                }),
+            "ongoing hardware clock outcomes: {outcomes:?}"
         );
     }
 

@@ -209,7 +209,7 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
             "initial_capture_age_floor_us", "max_additional_capture_age_us", "max_capture_clock_observation_gap_us",
             "capture_age_unavailable_batches", "capture_age_rejected_batches", "max_sender_phase_advance_us",
             "max_receiver_phase_advance_us", "future_rejected_packets", "max_future_lead_ms",
-            "remote_clock_ticks", "remote_clock_ns", "remote_clock_rejected_reports")
+            "remote_clock_ticks", "remote_clock_ns", "remote_clock_rejected_reports", "remote_clock_rejection_mask")
             .forEach { field ->
                 val value = source.getLong(field)
                 check(value >= 0, "invalid_native_counter")
@@ -518,6 +518,7 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
                 playbackCompensation.set(JSONObject().put("hardware_calibrated", command.calibrated)
                     .put("healthy", command.healthy).put("selected_rate", command.rate)
                     .put("sink_ppb", command.sinkPpb ?: JSONObject.NULL)
+                    .put("hardware_rejection_mask", command.rejectionMask)
                     .put("relative_ppm", command.relativePpm ?: JSONObject.NULL).toString())
                 requestedRate.set(command.rate)
                 command.sinkPpb?.let { check(CallProbeJni.sinkRate(nativeHandle, it), "sink_clock_rate_rejected") }
@@ -544,9 +545,10 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
                 if (now >= nextTimestamp) {
                     observeClock(headClock, Clock(hardware, now))
                     val ok = track.getTimestamp(timestamp)
-                    if (ok) compensation.observe(timestamp.framePosition, timestamp.nanoTime, now,
+                    val observed = System.nanoTime() // timestamp retrieval can advance beyond pre-call now
+                    if (ok) compensation.observe(timestamp.framePosition, timestamp.nanoTime, observed,
                         track.playbackRate, track.underrunCount)
-                    else compensation.observe(-1, -1, now, track.playbackRate, track.underrunCount)
+                    else compensation.observe(-1, -1, observed, track.playbackRate, track.underrunCount)
                     observeClock(playbackClock, if (ok && timestamp.nanoTime > 0 && timestamp.framePosition >= 0)
                         Clock(timestamp.framePosition, timestamp.nanoTime) else null)
                     underruns = track.underrunCount

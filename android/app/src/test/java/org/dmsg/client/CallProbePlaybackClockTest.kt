@@ -64,4 +64,29 @@ class CallProbePlaybackClockTest {
         assertFalse(absent.healthy)
         assertEquals(16_000, absent.rate)
     }
+
+    @Test fun unreportedStartupStallCannotPoisonLaterSteadyHardwareWindow() {
+        val clock = CallProbePlaybackClock()
+        val origin = 1_000_000_000L
+        // Some HALs initially publish a position before steady presentation,
+        // without advancing underrunCount. That window is not a rate sample.
+        for (step in 0..200) {
+            val elapsed = step * 100_000_000L
+            val frame = 640L + elapsed.coerceAtMost(1_000_000_000L) / 125_000L +
+                (elapsed - 1_000_000_000L).coerceAtLeast(0L) / 62_500L
+            clock.observe(frame, origin + elapsed, origin + elapsed, 16_000, 0)
+        }
+        assertFalse(clock.choose(origin + 20_000_000_000L, 48_000, 1_000_000_000, true).calibrated)
+        // A new complete steady 20s observation must calibrate, not retain the
+        // rejected startup anchor for 60s or certify the earlier stalled span.
+        for (step in 201..401) {
+            val elapsed = step * 100_000_000L
+            clock.observe(640L + 8_000L + (elapsed - 1_000_000_000L) / 62_500L,
+                origin + elapsed, origin + elapsed, 16_000, 0)
+        }
+        val recovered = clock.choose(origin + 40_100_000_000L, 48_000, 1_000_000_000, true)
+        assertTrue(recovered.calibrated && recovered.healthy)
+        assertEquals(16_000, recovered.rate)
+        assertEquals(0L, recovered.sinkPpb)
+    }
 }

@@ -9,7 +9,7 @@ import kotlin.math.roundToLong
  */
 internal class CallProbePlaybackClock {
     data class Output(val rate: Int, val sinkPpb: Long?, val calibrated: Boolean,
-        val healthy: Boolean, val relativePpm: Double?)
+        val healthy: Boolean, val relativePpm: Double?, val rejectionMask: Long)
     private data class Point(val frame: Long, val ns: Long, val rate: Int, val underruns: Int)
     private var first: Point? = null
     private var latest: Point? = null
@@ -20,15 +20,21 @@ internal class CallProbePlaybackClock {
     private var nextActuationNs = 0L
     private var selected = 16_000
     private var relativePpm: Double? = null
+    private var rejectionMask = 0L
 
     fun observe(frame: Long, timestampNs: Long, nowNs: Long, actualRate: Int, underruns: Int) {
-        if (frame < 0 || timestampNs <= 0 || nowNs < timestampNs || nowNs - timestampNs > 500_000_000L ||
-            actualRate !in 15_992..16_008) {
+        if (frame < 0 || timestampNs <= 0 || nowNs < timestampNs) {
+            rejectionMask = rejectionMask or 1L
+            first = null; healthy = false; return
+        }
+        if (nowNs - timestampNs > 500_000_000L || actualRate !in 15_992..16_008) {
+            rejectionMask = rejectionMask or 2L
             first = null; healthy = false; return
         }
         val previous = latest
         if (previous != null && (frame < previous.frame || timestampNs < previous.ns ||
                 ((frame == previous.frame) != (timestampNs == previous.ns)))) {
+            rejectionMask = rejectionMask or 4L
             first = null; latest = null; healthy = false; return
         }
         if (previous != null && timestampNs == previous.ns) return
@@ -47,7 +53,14 @@ internal class CallProbePlaybackClock {
                 // Later stalls must not grow a rate estimate or move a timeline.
                 if (neutralRatio == null) neutralRatio = ratio
                 healthy = true
-            } else healthy = false
+            } else {
+                rejectionMask = rejectionMask or 8L
+                healthy = false
+                // Reject this entire hardware sample. Start a new observation
+                // window; never retain a bad startup span as a frequency anchor.
+                // The established neutral ratio and media timeline do not move.
+                first = point
+            }
         }
     }
 
@@ -78,6 +91,6 @@ internal class CallProbePlaybackClock {
         }
         val sink = ratio?.let { ((it * selected / 16_000.0 - 1.0) * 1e9).roundToLong() }
         return Output(selected, sink?.takeIf { it in -1_000_000L..1_000_000L }, ratio != null,
-            valid && healthy, relativePpm)
+            valid && healthy, relativePpm, rejectionMask)
     }
 }
