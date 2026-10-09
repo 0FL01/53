@@ -35,8 +35,8 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Source: последний запрос, аудированный Android atom; AGENTS.md/AUTH_GATES.md.
   - Acceptance: visible target-UID host только .gate, explicit mic permission, real AudioRecord/AudioTrack, bounded 10ms JNI batches и independent capture/render/media progress; VOICE_COMMUNICATION/focus/effects/route observations. Playback queue учтена в deadlines, clock correction измеряется, lifecycle cleanup/cancel не зависит от DB/Olm. Main/Pacman/их identity/data не изменяются.
   - Primary evidence: selected exact-method .gate instrumentation на ZY22JFJ5LP, arm64/JVM/debug/release builds и real mic/playback/cleanup evidence.
-  - Status: in_progress
-  - Evidence: arm64/API26 native and JVM/debug/release/androidTest builds PASS. Exact foregroundMicrophoneProtectedLoopbackAndCleanupOnlyInGatePackage on Moto/API35 PASS: real mic/playback, enabled AEC/NS, actual640sample sink bound, hardware timestamps and16008Hz actuator slope, pause cleanup/stop3ms. Latest8s running baseline decoded192/PLC0/late0/renderDrop0/underrun0; only startup/intentional teardown drops separated. DNS exact-method fixture follows. Main/identities untouched.
+  - Status: verified
+  - Evidence: arm64/API26 native and JVM122/debug/release/androidTest builds PASS. Exact foregroundMicrophoneProtectedLoopbackAndCleanupOnlyInGatePackage on Moto/API35 PASS: real mic/playback, enabled AEC/NS, actual640sample sink bound, hardware timestamps and16008Hz actuator slope16007.747Hz, pause cleanup/stop4ms. Latest8s running baseline decoded198/PLC0/late0/renderDrop0/underrun0; only startup/intentional teardown drops separated. DNS exact-method belongs to remaining R3/R5 evidence. Main/identities untouched.
 - R5: Честный сквозной DNS/voice experiment и решение по профилю.
   - Source: исходный запрос/исследование, ARCHITECTURE §9.173–177, WORK_PLAN M1-V.
   - Acceptance: timestamp screening и duplex audio по actual DNS, полезная граница byte accounting явно указана; controlled 50/80 application service model отделена от observed DNS service rate. Для полной physical приёмки — два реальных Android, оба upload активны, ≥30min (план 45min) выбранного профиля; common-clock mouth-to-ear в обоих направлениях, late active duration включает pre-send drops, stalls/queue drift/bytes/query rate/ресурсы/понятность. Не заменять physical pair одним phone+host, USB/DirectTCP либо RTT/2. Нормальная цель p95≤400ms/late≤2%; 700ms/5% только кандидат экспериментального пилота, не low-latency обещание. Негативный результат сохраняется как результат, не маскируется изменением gate.
@@ -74,15 +74,15 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 
 ## Current Checkpoint
 - Closes: R3.
-- Smallest next action: commit/push verified private probe/relay; provision owned isolated DNS fixture and run selected phone↔host gate.
+- Smallest next action: publish verified debug Android owner; provision owned isolated DNS fixture and run selected phone↔host gate.
 - Expected evidence: protected actual DNS delivery/NativeClient stop/join counters and clean .gate audio teardown; no physical pair/quality claim.
 - Stop or replan if: изменение требует production rollout/schema/carrier rewrite либо иной physical device permission.
 
 ## Current State
-- Resolved: goal7a37e47, codec4bc5df8 and SRTP9bb9ecb pushed. Feature-only core probe/JNI and debug Android owner implemented and tested locally; private fixture docs in crates/core/VOICE_PROBE.md.
+- Resolved: goal7a37e47, codec4bc5df8, SRTP9bb9ecb and protected probe aeae648 pushed. Debug Android owner verified on Moto; private fixture docs in crates/core/VOICE_PROBE.md.
 - Last relevant evidence: core probe16/fmt PASS, workspace271 PASS, arm64/builds PASS; actual Moto packaged neural activation and8s protected mic/playback/cleanup PASS. Synthetic peer initially lost timer slots; source-conserving bounded capture fixed it, without weakening gates or expanding carrier scope.
 - Blocker: для R5 physical two-phone acceptance нужен второй явно разрешённый физический Android; это не блокирует R2–R4 и phone↔host evidence.
-- Next: publish current scoped core/Android checkpoints; actual DNS fixture screening, then record remaining R5 physical/measurement dependencies.
+- Next: publish scoped Android checkpoint; actual DNS fixture screening, then record remaining R5 physical/measurement dependencies.
 
 ## Material Decisions
 - 2026-10-09: последний user override разрешает implementation/commits/push/тесты на ZY22JFJ5LP; отменяет прежний read-only режим, не разрешает Main reset или production rollout.
@@ -94,6 +94,7 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 - 2026-10-09: goal7a37e47 pushed; separate bounded LiveEncoder/LiveDecoder, valid tiny DTX, exact PLC and actual WB40 neural activation host tests PASS. Note contract unchanged. Fresh target/live-check avoids stale native CMake cache; no upstream build changes.
 - 2026-10-09: live codec4bc5df8 pushed. SRTP2.7.0 native boundary verified host12 and Android arm64/API26; upstream archive unchanged, licenses retained. Separate debug/.gate Android owner and exact-method tests compile, JVM122 PASS; no device run yet.
 - 2026-10-09: SRTP9bb9ecb pushed. Integrated protected probe16 host tests and workspace271 PASS; target/live-check isolated. Full Temurin21 with verified archive resolves missing jlink in prior local JRE. Empty owned ADB server needed legacy USB backend to see authorized Moto; no keys/Main data changed. Actual codec and foreground local audio gates PASS; unnecessary render overwrite and synthetic missed-slot loss diagnosed and fixed before DNS screening.
+- 2026-10-09: protected probe aeae648 pushed. Latest Android local8s gate PASS: decoded198, PLC0, late0, renderDrop0, underrun0; independent capture/render progress, verified platform rate actuator and complete pause cleanup. R4 verified; no DNS/two-phone/mouth-to-ear claim.
 
 ## Completion
 - Resolved outcomes: pending.
