@@ -11,6 +11,7 @@ use zeroize::Zeroizing;
 
 use super::fixture::{EndpointFixture, RelayFixture};
 use super::lane::{self, Commit, Lane, SendRequest, OP_BIND, OP_BOUND, OP_RTCP, OP_RTP};
+use super::service::SyntheticServiceModel;
 
 const SETUP_TIMEOUT: Duration = Duration::from_secs(30);
 const HOP_DEADLINE: Duration = Duration::from_millis(20);
@@ -82,7 +83,29 @@ pub async fn serve(
     listener: TcpListener,
     fixture: RelayFixture,
     private: Zeroizing<[u8; 32]>,
+    stop: watch::Receiver<bool>,
+) -> Result<(), String> {
+    serve_inner(listener, fixture, private, stop, None).await
+}
+
+/// Synthetic 50/80k framed-application service, not measured DNS capacity. Clone
+/// the model before this call to observe progress. Default `serve` is ungated.
+pub async fn serve_with_service_model(
+    listener: TcpListener,
+    fixture: RelayFixture,
+    private: Zeroizing<[u8; 32]>,
+    stop: watch::Receiver<bool>,
+    service: SyntheticServiceModel,
+) -> Result<(), String> {
+    serve_inner(listener, fixture, private, stop, Some(service)).await
+}
+
+async fn serve_inner(
+    listener: TcpListener,
+    fixture: RelayFixture,
+    private: Zeroizing<[u8; 32]>,
     mut stop: watch::Receiver<bool>,
+    service: Option<SyntheticServiceModel>,
 ) -> Result<(), String> {
     if fixture.version != 1
         || fixture.domain.is_empty()
@@ -91,6 +114,9 @@ pub async fn serve(
         return Err("probe relay fixture rejected".into());
     }
     let cap = media_cap(fixture.profile_ms)?;
+    if let Some(service) = &service {
+        service.check_profile(fixture.profile_ms)?;
+    }
     let private = Arc::new(private);
     let mut handlers: JoinSet<Result<Bound, String>> = JoinSet::new();
     let mut lanes: [Option<Lane>; 4] = std::array::from_fn(|_| None);
@@ -133,7 +159,9 @@ pub async fn serve(
                     Err(_) => break Err("probe relay accept failed".to_string()),
                 };
                 if handlers.len() + lanes.iter().filter(|lane| lane.is_some()).count() < 4 {
-                    handlers.spawn(setup_peer(stream, fixture.clone(), Arc::clone(&private)));
+                    handlers.spawn(setup_peer(
+                        stream, fixture.clone(), Arc::clone(&private), service.clone(),
+                    ));
                 }
                 // An excess socket is dropped here, without another handler.
             }
@@ -142,15 +170,21 @@ pub async fn serve(
 
     let result = match setup {
         Ok(true) => {
-            // Four concrete directions, no routing registry or forwarding workers.
-            let [a_media, a_control, b_media, b_control] = &mut lanes;
-            let a_media = a_media.as_mut().expect("all four bound");
-            let a_control = a_control.as_mut().expect("all four bound");
-            let b_media = b_media.as_mut().expect("all four bound");
-            let b_control = b_control.as_mut().expect("all four bound");
-            route(
-                &listener, a_media, a_control, b_media, b_control, cap, &mut stop,
-            )
+            async {
+                if let Some(service) = &service {
+                    service.arm(Instant::now())?;
+                }
+                // Four concrete directions, no routing registry or forwarding workers.
+                let [a_media, a_control, b_media, b_control] = &mut lanes;
+                let a_media = a_media.as_mut().expect("all four bound");
+                let a_control = a_control.as_mut().expect("all four bound");
+                let b_media = b_media.as_mut().expect("all four bound");
+                let b_control = b_control.as_mut().expect("all four bound");
+                route(
+                    &listener, a_media, a_control, b_media, b_control, cap, &mut stop,
+                )
+                .await
+            }
             .await
         }
         Ok(false) => Ok(()),
@@ -253,6 +287,7 @@ async fn setup_peer(
     mut stream: TcpStream,
     fixture: RelayFixture,
     private: Arc<Zeroizing<[u8; 32]>>,
+    service: Option<SyntheticServiceModel>,
 ) -> Result<Bound, String> {
     stream
         .set_nodelay(true)
@@ -330,7 +365,14 @@ async fn setup_peer(
     if remote != fixture.device_public[role] {
         return Err("probe relay identity rejected".into());
     }
-    let lane = lane::spawn(stream, noise)?;
+    // Handshake, AUTH_DOMAIN and BIND have already been read/authenticated.
+    // Further reads wait for the generation owner's common four-lane epoch.
+    let lane = match service {
+        Some(service) => {
+            lane::spawn_with_ingress_service(stream, noise, service.ingress(role, body[17] == 1))?
+        }
+        None => lane::spawn(stream, noise)?,
+    };
     Ok(Bound {
         index: role * 2 + usize::from(body[17]),
         body,
@@ -547,6 +589,62 @@ mod tests {
         }
         retire(stop, job).await;
         close_all(&mut lanes).await;
+    }
+
+    #[tokio::test]
+    async fn synthetic_service_arms_after_four_bindings_and_counts_both_role_lanes() {
+        use super::super::service::{SyntheticCollapse, SyntheticServiceConfig};
+
+        let fixture = fixture(7);
+        let model = SyntheticServiceModel::new(
+            SyntheticServiceConfig {
+                baseline_bps: 80_000,
+                collapse: Some(SyntheticCollapse {
+                    start_ms: 0,
+                    duration_ms: 100,
+                    bps: 0,
+                }),
+            },
+            fixture.profile_ms,
+        )
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let (stop, receiver) = watch::channel(false);
+        let job = tokio::spawn(serve_with_service_model(
+            listener,
+            fixture.clone(),
+            Zeroizing::new(RELAY_PRIVATE),
+            receiver,
+            model.clone(),
+        ));
+        let mut a_media = valid(&addr, &fixture, 0, false).await;
+        send_setup(&a_media, OP_RTP, vec![1; 122]).await.unwrap();
+        let mut a_control = valid(&addr, &fixture, 0, true).await;
+        send_setup(&a_control, OP_RTCP, vec![2; 130]).await.unwrap();
+        let mut b_media = valid(&addr, &fixture, 1, false).await;
+        let unarmed = model.snapshot().unwrap();
+        assert!(!unarmed.armed);
+        assert_eq!(unarmed.roles[0].read_bytes, 0);
+        assert_eq!(unarmed.roles[1].read_bytes, 0);
+        let mut b_control = valid(&addr, &fixture, 1, true).await;
+        assert!(model.snapshot().unwrap().armed);
+        send_setup(&b_media, OP_RTP, vec![3; 122]).await.unwrap();
+        send_setup(&b_control, OP_RTCP, vec![4; 130]).await.unwrap();
+        assert_eq!(receive(&mut b_media).await, (OP_RTP, vec![1; 122]));
+        assert_eq!(receive(&mut b_control).await, (OP_RTCP, vec![2; 130]));
+        assert_eq!(receive(&mut a_media).await, (OP_RTP, vec![3; 122]));
+        assert_eq!(receive(&mut a_control).await, (OP_RTCP, vec![4; 130]));
+        retire(stop, job).await;
+        let final_stats = model.snapshot().unwrap();
+        for role in final_stats.roles {
+            assert_eq!(role.read_bytes, 296); // media144 + feedback152, no setup bytes.
+            assert_eq!(role.authenticated_framed_bytes, 296);
+            assert_eq!(role.authenticated_frames, 2);
+            assert_eq!(role.live_partial_bytes, 0);
+            assert_eq!(role.retired_partial_bytes, 0);
+        }
+        close_all(&mut [a_media, a_control, b_media, b_control]).await;
     }
 
     #[tokio::test]

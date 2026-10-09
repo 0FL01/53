@@ -9,6 +9,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use zeroize::Zeroizing;
 
+use super::service::IngressService;
+
 pub const OP_BIND: u8 = 240;
 pub const OP_BOUND: u8 = 241;
 pub const OP_RTP: u8 = 242;
@@ -59,13 +61,30 @@ impl Drop for Lane {
 }
 
 pub fn spawn(stream: TcpStream, noise: snow::TransportState) -> Result<Lane, String> {
+    spawn_inner(stream, noise, None)
+}
+
+/// Relay-only ingress service; outbound Noise commitment and deadlines are unchanged.
+pub(super) fn spawn_with_ingress_service(
+    stream: TcpStream,
+    noise: snow::TransportState,
+    service: IngressService,
+) -> Result<Lane, String> {
+    spawn_inner(stream, noise, Some(service))
+}
+
+fn spawn_inner(
+    stream: TcpStream,
+    noise: snow::TransportState,
+    service: Option<IngressService>,
+) -> Result<Lane, String> {
     stream
         .set_nodelay(true)
         .map_err(|_| "probe socket configuration failed".to_string())?;
     let (outgoing, mut requests) = mpsc::channel(1);
     let (received, incoming) = mpsc::channel(1);
     let actor = tokio::spawn(async move {
-        if let Err(error) = run(stream, noise, &mut requests, &received).await {
+        if let Err(error) = run(stream, noise, &mut requests, &received, service).await {
             // Never wait for an unresponsive consumer during teardown.
             let _ = received.try_send(Err(error));
         }
@@ -92,6 +111,7 @@ async fn run(
     mut noise: snow::TransportState,
     requests: &mut mpsc::Receiver<SendRequest>,
     received: &mpsc::Sender<Result<(u8, Vec<u8>), String>>,
+    mut service: Option<IngressService>,
 ) -> Result<(), String> {
     let (mut reader, mut writer) = stream.into_split();
     // Offsets live outside select futures: cancelled read/write calls lose no bytes.
@@ -106,7 +126,12 @@ async fn run(
     loop {
         tokio::select! {
             _ = received.closed() => return Err("probe consumer closed".into()),
-            read = reader.read(&mut cipher[filled..wanted]), if inbound.is_none() => {
+            read = async {
+                match &mut service {
+                    Some(service) => service.read(&mut reader, &mut cipher[filled..wanted]).await,
+                    None => reader.read(&mut cipher[filled..wanted]).await,
+                }
+            }, if inbound.is_none() => {
                 let count = read.map_err(|_| "probe read failed".to_string())?;
                 if count == 0 {
                     return Err("probe lane closed".into());
@@ -128,6 +153,9 @@ async fn run(
                         .map_err(|_| "probe frame rejected".to_string())?;
                     if consumed != length {
                         return Err("probe trailing frame bytes".into());
+                    }
+                    if let Some(service) = &mut service {
+                        service.authenticated(wanted)?;
                     }
                     inbound = Some(Ok((opcode, payload.to_vec())));
                     filled = 0;
@@ -183,6 +211,12 @@ mod tests {
     use tokio::time::timeout;
 
     async fn paired() -> (Lane, TcpStream, snow::TransportState) {
+        paired_with_service(None).await
+    }
+
+    async fn paired_with_service(
+        service: Option<IngressService>,
+    ) -> (Lane, TcpStream, snow::TransportState) {
         // Public deterministic fixture keys, never application identities.
         let private = [71; 32];
         let mut responder = snow::Builder::new(crate::transport::PATTERN.parse().unwrap())
@@ -212,11 +246,12 @@ mod tests {
             .await
             .unwrap();
         let (peer, _) = listener.accept().await.unwrap();
-        (
-            spawn(client, initiator.into_transport_mode().unwrap()).unwrap(),
-            peer,
-            responder.into_transport_mode().unwrap(),
-        )
+        let noise = initiator.into_transport_mode().unwrap();
+        let lane = match service {
+            Some(service) => spawn_with_ingress_service(client, noise, service).unwrap(),
+            None => spawn(client, noise).unwrap(),
+        };
+        (lane, peer, responder.into_transport_mode().unwrap())
     }
 
     fn encrypted(noise: &mut snow::TransportState, inner: &[u8]) -> Vec<u8> {
@@ -339,6 +374,157 @@ mod tests {
             (OP_RTP, vec![4; 64])
         );
         lane.joined_close().await;
+    }
+
+    #[tokio::test]
+    async fn gated_partial_noise_survives_collapse_restore_and_next_counter() {
+        use super::super::service::{
+            SyntheticCollapse, SyntheticServiceConfig, SyntheticServiceModel,
+        };
+
+        for prefix_bytes in [1, 10] {
+            let model = SyntheticServiceModel::new(
+                SyntheticServiceConfig {
+                    baseline_bps: 50_000,
+                    collapse: Some(SyntheticCollapse {
+                        start_ms: 100,
+                        duration_ms: 300,
+                        bps: 0,
+                    }),
+                },
+                40,
+            )
+            .unwrap();
+            let (mut lane, mut peer, mut noise) =
+                paired_with_service(Some(model.ingress(0, false))).await;
+            let wire = encrypted(&mut noise, &encode_frame(OP_RTP, &[4; 122]).unwrap());
+            assert_eq!(wire.len(), 144);
+            peer.write_all(&wire[..prefix_bytes]).await.unwrap();
+            // Reads are unarmed while outgoing commitment still works.
+            send(&lane, vec![8], None).await;
+            assert_eq!(model.snapshot().unwrap().roles[0].read_bytes, 0);
+            model.arm(Instant::now()).unwrap();
+            timeout(Duration::from_secs(2), async {
+                while model.snapshot().unwrap().roles[0].read_bytes != prefix_bytes as u64 {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let prior_wait = model.snapshot().unwrap().roles[0].credit_wait_ns;
+            timeout(Duration::from_secs(2), async {
+                while model.snapshot().unwrap().current_bps != 0 {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let partial = model.snapshot().unwrap().roles[0];
+            assert_eq!(partial.live_partial_bytes, prefix_bytes as u64);
+            assert_eq!(partial.authenticated_frames, 0);
+            assert_eq!(
+                partial.credit_wait_ns, prior_wait,
+                "idle socket charged as credit delay"
+            );
+            peer.write_all(&wire[prefix_bytes..]).await.unwrap();
+            timeout(Duration::from_secs(2), async {
+                while model.snapshot().unwrap().roles[0].credit_wait_ns == prior_wait {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .unwrap();
+            // Select cancels the gated read while outbound Noise continues.
+            send(&lane, vec![8], None).await;
+            for _ in 0..2 {
+                let mut reverse = [0; 23];
+                peer.read_exact(&mut reverse).await.unwrap();
+                let mut scratch = [0; 64];
+                let length = noise.read_message(&reverse[2..], &mut scratch).unwrap();
+                assert_eq!(decode_frame(&scratch[..length]).unwrap().2, &[8]);
+            }
+            assert_eq!(
+                timeout(Duration::from_secs(2), lane.incoming.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap(),
+                (OP_RTP, vec![4; 122]),
+            );
+            let following = encrypted(&mut noise, &encode_frame(OP_RTP, &[5]).unwrap());
+            peer.write_all(&following).await.unwrap();
+            assert_eq!(
+                timeout(Duration::from_secs(2), lane.incoming.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap(),
+                (OP_RTP, vec![5]),
+            );
+            // Retirement destroys the next partial frame; it cannot be refunded,
+            // discarded mid-stream or decoded under a restarted Noise counter.
+            let abandoned = encrypted(&mut noise, &encode_frame(OP_RTP, &[6]).unwrap());
+            peer.write_all(&abandoned[..1]).await.unwrap();
+            let completed = (wire.len() + following.len()) as u64;
+            timeout(Duration::from_secs(2), async {
+                while model.snapshot().unwrap().roles[0].read_bytes != completed + 1 {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .unwrap();
+            lane.joined_close().await;
+            let retired = model.snapshot().unwrap().roles[0];
+            assert_eq!(retired.read_bytes, completed + 1);
+            assert_eq!(retired.authenticated_framed_bytes, completed);
+            assert_eq!(retired.authenticated_frames, 2);
+            assert_eq!(retired.live_partial_bytes, 0);
+            assert_eq!(retired.retired_partial_bytes, 1);
+            assert!(retired.credit_wait_ns > 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn zero_service_retirement_cancels_wait_without_charging_unread_ciphertext() {
+        use super::super::service::{
+            SyntheticCollapse, SyntheticServiceConfig, SyntheticServiceModel,
+        };
+
+        let model = SyntheticServiceModel::new(
+            SyntheticServiceConfig {
+                baseline_bps: 80_000,
+                collapse: Some(SyntheticCollapse {
+                    start_ms: 0,
+                    duration_ms: 5_000,
+                    bps: 0,
+                }),
+            },
+            40,
+        )
+        .unwrap();
+        let (mut lane, mut peer, mut noise) =
+            paired_with_service(Some(model.ingress(0, false))).await;
+        let wire = encrypted(&mut noise, &encode_frame(OP_RTP, &[4; 122]).unwrap());
+        peer.write_all(&wire).await.unwrap();
+        model.arm(Instant::now()).unwrap();
+        timeout(Duration::from_secs(2), async {
+            while model.snapshot().unwrap().roles[0].credit_wait_ns == 0 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // Join must not wait for the five-second service restoration.
+        timeout(Duration::from_secs(2), lane.joined_close())
+            .await
+            .unwrap();
+        let retired = model.snapshot().unwrap().roles[0];
+        assert_eq!(retired.read_bytes, 0);
+        assert_eq!(retired.authenticated_framed_bytes, 0);
+        assert_eq!(retired.live_partial_bytes, 0);
+        assert_eq!(retired.retired_partial_bytes, 0);
+        assert!(retired.credit_wait_ns > 0);
+        assert_eq!(retired, model.snapshot().unwrap().roles[0]);
     }
 
     #[tokio::test]

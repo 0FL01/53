@@ -312,3 +312,56 @@ healthy122s snapshot had late22/PLC24 and **zero** render expiry; final post-pho
 shutdown counters are separate. These are packet/fixture counters, not source-active
 quality percentages, acoustic latency or measured DNS capacity. A fresh45-minute
 run continues with the corrected sink and clock pair.
+
+### Opt-in synthetic useful-byte service
+
+The endpoint's75% **offered admission** is not a50/80kbit/s service model. The
+diagnostic relay now accepts an optional owner-read-only fixture configuration:
+
+```text
+call_media_probe relay FIXTURE_DIR LOOPBACK_BIND SYNTHETIC_SERVICE_CONFIG
+```
+
+For example, the nonsecret JSON configuration may be:
+
+```json
+{"baseline_bps":50000,"collapse":{"start_ms":10000,"duration_ms":300,"bps":20000}}
+```
+
+Baseline must be exactly50000 or80000; optional collapse is0..baseline for1..5000ms,
+starting no later than3600000ms. Unknown fields and invalid bounds are rejected.
+Omitting the optional argument preserves the original relay behavior.
+
+Two independent source-role meters share each role's media/control allowance.
+They start with zero credit at one common monotonic epoch **after all four lanes
+authenticate and bind**. Setup bytes are excluded. The meter charges actual
+nonblocking reads of the full prefix/Noise/application/SRTP-or-SRTCP bytes, not
+codec payload alone. Burst is one maximum frame:152B for20/40ms and194B for60ms.
+Idle credit stays bounded; both collapse boundaries discard unused credit. There
+is no separate control allowance, outer-DNS/IP shaper, added packet queue or
+native scheduler change. Partial frame offsets and Noise counters survive
+service waits; retirement destroys partial records without refund or replay.
+
+`probe_service_progress`/`probe_service_final` JSON explicitly labels this
+`synthetic-framed-application-service`. Per-role read/authenticated/live-partial/
+retired-partial bytes and credit wait are observable. Wait is summed over the two
+lanes and includes reactor scheduling, not idle socket time. This is a synthetic
+application-byte ceiling **after DNS transit**; runtime/carrier service can be
+lower. It does not measure actual DNS safe capacity or acoustic latency.
+
+The61 focused tests include exact296B combined media+feedback service:47.36ms at
+50k and29.6ms at80k, shared per-role credit, zero-rate restoration, partial-frame
+cancellation and following Noise counters. Workspace316 tests and the separate
+CLI sink test pass, with the two unchanged explicit native ignores. Actual8s
+**DirectTCP component-only** executions of the complete protected endpoints and
+meter—not phone/DNS qualification—gave:
+
+| Synthetic service | Decoded A/B | PLC A/B | Native render expiry A/B |
+| --- | --- | --- | --- |
+| 50k baseline | 194/194 | 0/0 | 0/0 |
+| 80k baseline | 195/195 | 0/0 | 0/0 |
+| 50k,300ms at20k | 192/189 | 2/5 | 0/0 |
+
+Both role byte accounts matched authenticated frames with no retired partial
+bytes; setup was excluded and aggregate service bounds held. These component
+results do not replace applying the labelled model to the actual DNS fixture.

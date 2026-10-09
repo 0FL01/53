@@ -3,6 +3,7 @@ pub mod fixture;
 mod lane;
 mod packet;
 pub mod relay;
+pub mod service;
 mod session;
 
 #[cfg(target_os = "android")]

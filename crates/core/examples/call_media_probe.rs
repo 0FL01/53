@@ -1,5 +1,9 @@
 //! Fixture authority / opaque private relay / synthetic endpoint. No msgd DB.
-use dmsg_core::voice_probe::{fixture, relay, test_tone, Probe};
+use dmsg_core::voice_probe::{
+    fixture, relay,
+    service::{SyntheticServiceConfig, SyntheticServiceModel},
+    test_tone, Probe,
+};
 use std::{
     path::Path,
     time::{Duration, Instant},
@@ -103,10 +107,20 @@ fn execute() -> Result<(), String> {
             write_pair(next, fixture::rotate(a, b, key)?)?;
             println!("fresh epoch created with unchanged fixture trust identities");
         }
-        Some("relay") if args.len() == 4 => {
+        Some("relay") if matches!(args.len(), 4 | 5) => {
             let dir = Path::new(&args[2]);
             let route = fixture::read_private(&dir.join("relay.json"), 4096)?;
-            let route = serde_json::from_slice(&route).map_err(|_| "invalid relay fixture")?;
+            let route: fixture::RelayFixture =
+                serde_json::from_slice(&route).map_err(|_| "invalid relay fixture")?;
+            let service = args
+                .get(4)
+                .map(|path| {
+                    let bytes = fixture::read_private(Path::new(path), 4096)?;
+                    let config: SyntheticServiceConfig = serde_json::from_slice(&bytes)
+                        .map_err(|_| "invalid synthetic service fixture")?;
+                    SyntheticServiceModel::new(config, route.profile_ms)
+                })
+                .transpose()?;
             let key = fixture::read_private(&dir.join("relay.key"), 32)?;
             let key: [u8; 32] = key
                 .as_slice()
@@ -121,7 +135,35 @@ fn execute() -> Result<(), String> {
                     .await
                     .map_err(|_| "relay bind failed")?;
                 let (_stop, stopped) = tokio::sync::watch::channel(false);
-                relay::serve(listener, route, Zeroizing::new(key), stopped).await
+                if let Some(service) = service {
+                    let served = relay::serve_with_service_model(
+                        listener,
+                        route,
+                        Zeroizing::new(key),
+                        stopped,
+                        service.clone(),
+                    );
+                    tokio::pin!(served);
+                    let mut reports = tokio::time::interval(Duration::from_secs(10));
+                    reports.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    loop {
+                        tokio::select! {
+                            result = &mut served => {
+                                println!("{}", serde_json::json!({
+                                    "kind": "probe_service_final", "service": service.snapshot()?,
+                                }));
+                                break result;
+                            }
+                            _ = reports.tick() => {
+                                println!("{}", serde_json::json!({
+                                    "kind": "probe_service_progress", "service": service.snapshot()?,
+                                }));
+                            }
+                        }
+                    }
+                } else {
+                    relay::serve(listener, route, Zeroizing::new(key), stopped).await
+                }
             })?;
         }
         Some("endpoint") if args.len() == 4 => {
@@ -198,7 +240,7 @@ fn execute() -> Result<(), String> {
             }
         }
         _ => {
-            eprintln!("usage: call_media_probe create-fixtures DIR PUBLIC_CONFIG | rotate-fixtures OLD_DIR NEW_DIR | relay DIR BIND | endpoint FIXTURE SECONDS | local");
+            eprintln!("usage: call_media_probe create-fixtures DIR PUBLIC_CONFIG | rotate-fixtures OLD_DIR NEW_DIR | relay DIR BIND [SYNTHETIC_SERVICE_CONFIG] | endpoint FIXTURE SECONDS | local");
             return Err("invalid probe command".into());
         }
     }
