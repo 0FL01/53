@@ -66,15 +66,15 @@ class CallMediaProbeGatesTest {
     }
 
     /** Required instrumentation arguments: probe_fixture_path (private owner0400 file),
-     * probe_duration_seconds (6..120). Missing/invalid inputs fail, never skip.
+     * probe_duration_seconds (6..3600). Missing/invalid inputs fail, never skip.
      * Peer/relay topology and actual DNS service rate must be independently documented.
      */
-    @Test(timeout = 240_000) fun foregroundMicrophoneProtectedDnsAndCleanupOnlyInGatePackage() {
+    @Test(timeout = 3_840_000) fun foregroundMicrophoneProtectedDnsAndCleanupOnlyInGatePackage() {
         val app = gate()
         val path = arguments.getString(CallProbeActivity.EXTRA_FIXTURE_PATH)
         assertFalse("required explicit probe_fixture_path", path.isNullOrBlank())
         val duration = arguments.getString("probe_duration_seconds")?.toLongOrNull()
-        assertTrue("required probe_duration_seconds in 6..120", duration != null && duration in 6..120)
+        assertTrue("required probe_duration_seconds in 6..3600", duration != null && duration in 6..3600)
         runAudio(app, path!!, duration!! * 1_000, exerciseRate = false)
     }
 
@@ -102,7 +102,11 @@ class CallMediaProbeGatesTest {
                         owner = it.probeOwner
                         owner?.let { audio -> assertHealthy(it, audio) }
                     }
-                    owner?.snapshot()?.phase == "running"
+                    owner?.snapshot()?.let { state ->
+                        val native = JSONObject(state.nativeStats)
+                        state.phase == "running" && native.optBoolean("ready") &&
+                            (fixture == null || native.optBoolean("dns_carrier"))
+                    } == true
                 }
                 val audio = owner!!
                 val host = activity!!
@@ -140,6 +144,8 @@ class CallMediaProbeGatesTest {
                 assertTrue("continued real microphone progress", state.capturedSamples > (initialCapture ?: 0) + 16_000)
                 assertTrue("nonzero microphone signal (all-zero/muted input is not evidence)", state.capturePeak > 0)
                 val native = JSONObject(state.nativeStats)
+                assertTrue("authenticated peer readiness", native.getBoolean("ready"))
+                assertEquals("explicit topology must match the native carrier", fixture != null, native.getBoolean("dns_carrier"))
                 assertTrue("real live encoder packets", native.getLong("encoded_packets") > 0)
                 assertTrue("real protected decoder packets", native.getLong("decoded_packets") > 0)
                 assertTrue("protected outbound bytes", native.getLong("tx_bytes") > 0)

@@ -138,7 +138,9 @@ Instrumentation selects one exact method in `CallMediaProbeGatesTest`:
 - `foregroundMicrophoneProtectedDnsAndCleanupOnlyInGatePackage`
 
 The last method requires an explicit private `probe_fixture_path` and
-`probe_duration_seconds`6–120. Missing fixtures fail, never pass as a skip.
+`probe_duration_seconds`6–3600, allowing the planned45-minute gate. Missing fixtures
+fail, never pass as a skip. Measurement starts only after authenticated peer
+readiness; DNS mode also requires the native carrier flag, not just Activity start.
 Install only the APKs built with `-PgateInstall=true`; never reset/install Main.
 Permission grant precedes instrumentation; revocation is separate because it can
 kill the runner UID. Lifecycle pause ends audio and joins its native owner.
@@ -151,3 +153,39 @@ physical acceptance; one phone + synthetic host, DirectTCP or RTT/2 cannot repla
 them. Explicit near-boundary tests cover RTP16-bit sequence and32-bit timestamp
 rollover;45minutes alone does not cover timestamp rollover or guarantee sequence
 wrap with DTX.
+
+## Observed checkpoint, 2026-10-09
+
+The authorized Moto/API35 passed actual packaged WB40 NoLACE/Deep PLC activation
+and the foreground protected local pair. The latest8-second local run decoded201
+packets with0 PLC/late/render drops/underruns; actual sink depth stayed≤640samples.
+The platform16008Hz actuator was observed at16007.707Hz; teardown joined in5ms.
+
+One Moto plus a synthetic Linux peer also traversed two real pinned C clients,
+a source-scoped controlled LAN DNS forwarder, a private authoritative carrier and
+the opaque relay. This is neither USB DirectTCP nor public recursive DNS evidence.
+The declared50kbit/s admission input and600ms feedback cycle were **not measured
+DNS capacity/calibration**. No common-clock mouth-to-ear or listening pass exists.
+
+| Short20-second fixture | Authenticated incoming RTP | Late packets | PLC slots | Result |
+|---|---:|---:|---:|---|
+|40ms, fresh epoch with unchanged Noise trust identities |497 |192 |192 |Protected DNS/lifecycle PASS; poor delivery |
+|20ms |845 at early stop |519 |524 |Bounded generation retired before completion |
+|60ms |330 |172 |172 |Protected DNS/lifecycle PASS; poor delivery |
+|40ms, injected20ms DNS response delay |496 |35 |36 |Protected DNS/lifecycle PASS; not quality acceptance |
+
+These are packet/slot counters, **not source-active loss percentages**. The first
+40ms run was materially better; the variation does not qualify any profile.
+Unmodified LAN fixtures emitted hundreds of thousands of queries during short
+scripts, including startup/tail. The injected-delay comparison also dropped16676
+responses at its bounded256-entry fixture queue, so it is a labelled impairment,
+not a clean attribution of improved delivery solely to pacing. No scheduler,
+congestion control, jitter target or progress window was changed to hide failure.
+
+Actual native stop/join was observed at1–8ms on the phone and25–42ms on the host;
+fresh-generation setup succeeded and all owned listeners/phone fixtures were
+removed. This does not prove prompt per-lane abort or sibling preservation.
+The selected baseline remains an **unqualified engineering candidate**. Physical
+acceptance is blocked by the missing second authorized Android and common-clock,
+representative50/80kbit/s recursive-DNS measurement fixture; a host cannot replace
+those requirements. See the durable goal for remaining evidence and artifact hashes.

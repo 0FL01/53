@@ -198,12 +198,19 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
             clean.put(field, value)
         }
         listOf("received_rtp_packets", "capture_gap_batches", "fixture_peer_encoded_packets",
-            "fixture_peer_dropped_capture", "fixture_peer_capture_gap_batches")
+            "fixture_peer_dropped_capture", "fixture_peer_capture_gap_batches", "tiny_non_dtx_packets")
             .forEach { clean.put(it, source.getLong(it)) }
+        clean.put("ready", source.getBoolean("ready")).put("dns_carrier", source.getBoolean("dns_carrier"))
         clean.put("failed", source.getBoolean("failed")).put("stopped", source.getBoolean("stopped"))
         val error = source.optString("error")
         // Never forward arbitrary exceptions, fixture/config content, or path strings.
-        clean.put("error", if (error.matches(Regex("[A-Za-z0-9_ -]{0,120}"))) error else "native_diagnostic_redacted")
+        val safeError = when (error) {
+            "remote media window exhausted; retire generation" -> "remote_media_window_exhausted"
+            "remote media progress expired; retire generation" -> "remote_media_progress_expired"
+            "control submission expired; retire generation" -> "control_submission_expired"
+            else -> if (error.matches(Regex("[A-Za-z0-9_ -]{0,120}"))) error else "native_diagnostic_redacted"
+        }
+        clean.put("error", safeError)
         return clean.toString()
     }
 
