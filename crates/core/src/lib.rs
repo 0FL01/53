@@ -22,6 +22,8 @@
 
 #[cfg(target_os = "android")]
 mod android_audio_jni;
+#[cfg(all(target_os = "android", feature = "voice-probe"))]
+mod android_call_jni;
 pub mod auth;
 pub mod chat;
 pub mod contacts;
@@ -35,6 +37,8 @@ pub mod supervisor;
 pub mod transport;
 pub mod voice;
 pub mod voice_codec;
+#[cfg(feature = "voice-probe")]
+pub mod voice_probe;
 
 uniffi::setup_scaffolding!();
 

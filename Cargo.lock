@@ -559,6 +559,7 @@ dependencies = [
  "chacha20poly1305 0.10.1",
  "dmsg-opus-sys",
  "dmsg-protocol",
+ "dmsg-srtp-sys",
  "ed25519-dalek 2.2.0",
  "getrandom 0.3.4",
  "jni",

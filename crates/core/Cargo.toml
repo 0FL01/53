@@ -4,11 +4,15 @@ version = "0.1.0"
 edition = "2021"
 description = "dmsg client core: pinned DNS transport, unified auth, sealed local store, Olm E2E, contacts and durable outbox"
 
+[features]
+voice-probe = ["dep:dmsg-srtp-sys"]
+
 [dependencies]
 tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "io-util", "time", "sync"] }
 dmsg-protocol = { path = "../protocol" }
 slipstream-sys = { path = "../slipstream-sys" }
 dmsg-opus-sys = { path = "../opus-sys" }
+dmsg-srtp-sys = { path = "../srtp-sys", optional = true }
 serde = { version = "1", features = ["derive"] }
 rusqlite = { version = "0.32", features = ["bundled", "functions"] }
 chacha20poly1305 = "0.10"
@@ -34,3 +38,7 @@ crate-type = ["cdylib", "rlib"]
 [dev-dependencies]
 uniffi_bindgen = "0.29"
 camino = "1"
+
+[[example]]
+name = "call_media_probe"
+required-features = ["voice-probe"]

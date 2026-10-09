@@ -23,20 +23,20 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Source: аудированный media-план, ARCHITECTURE §9, переиспользование голосовых сообщений из исходного запроса.
   - Acceptance: исходный кандидат mono PCM16/16kHz, VOIP, 12 kbit/s, 40ms/640samples, VBR с реальным max_data_bytes=100, encoder10/decoder7, WB maximum/AUTO, DTX/PLC. FEC/DRED/BWE/QEXT off. Legal tiny DTX packets допустимы, zero-byte incoming packet запрещён; duration/mono/bandwidth/cap проверяются. Existing 10k/20ms DVN API/validation неизменны. NoLACE и Deep PLC проверяются по actual decoder path, не только CTL readback.
   - Primary evidence: live codec tests, existing voice_codec/voice-note regressions, host/Android native linkage.
-  - Status: in_progress
-  - Evidence: live API host6 tests + six note-container regressions PASS; separate core voice_codec6 PASS. Actual WB40 NoLACE and isolated Deep PLC4/5 change decoded PCM. Fresh target/live-check test/clippy(-D warnings)/fmt PASS; старый clippy CMake cache attempted /usr/local install, fresh target resolves without privilege/config change. Android packaged activation remains for R4 checkpoint.
+  - Status: verified
+  - Evidence: host live6 + note-container6/core voice_codec6 PASS, note contracts unchanged. Exact packagedLiveCodecActivationOnlyInGatePackage on Moto/API35 PASS: actual arm64 WB40 packets100, NoLACE changed31998samples, isolated Deep PLC4/5 changed1907samples, lookahead104. Fresh isolated target avoids old unrelated CMake cache; no privileged/upstream/config changes.
 - R3: Memory-only protected duplex media/feedback/relay с ограниченными очередями и retirement старой generation.
   - Source: аудированный media-план; ARCHITECTURE §7–9.
   - Acceptance: один bidirectional media lane и один control lane на endpoint, независимые Noise states; RTP/SRTP AES_CM_128_HMAC_SHA1_80, SRTCP feedback. Один pending plaintext media packet + один committed frame; deadline drop до Noise, после commitment — finish ordered frame либо уничтожить lane. Remote-authenticated terminal progress ограничивает admitted bytes; local writes не считаются ACK. Relay не получает media keys и не декодирует звук. Fresh generation/Noise/SRTP keys/SSRC/codec/queues после coordinated fixture restart; старый material не replay.
   - Primary evidence: protected duplex/crypto/parser/queue/credit/generation tests и two-endpoint probe results.
   - Status: in_progress
-  - Evidence: statically bundled libSRTP2.7.0, owned Send/!Sync contexts, whole-compound SRTCP, tamper/replay/ROC/fresh-generation tests: host12/fmt/clippy PASS; arm64/API26 compile PASS. Duplex/admission/relay still pending.
+  - Evidence: SRTP9bb9ecb pushed; host12/arm64 PASS. Integrated private duplex/relay/fixture/packet/session16 tests PASS, including backpressure, partial IO, nonce-safe deadline, authentication/binding, ordered credit and generation retirement. Workspace271 PASS, two existing native tests ignored unchanged; fmt PASS. Protected real-phone local pair PASS; actual native DNS/carrier retirement remains next evidence, not inferred from loopback.
 - R4: Реальный foreground Android audio probe на разрешённом телефоне.
   - Source: последний запрос, аудированный Android atom; AGENTS.md/AUTH_GATES.md.
   - Acceptance: visible target-UID host только .gate, explicit mic permission, real AudioRecord/AudioTrack, bounded 10ms JNI batches и independent capture/render/media progress; VOICE_COMMUNICATION/focus/effects/route observations. Playback queue учтена в deadlines, clock correction измеряется, lifecycle cleanup/cancel не зависит от DB/Olm. Main/Pacman/их identity/data не изменяются.
   - Primary evidence: selected exact-method .gate instrumentation на ZY22JFJ5LP, arm64/JVM/debug/release builds и real mic/playback/cleanup evidence.
-  - Status: pending
-  - Evidence: adb devices -l подтверждает только ZY22JFJ5LP; второй физический endpoint пока отсутствует.
+  - Status: in_progress
+  - Evidence: arm64/API26 native and JVM/debug/release/androidTest builds PASS. Exact foregroundMicrophoneProtectedLoopbackAndCleanupOnlyInGatePackage on Moto/API35 PASS: real mic/playback, enabled AEC/NS, actual640sample sink bound, hardware timestamps and16008Hz actuator slope, pause cleanup/stop3ms. Latest8s running baseline decoded192/PLC0/late0/renderDrop0/underrun0; only startup/intentional teardown drops separated. DNS exact-method fixture follows. Main/identities untouched.
 - R5: Честный сквозной DNS/voice experiment и решение по профилю.
   - Source: исходный запрос/исследование, ARCHITECTURE §9.173–177, WORK_PLAN M1-V.
   - Acceptance: timestamp screening и duplex audio по actual DNS, полезная граница byte accounting явно указана; controlled 50/80 application service model отделена от observed DNS service rate. Для полной physical приёмки — два реальных Android, оба upload активны, ≥30min (план 45min) выбранного профиля; common-clock mouth-to-ear в обоих направлениях, late active duration включает pre-send drops, stalls/queue drift/bytes/query rate/ресурсы/понятность. Не заменять physical pair одним phone+host, USB/DirectTCP либо RTT/2. Нормальная цель p95≤400ms/late≤2%; 700ms/5% только кандидат экспериментального пилота, не low-latency обещание. Негативный результат сохраняется как результат, не маскируется изменением gate.
@@ -74,15 +74,15 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 
 ## Current Checkpoint
 - Closes: R3.
-- Smallest next action: commit/push verified SRTP boundary; implement private duplex probe/relay and generation-bound feedback/credit.
-- Expected evidence: bounded live codec/unchanged notes; crypto and duplex/admission/generation tests; Android activation later in R4.
+- Smallest next action: commit/push verified private probe/relay; provision owned isolated DNS fixture and run selected phone↔host gate.
+- Expected evidence: protected actual DNS delivery/NativeClient stop/join counters and clean .gate audio teardown; no physical pair/quality claim.
 - Stop or replan if: изменение требует production rollout/schema/carrier rewrite либо иной physical device permission.
 
 ## Current State
-- Resolved: frozen goal and live codec4bc5df8 pushed; independent SRTP native boundary implemented and reviewed: host12 tests/fmt/clippy and arm64/API26 build PASS in isolated target/srtp-check.
-- Last relevant evidence: live test6+note regression6/core voice_codec6, isolated clippy/fmt PASS; adb devices -l показывает единственный разрешённый Moto.
+- Resolved: goal7a37e47, codec4bc5df8 and SRTP9bb9ecb pushed. Feature-only core probe/JNI and debug Android owner implemented and tested locally; private fixture docs in crates/core/VOICE_PROBE.md.
+- Last relevant evidence: core probe16/fmt PASS, workspace271 PASS, arm64/builds PASS; actual Moto packaged neural activation and8s protected mic/playback/cleanup PASS. Synthetic peer initially lost timer slots; source-conserving bounded capture fixed it, without weakening gates or expanding carrier scope.
 - Blocker: для R5 physical two-phone acceptance нужен второй явно разрешённый физический Android; это не блокирует R2–R4 и phone↔host evidence.
-- Next: protected duplex probe checkpoint; debug Android owner compiled independently, packaged JNI/device verification follows native implementation.
+- Next: publish current scoped core/Android checkpoints; actual DNS fixture screening, then record remaining R5 physical/measurement dependencies.
 
 ## Material Decisions
 - 2026-10-09: последний user override разрешает implementation/commits/push/тесты на ZY22JFJ5LP; отменяет прежний read-only режим, не разрешает Main reset или production rollout.
@@ -93,6 +93,7 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 - 2026-10-09: preflight/audit/contract freeze; implementation и tests ещё не выполнялись.
 - 2026-10-09: goal7a37e47 pushed; separate bounded LiveEncoder/LiveDecoder, valid tiny DTX, exact PLC and actual WB40 neural activation host tests PASS. Note contract unchanged. Fresh target/live-check avoids stale native CMake cache; no upstream build changes.
 - 2026-10-09: live codec4bc5df8 pushed. SRTP2.7.0 native boundary verified host12 and Android arm64/API26; upstream archive unchanged, licenses retained. Separate debug/.gate Android owner and exact-method tests compile, JVM122 PASS; no device run yet.
+- 2026-10-09: SRTP9bb9ecb pushed. Integrated protected probe16 host tests and workspace271 PASS; target/live-check isolated. Full Temurin21 with verified archive resolves missing jlink in prior local JRE. Empty owned ADB server needed legacy USB backend to see authorized Moto; no keys/Main data changed. Actual codec and foreground local audio gates PASS; unnecessary render overwrite and synthetic missed-slot loss diagnosed and fixed before DNS screening.
 
 ## Completion
 - Resolved outcomes: pending.

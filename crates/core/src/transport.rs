@@ -110,6 +110,18 @@ impl DirectTcp {
     fn noise_mut(&mut self) -> Result<&mut snow::TransportState, TransportError> {
         self.noise.as_mut().ok_or(TransportError::Closed)
     }
+
+    /// Transfer an authenticated fixture lane to its single duplex owner.
+    /// Production RPC/close behavior is unchanged; this is not a split Noise API.
+    #[cfg(feature = "voice-probe")]
+    pub(crate) fn into_probe_parts(
+        mut self,
+    ) -> Result<(tokio::net::TcpStream, snow::TransportState), TransportError> {
+        Ok((
+            self.stream.take().ok_or(TransportError::Closed)?,
+            self.noise.take().ok_or(TransportError::Closed)?,
+        ))
+    }
 }
 
 impl Transport for DirectTcp {
