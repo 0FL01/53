@@ -214,6 +214,17 @@ pub extern "system" fn Java_org_dmsg_client_CallProbeJni_sinkRate(
     u8::from(get(handle).is_some_and(|owner| owner.audio.sink_rate(ppb)))
 }
 #[no_mangle]
+pub extern "system" fn Java_org_dmsg_client_CallProbeJni_renderExpiredSamples(
+    _env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+) -> jlong {
+    get(handle)
+        .and_then(|owner| owner.audio.render_expired_samples())
+        .and_then(|samples| jlong::try_from(samples).ok())
+        .unwrap_or(-1)
+}
+#[no_mangle]
 pub extern "system" fn Java_org_dmsg_client_CallProbeJni_stats(
     mut env: JNIEnv<'_>,
     _class: JClass<'_>,

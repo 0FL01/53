@@ -801,3 +801,87 @@ causal promotion of TCP_NODELAY. Admission capacity and healthy feedback cycle
 remain declared, the service ceiling is synthetic after DNS transit, and the
 direct-authoritative fixture supplies no public-recursive capacity or DNS-QPS
 acceptance. Latest-build long-pair and common-clock acoustic evidence remain open.
+
+### Queued terminal progress, receipt accounting and bounded renderer cache
+
+Two protected source regressions corrected progress decisions without increasing
+the byte window or the720ms oldest-entry bound. The actor consumes at most one
+already-ready capacity-one control frame before both top-turn and media-wake
+decisions. SRTCP authentication, strict compound/frontier validation and receipt
+reaping still precede credit release. An ACK queued at719ms can clear credit when
+the actor runs at721ms; its measured cycle remains721ms, not clipped to the guard.
+No ACK, forged/stale/non-covering progress and uncovered old entries still fail.
+
+Waiting admission charge is now calculated **after** receipt reaping. A ready
+receipt moving into the ledger is not also retained in a caller's cached pending
+sum. The reproduced protected prefix case correctly charges2736 ledger bytes
+plus144 waiting bytes, rather than3024. Unresolved pending receipts remain charged;
+2880 passes and2881 fails. Reaping a local receipt never substitutes for a terminal
+remote ACK. These source proofs do not attribute the historical physical retirement
+around35.8 minutes to either race.
+
+Fresh JNI pulls request only free AudioTrack capacity, capped at160 samples. An
+already-owned partial batch must finish before another pull. The original single
+ShortArray,640-sample sink/native-frame limits, source-sample handoff and immutable
+frame end remain unchanged. A controlled159-free case transfers639 instead of480
+samples before expiry, but still expires one sample without another head advance;
+the model is not a claim that every physical tail is fixed.
+
+`last_render_loop_trace` is one optional renderer observation, with exactly two
+preallocated completed-cycle buffers. It records operation durations, head/depth,
+requests, partial writes, parking and scheduling gaps. A read-only nonblocking JNI
+counter returns unknown for invalid/busy/retired state; unknown is not zero or a
+media failure. Cached native expiry detail is associated only when its counter
+matches the fresh sample. Multiple expiries or cache lag remain explicitly
+ambiguous. The two cycles precede **observation**, not necessarily the native event;
+their offsets are local monotonic diagnostics, not acoustic timestamps.
+
+One strict Moto8s run still failed21 active expired samples, with zero late/PLC or
+source loss. Its two prior cycles spent3.258/7.594ms repeatedly parsing the owner's
+100ms cache while parked at sink640. This does not establish the final-pull cause.
+The renderer now retains one raw string reference and parsed readonly JSONObject:
+identical references reuse parsing; equal content in a new reference reparses.
+Malformed replacement still fails, without stale fallback. Atomic cache reads,
+clock/freshness selection and all media operations continue every cycle. Unchanged
+compensation JSON is reused by exact output equality, not approximate rates.
+JVM models preserve commands/metadata/media decisions across all641 sink depths;
+200 identical-reference reads parse once rather than200 times. No owner refresh,
+priority, queue, deadline or source-anchor policy is changed.
+
+Current checks:127 focused,383 workspace (two unchanged explicit native ignores),
+two example tests,162 JVM reports, formatting, candidate arm64/API26 and complete
+debug/release/instrumentation builds pass. The normal CLI is explicitly rebuilt
+after example tests and is not the test harness. Both actual strict local8s gates
+pass with zero active source/render loss and late/PLC in those samples; the Moto
+source-worker's30.020s supervisor-bound overrun is separately recorded and is not
+an application failure. The later Mi source/controller bound and cleanup pass.
+
+Two latest120s paired records use real Moto/API35 and Mi/API30 audio/C/DNS paths,
+existing BBR, the labelled opt-in TCP option, synthetic50k framed service per role,
+declared admission50k/F0=600ms and known finite PC-speaker test material. Both
+clock/lifecycle/cleanup gates and coordinated frozen-interval release pass.
+
+| Build record | Moto late / PLC / post-ready capture / render expiry | Mi late / PLC / post-ready capture / render expiry |
+| --- | --- | --- |
+| Cache/ACK124 | 16 /16 /0 /0 | 9 /9 /0 /0 |
+| Receipt127 | 3 /3 /640 /0 | 10 /11 /0 /0 |
+
+These are packet/sample counters, not source-active loss ratios or listening
+acceptance. First-arrival phase and source duty vary; the two records are not a
+causal cache/receipt comparison. READY, frozen RUN and intentional teardown remain
+separate. The cache/ACK124 disposable relay exits1 after both instruments finish;
+that nonzero child retirement is retained, not relabelled a zero-exit runtime.
+
+A new2700s receipt127 pair is running on frozen artifacts. Near8 minutes its
+running clocks/owners remain healthy, but Moto/Mi render expiry is254/480 samples:
+no intermittent-tail-fix or45-minute PASS is claimed. The earlier f844d1c45-minute
+attempt ended around35.8 minutes with both `remote_media_progress_expired` errors;
+it did not complete. Do not reinstall or rebuild into a running experiment.
+
+The fixture is direct-authoritative LAN, with the service meter applied after DNS
+transit. Declared admission capacity and F0 are not measured safe recursive-DNS
+capacity. It supplies no DNS-QPS or common-clock acoustic measurement. Full R5
+still requires latest-build long50/80, source-active gaps/stalls, attributable
+mouth-to-ear and listening/double-talk evidence; code/model/local PASS does not
+replace those outcomes. Device wall clocks, Main/identity and transport pin/
+scheduler remain unchanged.

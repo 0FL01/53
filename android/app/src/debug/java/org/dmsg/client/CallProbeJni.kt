@@ -19,6 +19,8 @@ object CallProbeJni {
     external fun sinkQueued(handle: Long, samples: Int)
     /** Actual sink frequency relative to nominal16k in parts per billion. */
     external fun sinkRate(handle: Long, ppb: Long): Boolean
+    /** Read-only expiry diagnostic; -1 means invalid/busy/closed/unrepresentable, never a sink failure. */
+    external fun renderExpiredSamples(handle: Long): Long
     external fun stats(handle: Long): String
     external fun stop(handle: Long): String
 }

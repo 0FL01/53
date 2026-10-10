@@ -6,11 +6,11 @@ import org.junit.Test
 class CallProbeRenderCapacityTest {
     private data class Write(val offset: Int, val requested: Int, val accepted: Int)
 
-    // Fixed head and scripted nonblocking writes isolate capacity/PCM ownership.
+    // Controlled head and scripted nonblocking writes isolate capacity/PCM ownership.
     // This models neither native source deadlines nor physical tail expiry.
     private class PartialWriteFixture(initialDepth: Long = 480) {
         private val pcm = ShortArray(CallProbeAudio.BATCH_SAMPLES)
-        private val head = 0L
+        private var head = 0L
         var submitted = initialDepth
             private set
         var valid = 0
@@ -20,18 +20,27 @@ class CallProbeRenderCapacityTest {
         var pullCalls = 0
             private set
         private var pulledSamples = 0
+        val requestedPulls = mutableListOf<Int>()
         val writes = mutableListOf<Write>()
         val acceptedSamples = mutableListOf<Short>()
         val pending get() = valid - offset
         val depth get() = submitted - head
 
-        fun step(accepted: Int, pullSamples: Int = pcm.size): Boolean {
+        fun advanceHead(samples: Int) {
+            assertTrue(samples >= 0 && samples <= depth)
+            head += samples
+        }
+
+        fun step(accepted: Int, pullSamples: Int? = null): Boolean {
             assertTrue(depth in 0..CallProbeAudio.QUEUE_BOUND_SAMPLES.toLong())
             assertTrue(offset in 0..valid && valid <= pcm.size)
             if (!CallProbeAudio.renderHasCapacity(depth, pending)) return false
             if (valid == offset) {
-                valid = pullSamples; offset = 0
-                assertTrue(valid in 0..pcm.size)
+                val requested = CallProbeAudio.freshPullLimit(depth)
+                assertTrue(requested in 1..pcm.size)
+                requestedPulls += requested
+                valid = pullSamples ?: requested; offset = 0
+                assertTrue("native must not return beyond the requested prefix", valid in 0..requested)
                 pullCalls++
                 for (index in 0 until valid) pcm[index] = (pulledSamples + index).toShort()
                 pulledSamples += valid
@@ -136,14 +145,19 @@ class CallProbeRenderCapacityTest {
         assertEquals((0 until 260).map(Int::toShort), fixture.acceptedSamples)
     }
 
-    @Test fun freshPullStillRequires160SamplesOfCapacity() {
+    @Test fun freshPullUsesOnlyFreeCapacityUpToTheTenMillisecondMaximum() {
         for (depth in 0L..640L) {
             val fixture = PartialWriteFixture(depth)
-            if (depth <= 480) {
-                assertTrue("fresh pull must fit at depth $depth", fixture.step(160))
-                assertEquals(depth + 160, fixture.depth)
+            val requested = minOf(160, (640 - depth).toInt())
+            assertEquals(requested, CallProbeAudio.freshPullLimit(depth))
+            assertEquals(requested > 0, CallProbeAudio.renderHasCapacity(depth, 0))
+            if (requested > 0) {
+                assertTrue("fresh prefix must fit at depth $depth", fixture.step(requested))
+                assertEquals(depth + requested, fixture.depth)
                 assertEquals(1, fixture.pullCalls)
+                assertEquals(listOf(requested), fixture.requestedPulls)
                 assertEquals(0, fixture.pending)
+                assertEquals((0 until requested).map(Int::toShort), fixture.acceptedSamples)
             } else {
                 assertFalse("fresh pull must be blocked at depth $depth", fixture.step(0))
                 assertEquals(depth, fixture.depth)
@@ -153,5 +167,59 @@ class CallProbeRenderCapacityTest {
                 assertEquals(0, fixture.offset)
             }
         }
+    }
+
+    @Test fun oneTo159FreeSamplesNoLongerParkForAWholeFreshBatch() {
+        for ((depth, expected) in listOf(0L to 160, 480L to 160, 481L to 159,
+                639L to 1, 640L to 0)) {
+            assertEquals(expected, CallProbeAudio.freshPullLimit(depth))
+            if (depth in 481L..639L) {
+                assertFalse("the previous full-batch predicate parks", depth + 160 <= 640)
+                assertTrue("the production predicate admits a legal prefix",
+                    CallProbeAudio.renderHasCapacity(depth, 0))
+            }
+        }
+    }
+
+    @Test fun capacityLimitedPullRetainsZeroAndPartialWritesUntilItsRemainderFinishes() {
+        val fixture = PartialWriteFixture(481)
+        assertTrue(fixture.step(0))
+        assertEquals(159, fixture.pending)
+        assertEquals(listOf(159), fixture.requestedPulls)
+        assertTrue(fixture.step(80))
+        assertEquals(561L, fixture.depth)
+        assertEquals(79, fixture.pending)
+        assertEquals(80, fixture.offset)
+        assertTrue(fixture.step(0))
+        assertTrue(fixture.step(79))
+        assertEquals(640L, fixture.depth)
+        assertEquals(1, fixture.pullCalls)
+        assertEquals((0 until 159).map(Int::toShort), fixture.acceptedSamples)
+        assertFalse(fixture.step(0))
+
+        fixture.advanceHead(1)
+        assertTrue(fixture.step(1))
+        assertEquals(listOf(159, 1), fixture.requestedPulls)
+        assertEquals((0 until 160).map(Int::toShort), fixture.acceptedSamples)
+        assertEquals(0, fixture.pending)
+        assertEquals(640L, fixture.depth)
+        assertFalse(CallProbeAudio.renderHasCapacity(562, 79))
+    }
+
+    @Test fun emptyNativePrefixDoesNotWriteOrOwnPcm() {
+        val fixture = PartialWriteFixture(639)
+        assertFalse(fixture.step(0, pullSamples = 0))
+        assertEquals(0, fixture.pending)
+        assertEquals(639L, fixture.depth)
+        assertTrue(fixture.writes.isEmpty())
+        assertTrue(fixture.step(1))
+        assertEquals(listOf(1, 1), fixture.requestedPulls)
+        assertEquals(listOf(0.toShort()), fixture.acceptedSamples)
+        assertEquals(640L, fixture.depth)
+    }
+
+    @Test(expected = AssertionError::class)
+    fun nativeResultWithinArrayButBeyondRequestedPrefixIsRejected() {
+        PartialWriteFixture(639).step(2, pullSamples = 2)
     }
 }

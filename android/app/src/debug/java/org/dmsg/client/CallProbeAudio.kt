@@ -36,16 +36,51 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
         const val SAMPLE_RATE = 16_000
         const val BATCH_SAMPLES = 160
         const val QUEUE_BOUND_SAMPLES = 640 // 40 ms of submitted, not yet rendered PCM.
+        internal fun freshPullLimit(depth: Long): Int =
+            (QUEUE_BOUND_SAMPLES - depth).coerceIn(0L, BATCH_SAMPLES.toLong()).toInt()
+
         internal fun renderHasCapacity(depth: Long, pending: Int): Boolean {
-            // Finish the owned remainder; reserve a full batch only for a fresh pull.
-            val required = if (pending > 0) pending else BATCH_SAMPLES
-            return depth + required <= QUEUE_BOUND_SAMPLES
+            // Finish all owned PCM before requesting another bounded prefix.
+            return if (pending > 0) depth + pending <= QUEUE_BOUND_SAMPLES
+                else freshPullLimit(depth) > 0
         }
 
         private val nativeCounters = listOf("encoded_packets", "decoded_packets", "plc_slots",
             "tx_bytes", "rx_bytes", "dropped_capture", "dropped_render", "terminal_feedback",
             "late_packets", "max_unconfirmed_bytes", "max_feedback_cycle_ms", "sink_queue_samples",
             "tx_soft_deadline_packets", "stop_ms", "native_stop_ms")
+    }
+
+    /** One renderer's read-only parse, keyed by the immutable owner's string identity. */
+    internal class RenderMetadataCache(private val parse: (String) -> JSONObject = ::JSONObject) {
+        private var lastRaw: String? = null
+        private var lastParsed: JSONObject? = null
+
+        fun read(raw: String): JSONObject {
+            if (raw === lastRaw) return lastParsed!!
+            val parsed = parse(raw) // A malformed replacement throws before either cache field changes.
+            lastParsed = parsed
+            lastRaw = raw
+            return parsed
+        }
+    }
+
+    /** Only diagnostic serialization is skipped; the immutable output still drives every media call. */
+    internal class RenderCompensationCache(private val encode: (CallProbePlaybackClock.Output) -> String = { command ->
+        JSONObject().put("hardware_calibrated", command.calibrated)
+            .put("healthy", command.healthy).put("selected_rate", command.rate)
+            .put("sink_ppb", command.sinkPpb ?: JSONObject.NULL)
+            .put("hardware_rejection_mask", command.rejectionMask)
+            .put("relative_ppm", command.relativePpm ?: JSONObject.NULL).toString()
+    }) {
+        private var lastCommand: CallProbePlaybackClock.Output? = null
+
+        fun changedJson(command: CallProbePlaybackClock.Output): String? {
+            if (command == lastCommand) return null
+            val json = encode(command)
+            lastCommand = command
+            return json
+        }
     }
 
     data class Clock(val frame: Long, val nanoTime: Long) {
@@ -67,6 +102,181 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
         fun json() = JSONObject().put("available", available).put("created", created)
             .put("enable_result", enableResult ?: JSONObject.NULL).put("enabled", enabled).put("control", control)
     }
+
+    enum class RenderParkReason(val label: String) {
+        UNOBSERVED("unobserved"), NONE("none"), CAPACITY("capacity"),
+        EMPTY_PULL("emptyPull"), ZERO_WRITE("zeroWrite")
+    }
+
+    /** Immutable typed copy of the already sanitized native last-expiry object. */
+    data class RenderExpiry(
+        val kind: String, val publicationVsStartUs: Long?, val firstPullVsStartUs: Long?,
+        val lastPullVsStartUs: Long?, val codecDurationUs: Long?, val successfulPullCalls: Long,
+        val initialSamples: Long, val transferredSamples: Long, val discardedSamples: Long,
+        val sourceFrameDurationUs: Long, val sinkQueueSamples: Long, val expiryVsEndUs: Long,
+        val sinkRatePpb: Long
+    ) {
+        companion object {
+            internal fun fromJson(source: JSONObject): RenderExpiry {
+                fun optional(field: String) = if (source.isNull(field)) null else source.getLong(field)
+                return RenderExpiry(source.getString("kind"), optional("publication_vs_start_us"),
+                    optional("first_pull_vs_start_us"), optional("last_pull_vs_start_us"), optional("codec_duration_us"),
+                    source.getLong("successful_pull_calls"), source.getLong("initial_samples"),
+                    source.getLong("transferred_samples"), source.getLong("discarded_samples"),
+                    source.getLong("source_frame_duration_us"), source.getLong("sink_queue_samples"),
+                    source.getLong("expiry_vs_end_us"), source.getLong("sink_rate_ppb"))
+            }
+        }
+
+        fun json() = JSONObject().put("kind", kind)
+            .put("publication_vs_start_us", publicationVsStartUs ?: JSONObject.NULL)
+            .put("first_pull_vs_start_us", firstPullVsStartUs ?: JSONObject.NULL)
+            .put("last_pull_vs_start_us", lastPullVsStartUs ?: JSONObject.NULL)
+            .put("codec_duration_us", codecDurationUs ?: JSONObject.NULL)
+            .put("successful_pull_calls", successfulPullCalls).put("initial_samples", initialSamples)
+            .put("transferred_samples", transferredSamples).put("discarded_samples", discardedSamples)
+            .put("source_frame_duration_us", sourceFrameDurationUs).put("sink_queue_samples", sinkQueueSamples)
+            .put("expiry_vs_end_us", expiryVsEndUs).put("sink_rate_ppb", sinkRatePpb)
+    }
+
+    /** No absolute Java monotonic timestamp survives publication. -1 means action not observed.
+     * expiryCounterReadNs is the fresh JNI getter; statsReadParseNs is the cache read and conditional parse.
+     */
+    data class RenderCycle(
+        val observed: Boolean, val completed: Boolean, val startVsObservationNs: Long?, val endVsObservationNs: Long?,
+        val durationNs: Long, val precedingLoopGapNs: Long, val expiryCounterReadNs: Long,
+        val statsReadParseNs: Long, val clockWorkNs: Long,
+        val headReadNs: Long, val sinkQueuedNs: Long, val timestampWorkNs: Long, val pullNs: Long, val writeNs: Long,
+        val parkNs: Long, val otherWorkNs: Long, val head: Long, val depth: Long, val freshRequest: Int,
+        val pullValid: Int, val validBefore: Int, val offsetBefore: Int, val pendingBefore: Int,
+        val validAfter: Int, val offsetAfter: Int, val pendingAfter: Int,
+        val writeRequested: Int, val writeAccepted: Int, val parkReason: RenderParkReason
+    ) {
+        fun json(): JSONObject {
+            fun us(value: Long): Any = if (value == -1L) JSONObject.NULL else value / 1000.0
+            fun count(value: Long): Any = if (value == -1L) JSONObject.NULL else value
+            return JSONObject().put("observed", observed).put("completed", completed)
+                .put("start_vs_observation_us", startVsObservationNs?.let { it / 1000.0 } ?: JSONObject.NULL)
+                .put("end_vs_observation_us", endVsObservationNs?.let { it / 1000.0 } ?: JSONObject.NULL)
+                .put("duration_us", us(durationNs)).put("preceding_loop_gap_us", us(precedingLoopGapNs))
+                .put("expiry_counter_read_us", us(expiryCounterReadNs))
+                .put("stats_read_parse_us", us(statsReadParseNs)).put("clock_work_us", us(clockWorkNs))
+                .put("head_read_us", us(headReadNs)).put("sink_queued_us", us(sinkQueuedNs))
+                .put("timestamp_work_us", us(timestampWorkNs)).put("pull_us", us(pullNs)).put("write_us", us(writeNs))
+                .put("park_us", us(parkNs)).put("other_work_us", us(otherWorkNs))
+                .put("head_frames", count(head)).put("depth_samples", count(depth))
+                .put("fresh_request_samples", count(freshRequest.toLong())).put("pull_valid_samples", count(pullValid.toLong()))
+                .put("valid_before", count(validBefore.toLong())).put("offset_before", count(offsetBefore.toLong()))
+                .put("pending_before", count(pendingBefore.toLong())).put("valid_after", count(validAfter.toLong()))
+                .put("offset_after", count(offsetAfter.toLong())).put("pending_after", count(pendingAfter.toLong()))
+                .put("write_requested_samples", count(writeRequested.toLong())).put("write_accepted_samples", count(writeAccepted.toLong()))
+                .put("parking_reason", parkReason.label)
+        }
+    }
+
+    /** Observation is local getter completion, not native expiry time. Cached detail is parsed afterwards. */
+    data class RenderLoopTrace(
+        val expiredRenderSamples: Long, val counterDelta: Long, val cachedCounter: Long, val nativeExpiry: RenderExpiry?,
+        val observationCounterReadStartVsObservationNs: Long, val observationCounterReadDurationNs: Long,
+        val observationIterationStartVsObservationNs: Long,
+        val observationPrecedingLoopGapNs: Long, val cycleMinus2: RenderCycle, val cycleMinus1: RenderCycle
+    ) {
+        val cachedDetailMatch: Boolean get() = cachedCounter == expiredRenderSamples && nativeExpiry != null
+        val ambiguousMultipleExpiries: Boolean get() = nativeExpiry == null || counterDelta != nativeExpiry.discardedSamples
+
+        fun json() = JSONObject().put("association", "OBSERVATION_ASSOCIATION_ONLY")
+            .put("time_basis", "local_monotonic_diagnostic")
+            .put("timing_scope", "not_physical_arrival_or_acoustic")
+            .put("stats_source", "fresh_native_expiry_counter_with_cached_detail")
+            .put("cycle_scope", "two_completed_cycles_before_fresh_counter_observation_not_expiry_bracket")
+            .put("expired_render_samples", expiredRenderSamples).put("counter_delta", counterDelta)
+            .put("cached_counter", if (cachedCounter < 0) JSONObject.NULL else cachedCounter)
+            .put("cached_detail_match", cachedDetailMatch)
+            .put("ambiguous_multiple_expiries", ambiguousMultipleExpiries)
+            .put("native_last_render_expiry", nativeExpiry?.json() ?: JSONObject.NULL)
+            .put("observation_counter_read_start_vs_observation_us", observationCounterReadStartVsObservationNs / 1000.0)
+            .put("observation_counter_read_duration_us", observationCounterReadDurationNs / 1000.0)
+            .put("observation_iteration_start_vs_observation_us", observationIterationStartVsObservationNs / 1000.0)
+            .put("observation_preceding_loop_gap_us",
+                if (observationPrecedingLoopGapNs == -1L) JSONObject.NULL else observationPrecedingLoopGapNs / 1000.0)
+            .put("cycle_minus_2", cycleMinus2.json()).put("cycle_minus_1", cycleMinus1.json())
+    }
+
+    /** Render-thread-only primitives; precisely two reusable records, no per-cycle allocation. */
+    internal class RenderLoopRecorder {
+        internal class RecentCycle {
+            var observed = false; var completed = false
+            var start = 0L; var end = 0L; var gap = -1L
+            var counterRead = -1L; var stats = -1L; var clock = -1L; var headRead = -1L; var sink = -1L; var timestamp = -1L
+            var pull = -1L; var write = -1L; var park = -1L
+            var head = -1L; var depth = -1L
+            var freshRequest = -1; var pullValid = -1
+            var validBefore = -1; var offsetBefore = -1; var pendingBefore = -1
+            var validAfter = -1; var offsetAfter = -1; var pendingAfter = -1
+            var writeRequested = -1; var writeAccepted = -1
+            var parkReason = RenderParkReason.UNOBSERVED.ordinal
+
+            fun freeze(observation: Long): RenderCycle {
+                val duration = if (observed) end - start else -1L
+                val measured = max(0L, counterRead) + max(0L, stats) + max(0L, clock) + max(0L, headRead) + max(0L, sink) +
+                    max(0L, timestamp) + max(0L, pull) + max(0L, write) + max(0L, park)
+                return RenderCycle(observed, completed, if (observed) start - observation else null,
+                    if (observed) end - observation else null, duration, gap, counterRead, stats, clock, headRead, sink,
+                    timestamp, pull, write, park, if (observed) duration - measured else -1L, head, depth,
+                    freshRequest, pullValid, validBefore, offsetBefore, pendingBefore, validAfter, offsetAfter,
+                    pendingAfter, writeRequested, writeAccepted, RenderParkReason.entries[parkReason])
+            }
+        }
+
+        private val first = RecentCycle()
+        private val second = RecentCycle()
+        // next is always the older slot; neither slot is touched until after observation.
+        private var next = 0
+        private var previousEnd = 0L
+        private var hasPreviousEnd = false
+        private var previousCounter = -1L
+        @Volatile var latest: RenderLoopTrace? = null
+            private set
+
+        fun precedingGap(start: Long): Long = if (hasPreviousEnd) start - previousEnd else -1L
+
+        /** Unknown observations leave the baseline alone; first known value invents no event. */
+        fun counterIncrease(counter: Long): Long {
+            if (counter < 0) return -1L
+            val delta = if (previousCounter < 0) 0L else counter - previousCounter
+            previousCounter = counter
+            return delta
+        }
+
+        fun freezeExpiry(counter: Long, delta: Long, cachedCounter: Long, expiry: RenderExpiry?, observation: Long,
+            iterationStart: Long, counterReadStart: Long) {
+            if (counter < 0 || delta <= 0) return
+            val older = if (next == 0) first else second
+            val newer = if (next == 0) second else first
+            val matchedExpiry = if (cachedCounter == counter) expiry else null
+            latest = RenderLoopTrace(counter, delta, cachedCounter, matchedExpiry,
+                counterReadStart - observation, observation - counterReadStart, iterationStart - observation,
+                precedingGap(iterationStart), older.freeze(observation), newer.freeze(observation))
+        }
+
+        fun record(start: Long, end: Long, completed: Boolean, counterRead: Long, stats: Long, clock: Long, headRead: Long,
+            sink: Long, timestamp: Long, pull: Long, write: Long, park: Long, head: Long, depth: Long,
+            freshRequest: Int, pullValid: Int, validBefore: Int, offsetBefore: Int, validAfter: Int,
+            offsetAfter: Int, writeRequested: Int, writeAccepted: Int, parkReason: RenderParkReason) {
+            if (!completed) return
+            val cycle = if (next == 0) first else second
+            cycle.observed = true; cycle.completed = completed
+            cycle.start = start; cycle.end = end; cycle.gap = precedingGap(start)
+            cycle.counterRead = counterRead; cycle.stats = stats; cycle.clock = clock; cycle.headRead = headRead; cycle.sink = sink
+            cycle.timestamp = timestamp; cycle.pull = pull; cycle.write = write; cycle.park = park
+            cycle.head = head; cycle.depth = depth; cycle.freshRequest = freshRequest; cycle.pullValid = pullValid
+            cycle.validBefore = validBefore; cycle.offsetBefore = offsetBefore; cycle.pendingBefore = validBefore - offsetBefore
+            cycle.validAfter = validAfter; cycle.offsetAfter = offsetAfter; cycle.pendingAfter = validAfter - offsetAfter
+            cycle.writeRequested = writeRequested; cycle.writeAccepted = writeAccepted; cycle.parkReason = parkReason.ordinal
+            previousEnd = end; hasPreviousEnd = true; next = 1 - next
+        }
+    }
+
     data class Snapshot(
         val phase: String, val failure: String?, val stopReason: String?, val dns: Boolean,
         val cleanupComplete: Boolean, val ownerAlive: Boolean, val captureAlive: Boolean, val renderAlive: Boolean,
@@ -83,7 +293,8 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
         val communicationMode: Int, val restoredMode: Int, val aec: Effect, val ns: Effect,
         val playbackRate: Int, val requestedRate: Int, val underruns: Int,
         val captureClock: ClockPair, val playbackClock: ClockPair, val playbackHeadClock: ClockPair,
-        val nativeStats: String, val stopResult: String?, val playbackCompensation: String
+        val nativeStats: String, val stopResult: String?, val playbackCompensation: String,
+        val lastRenderLoopTrace: RenderLoopTrace? = null
     ) {
         fun json() = JSONObject().put("phase", phase).put("failure", failure ?: JSONObject.NULL)
             .put("stop_reason", stopReason ?: JSONObject.NULL).put("path", if (dns) "dns_fixture" else "local_memory_pair")
@@ -111,6 +322,7 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
             .put("playback_clock", playbackClock.json()).put("playback_head_clock", playbackHeadClock.json())
             .put("native", JSONObject(nativeStats)).put("native_stop", stopResult?.let(::JSONObject) ?: JSONObject.NULL)
             .put("playback_compensation", JSONObject(playbackCompensation))
+            .put("last_render_loop_trace", lastRenderLoopTrace?.json() ?: JSONObject.NULL)
     }
 
     private val app = context.applicationContext
@@ -142,6 +354,7 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
     private val headClock = AtomicReference(ClockPair())
     private val nativeStats = AtomicReference("{}")
     private val playbackCompensation = AtomicReference("{}")
+    private val renderLoopRecorder = RenderLoopRecorder()
     private val stopResult = AtomicReference<String?>(null)
     @Volatile private var captureThread: Thread? = null
     @Volatile private var renderThread: Thread? = null
@@ -193,7 +406,8 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
         renderPeak.get(), renderClipped.get(), recordMin, trackMin, recordFrames, trackFrames, trackCapacity, startThreshold,
         inputId, inputType, outputId, outputType, micMuted, silenced, silencingObservable, focusGranted, focusAbandoned,
         previousMode, communicationMode, restoredMode, aecState, nsState, playbackRate.get(), requestedRate.get(), underruns,
-        captureClock.get(), playbackClock.get(), headClock.get(), nativeStats.get(), stopResult.get(), playbackCompensation.get())
+        captureClock.get(), playbackClock.get(), headClock.get(), nativeStats.get(), stopResult.get(), playbackCompensation.get(),
+        renderLoopRecorder.latest)
 
     private class ProbeFailure(val diagnostic: String) : RuntimeException()
     private fun check(condition: Boolean, diagnostic: String) { if (!condition) throw ProbeFailure(diagnostic) }
@@ -560,72 +774,136 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
         var wrap = 0L; var previousHead = 0L
         var nextTimestamp = 0L
         val compensation = CallProbePlaybackClock()
+        val metadataCache = RenderMetadataCache()
+        val compensationCache = RenderCompensationCache()
         try {
             Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
             while (!stopping.get()) {
-                val source = JSONObject(nativeStats.get())
-                val command = compensation.choose(System.nanoTime(), source.optLong("remote_clock_ticks"),
-                    source.optLong("remote_clock_ns"), source.optBoolean("remote_clock_valid"), manualRateOffset.get())
-                playbackCompensation.set(JSONObject().put("hardware_calibrated", command.calibrated)
-                    .put("healthy", command.healthy).put("selected_rate", command.rate)
-                    .put("sink_ppb", command.sinkPpb ?: JSONObject.NULL)
-                    .put("hardware_rejection_mask", command.rejectionMask)
-                    .put("relative_ppm", command.relativePpm ?: JSONObject.NULL).toString())
-                requestedRate.set(command.rate)
-                command.sinkPpb?.let { check(CallProbeJni.sinkRate(nativeHandle, it), "sink_clock_rate_rejected") }
-                val rate = requestedRate.get()
-                if (playbackRate.get() != rate) {
-                    check(track.setPlaybackRate(rate) == AudioTrack.SUCCESS, "playback_rate_failed")
-                    playbackRate.set(track.playbackRate)
-                    check(playbackRate.get() == rate, "playback_rate_readback_failed")
-                    playbackClock.set(ClockPair()); headClock.set(ClockPair())
+                val iterationStart = System.nanoTime()
+                val validBefore = valid; val offsetBefore = offset
+                var cycleCompleted = false
+                var counterReadNs = -1L; var statsNs = -1L; var clockNs = -1L; var headNs = -1L; var sinkNs = -1L; var timestampNs = -1L
+                var pullNs = -1L; var writeNs = -1L; var parkNs = -1L
+                var observedHead = -1L; var observedDepth = -1L
+                var freshRequest = -1; var pullValid = -1; var writeRequested = -1; var writeAccepted = -1
+                var parkReason = RenderParkReason.NONE
+                try {
+                    val counterReadStart = System.nanoTime()
+                    val expired = CallProbeJni.renderExpiredSamples(nativeHandle)
+                    val observation = System.nanoTime() // Getter completion, before the existing cache parse.
+                    counterReadNs = observation - counterReadStart
+                    val expiryDelta = renderLoopRecorder.counterIncrease(expired)
+                    val statsStart = System.nanoTime()
+                    val source = metadataCache.read(nativeStats.get())
+                    val cachedCounter = if (source.has("expired_render_samples") && !source.isNull("expired_render_samples"))
+                        source.getLong("expired_render_samples") else -1L
+                    statsNs = System.nanoTime() - statsStart
+                    if (expiryDelta > 0) {
+                        val expiry = if (cachedCounter == expired && !source.isNull("last_render_expiry"))
+                            RenderExpiry.fromJson(source.getJSONObject("last_render_expiry")) else null
+                        renderLoopRecorder.freezeExpiry(expired, expiryDelta, cachedCounter, expiry,
+                            observation, iterationStart, counterReadStart)
+                    }
+                    val clockStart = System.nanoTime()
+                    val command = compensation.choose(System.nanoTime(), source.optLong("remote_clock_ticks"),
+                        source.optLong("remote_clock_ns"), source.optBoolean("remote_clock_valid"), manualRateOffset.get())
+                    compensationCache.changedJson(command)?.let { playbackCompensation.set(it) }
+                    requestedRate.set(command.rate)
+                    command.sinkPpb?.let { check(CallProbeJni.sinkRate(nativeHandle, it), "sink_clock_rate_rejected") }
+                    val rate = requestedRate.get()
+                    if (playbackRate.get() != rate) {
+                        check(track.setPlaybackRate(rate) == AudioTrack.SUCCESS, "playback_rate_failed")
+                        playbackRate.set(track.playbackRate)
+                        check(playbackRate.get() == rate, "playback_rate_readback_failed")
+                        playbackClock.set(ClockPair()); headClock.set(ClockPair())
+                    }
+                    clockNs = System.nanoTime() - clockStart
+                    val headStart = System.nanoTime()
+                    val head = track.playbackHeadPosition.toLong() and 0xffffffffL
+                    headNs = System.nanoTime() - headStart
+                    if (head < previousHead) {
+                        check(previousHead - head > 0x80000000L, "playback_head_discontinuity")
+                        wrap += 0x100000000L
+                    }
+                    previousHead = head
+                    val hardware = wrap + head
+                    observedHead = hardware
+                    rendered.set(hardware)
+                    val depth = submitted.get() - hardware
+                    observedDepth = depth
+                    check(depth >= 0 && depth <= QUEUE_BOUND_SAMPLES, "playback_queue_invalid")
+                    queued.set(depth); maxQueued.accumulateAndGet(depth, ::max)
+                    val sinkStart = System.nanoTime()
+                    CallProbeJni.sinkQueued(nativeHandle, depth.toInt())
+                    sinkNs = System.nanoTime() - sinkStart
+                    val now = System.nanoTime()
+                    if (now >= nextTimestamp) {
+                        val timestampStart = System.nanoTime()
+                        observeClock(headClock, Clock(hardware, now))
+                        val ok = track.getTimestamp(timestamp)
+                        val observed = System.nanoTime() // timestamp retrieval can advance beyond pre-call now
+                        if (ok) compensation.observe(timestamp.framePosition, timestamp.nanoTime, observed,
+                            track.playbackRate, track.underrunCount)
+                        else compensation.observe(-1, -1, observed, track.playbackRate, track.underrunCount)
+                        observeClock(playbackClock, if (ok && timestamp.nanoTime > 0 && timestamp.framePosition >= 0)
+                            Clock(timestamp.framePosition, timestamp.nanoTime) else null)
+                        underruns = track.underrunCount
+                        nextTimestamp = now + 100_000_000
+                        timestampNs = System.nanoTime() - timestampStart
+                    }
+                    // Account the *actual* sink queue, irrespective of its minBuffer/capacity.
+                    if (!renderHasCapacity(depth, valid - offset)) {
+                        parkReason = RenderParkReason.CAPACITY
+                        val parkStart = System.nanoTime()
+                        LockSupport.parkNanos(2_000_000)
+                        parkNs = System.nanoTime() - parkStart
+                        cycleCompleted = true
+                        continue
+                    }
+                    if (valid == offset) {
+                        val requested = freshPullLimit(depth)
+                        freshRequest = requested
+                        val pullStart = System.nanoTime()
+                        valid = CallProbeJni.pull(nativeHandle, pcm, requested); offset = 0
+                        pullNs = System.nanoTime() - pullStart
+                        pullValid = valid
+                        check(valid in 0..requested, "native_pull_invalid")
+                        if (valid == 0) {
+                            parkReason = RenderParkReason.EMPTY_PULL
+                            val parkStart = System.nanoTime()
+                            LockSupport.parkNanos(2_000_000)
+                            parkNs = System.nanoTime() - parkStart
+                            cycleCompleted = true
+                            continue
+                        }
+                    }
+                    writeRequested = valid - offset
+                    val writeStart = System.nanoTime()
+                    val count = track.write(pcm, offset, valid - offset, AudioTrack.WRITE_NON_BLOCKING)
+                    writeNs = System.nanoTime() - writeStart
+                    writeAccepted = count
+                    check(count >= 0, "render_write_failed")
+                    var peak = 0; var clipped = 0L
+                    for (i in offset until offset + count) {
+                        val sample = abs(pcm[i].toInt()); peak = max(peak, sample)
+                        if (sample >= 32767) clipped++
+                    }
+                    renderPeak.accumulateAndGet(peak, ::max); renderClipped.addAndGet(clipped)
+                    offset += count; submitted.addAndGet(count.toLong())
+                    val afterWriteDepth = submitted.get() - hardware
+                    queued.set(afterWriteDepth); maxQueued.accumulateAndGet(afterWriteDepth, ::max)
+                    if (count == 0) {
+                        parkReason = RenderParkReason.ZERO_WRITE
+                        val parkStart = System.nanoTime()
+                        LockSupport.parkNanos(2_000_000)
+                        parkNs = System.nanoTime() - parkStart
+                    }
+                    cycleCompleted = true
+                } finally {
+                    renderLoopRecorder.record(iterationStart, System.nanoTime(), cycleCompleted, counterReadNs, statsNs, clockNs, headNs,
+                        sinkNs, timestampNs, pullNs, writeNs, parkNs, observedHead, observedDepth, freshRequest, pullValid,
+                        validBefore, offsetBefore, valid, offset, writeRequested, writeAccepted, parkReason)
                 }
-                val head = track.playbackHeadPosition.toLong() and 0xffffffffL
-                if (head < previousHead) {
-                    check(previousHead - head > 0x80000000L, "playback_head_discontinuity")
-                    wrap += 0x100000000L
-                }
-                previousHead = head
-                val hardware = wrap + head
-                rendered.set(hardware)
-                val depth = submitted.get() - hardware
-                check(depth >= 0 && depth <= QUEUE_BOUND_SAMPLES, "playback_queue_invalid")
-                queued.set(depth); maxQueued.accumulateAndGet(depth, ::max)
-                CallProbeJni.sinkQueued(nativeHandle, depth.toInt())
-                val now = System.nanoTime()
-                if (now >= nextTimestamp) {
-                    observeClock(headClock, Clock(hardware, now))
-                    val ok = track.getTimestamp(timestamp)
-                    val observed = System.nanoTime() // timestamp retrieval can advance beyond pre-call now
-                    if (ok) compensation.observe(timestamp.framePosition, timestamp.nanoTime, observed,
-                        track.playbackRate, track.underrunCount)
-                    else compensation.observe(-1, -1, observed, track.playbackRate, track.underrunCount)
-                    observeClock(playbackClock, if (ok && timestamp.nanoTime > 0 && timestamp.framePosition >= 0)
-                        Clock(timestamp.framePosition, timestamp.nanoTime) else null)
-                    underruns = track.underrunCount
-                    nextTimestamp = now + 100_000_000
-                }
-                // Account the *actual* sink queue, irrespective of its minBuffer/capacity.
-                if (!renderHasCapacity(depth, valid - offset)) {
-                    LockSupport.parkNanos(2_000_000); continue
-                }
-                if (valid == offset) {
-                    valid = CallProbeJni.pull(nativeHandle, pcm, pcm.size); offset = 0
-                    check(valid in 0..pcm.size, "native_pull_invalid")
-                    if (valid == 0) { LockSupport.parkNanos(2_000_000); continue }
-                }
-                val count = track.write(pcm, offset, valid - offset, AudioTrack.WRITE_NON_BLOCKING)
-                check(count >= 0, "render_write_failed")
-                var peak = 0; var clipped = 0L
-                for (i in offset until offset + count) {
-                    val sample = abs(pcm[i].toInt()); peak = max(peak, sample)
-                    if (sample >= 32767) clipped++
-                }
-                renderPeak.accumulateAndGet(peak, ::max); renderClipped.addAndGet(clipped)
-                offset += count; submitted.addAndGet(count.toLong())
-                val afterWriteDepth = submitted.get() - hardware
-                queued.set(afterWriteDepth); maxQueued.accumulateAndGet(afterWriteDepth, ::max)
-                if (count == 0) LockSupport.parkNanos(2_000_000)
             }
         } catch (e: ProbeFailure) { if (!stopping.get()) fail(e.diagnostic) }
         catch (_: Throwable) { if (!stopping.get()) fail("render_worker_failed") }

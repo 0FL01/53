@@ -781,6 +781,19 @@ impl AudioPort {
         self.pull_at(Instant::now(), pcm)
     }
 
+    /// Read-only diagnostic; a busy or closed port is an unknown observation.
+    #[cfg(any(target_os = "android", test))]
+    pub(crate) fn render_expired_samples(&self) -> Option<u64> {
+        if self.port.closed.load(Ordering::Relaxed) {
+            return None;
+        }
+        self.port
+            .stats
+            .try_lock()
+            .ok()
+            .map(|stats| stats.expired_render_samples)
+    }
+
     fn pull_at(&self, now: Instant, pcm: &mut [i16]) -> usize {
         if pcm.is_empty() || pcm.len() > 160 || self.port.closed.load(Ordering::Relaxed) {
             return 0;
@@ -2018,6 +2031,125 @@ fn reap_commits(
     Ok(())
 }
 
+fn receive_control(
+    frame: Option<Result<InboundFrame, String>>,
+    receiver: &mut dmsg_srtp_sys::Receiver,
+    fixture: &EndpointFixture,
+    commits: &mut VecDeque<PendingCommit>,
+    admission: &mut MediaAdmission,
+    ledger: &mut packet::Ledger,
+    sent: &mut SendCounters,
+    received: &mut ReceiveState,
+    ready: &mut bool,
+    port: &Port,
+    // Production observes Instant::now at the original ACK/clock boundaries;
+    // tests supply explicit monotonic decision instants without timer sleeps.
+    now: impl Fn() -> Instant,
+) -> Result<(), String> {
+    let (op, cipher) = match frame {
+        Some(Ok(frame)) => frame.frame,
+        _ => return Err("probe control lane failed".into()),
+    };
+    if op != OP_RTCP {
+        return Err("probe control opcode rejected".into());
+    }
+    let plain = receiver.unprotect_rtcp(&cipher)?;
+    let remote = packet::read_compound(
+        &plain,
+        fixture.ssrc_rx,
+        fixture.ssrc_tx,
+        &fixture.peer_cname,
+    )?;
+    // A fast peer may ACK while select was waiting. Noise's commitment
+    // receipt precedes its socket write; consume it before validation.
+    reap_commits(
+        commits,
+        admission,
+        ledger,
+        port,
+        fixture::profile(fixture.profile_ms)?.samples(),
+        sent,
+    )?;
+    if let Some(index) = remote.terminal {
+        let cycle = ledger.acknowledge(index, now())?;
+        port.stats(|stats| {
+            stats.terminal_feedback += 1;
+            stats.max_feedback_cycle_ms = stats.max_feedback_cycle_ms.max(cycle.as_millis() as u64);
+        });
+    }
+    received.report_clock(remote, now(), port);
+    *ready = true;
+    port.stats(|stats| {
+        stats.ready = true;
+        stats.rx_bytes += (cipher.len() + packet::FRAMING_BYTES) as u64;
+    });
+    Ok(())
+}
+
+fn control_progress(
+    incoming: &mut mpsc::Receiver<Result<InboundFrame, String>>,
+    receiver: &mut dmsg_srtp_sys::Receiver,
+    fixture: &EndpointFixture,
+    commits: &mut VecDeque<PendingCommit>,
+    admission: &mut MediaAdmission,
+    ledger: &mut packet::Ledger,
+    sent: &mut SendCounters,
+    received: &mut ReceiveState,
+    ready: &mut bool,
+    port: &Port,
+    waiting_bytes: Option<usize>,
+    now: impl Fn() -> Instant,
+) -> Result<bool, String> {
+    // The capacity-one inbox may already contain authoritative progress when
+    // either progress decision runs, including a media wake selected after the
+    // top-of-turn check. Authenticate/process at most one item, then retain the
+    // original ledger age and full waiting-plus-pending byte admission bounds.
+    let handled = match incoming.try_recv() {
+        Ok(frame) => {
+            receive_control(
+                Some(frame),
+                receiver,
+                fixture,
+                commits,
+                admission,
+                ledger,
+                sent,
+                received,
+                ready,
+                port,
+                &now,
+            )?;
+            true
+        }
+        Err(mpsc::error::TryRecvError::Empty) => false,
+        Err(_) => return Err("probe control lane failed".into()),
+    };
+    // Receipts can become ready while select waits even without a control frame.
+    // Reap before charging so each frame is in the ledger OR still pending, and
+    // never both. Control already reaps before validating a fast terminal ACK.
+    reap_commits(
+        commits,
+        admission,
+        ledger,
+        port,
+        fixture::profile(fixture.profile_ms)?.samples(),
+        sent,
+    )?;
+    if *ready {
+        // None is the top-of-turn age check; Some is the taken waiting frame's
+        // own byte count, with the current (not pre-handler) pending charge.
+        let extra_bytes = waiting_bytes.map_or(0, |waiting| {
+            waiting
+                + commits
+                    .iter()
+                    .map(|pending| pending.opus_bytes + packet::MEDIA_OVERHEAD)
+                    .sum::<usize>()
+        });
+        ledger.check(now(), extra_bytes)?;
+    }
+    Ok(handled)
+}
+
 fn apply_codec_completion(
     completed: codec::Completion,
     flight: &mut Option<CodecFlight>,
@@ -2267,10 +2399,33 @@ async fn endpoint_owned(
                 Err(_) => break 'session Err("probe control commitment owner closed".into()),
             }
         }
-        if ready {
-            if let Err(error) = ledger.check(now, 0) {
-                break Err(error);
+        match control_progress(
+            &mut control.incoming,
+            &mut receiver,
+            &fixture,
+            &mut commits,
+            &mut admission,
+            &mut ledger,
+            &mut sent,
+            &mut received,
+            &mut ready,
+            &port,
+            None,
+            Instant::now,
+        ) {
+            Ok(handled) => {
+                #[cfg(test)]
+                if handled {
+                    if let Some(hold) = &hold {
+                        hold.controlled.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                #[cfg(not(test))]
+                let _ = handled;
             }
+            Err(error) => break Err(error),
+        }
+        if ready {
             if now.saturating_duration_since(last_control_submission) >= Duration::from_millis(400)
             {
                 break Err("control submission expired; retire generation".into());
@@ -2323,22 +2478,8 @@ async fn endpoint_owned(
                     &mut feedback, commits.len(), Instant::now(), profile, &port) { break Err(error); }
             }
             packet = control.incoming.recv() => {
-                let (op, cipher) = match packet { Some(Ok(frame)) => frame.frame, _ => break Err("probe control lane failed".into()) };
-                if op != OP_RTCP { break Err("probe control opcode rejected".into()); }
-                let plain = match receiver.unprotect_rtcp(&cipher) { Ok(packet) => packet, Err(error) => break Err(error) };
-                let remote = match packet::read_compound(&plain, fixture.ssrc_rx, fixture.ssrc_tx, &fixture.peer_cname) { Ok(report) => report, Err(error) => break Err(error) };
-                // A fast peer may ACK while select was waiting. Noise's commitment
-                // receipt precedes its socket write; consume it before validation.
-                if let Err(error) = reap_commits(&mut commits, &mut admission, &mut ledger, &port, profile.samples(), &mut sent) { break Err(error); }
-                if let Some(index) = remote.terminal {
-                    match ledger.acknowledge(index, Instant::now()) {
-                        Ok(cycle) => port.stats(|stats| { stats.terminal_feedback += 1; stats.max_feedback_cycle_ms = stats.max_feedback_cycle_ms.max(cycle.as_millis() as u64); }),
-                        Err(error) => break Err(error),
-                    }
-                }
-                received.report_clock(remote, Instant::now(), &port);
-                ready = true;
-                port.stats(|stats| { stats.ready = true; stats.rx_bytes += (cipher.len() + packet::FRAMING_BYTES) as u64; });
+                if let Err(error) = receive_control(packet, &mut receiver, &fixture, &mut commits,
+                    &mut admission, &mut ledger, &mut sent, &mut received, &mut ready, &port, Instant::now) { break Err(error); }
                 #[cfg(test)]
                 if let Some(hold) = &hold { hold.controlled.fetch_add(1, Ordering::Relaxed); }
             }
@@ -2352,10 +2493,21 @@ async fn endpoint_owned(
                 let now = Instant::now();
                 let Some((waiting, permit)) = admission.take_ready(&mut budget, now, profile, &port) else { continue; };
                 let bytes = waiting.bytes();
-                let pending_bytes: usize = commits.iter().map(|pending| pending.opus_bytes + packet::MEDIA_OVERHEAD).sum();
-                if let Err(error) = ledger.check(now, bytes + pending_bytes) {
-                    port.stats(|stats| stats.dropped_capture += profile.samples() as u64);
-                    break Err(error);
+                match control_progress(&mut control.incoming, &mut receiver, &fixture, &mut commits,
+                    &mut admission, &mut ledger, &mut sent, &mut received, &mut ready, &port,
+                    Some(bytes), Instant::now) {
+                    Ok(handled) => {
+                        #[cfg(test)]
+                        if handled {
+                            if let Some(hold) = &hold { hold.controlled.fetch_add(1, Ordering::Relaxed); }
+                        }
+                        #[cfg(not(test))]
+                        let _ = handled;
+                    }
+                    Err(error) => {
+                        port.stats(|stats| stats.dropped_capture += profile.samples() as u64);
+                        break Err(error);
+                    }
                 }
                 let timestamp = fixture.initial_timestamp.wrapping_add((waiting.position * 3) as u32);
                 let plain = Zeroizing::new(packet::rtp(fixture.ssrc_tx, source_index, timestamp, &waiting.opus));
@@ -2421,8 +2573,772 @@ async fn endpoint_owned(
 mod tests {
     use super::*;
 
+    struct ControlTurn {
+        fixture: EndpointFixture,
+        peer: EndpointFixture,
+        sender: dmsg_srtp_sys::Sender,
+        receiver: dmsg_srtp_sys::Receiver,
+        queued: mpsc::Sender<Result<InboundFrame, String>>,
+        incoming: mpsc::Receiver<Result<InboundFrame, String>>,
+        commits: VecDeque<PendingCommit>,
+        admission: MediaAdmission,
+        ledger: packet::Ledger,
+        sent: SendCounters,
+        received: ReceiveState,
+        ready: bool,
+        port: Port,
+        origin: Instant,
+    }
+
+    impl ControlTurn {
+        fn new() -> Self {
+            let (fixture, peer, _, _) = fixture::pair(PublicConfig {
+                relay_addr: "127.0.0.1:1".into(),
+                domain: "control-turn.invalid".into(),
+                profile_ms: 40,
+                healthy_cycle_ms: 600,
+                capacity_bps: 50_000,
+                carriers: [None, None],
+            })
+            .unwrap();
+            // The production Lane inbox type and capacity, not a ledger-only ACK.
+            let (queued, incoming) = mpsc::channel(1);
+            Self {
+                sender: dmsg_srtp_sys::Sender::new(&peer.media_tx, peer.ssrc_tx).unwrap(),
+                receiver: dmsg_srtp_sys::Receiver::new(&fixture.media_rx, fixture.ssrc_rx).unwrap(),
+                fixture,
+                peer,
+                queued,
+                incoming,
+                commits: VecDeque::new(),
+                admission: MediaAdmission::default(),
+                ledger: packet::Ledger::new(100, 40, 600),
+                sent: SendCounters {
+                    timestamp: 0,
+                    packets: 0,
+                    octets: 0,
+                    since_report: false,
+                },
+                received: test_received(),
+                ready: true,
+                port: test_port(),
+                origin: Instant::now(),
+            }
+        }
+
+        fn at(&self, ms: u64) -> Instant {
+            self.origin + Duration::from_millis(ms)
+        }
+
+        fn commit(&mut self, index: u64, ms: u64) {
+            let (notify, receipt) = oneshot::channel();
+            notify
+                .send(Commit::Committed {
+                    framed_bytes: 144,
+                    at: self.at(ms),
+                })
+                .unwrap_or_else(|_| panic!("receipt closed"));
+            self.commits.push_back(PendingCommit {
+                index,
+                timestamp: index as u32 * 1920,
+                opus_bytes: 100,
+                submitted: self.at(ms),
+                source_ready: self.at(ms),
+                receipt,
+            });
+            self.reap();
+        }
+
+        fn reap(&mut self) {
+            reap_commits(
+                &mut self.commits,
+                &mut self.admission,
+                &mut self.ledger,
+                &self.port,
+                640,
+                &mut self.sent,
+            )
+            .unwrap();
+        }
+
+        fn compound(&self, terminal: Option<u64>) -> Vec<u8> {
+            packet::compound(packet::Report {
+                sender_ssrc: self.peer.ssrc_tx,
+                peer_ssrc: self.peer.ssrc_rx,
+                cname: &self.peer.cname,
+                sender: None,
+                feedback: packet::Feedback {
+                    terminal,
+                    ..packet::Feedback::default()
+                },
+            })
+        }
+
+        fn queue_cipher(&mut self, cipher: Vec<u8>, ms: u64) {
+            self.queued
+                .try_send(Ok(InboundFrame {
+                    frame: (OP_RTCP, cipher),
+                    body_complete: self.at(ms),
+                    noise_done: self.at(ms),
+                }))
+                .unwrap_or_else(|_| panic!("control inbox full"));
+            assert_eq!(self.queued.capacity(), 0);
+        }
+
+        fn queue_ack(&mut self, terminal: Option<u64>, ms: u64) {
+            let compound = self.compound(terminal);
+            let cipher = self.sender.protect_rtcp(&compound).unwrap();
+            self.queue_cipher(cipher, ms);
+        }
+
+        fn decide(&mut self, ms: u64, waiting_bytes: Option<usize>) -> Result<bool, String> {
+            if waiting_bytes.is_none() {
+                self.reap(); // The endpoint's existing top-of-turn receipt reaping.
+            }
+            // A media wake resumes select without another top-of-turn reap.
+            let now = self.at(ms);
+            control_progress(
+                &mut self.incoming,
+                &mut self.receiver,
+                &self.fixture,
+                &mut self.commits,
+                &mut self.admission,
+                &mut self.ledger,
+                &mut self.sent,
+                &mut self.received,
+                &mut self.ready,
+                &self.port,
+                waiting_bytes,
+                || now,
+            )
+        }
+    }
+
+    #[test]
+    fn media_wake_prefix_ack_does_not_double_charge_newly_ready_receipt() {
+        let mut turn = ControlTurn::new();
+        let profile = LiveProfile::Ms40;
+        for index in 7..=25 {
+            turn.commit(index, if index == 7 { 0 } else { 700 });
+        }
+        assert_eq!(turn.ledger.bytes(), 2736);
+        assert_eq!(turn.decide(719, None), Ok(false));
+
+        let (outgoing, _requests) = mpsc::channel(1);
+        let waiting = WaitingPacket::new(
+            vec![0; 100],
+            0,
+            turn.at(679),
+            turn.at(719),
+            turn.at(719),
+            profile,
+        );
+        turn.admission
+            .stage(waiting, &outgoing, 0, turn.at(719), profile, &turn.port)
+            .unwrap();
+        let (notify, receipt) = oneshot::channel();
+        turn.commits.push_back(PendingCommit {
+            index: 26,
+            timestamp: 26 * 1920,
+            opus_bytes: 100,
+            submitted: turn.at(719),
+            source_ready: turn.at(719),
+            receipt,
+        });
+        // Receipt and protected prefix ACK become ready after the empty top turn.
+        notify
+            .send(Commit::Committed {
+                framed_bytes: 144,
+                at: turn.at(720),
+            })
+            .unwrap_or_else(|_| panic!("receipt closed"));
+        turn.queue_ack(Some(7), 719);
+        let mut budget = packet::Budget::new(50_000, 144, turn.at(719));
+        let (waiting, _permit) = turn
+            .admission
+            .take_ready(&mut budget, turn.at(721), profile, &turn.port)
+            .unwrap();
+        let pending_bytes: usize = turn
+            .commits
+            .iter()
+            .map(|pending| pending.opus_bytes + packet::MEDIA_OVERHEAD)
+            .sum();
+        assert_eq!(waiting.bytes(), 144);
+        assert_eq!(pending_bytes, 144);
+        let decision = turn.decide(721, Some(waiting.bytes()));
+        if decision.is_err() {
+            // The media-wake caller accounts its taken unsent frame exactly once.
+            turn.port
+                .stats(|stats| stats.dropped_capture += profile.samples() as u64);
+        }
+        assert!(turn.commits.is_empty());
+        assert!(turn.incoming.is_empty());
+        assert_eq!(turn.sent.packets, 20);
+        assert_eq!(turn.ledger.bytes(), 2736);
+        assert_eq!(turn.port.snapshot().terminal_feedback, 1);
+        assert_eq!(turn.port.snapshot().max_feedback_cycle_ms, 721);
+        assert_eq!(turn.port.snapshot().rx_bytes, 132);
+        assert_eq!(turn.ledger.bytes() + waiting.bytes(), 2880);
+        assert_eq!(
+            decision,
+            Ok(true),
+            "fresh ledger plus waiting fits 2880; stale pending charges 3024"
+        );
+        assert_eq!(turn.port.snapshot().dropped_capture, 0);
+    }
+
+    #[test]
+    fn media_wake_reaps_one_receipt_but_still_charges_unresolved_pending_bytes() {
+        for one_byte_over in [false, true] {
+            let mut turn = ControlTurn::new();
+            let profile = LiveProfile::Ms40;
+            turn.commit(7, 0);
+            for index in 8..=24 {
+                turn.commit(index, 700);
+            }
+            turn.ledger
+                .commit(25, 99 + usize::from(one_byte_over), turn.at(700))
+                .unwrap();
+            assert_eq!(turn.decide(719, None), Ok(false));
+            let (notify, receipt) = oneshot::channel();
+            turn.commits.push_back(PendingCommit {
+                index: 26,
+                timestamp: 26 * 1920,
+                opus_bytes: 1,
+                submitted: turn.at(719),
+                source_ready: turn.at(719),
+                receipt,
+            });
+            notify
+                .send(Commit::Committed {
+                    framed_bytes: 45,
+                    at: turn.at(720),
+                })
+                .unwrap_or_else(|_| panic!("receipt closed"));
+            let (_pending, receipt) = oneshot::channel();
+            turn.commits.push_back(PendingCommit {
+                index: 27,
+                timestamp: 27 * 1920,
+                opus_bytes: 100,
+                submitted: turn.at(719),
+                source_ready: turn.at(719),
+                receipt,
+            });
+            turn.queue_ack(Some(7), 719);
+
+            let (outgoing, _requests) = mpsc::channel(1);
+            let waiting = WaitingPacket::new(
+                vec![0; 100],
+                0,
+                turn.at(679),
+                turn.at(719),
+                turn.at(719),
+                profile,
+            );
+            turn.admission
+                .stage(waiting, &outgoing, 0, turn.at(719), profile, &turn.port)
+                .unwrap();
+            let mut budget = packet::Budget::new(50_000, 144, turn.at(719));
+            let (waiting, _permit) = turn
+                .admission
+                .take_ready(&mut budget, turn.at(721), profile, &turn.port)
+                .unwrap();
+            let decision = turn.decide(721, Some(waiting.bytes()));
+            if decision.is_err() {
+                turn.port
+                    .stats(|stats| stats.dropped_capture += profile.samples() as u64);
+            }
+            assert_eq!(
+                decision,
+                if one_byte_over {
+                    Err("remote media window exhausted; retire generation".into())
+                } else {
+                    Ok(true)
+                }
+            );
+            assert_eq!(turn.commits.len(), 1);
+            assert_eq!(turn.commits.front().unwrap().index, 27);
+            let pending_bytes: usize = turn
+                .commits
+                .iter()
+                .map(|pending| pending.opus_bytes + packet::MEDIA_OVERHEAD)
+                .sum();
+            assert_eq!(pending_bytes, 144);
+            assert_eq!(turn.ledger.bytes(), 2592 + usize::from(one_byte_over));
+            assert_eq!(
+                turn.ledger.bytes() + pending_bytes + waiting.bytes(),
+                2880 + usize::from(one_byte_over)
+            );
+            // The one-byte excess would pass if the still-pending frame vanished
+            // from the charge when its preceding receipt was reaped.
+            assert!(turn.ledger.check(turn.at(721), waiting.bytes()).is_ok());
+            assert_eq!(turn.sent.packets, 19);
+            assert_eq!(turn.port.snapshot().terminal_feedback, 1);
+            assert_eq!(turn.port.snapshot().max_feedback_cycle_ms, 721);
+            assert_eq!(
+                turn.port.snapshot().dropped_capture,
+                u64::from(one_byte_over) * profile.samples() as u64
+            );
+            assert!(turn.incoming.is_empty());
+        }
+    }
+
+    #[test]
+    fn media_wake_without_control_reaps_receipts_without_releasing_credit_or_age() {
+        for waiting_bytes in [None, Some(144)] {
+            let mut turn = ControlTurn::new();
+            for index in 7..=24 {
+                turn.commit(index, 700);
+            }
+            assert_eq!(turn.decide(719, None), Ok(false));
+            let (notify, receipt) = oneshot::channel();
+            turn.commits.push_back(PendingCommit {
+                index: 25,
+                timestamp: 25 * 1920,
+                opus_bytes: 100,
+                submitted: turn.at(719),
+                source_ready: turn.at(719),
+                receipt,
+            });
+            notify
+                .send(Commit::Committed {
+                    framed_bytes: 144,
+                    at: turn.at(720),
+                })
+                .unwrap_or_else(|_| panic!("receipt closed"));
+            assert_eq!(turn.decide(721, waiting_bytes), Ok(false));
+            assert!(turn.commits.is_empty());
+            assert_eq!(turn.sent.packets, 19);
+            assert_eq!(turn.ledger.bytes(), 2736);
+            assert_eq!(turn.port.snapshot().terminal_feedback, 0);
+            assert_eq!(turn.port.snapshot().rx_bytes, 0);
+            assert!(turn.ledger.check(turn.at(721), 144).is_ok());
+            assert_eq!(
+                turn.ledger.check(turn.at(721), 145),
+                Err("remote media window exhausted; retire generation".into())
+            );
+        }
+
+        let mut turn = ControlTurn::new();
+        let (notify, receipt) = oneshot::channel();
+        turn.commits.push_back(PendingCommit {
+            index: 7,
+            timestamp: 7 * 1920,
+            opus_bytes: 100,
+            submitted: turn.at(0),
+            source_ready: turn.at(0),
+            receipt,
+        });
+        notify
+            .send(Commit::Committed {
+                framed_bytes: 144,
+                at: turn.at(0),
+            })
+            .unwrap_or_else(|_| panic!("receipt closed"));
+        // An old receipt cannot hide as a pending byte charge until the next
+        // top turn: the unchanged 720ms age limit applies at this media wake.
+        assert_eq!(
+            turn.decide(721, Some(144)),
+            Err("remote media progress expired; retire generation".into())
+        );
+        assert!(turn.commits.is_empty());
+        assert_eq!(turn.ledger.bytes(), 144);
+        assert_eq!(turn.sent.packets, 1);
+        assert_eq!(turn.port.snapshot().terminal_feedback, 0);
+    }
+
+    #[test]
+    fn queued_terminal_ack_precedes_expired_ledger_decision() {
+        let mut turn = ControlTurn::new();
+        turn.commit(7, 0);
+        assert_eq!(turn.ledger.bytes(), 144);
+        assert_eq!(turn.sent.packets, 1);
+        assert!(turn.ledger.check(turn.at(720), 0).is_ok());
+        turn.queue_ack(Some(7), 719);
+        // Explicit std::Instant decision times: no sleeps or scheduler timing.
+        assert_eq!(turn.decide(721, None), Ok(true));
+        assert_eq!(turn.ledger.bytes(), 0);
+        assert_eq!(turn.port.snapshot().terminal_feedback, 1);
+        assert_eq!(turn.port.snapshot().max_feedback_cycle_ms, 721);
+    }
+
+    #[test]
+    fn absent_terminal_ack_keeps_original_ledger_expiry() {
+        let mut turn = ControlTurn::new();
+        turn.commit(7, 0);
+        assert_eq!(turn.decide(720, None), Ok(false));
+        assert_eq!(
+            turn.decide(721, None),
+            Err("remote media progress expired; retire generation".into())
+        );
+        assert_eq!(turn.ledger.bytes(), 144);
+        assert_eq!(turn.port.snapshot().terminal_feedback, 0);
+    }
+
+    #[test]
+    fn media_wake_processes_terminal_ack_queued_after_top_of_turn_check() {
+        for queued_ack in [false, true] {
+            let mut turn = ControlTurn::new();
+            let profile = LiveProfile::Ms40;
+            turn.commit(7, 0);
+            assert_eq!(turn.decide(719, None), Ok(false));
+
+            let (outgoing, _requests) = mpsc::channel(1);
+            let mut budget = packet::Budget::new(50_000, 144, turn.at(719));
+            // Existing credit is briefly short of the waiting frame. Both the
+            // media wake and control inbox can be ready on the next select poll.
+            assert!(budget.admit_media(7, turn.at(719)));
+            let waiting = WaitingPacket::new(
+                vec![0; 100],
+                0,
+                turn.at(679),
+                turn.at(719),
+                turn.at(719),
+                profile,
+            );
+            turn.admission
+                .stage(waiting, &outgoing, 0, turn.at(719), profile, &turn.port)
+                .unwrap();
+            let wake = turn
+                .admission
+                .wake_at(&mut budget, turn.at(719), profile)
+                .unwrap();
+            assert!(wake > turn.at(719) && wake <= turn.at(721));
+            if queued_ack {
+                turn.queue_ack(Some(7), 720); // After the empty top-of-turn check.
+            }
+            let (waiting, _permit) = turn
+                .admission
+                .take_ready(&mut budget, turn.at(721), profile, &turn.port)
+                .unwrap();
+            let pending_bytes: usize = turn
+                .commits
+                .iter()
+                .map(|pending| pending.opus_bytes + packet::MEDIA_OVERHEAD)
+                .sum();
+            let extra_bytes = waiting.bytes() + pending_bytes;
+            assert_eq!(extra_bytes, 144);
+            // The original media-wake decision fails even with the protected
+            // terminal ACK already queued. It has not authenticated that ACK.
+            assert_eq!(
+                turn.ledger.check(turn.at(721), extra_bytes),
+                Err("remote media progress expired; retire generation".into())
+            );
+            let decision = turn.decide(721, Some(waiting.bytes()));
+            if queued_ack {
+                assert_eq!(decision, Ok(true));
+                assert_eq!(turn.ledger.bytes(), 0);
+                assert_eq!(turn.port.snapshot().terminal_feedback, 1);
+                assert_eq!(turn.port.snapshot().max_feedback_cycle_ms, 721);
+                assert_eq!(turn.port.snapshot().rx_bytes, 132);
+            } else {
+                assert_eq!(
+                    decision,
+                    Err("remote media progress expired; retire generation".into())
+                );
+                assert_eq!(turn.ledger.bytes(), 144);
+                assert_eq!(turn.port.snapshot().terminal_feedback, 0);
+            }
+            assert!(turn.incoming.is_empty());
+            assert_eq!(turn.port.snapshot().dropped_capture, 0);
+        }
+    }
+
+    #[test]
+    fn media_wake_valid_ack_keeps_waiting_and_pending_byte_window() {
+        for one_byte_over in [false, true] {
+            let mut turn = ControlTurn::new();
+            let profile = LiveProfile::Ms40;
+            let limit = 144 * ((600 + 120) / 40 + 2);
+            assert_eq!(limit, 2880);
+            turn.commit(7, 0);
+            // A valid prefix ACK leaves fresh commitments. Legal framed packet
+            // sizes put full waiting-plus-pending admission exactly at Wmax or
+            // one byte above it, without involving the age guard.
+            for index in 8..=24 {
+                turn.commit(index, 700);
+            }
+            turn.ledger
+                .commit(25, 99 + usize::from(one_byte_over), turn.at(700))
+                .unwrap();
+            turn.ledger.commit(26, 45, turn.at(700)).unwrap();
+            assert_eq!(turn.decide(719, None), Ok(false));
+
+            let (outgoing, _requests) = mpsc::channel(1);
+            let waiting = WaitingPacket::new(
+                vec![0; 100],
+                0,
+                turn.at(679),
+                turn.at(719),
+                turn.at(719),
+                profile,
+            );
+            turn.admission
+                .stage(waiting, &outgoing, 0, turn.at(719), profile, &turn.port)
+                .unwrap();
+            let (_notify, receipt) = oneshot::channel();
+            turn.commits.push_back(PendingCommit {
+                index: 27,
+                timestamp: 0,
+                opus_bytes: 100,
+                submitted: turn.at(719),
+                source_ready: turn.at(719),
+                receipt,
+            });
+            turn.queue_ack(Some(7), 720);
+            let mut budget = packet::Budget::new(50_000, 144, turn.at(719));
+            let (waiting, _permit) = turn
+                .admission
+                .take_ready(&mut budget, turn.at(721), profile, &turn.port)
+                .unwrap();
+            let pending_bytes: usize = turn
+                .commits
+                .iter()
+                .map(|pending| pending.opus_bytes + packet::MEDIA_OVERHEAD)
+                .sum();
+            let extra_bytes = waiting.bytes() + pending_bytes;
+            assert_eq!(extra_bytes, 288);
+            let decision = turn.decide(721, Some(waiting.bytes()));
+            assert_eq!(
+                decision,
+                if one_byte_over {
+                    Err("remote media window exhausted; retire generation".into())
+                } else {
+                    Ok(true)
+                }
+            );
+            assert_eq!(turn.port.snapshot().terminal_feedback, 1);
+            assert_eq!(
+                turn.ledger.bytes() + extra_bytes,
+                limit + usize::from(one_byte_over)
+            );
+            assert_eq!(turn.commits.len(), 1);
+            assert!(turn.incoming.is_empty());
+            // Omitting the uncommitted packet charge would incorrectly admit
+            // even the over-window case after authenticating the valid ACK.
+            assert!(turn.ledger.check(turn.at(721), waiting.bytes()).is_ok());
+        }
+    }
+
+    #[test]
+    fn queued_control_rejects_tampering_and_unexpected_ssrc_without_credit() {
+        for unknown_author in [false, true] {
+            let mut turn = ControlTurn::new();
+            turn.commit(7, 0);
+            let mut plain = turn.compound(Some(7));
+            let cipher = if unknown_author {
+                let ssrc = turn.peer.ssrc_tx ^ 1;
+                // Structurally valid compound protected under the same key but
+                // an unrecognized author; the exact-SSRC receiver must reject.
+                for offset in [4, 32 + 4, 32 + 20 + 4] {
+                    plain[offset..offset + 4].copy_from_slice(&ssrc.to_be_bytes());
+                }
+                dmsg_srtp_sys::Sender::new(&turn.peer.media_tx, ssrc)
+                    .unwrap()
+                    .protect_rtcp(&plain)
+                    .unwrap()
+            } else {
+                let mut cipher = turn.sender.protect_rtcp(&plain).unwrap();
+                *cipher.last_mut().unwrap() ^= 1;
+                cipher
+            };
+            turn.queue_cipher(cipher, 719);
+            let error = turn.decide(721, None).unwrap_err();
+            if unknown_author {
+                assert_eq!(error, "SRTP unexpected SSRC");
+            } else {
+                assert_eq!(error, "SRTP authentication failed");
+            }
+            assert_eq!(turn.ledger.bytes(), 144);
+            assert_eq!(turn.port.snapshot().terminal_feedback, 0);
+            assert_eq!(turn.port.snapshot().rx_bytes, 0);
+        }
+    }
+
+    #[test]
+    fn queued_authenticated_control_keeps_whole_compound_and_frontier_checks() {
+        for (offset, expected) in [
+            (8, "invalid fixture RTCP peer"),
+            (32 + 10, "invalid fixture RTCP CNAME"),
+            (32 + 20 + 12, "invalid fixture RTCP APP"),
+        ] {
+            let mut turn = ControlTurn::new();
+            turn.commit(7, 0);
+            let mut plain = turn.compound(Some(7));
+            plain[offset] ^= 1;
+            let cipher = turn.sender.protect_rtcp(&plain).unwrap();
+            turn.queue_cipher(cipher, 719);
+            assert_eq!(turn.decide(721, None), Err(expected.into()));
+            assert_eq!(turn.ledger.bytes(), 144);
+            assert_eq!(turn.port.snapshot().terminal_feedback, 0);
+            assert_eq!(turn.port.snapshot().rx_bytes, 0);
+        }
+        for (terminal, expected) in [
+            (8, "invalid remote terminal frontier"),
+            (1 << 48, "invalid fixture RTCP cursor"),
+        ] {
+            let mut turn = ControlTurn::new();
+            turn.commit(7, 0);
+            turn.queue_ack(Some(terminal), 719);
+            assert_eq!(turn.decide(721, None), Err(expected.into()));
+            assert_eq!(turn.ledger.bytes(), 144);
+            assert_eq!(turn.port.snapshot().terminal_feedback, 0);
+        }
+    }
+
+    #[test]
+    fn queued_prefix_ack_cannot_hide_remaining_expired_commitment() {
+        let mut turn = ControlTurn::new();
+        turn.commit(7, 0);
+        turn.commit(8, 0);
+        turn.queue_ack(Some(7), 719);
+        assert_eq!(
+            turn.decide(721, None),
+            Err("remote media progress expired; retire generation".into())
+        );
+        assert_eq!(turn.ledger.bytes(), 144);
+        assert_eq!(turn.port.snapshot().terminal_feedback, 1);
+        assert_eq!(turn.port.snapshot().max_feedback_cycle_ms, 721);
+    }
+
+    #[test]
+    fn queued_stale_and_nonprogress_control_cannot_reset_oldest_commitment_age() {
+        for terminal in [Some(6), Some(7), None] {
+            let mut turn = ControlTurn::new();
+            turn.commit(7, 0);
+            turn.queue_ack(Some(7), 199);
+            assert_eq!(turn.decide(200, None), Ok(true));
+            turn.commit(8, 200);
+            turn.queue_ack(terminal, 919);
+            let expected = if terminal == Some(6) {
+                "invalid remote terminal frontier"
+            } else {
+                "remote media progress expired; retire generation"
+            };
+            assert_eq!(turn.decide(921, None), Err(expected.into()));
+            assert_eq!(turn.ledger.bytes(), 144);
+            assert_eq!(
+                turn.port.snapshot().terminal_feedback,
+                if terminal == Some(7) { 2 } else { 1 }
+            );
+            assert_eq!(turn.port.snapshot().max_feedback_cycle_ms, 200);
+        }
+        // A fully authenticated sender-clock observation is not a terminal ACK.
+        let mut turn = ControlTurn::new();
+        turn.commit(7, 0);
+        let plain = packet::compound(packet::Report {
+            sender_ssrc: turn.peer.ssrc_tx,
+            peer_ssrc: turn.peer.ssrc_rx,
+            cname: &turn.peer.cname,
+            sender: Some((1 << 32, 1920, 1, 100)),
+            feedback: packet::Feedback::default(),
+        });
+        let cipher = turn.sender.protect_rtcp(&plain).unwrap();
+        turn.queue_cipher(cipher, 719);
+        assert_eq!(
+            turn.decide(721, None),
+            Err("remote media progress expired; retire generation".into())
+        );
+        assert_eq!(turn.ledger.bytes(), 144);
+        assert_eq!(turn.port.snapshot().terminal_feedback, 0);
+        assert_eq!(turn.port.snapshot().rx_bytes, 152);
+        assert_eq!(turn.port.snapshot().remote_clock_rejected_reports, 0);
+    }
+
+    #[test]
+    fn selected_control_reaps_pending_receipt_before_fast_ack_validation() {
+        let mut turn = ControlTurn::new();
+        let (notify, receipt) = oneshot::channel();
+        notify
+            .send(Commit::Committed {
+                framed_bytes: 144,
+                at: turn.at(0),
+            })
+            .unwrap_or_else(|_| panic!("receipt closed"));
+        turn.commits.push_back(PendingCommit {
+            index: 7,
+            timestamp: 1920,
+            opus_bytes: 100,
+            submitted: turn.at(0),
+            source_ready: turn.at(0),
+            receipt,
+        });
+        turn.queue_ack(Some(7), 1);
+        let frame = turn.incoming.try_recv().unwrap();
+        let now = turn.at(2);
+        // Same handler as select: unlike the top-of-turn path, its receipt was
+        // completed while awaiting control and has not been reaped beforehand.
+        receive_control(
+            Some(frame),
+            &mut turn.receiver,
+            &turn.fixture,
+            &mut turn.commits,
+            &mut turn.admission,
+            &mut turn.ledger,
+            &mut turn.sent,
+            &mut turn.received,
+            &mut turn.ready,
+            &turn.port,
+            || now,
+        )
+        .unwrap();
+        assert!(turn.commits.is_empty());
+        assert_eq!(turn.sent.packets, 1);
+        assert_eq!(turn.ledger.bytes(), 0);
+        assert_eq!(turn.port.snapshot().terminal_feedback, 1);
+        assert_eq!(turn.port.snapshot().max_feedback_cycle_ms, 2);
+    }
+
+    #[test]
+    fn control_progress_processes_at_most_one_ready_frame() {
+        let mut turn = ControlTurn::new();
+        turn.commit(7, 0);
+        let first = turn.sender.protect_rtcp(&turn.compound(None)).unwrap();
+        let second = turn.sender.protect_rtcp(&turn.compound(Some(7))).unwrap();
+        turn.queue_cipher(first, 719);
+        let queued = turn.queued.clone();
+        let at = turn.at(721);
+        // Refill the freed capacity-one inbox precisely when the first handler
+        // asks for its clock observation, without scheduling another actor.
+        let refilled = std::cell::Cell::new(false);
+        let second = std::cell::RefCell::new(Some(second));
+        let result = control_progress(
+            &mut turn.incoming,
+            &mut turn.receiver,
+            &turn.fixture,
+            &mut turn.commits,
+            &mut turn.admission,
+            &mut turn.ledger,
+            &mut turn.sent,
+            &mut turn.received,
+            &mut turn.ready,
+            &turn.port,
+            None,
+            || {
+                if !refilled.replace(true) {
+                    queued
+                        .try_send(Ok(InboundFrame {
+                            frame: (OP_RTCP, second.borrow_mut().take().unwrap()),
+                            body_complete: at,
+                            noise_done: at,
+                        }))
+                        .unwrap_or_else(|_| panic!("control inbox full"));
+                }
+                at
+            },
+        );
+        assert_eq!(
+            result,
+            Err("remote media progress expired; retire generation".into())
+        );
+        assert_eq!(turn.ledger.bytes(), 144);
+        assert_eq!(turn.port.snapshot().terminal_feedback, 0);
+        assert_eq!(turn.incoming.len(), 1);
+    }
+
     fn held_codec_endpoint_progress(kind: super::super::codec::Kind) {
         use super::super::codec::Hold;
+        use std::future::Future;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let addr = listener.local_addr().unwrap().to_string();
@@ -2506,10 +3422,14 @@ mod tests {
         let port = Arc::new(test_port());
         let (input, incoming) = mpsc::channel(4);
         let actor_port = port.clone();
+        let observer_port = port.clone();
+        let observer_input = input.clone();
         let actor_hold = hold.clone();
         let actor_stop = stopped.clone();
         let (connected, connection) = std::sync::mpsc::sync_channel(1);
         let (returned, returning) = std::sync::mpsc::sync_channel(1);
+        let (observe, observation) = oneshot::channel::<u64>();
+        let (observed, source_slots) = std::sync::mpsc::sync_channel(1);
         let actor = thread::spawn(move || {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -2519,7 +3439,7 @@ mod tests {
                     let media = relay::connect(&a.relay_addr, &a, true).await.unwrap();
                     let control = relay::connect(&a.relay_addr, &a, false).await.unwrap();
                     connected.send(()).unwrap();
-                    let outcome = endpoint_owned(
+                    let endpoint = endpoint_owned(
                         a,
                         actor_port,
                         incoming,
@@ -2527,8 +3447,46 @@ mod tests {
                         control,
                         actor_stop,
                         Some(actor_hold),
-                    )
-                    .await;
+                    );
+                    tokio::pin!(endpoint);
+                    let outcome = tokio::select! {
+                        outcome = &mut endpoint => outcome,
+                        baseline = observation => {
+                            match baseline {
+                                Ok(baseline) => {
+                                    // One bounded snapshot after the four sends,
+                                    // with the producer quiescent. Poll the same
+                                    // endpoint so decode gets a legal collection
+                                    // turn instead of racing the supervisor's
+                                    // immediate channel-capacity read.
+                                    let slots = std::future::poll_fn(|cx| {
+                                        if let std::task::Poll::Ready(outcome) = endpoint.as_mut().poll(cx) {
+                                            return std::task::Poll::Ready(Err(outcome));
+                                        }
+                                        let queued = observer_input.max_capacity() - observer_input.capacity();
+                                        if kind == super::super::codec::Kind::Decode && queued == 4 {
+                                            return std::task::Poll::Pending;
+                                        }
+                                        let stats = observer_port.snapshot();
+                                        std::task::Poll::Ready(Ok((
+                                            queued,
+                                            stats.dropped_capture.saturating_sub(baseline),
+                                            stats.encoded_packets,
+                                            stats.encode_duration_bins.iter().sum::<u64>(),
+                                        )))
+                                    }).await;
+                                    match slots {
+                                        Ok(slots) => {
+                                            observed.send(slots).unwrap();
+                                            endpoint.await
+                                        }
+                                        Err(outcome) => outcome,
+                                    }
+                                }
+                                Err(_) => endpoint.await,
+                            }
+                        }
+                    };
                     returned.send(()).unwrap();
                     outcome
                 })
@@ -2576,7 +3534,8 @@ mod tests {
         } else {
             0
         };
-        let mut kept_ring = true;
+        let source_baseline = port.snapshot().dropped_capture;
+        let mut sent_all = true;
         for batch in 0..4 {
             input
                 .try_send(Captured {
@@ -2588,9 +3547,10 @@ mod tests {
                     hardware_age: None,
                     capture_clock: None,
                 })
-                .unwrap_or_else(|_| kept_ring = false);
+                .unwrap_or_else(|_| sent_all = false);
         }
-        kept_ring &= input.capacity() == 0;
+        observe.send(source_baseline).unwrap();
+        let observed_slots = source_slots.recv_timeout(Duration::from_secs(3));
         let _ = stop.send(true);
         let returned_while_held = returning.recv_timeout(Duration::from_millis(20)).is_ok();
         hold.release();
@@ -2614,10 +3574,39 @@ mod tests {
             !returned_while_held,
             "endpoint retired before joining the held codec owner"
         );
-        assert!(
-            kept_ring,
-            "codec work must leave PCM in the original four-batch ring"
+        assert!(sent_all, "the original ring must accept four batches");
+        let (queued, discarded, encoded, encode_operations) =
+            observed_slots.expect("source ownership was not observed while codec remained held");
+        let samples = LiveProfile::Ms40.samples();
+        assert_eq!(input.max_capacity(), 4);
+        assert!(queued <= 4, "capture exceeded the original ring");
+        assert_eq!(encoded, 0, "encoder output appeared before codec release");
+        assert_eq!(
+            encode_operations, 0,
+            "encoder work completed before the held operation was released"
         );
+        // At this endpoint poll boundary there is no dequeued-but-unprocessed
+        // batch. While the sole codec operation is held, collected samples can
+        // only remain in the assembled source slot or be accounted as loss.
+        // Do not require loss-free 40ms scheduling under host CPU contention;
+        // the controlled-Instant source-slot tests check age and deadlines.
+        assert!(discarded <= samples as u64);
+        let assembled = samples
+            .checked_sub(queued * 160 + discarded as usize)
+            .expect("capture escaped the ring/source/loss accounting");
+        assert!(assembled <= samples, "assembled source frame grew");
+        let source_owned = if kind == super::super::codec::Kind::Encode {
+            assert_eq!(
+                (queued, assembled, discarded),
+                (4, 0, 0),
+                "encode owns the source slot and must retain the extra ring"
+            );
+            samples
+        } else {
+            assert!(queued < 4, "decode prevented legal source collection");
+            assembled
+        };
+        assert!(source_owned + queued * 160 <= samples + 4 * 160);
     }
 
     #[test]
@@ -2628,6 +3617,12 @@ mod tests {
     #[test]
     fn held_decoder_does_not_block_authenticated_endpoint_media_and_control() {
         held_codec_endpoint_progress(super::super::codec::Kind::Decode);
+    }
+
+    // Android's current-capacity fresh request; the existing batch is still <=160.
+    fn renderer_fresh_pull_limit(depth: usize) -> usize {
+        assert!(depth <= 640);
+        (640 - depth).min(160)
     }
 
     #[tokio::test]
@@ -2811,14 +3806,15 @@ mod tests {
                         {
                             let depth = (submitted - head) as usize;
                             let required = if pending.is_empty() {
-                                160
+                                renderer_fresh_pull_limit(depth)
                             } else {
                                 pending.len()
                             };
-                            if depth + required <= 640 {
+                            if required != 0 && depth + required <= 640 {
                                 if pending.is_empty() {
                                     let mut pcm = [0; 160];
-                                    let count = audio.pull_at(now, &mut pcm);
+                                    let count = audio.pull_at(now, &mut pcm[..required]);
+                                    assert!(count <= required);
                                     if count != 0 {
                                         max_native_hold =
                                             max_native_hold.max(ns - published.unwrap());
@@ -2891,6 +3887,232 @@ mod tests {
                 && row.7 == 0
                 && row.8 == if row.1 == 160 { 13_800_000 } else { 19_800_000 }),
             "first source due must remain80ms, no active tail expiry: {results:?}"
+        );
+    }
+
+    #[test]
+    fn capacity_limited_renderer_conserves_pcm_under_controlled_head_readback() {
+        // These are controlled legal readbacks/wakes, not a replay of a phone
+        // trace: the physical trace does not establish earlier free capacity.
+        // A one-sample later readback distinguishes prompt handoff from expiry.
+        let mut outcomes = Vec::new();
+        for reclaim_last in [false, true] {
+            for write_limit in [160usize, 80] {
+                for capacity_limited in [false, true] {
+                    let profile = LiveProfile::Ms40;
+                    let origin = Instant::now();
+                    let at = |us| origin + Duration::from_micros(us);
+                    let due = at(80_000);
+                    let end = at(120_000);
+                    let port = Arc::new(test_port());
+                    let audio = AudioPort { port: port.clone() };
+                    let mut received = test_received();
+                    let mut feedback = packet::Feedback::default();
+                    received.admit(0, &opus40(), origin, profile, &mut feedback, &port);
+                    let mut work = received
+                        .prepare_decode(at(70_371), profile, &mut feedback, &port)
+                        .unwrap();
+                    let expected = LiveDecoder::new(profile)
+                        .unwrap()
+                        .decode(work.opus.take().as_ref().unwrap())
+                        .unwrap();
+                    received
+                        .apply_decode(
+                            work,
+                            at(81_841),
+                            Duration::from_micros(11_470),
+                            Zeroizing::new(expected.clone()),
+                            &port,
+                        )
+                        .unwrap();
+                    assert!(audio.sink_rate(2_739));
+
+                    // Previous-frame PCM accounts for the sink's initial lead.
+                    // Its 320 already consumed samples are outside this frame.
+                    let mut hardware: VecDeque<(Option<usize>, i16)> =
+                        (0..320).map(|_| (None, 0)).collect();
+                    let (mut submitted, mut consumed) = (640u64, 320u64);
+                    let mut previous_head = 0;
+                    let mut consumed_at = at(84_069);
+                    let mut pcm = [77; 160]; // One existing renderer batch.
+                    let (mut valid, mut offset) = (0, 0);
+                    let mut transferred = Vec::new();
+                    let mut played = Vec::new();
+                    let mut first_tail_pull = None;
+                    let tail_wake = if reclaim_last { 116_605 } else { 118_605 };
+                    let mut wakes = vec![
+                        (84_069, 160),
+                        (94_069, 320),
+                        (107_220, 480),
+                        (tail_wake, 639),
+                    ];
+                    if reclaim_last {
+                        wakes.push((118_605, 640));
+                    }
+                    wakes.push((120_605, if reclaim_last { 640 } else { 639 }));
+                    for (us, head) in wakes {
+                        let now = at(us);
+                        while !hardware.is_empty()
+                            && consumed_at + Duration::from_nanos(SAMPLE_NS) <= now
+                        {
+                            consumed_at += Duration::from_nanos(SAMPLE_NS);
+                            let (sample, value) = hardware.pop_front().unwrap();
+                            if let Some(sample) = sample {
+                                assert!(
+                                    consumed_at
+                                        >= due
+                                            + received
+                                                .remote_clock
+                                                .rate
+                                                .duration(sample as u64 * 3)
+                                );
+                                assert_eq!(sample, played.len());
+                                assert_eq!(value, expected[sample]);
+                                played.push(value);
+                            }
+                            consumed += 1;
+                        }
+                        assert!(previous_head <= head && head <= consumed);
+                        previous_head = head;
+                        let depth = (submitted - head) as usize;
+                        assert!(depth <= 640 && hardware.len() <= depth);
+                        audio.sink_queued(depth);
+                        received.maintain_playout(now, profile, &mut feedback, &port);
+                        loop {
+                            let depth = (submitted - head) as usize;
+                            let pending = valid - offset;
+                            let requested = if pending == 0 {
+                                if capacity_limited {
+                                    renderer_fresh_pull_limit(depth)
+                                } else if depth <= 480 {
+                                    160 // The previous fresh/full-batch policy.
+                                } else {
+                                    0
+                                }
+                            } else {
+                                pending
+                            };
+                            if requested == 0 || depth + requested > 640 {
+                                break;
+                            }
+                            if pending == 0 {
+                                pcm.fill(77);
+                                audio.sink_queued(depth);
+                                valid = audio.pull_at(now, &mut pcm[..requested]);
+                                offset = 0;
+                                assert!(valid <= requested && requested <= 160);
+                                assert!(pcm[valid..].iter().all(|value| *value == 77));
+                                if valid == 0 {
+                                    break;
+                                }
+                                let next = transferred.len();
+                                assert!(
+                                    now + clock::sink_lead(depth, 2_739)
+                                        >= due
+                                            + received.remote_clock.rate.duration(next as u64 * 3)
+                                );
+                                assert_eq!(&pcm[..valid], &expected[next..next + valid]);
+                                if next == 480 {
+                                    first_tail_pull = Some(us);
+                                }
+                                transferred.extend_from_slice(&pcm[..valid]);
+                            }
+                            // Finish the entire owned remainder through partial
+                            // writes before overwriting the preallocated batch.
+                            let count = (valid - offset).min(write_limit);
+                            let first = transferred.len() - valid;
+                            for index in offset..offset + count {
+                                hardware.push_back((Some(first + index), pcm[index]));
+                            }
+                            offset += count;
+                            submitted += count as u64;
+                            assert!(submitted - head <= 640 && valid - offset <= 160);
+                        }
+                        let render = port.render.lock().unwrap();
+                        if !render.pcm.is_empty() {
+                            assert_eq!(render.start_due, Some(due));
+                            assert_eq!(render.end_due, Some(end));
+                            assert_eq!(render.source_end, Some(1920));
+                        }
+                        assert_eq!(
+                            render.pcm.len()
+                                + transferred.len()
+                                + port.snapshot().expired_render_samples as usize,
+                            640
+                        );
+                        assert_eq!(
+                            hardware
+                                .iter()
+                                .filter(|(sample, _)| sample.is_some())
+                                .count()
+                                + played.len()
+                                + valid
+                                - offset,
+                            transferred.len()
+                        );
+                        assert_eq!(received.first_playout, Some((0, due)));
+                        assert_eq!(received.source_due(1920), end);
+                    }
+                    while let Some((sample, value)) = hardware.pop_front() {
+                        consumed_at += Duration::from_nanos(SAMPLE_NS);
+                        if let Some(sample) = sample {
+                            assert!(
+                                consumed_at
+                                    >= due + received.remote_clock.rate.duration(sample as u64 * 3)
+                            );
+                            assert_eq!(sample, played.len());
+                            played.push(value);
+                        }
+                        consumed += 1;
+                    }
+                    assert_eq!(submitted, consumed);
+                    assert_eq!(valid, offset);
+                    assert_eq!(played, transferred);
+                    assert_eq!(played, expected[..played.len()]);
+                    let stats = port.snapshot();
+                    assert_eq!(
+                        (
+                            stats.decoded_packets,
+                            stats.plc_slots,
+                            stats.late_packets,
+                            stats.future_rejected_packets
+                        ),
+                        (1, 0, 0, 0)
+                    );
+                    assert_eq!(stats.dropped_render, stats.expired_render_samples);
+                    if !reclaim_last {
+                        let trace = stats.last_render_expiry.unwrap();
+                        assert_eq!(trace.expiry_vs_end_us, 605);
+                        assert_eq!(trace.source_frame_duration_us, 40_000);
+                        assert_eq!(trace.transferred_samples, played.len() as u64);
+                    }
+                    outcomes.push((
+                        reclaim_last,
+                        write_limit,
+                        capacity_limited,
+                        played.len(),
+                        stats.expired_render_samples,
+                        first_tail_pull,
+                    ));
+                    pcm.zeroize();
+                }
+            }
+        }
+        assert!(
+            outcomes
+                .iter()
+                .all(|&(reclaim, _, limited, played, expired, tail)| {
+                    if reclaim {
+                        played == 640
+                            && expired == 0
+                            && tail == Some(if limited { 116_605 } else { 118_605 })
+                    } else if limited {
+                        played == 639 && expired == 1 && tail == Some(118_605)
+                    } else {
+                        played == 480 && expired == 160 && tail.is_none()
+                    }
+                }),
+            "controlled capacity outcomes: {outcomes:?}"
         );
     }
 
@@ -3032,6 +4254,48 @@ mod tests {
         );
         assert_eq!(received.playout.as_ref().unwrap().cursor, 1920);
         assert_eq!(received.first_playout, Some((0, at(80))));
+    }
+
+    #[test]
+    fn render_expired_samples_is_nonblocking_read_only_and_unknown_when_closed() {
+        let port = Arc::new(test_port());
+        let audio = AudioPort { port: port.clone() };
+        port.position.store(17, Ordering::Relaxed);
+        audio.sink_queued(181);
+        assert!(audio.sink_rate(500_000));
+        let due = Instant::now();
+        let mut render = port.render.lock().unwrap();
+        render.enqueue_observed(due, vec![7; 640], None, None);
+        // Holding the media/clock locks also proves the getter does not use them.
+        let _clock = port.remote_clock_fresh_until.lock().unwrap();
+        assert_eq!(audio.render_expired_samples(), Some(0));
+        for counter in [95, 255, u64::MAX] {
+            let mut stats = port.stats.lock().unwrap();
+            stats.expired_render_samples = counter;
+            let before = serde_json::to_value(&*stats).unwrap();
+            // Same-thread ownership would deadlock a blocking lock(), not try_lock().
+            assert_eq!(audio.render_expired_samples(), None);
+            port.closed.store(true, Ordering::Relaxed);
+            assert_eq!(audio.render_expired_samples(), None);
+            drop(stats);
+            assert_eq!(audio.render_expired_samples(), None);
+            port.closed.store(false, Ordering::Relaxed);
+            assert_eq!(audio.render_expired_samples(), Some(counter));
+            assert_eq!(audio.render_expired_samples(), Some(counter));
+            assert_eq!(
+                serde_json::to_value(&*port.stats.lock().unwrap()).unwrap(),
+                before
+            );
+        }
+        assert_eq!(port.position.load(Ordering::Relaxed), 17);
+        assert_eq!(port.sink_queue.load(Ordering::Relaxed), 181);
+        assert_eq!(port.sink_rate.load(Ordering::Relaxed), 500_000);
+        assert_eq!(render.pcm.iter().copied().collect::<Vec<_>>(), vec![7; 640]);
+        assert_eq!(render.start_due, Some(due));
+        assert_eq!(render.end_due, Some(due + Duration::from_millis(40)));
+        assert_eq!(render.frame_samples, 640);
+        assert!(render.first_pull.is_none() && render.last_pull.is_none());
+        assert_eq!(render.successful_pull_calls, 0);
     }
 
     #[test]
