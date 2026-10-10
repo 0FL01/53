@@ -10,6 +10,119 @@ class CallProbePlaybackClockTest {
         it.observe(320_000, 20_000_000_001, 20_000_000_001, 16_000, 0)
     }
 
+    @Test fun fractionalCommandsRecoverAfterOneInvalidHardwareTimestamp() {
+        val clock = CallProbePlaybackClock()
+        val origin = 1_000_000_000L
+        var frameTenths = 0L
+        var actualRate = 16_000
+        var recoveredStep: Int? = null
+        var invalidCommands = 0
+        val resumedChanges = mutableListOf<Int>()
+        val trace = mutableListOf<String>()
+        for (step in 0..900) {
+            if (step > 0) frameTenths += actualRate
+            val now = origin + step * 100_000_000L
+            // Physical position integrates only the previously commanded rate.
+            // No arrival time, queue depth or nominal-rate replacement is used.
+            if (step == 250) clock.observe(-1, -1, now, actualRate, 0)
+            else clock.observe(frameTenths / 10, now, now, actualRate, 0)
+            val output = clock.choose(now, 4_799_983_248L, 100_000_000_000_000L, true)
+            if (step == 200) {
+                assertTrue(output.calibrated && output.healthy)
+                assertEquals(-3.49, output.relativePpm!!, 1e-6)
+                assertEquals(15_999, output.rate)
+            }
+            if (step >= 250) {
+                assertTrue("the neutral calibration must remain frozen", output.calibrated)
+                assertEquals(1L, output.rejectionMask)
+                assertEquals(kotlin.math.round((output.rate / 16_000.0 - 1.0) * 1e9).toLong(), output.sinkPpb)
+                if (output.healthy && recoveredStep == null) recoveredStep = step
+                if (!output.healthy && output.rate != actualRate) invalidCommands++
+                if (output.healthy && output.rate != actualRate) resumedChanges += step
+            }
+            if (output.rate != actualRate || step in listOf(200, 250, 251, 450, 451, 900)) {
+                trace += "t=${step / 10.0}s rate=${output.rate} healthy=${output.healthy} mask=${output.rejectionMask}"
+            }
+            actualRate = output.rate
+        }
+        val evidence = "recovered=${recoveredStep?.div(10.0)}s invalidChanges=$invalidCommands resumedChanges=$resumedChanges; ${trace.joinToString("; ")}"
+        println(evidence)
+        // The first good point is at 25.1s. Exactly 20s, not merely advancing
+        // timestamps, is required before resuming the supported fractional target.
+        assertEquals(evidence, 451, recoveredStep)
+        assertEquals(evidence, 0, invalidCommands)
+        assertEquals("resume one command, without replaying the expired 1s ticks: $evidence",
+            listOf(571, 581, 751, 761), resumedChanges)
+    }
+
+    @Test fun healthyFractionalCommandSequenceAndAccuracyRemainUnchanged() {
+        for (sign in listOf(-1, 1)) {
+            val clock = calibrated()
+            val origin = 20_000_000_001L
+            var frameTenths = 3_200_000L
+            var actualRate = 16_000
+            var consumed = 0L
+            for (step in 0..27_000) {
+                if (step > 0) frameTenths += actualRate
+                val now = origin + step * 100_000_000L
+                clock.observe(frameTenths / 10, now, now, actualRate, 0)
+                val output = clock.choose(now, 4_800_000_000L + sign * 16_752L,
+                    100_000_000_000_000L, true)
+                assertTrue("healthy $sign at step=$step: $output", output.calibrated && output.healthy)
+                assertEquals(sign * 3.49, output.relativePpm!!, 1e-6)
+                if (step < 400) {
+                    val second = step / 10
+                    // Golden original sequence, including unchanged selections
+                    // between 1s commands, in both fractional directions.
+                    val expected = if (sign < 0 && second in listOf(0, 17, 35)) 15_999
+                        else if (sign > 0 && second in listOf(17, 35)) 16_001 else 16_000
+                    assertEquals("$sign at step=$step", expected, output.rate)
+                }
+                if (step % 10 == 0 && step < 27_000) consumed += output.rate
+                actualRate = output.rate
+            }
+            val expected = 16_000.0 * (1.0 + sign * 3.49 / 1e6) * 2_700
+            assertTrue("45min fractional error below one sample: $sign consumed=$consumed expected=$expected",
+                kotlin.math.abs(consumed - expected) < 1.01)
+        }
+    }
+
+    @Test fun invalidTimingHoldsAutomaticButManualOverrideAndReleaseRemainExplicit() {
+        val origin = 20_000_000_001L
+        for (fault in listOf("hardware", "stale", "remote", "ticks", "ns", "unsupported")) {
+            val clock = calibrated()
+            val selected = clock.choose(origin, 47_995_200, 1_000_000_000_000, true)
+            assertTrue(selected.healthy)
+            assertEquals(15_998, selected.rate)
+            for (second in 1..5) {
+                val now = origin + second * 1_000_000_000L
+                when (fault) {
+                    "hardware" -> clock.observe(-1, -1, now, selected.rate, 0)
+                    "stale" -> Unit
+                    else -> clock.observe(320_000L + second * selected.rate, now, now, selected.rate, 0)
+                }
+                val output = clock.choose(now,
+                    if (fault == "ticks") 0 else if (fault == "unsupported") 48_096 else 47_995_200,
+                    if (fault == "ns") 0 else if (fault == "unsupported") 1_000_000_000 else 1_000_000_000_000,
+                    fault != "remote")
+                assertFalse("$fault must stay explicit at $second: $output", output.healthy)
+                assertEquals("$fault must hold its last automatic selection", selected.rate, output.rate)
+            }
+            // Explicit manual commands still work without valid timing, and
+            // releasing them restores the retained fractional automatic target.
+            for (offset in listOf(8, -8)) {
+                val manual = clock.choose(origin + 6_000_000_000L, 0, 0, false, offset)
+                assertFalse(manual.healthy)
+                assertEquals(16_000 + offset, manual.rate)
+            }
+            val restored = clock.choose(origin + 7_000_000_000L, 0, 0, false)
+            assertFalse(restored.healthy)
+            assertEquals(selected.rate, restored.rate)
+            assertEquals("manual release must not re-enable invalid automatic dither: $fault",
+                restored.rate, clock.choose(origin + 8_000_000_000L, 0, 0, false).rate)
+        }
+    }
+
     @Test fun fractionalHertzDoesNotAccumulateHundredPpmResidual() {
         for (ppm in listOf(-500, -100, 100, 500)) {
             val clock = calibrated()

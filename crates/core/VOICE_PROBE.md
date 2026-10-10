@@ -961,3 +961,25 @@ Noise identities/pins, directional media keys/salts, SSRC, generation and
 certificate; `rotate-fixtures` deliberately preserves trust identities and is
 not a remedy for exposed authentication keys. Retain the sanitized incident fact
 and interrupted-run classification, not secret contents.
+
+## Hardware-clock recovery while fractional playback is frozen
+
+The pure platform controller previously continued its one-second fractional-Hz
+commands even when hardware timing was invalid. A supported-3.49ppm target can
+change the actual integer rate more often than the required20s hardware recovery
+window; each change restarts that window. This is a source-level recovery lockout,
+not proof that every physical unhealthy snapshot has that cause.
+
+The deterministic hardware model calibrates at20s, rejects one timestamp at25s,
+then supplies valid positions integrating the commanded rates. Before correction
+six automatic rate changes occur while unhealthy and no recovery happens by90s.
+After correction the last actual selection stays frozen; a valid window starting
+at25.1s recovers at45.1s, then normal fractional commands resume without catch-up.
+Only the automatic actuation condition changes. Initial neutral selection and
+explicit +/-8Hz manual override/release remain available; the established neutral,
+freshness, timestamp/rate validation and supported relative range remain intact.
+
+The165 JVM tests pass, including unchanged healthy command sequences and less than
+one sample of fractional error over2700s at +/-3.49ppm. These are controller-model
+results. The currently running141-build physical pair uses its original APK; no
+replacement, rebuild or new physical acceptance is inferred from the model.

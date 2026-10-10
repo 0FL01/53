@@ -101,7 +101,10 @@ internal class CallProbePlaybackClock {
         if (manualOffset != 0) {
             selected = 16_000 + manualOffset
             nextActuationNs = 0L
-        } else if (nowNs >= nextActuationNs) {
+        } else if ((valid && healthy || nextActuationNs == 0L) && nowNs >= nextActuationNs) {
+            // Hold automatic commands/fraction while timing is invalid so the
+            // unchanged actual rate can certify a complete 20s hardware window.
+            // Zero permits the initial neutral command and explicit manual release.
             val lower = floor(targetHz).toInt()
             fraction += targetHz - lower
             val extra = if (fraction >= 1.0) { fraction -= 1.0; 1 } else 0
