@@ -872,16 +872,76 @@ causal cache/receipt comparison. READY, frozen RUN and intentional teardown rema
 separate. The cache/ACK124 disposable relay exits1 after both instruments finish;
 that nonzero child retirement is retained, not relabelled a zero-exit runtime.
 
-A new2700s receipt127 pair is running on frozen artifacts. Near8 minutes its
-running clocks/owners remain healthy, but Moto/Mi render expiry is254/480 samples:
-no intermittent-tail-fix or45-minute PASS is claimed. The earlier f844d1c45-minute
-attempt ended around35.8 minutes with both `remote_media_progress_expired` errors;
-it did not complete. Do not reinstall or rebuild into a running experiment.
+The frozen receipt127 synthetic50 pair completed2700002/2700067ms. Both original
+clock/lifecycle gates, coordinated interval release and cleanup pass. Active
+Moto/Mi counters still include late330/106, PLC330/158, capture loss33280/0 and
+render expiry620/480 samples. First/last roughly-five-minute counters are not
+acoustic latency or source-active speech-loss ratios. The disposable relay exits1
+at retirement; this is preserved separately from the successful instruments.
+Final service elapsed2731064ms, read/authenticated role bytes5690668/5508770,
+live/retired partial bytes0/0: both conservation and synthetic service bounds hold.
+
+The same-build synthetic80 pair did **not** finish45min. Last healthy measured
+snapshots are1132571/1133793ms; both subsequent final reports have
+`remote_media_progress_expired`. Neither emits an interval-complete frozen RUN or
+coordinated release. All113 preceding progress records per phone are healthy;
+final `sink_clock_rate_rejected` reflects the retired native port, not proof of
+an unsupported oscillator. Owned processes/listeners and audio resources close.
+Exact first retirement and expired-entry age/frontier/control timing were not
+recorded. Maximum acknowledged ages718/644ms were already observed around110s;
+they are not the timeout's measured age or causal evidence. Final synthetic
+service elapsed1139817ms, role read/authenticated2279411/2246682 bytes, with zero
+live/retired partials, conserves accounting. These are negative physical results,
+not R5 quality acceptance. The earlier f844d1c attempt ended around35.8min with
+the same generic progress error and also did not complete.
 
 The fixture is direct-authoritative LAN, with the service meter applied after DNS
 transit. Declared admission capacity and F0 are not measured safe recursive-DNS
 capacity. It supplies no DNS-QPS or common-clock acoustic measurement. Full R5
-still requires latest-build long50/80, source-active gaps/stalls, attributable
+still requires qualifying latest-build long50/80, source-active gaps/stalls, attributable
 mouth-to-ear and listening/double-talk evidence; code/model/local PASS does not
 replace those outcomes. Device wall clocks, Main/identity and transport pin/
 scheduler remain unchanged.
+
+## Bounded progress-failure observation and known-prefix ordering
+
+The141-test source adds one optional `last_progress_failure` observation. It is
+null until an original ledger check fails, then retains the failed decision at
+`top_turn`, `media_admission` or `receipt_commit`. It contains ledger/window bytes,
+entry/frontier state, pending/waiting observations and optional relative timings
+of the last fully authenticated and successfully handled control frame. Unknown
+or backwards relative durations remain null. No PCM, ciphertext, keys, participant
+identity or absolute clock is stored in it; there is no event backlog.
+
+Window-before-age and invalid-index-before-commit precedence, error strings,
+720ms expiry and2880-byte window remain unchanged. A receipt failure uses its
+original `Commit.at`, not the later actor-processing time; its attempted frame is
+reported separately from the remaining pending receipts. Authentication, replay,
+malformed compound, invalid frontier and closed/invalid receipt failures do not
+invent a progress record. Retirement retains the record; the Kotlin forwarder
+validates its enumerated sites/reasons and required/nullable nonnegative fields.
+
+The protected reproducer also exposes a separate ordering fault: entry7 committed
+at0 can already have authenticated ACK7 queued at719ms, yet a later receipt8 at
+721ms is checked against the still-unreleased entry7 before the ACK can apply.
+After full SRTCP authentication and exact compound parsing, a terminal at or below
+the currently known committed frontier now goes through the original strict
+`acknowledge` once before receipt reaping. Higher/unknown frontiers still require
+actual receipts first. The redundant top reap no longer bypasses the bounded
+one-control-frame helper. No speculative future credit is introduced.
+
+Selected-control, top-turn and media-helper cases at actor times721/999ms release
+only the covered old prefix and retain entry8's original721ms commit time. The
+measured feedback cycle remains721/999ms, not clipped. Waiting audio with its
+original740ms deadline still expires at999ms. Repeated/non-covering prefixes,
+no ACK, invalid receipts/frontiers, replay and2881-byte excess retain their failures.
+These regressions fix source ordering; they do not attribute the physical19-minute
+paired80 retirement to that fault.
+
+Current closure:141 focused tests,397 workspace tests with the two unchanged
+explicit native ignores, two example tests, formatting, candidate arm64/API26 and
+full debug/release/instrumentation builds pass. The162 JVM tests actually execute;
+the normal CLI is explicitly rebuilt after example tests. The existing native TCP
+aggregate and both C-server artifact hashes are unchanged. One new frozen physical
+discriminator remains necessary; the previous127-build long results above are not
+promoted to new-build quality or acoustic acceptance.

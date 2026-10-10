@@ -480,6 +480,51 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
             expiry.put("sink_rate_ppb", sinkRate)
             clean.put("last_render_expiry", expiry)
         }
+        check(source.has("last_progress_failure"), "invalid_native_progress_failure")
+        if (source.isNull("last_progress_failure")) {
+            clean.put("last_progress_failure", JSONObject.NULL)
+        } else {
+            val trace = source.getJSONObject("last_progress_failure")
+            val progress = JSONObject()
+            val reason = trace.getString("reason")
+            check(reason == "expired" || reason == "window_exhausted", "invalid_native_progress_failure")
+            progress.put("reason", reason)
+            val site = trace.getString("check_site")
+            check(site == "top_turn" || site == "media_admission" || site == "receipt_commit",
+                "invalid_native_progress_failure")
+            progress.put("check_site", site)
+            listOf("ledger_bytes", "window_bytes", "entry_count", "max_age_us", "pending_bytes",
+                "pending_receipt_count", "committed_receipt_count", "check_extra_bytes", "total_check_bytes")
+                .forEach { field ->
+                    val value = trace.getLong(field)
+                    check(value >= 0, "invalid_native_progress_failure")
+                    progress.put(field, value)
+                }
+            listOf("attempted_index", "frame_bytes", "oldest_index", "oldest_age_us",
+                "highest_committed_index", "terminal_frontier", "waiting_bytes").forEach { field ->
+                check(trace.has(field), "invalid_native_progress_failure")
+                val value = if (trace.isNull(field)) null else trace.getLong(field)
+                check(value == null || value >= 0, "invalid_native_progress_failure")
+                progress.put(field, value ?: JSONObject.NULL)
+            }
+            check(trace.has("last_authenticated_control"), "invalid_native_progress_failure")
+            if (trace.isNull("last_authenticated_control")) {
+                progress.put("last_authenticated_control", JSONObject.NULL)
+            } else {
+                val control = trace.getJSONObject("last_authenticated_control")
+                val observation = JSONObject()
+                observation.put("sender_clock_present", control.getBoolean("sender_clock_present"))
+                listOf("terminal", "body_to_noise_us", "noise_to_processed_us", "since_processed_us",
+                    "since_noise_us", "since_body_us").forEach { field ->
+                    check(control.has(field), "invalid_native_progress_failure")
+                    val value = if (control.isNull(field)) null else control.getLong(field)
+                    check(value == null || value >= 0, "invalid_native_progress_failure")
+                    observation.put(field, value ?: JSONObject.NULL)
+                }
+                progress.put("last_authenticated_control", observation)
+            }
+            clean.put("last_progress_failure", progress)
+        }
         clean.put("ready", source.getBoolean("ready")).put("dns_carrier", source.getBoolean("dns_carrier"))
         clean.put("failed", source.getBoolean("failed")).put("stopped", source.getBoolean("stopped"))
         clean.put("capture_clock_calibrated", source.getBoolean("capture_clock_calibrated"))

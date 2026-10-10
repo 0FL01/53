@@ -183,6 +183,56 @@ struct Entry {
     at: Instant,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgressFailureReason {
+    Expired,
+    WindowExhausted,
+}
+
+impl ProgressFailureReason {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::Expired => "remote media progress expired; retire generation",
+            Self::WindowExhausted => "remote media window exhausted; retire generation",
+        }
+    }
+}
+
+/// Read-only state at the original check instant; no new decision or clock read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LedgerObservation {
+    pub bytes: usize,
+    pub window: usize,
+    pub entries: usize,
+    pub oldest_index: Option<u64>,
+    pub oldest_age: Option<Duration>,
+    pub highest: Option<u64>,
+    pub terminal: Option<u64>,
+    pub max_age: Duration,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LedgerFailure {
+    pub reason: ProgressFailureReason,
+    pub observation: LedgerObservation,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LedgerCommitFailure {
+    InvalidIndex,
+    Progress(LedgerFailure),
+}
+
+impl LedgerCommitFailure {
+    pub fn message(&self) -> &'static str {
+        match self {
+            Self::InvalidIndex => "invalid committed media index",
+            Self::Progress(failure) => failure.reason.message(),
+        }
+    }
+}
+
 pub struct Ledger {
     entries: VecDeque<Entry>,
     bytes: usize,
@@ -207,25 +257,66 @@ impl Ledger {
         }
     }
 
+    // Retain the original string API for callers of the standalone ledger.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn check(&self, now: Instant, next: usize) -> Result<(), String> {
+        self.check_observed(now, next)
+            .map_err(|failure| failure.reason.message().into())
+    }
+
+    pub fn check_observed(&self, now: Instant, next: usize) -> Result<(), LedgerFailure> {
         if self.bytes + next > self.limit {
-            return Err("remote media window exhausted; retire generation".into());
+            return Err(LedgerFailure {
+                reason: ProgressFailureReason::WindowExhausted,
+                observation: self.observe(now),
+            });
         }
         if self
             .entries
             .front()
             .is_some_and(|e| now.saturating_duration_since(e.at) > self.max_age)
         {
-            return Err("remote media progress expired; retire generation".into());
+            return Err(LedgerFailure {
+                reason: ProgressFailureReason::Expired,
+                observation: self.observe(now),
+            });
         }
         Ok(())
     }
 
-    pub fn commit(&mut self, index: u64, bytes: usize, at: Instant) -> Result<(), String> {
-        if index >> 48 != 0 || self.highest.is_some_and(|old| index <= old) {
-            return Err("invalid committed media index".into());
+    fn observe(&self, now: Instant) -> LedgerObservation {
+        LedgerObservation {
+            bytes: self.bytes,
+            window: self.limit,
+            entries: self.entries.len(),
+            oldest_index: self.entries.front().map(|entry| entry.index),
+            oldest_age: self
+                .entries
+                .front()
+                .map(|entry| now.saturating_duration_since(entry.at)),
+            highest: self.highest,
+            terminal: self.terminal,
+            max_age: self.max_age,
         }
-        self.check(at, bytes)?;
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn commit(&mut self, index: u64, bytes: usize, at: Instant) -> Result<(), String> {
+        self.commit_observed(index, bytes, at)
+            .map_err(|failure| failure.message().into())
+    }
+
+    pub fn commit_observed(
+        &mut self,
+        index: u64,
+        bytes: usize,
+        at: Instant,
+    ) -> Result<(), LedgerCommitFailure> {
+        if index >> 48 != 0 || self.highest.is_some_and(|old| index <= old) {
+            return Err(LedgerCommitFailure::InvalidIndex);
+        }
+        self.check_observed(at, bytes)
+            .map_err(LedgerCommitFailure::Progress)?;
         self.entries.push_back(Entry { index, bytes, at });
         self.bytes += bytes;
         self.highest = Some(index);
@@ -251,6 +342,11 @@ impl Ledger {
 
     pub fn bytes(&self) -> usize {
         self.bytes
+    }
+
+    /// Already registered commitments; pending receipts do not extend this frontier.
+    pub fn highest_committed(&self) -> Option<u64> {
+        self.highest
     }
 }
 
@@ -450,6 +546,125 @@ mod tests {
             extend((1 << 32) + 1919, u64::from(u32::MAX), 32),
             u64::from(u32::MAX)
         );
+    }
+
+    #[test]
+    fn ledger_failure_observation_is_read_only_and_preserves_check_precedence() {
+        let now = Instant::now();
+        let mut ledger = Ledger::new(100, 40, 600);
+        ledger.commit(7, 144, now).unwrap();
+        ledger
+            .acknowledge(6, now + Duration::from_millis(100))
+            .unwrap();
+        ledger
+            .commit(8, 100, now + Duration::from_millis(700))
+            .unwrap();
+        assert!(ledger
+            .check_observed(now + Duration::from_millis(720), 0)
+            .is_ok());
+        let failed_at = now + Duration::from_millis(721);
+        let expired = ledger.check_observed(failed_at, 0).unwrap_err();
+        assert_eq!(expired.reason, ProgressFailureReason::Expired);
+        assert_eq!(
+            expired.observation,
+            LedgerObservation {
+                bytes: 244,
+                window: 2880,
+                entries: 2,
+                oldest_index: Some(7),
+                oldest_age: Some(Duration::from_millis(721)),
+                highest: Some(8),
+                terminal: Some(6),
+                max_age: Duration::from_millis(720),
+            }
+        );
+        assert_eq!(
+            ledger.check(failed_at, 0),
+            Err(expired.reason.message().into())
+        );
+        let window = ledger.check_observed(failed_at, 2637).unwrap_err();
+        assert_eq!(window.reason, ProgressFailureReason::WindowExhausted);
+        assert_eq!(window.observation, expired.observation);
+        assert_eq!(
+            ledger.check(failed_at, 2637),
+            Err(window.reason.message().into())
+        );
+        assert_eq!(
+            (
+                ledger.bytes,
+                ledger.entries.len(),
+                ledger.highest,
+                ledger.terminal
+            ),
+            (244, 2, Some(8), Some(6))
+        );
+        ledger.acknowledge(7, failed_at).unwrap();
+        assert!(ledger.check_observed(failed_at, 0).is_ok());
+        assert_eq!(expired.observation.oldest_index, Some(7));
+        assert_eq!((ledger.bytes, ledger.entries.len()), (100, 1));
+    }
+
+    #[test]
+    fn ledger_commit_observation_preserves_index_priority_and_original_instant() {
+        let origin = Instant::now();
+        let at = |ms| origin + Duration::from_millis(ms);
+        let mut ledger = Ledger::new(100, 40, 600);
+        ledger.commit(7, 144, origin).unwrap();
+        ledger.acknowledge(6, at(200)).unwrap();
+        assert_eq!(ledger.commit_observed(8, 144, at(720)), Ok(()));
+        let expired = ledger.commit_observed(9, 144, at(721)).unwrap_err();
+        let LedgerCommitFailure::Progress(failure) = &expired else {
+            panic!("expected the original age failure");
+        };
+        assert_eq!(failure.reason, ProgressFailureReason::Expired);
+        assert_eq!(failure.observation.oldest_index, Some(7));
+        assert_eq!(
+            failure.observation.oldest_age,
+            Some(Duration::from_millis(721))
+        );
+        assert_eq!(failure.observation.bytes, 288);
+        assert_eq!(failure.observation.highest, Some(8));
+        assert_eq!(failure.observation.terminal, Some(6));
+        assert_eq!(
+            ledger.commit(9, 144, at(721)),
+            Err(expired.message().into())
+        );
+        for invalid_index in [8, 1 << 48] {
+            assert_eq!(
+                ledger.commit_observed(invalid_index, 3000, at(721)),
+                Err(LedgerCommitFailure::InvalidIndex)
+            );
+            assert_eq!(
+                ledger.commit(invalid_index, 3000, at(721)),
+                Err("invalid committed media index".into())
+            );
+        }
+        let window = ledger.commit_observed(9, 2593, at(721)).unwrap_err();
+        let LedgerCommitFailure::Progress(window_failure) = &window else {
+            panic!("expected the original byte failure");
+        };
+        assert_eq!(
+            window_failure.reason,
+            ProgressFailureReason::WindowExhausted
+        );
+        assert_eq!(window_failure.observation, failure.observation);
+        assert_eq!(
+            ledger.commit(9, 2593, at(721)),
+            Err(window.message().into())
+        );
+        assert_eq!(
+            (
+                ledger.bytes,
+                ledger.entries.len(),
+                ledger.highest,
+                ledger.terminal
+            ),
+            (288, 2, Some(8), Some(6))
+        );
+        ledger.acknowledge(7, at(721)).unwrap();
+        assert_eq!(ledger.commit_observed(9, 144, at(721)), Ok(()));
+        assert_eq!(failure.observation.oldest_index, Some(7));
+        assert_eq!(ledger.highest, Some(9));
     }
 
     #[test]
