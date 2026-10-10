@@ -945,3 +945,19 @@ the normal CLI is explicitly rebuilt after example tests. The existing native TC
 aggregate and both C-server artifact hashes are unchanged. One new frozen physical
 discriminator remains necessary; the previous127-build long results above are not
 promoted to new-build quality or acoustic acceptance.
+
+## Disposable fixture privacy boundary
+
+Endpoint descriptors and relay/private certificate keys are secrets, even for a
+disposable test. Never content-search their directory, dump their JSON, or pass a
+receipt file to a directory-scoped search tool. Use exact, already-sanitized
+receipt paths for evidence; secret inputs remain read-only files/stdin transfers,
+never argv, environment or output.
+
+If fixture material is exposed, stop the owned generation and reject that active
+run as protected proof. Remove its private test material without resetting Main,
+Keystore or account data. A replacement must use `create-fixtures` with fresh
+Noise identities/pins, directional media keys/salts, SSRC, generation and
+certificate; `rotate-fixtures` deliberately preserves trust identities and is
+not a remedy for exposed authentication keys. Retain the sanitized incident fact
+and interrupted-run classification, not secret contents.
