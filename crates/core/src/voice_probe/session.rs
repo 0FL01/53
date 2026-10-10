@@ -1,10 +1,13 @@
 use super::{
     clock::{self, LocalClock, Rate, RemoteClock},
+    codec,
     fixture::{self, EndpointFixture, PublicConfig},
-    lane::{Commit, SendRequest, OP_RTCP, OP_RTP},
+    lane::{Commit, InboundFrame, SendRequest, OP_RTCP, OP_RTP},
     packet, relay,
 };
-use dmsg_opus_sys::live::{LiveDecoder, LiveEncoder, LiveProfile};
+use dmsg_opus_sys::live::LiveProfile;
+#[cfg(test)]
+use dmsg_opus_sys::live::{LiveDecoder, LiveEncoder};
 use serde::Serialize;
 use std::{
     collections::VecDeque,
@@ -25,6 +28,17 @@ const PREPARATION: Duration = Duration::from_millis(DECODE_WRITE_PREPARATION_MS)
 const SAMPLE_NS: u64 = 1_000_000_000 / 16_000;
 // Application backlog above the frozen observed initial hardware-age floor.
 const CAPTURE_MAX_AGE: Duration = Duration::from_millis(40);
+// Inclusive upper bounds in microseconds; the final bin is unbounded.
+const TIMING_BOUNDS_US: [u64; 7] = [1_000, 2_000, 5_000, 10_000, 20_000, 40_000, 80_000];
+
+fn observe_duration(buckets: &mut [u64; 8], duration: Duration) {
+    let us = duration.as_nanos().div_ceil(1_000);
+    let index = TIMING_BOUNDS_US
+        .iter()
+        .position(|bound| us <= u128::from(*bound))
+        .unwrap_or(7);
+    buckets[index] = buckets[index].saturating_add(1);
+}
 #[cfg(any(target_os = "android", test))]
 const CAPTURE_CALIBRATION_BATCHES: u8 = 20;
 
@@ -75,6 +89,20 @@ pub struct Stats {
     pub expired_render_samples: u64,
     pub decode_after_nominal_due_slots: u64,
     pub max_decode_us: u64,
+    /// Fixed duration bins bracket only the named synchronous operation.
+    pub encode_duration_bins: [u64; 8],
+    pub decode_duration_bins: [u64; 8],
+    pub plc_duration_bins: [u64; 8],
+    /// Rust Noise completion to endpoint dequeue; not physical DNS arrival.
+    pub rx_post_noise_wait_bins: [u64; 8],
+    pub rx_validation_duration_bins: [u64; 8],
+    pub source_ready_to_commit_bins: [u64; 8],
+    pub max_rx_noise_auth_us: u64,
+    pub max_rx_post_noise_wait_us: u64,
+    pub max_rx_validation_us: u64,
+    pub noise_after_nominal_due_packets: u64,
+    pub noise_before_due_admitted_after_due_packets: u64,
+    pub max_source_ready_to_commit_us: u64,
     pub max_playout_tick_lateness_ms: u64,
     pub tiny_non_dtx_packets: u64,
     pub max_unconfirmed_bytes: usize,
@@ -131,6 +159,18 @@ impl Default for Stats {
             expired_render_samples: 0,
             decode_after_nominal_due_slots: 0,
             max_decode_us: 0,
+            encode_duration_bins: [0; 8],
+            decode_duration_bins: [0; 8],
+            plc_duration_bins: [0; 8],
+            rx_post_noise_wait_bins: [0; 8],
+            rx_validation_duration_bins: [0; 8],
+            source_ready_to_commit_bins: [0; 8],
+            max_rx_noise_auth_us: 0,
+            max_rx_post_noise_wait_us: 0,
+            max_rx_validation_us: 0,
+            noise_after_nominal_due_packets: 0,
+            noise_before_due_admitted_after_due_packets: 0,
+            max_source_ready_to_commit_us: 0,
             max_playout_tick_lateness_ms: 0,
             tiny_non_dtx_packets: 0,
             max_unconfirmed_bytes: 0,
@@ -899,6 +939,7 @@ struct PendingCommit {
     timestamp: u32,
     opus_bytes: usize,
     submitted: Instant,
+    source_ready: Instant,
     receipt: oneshot::Receiver<Commit>,
 }
 
@@ -907,6 +948,7 @@ struct WaitingPacket {
     position: u64,
     pushed_at: Instant,
     encoded_at: Instant,
+    captured_at: Instant,
     deadline: Instant,
     capture_clock: Option<CaptureClockSpan>,
 }
@@ -925,6 +967,7 @@ impl WaitingPacket {
             position,
             pushed_at,
             encoded_at,
+            captured_at,
             capture_clock: None,
             // Waiting and Noise admission share these original age limits.
             // Submission cannot give an already encoded packet another 40ms.
@@ -938,6 +981,15 @@ impl WaitingPacket {
 
     fn bytes(&self) -> usize {
         self.opus.len() + packet::MEDIA_OVERHEAD
+    }
+
+    fn source_ready(&self, profile: LiveProfile) -> Instant {
+        self.captured_at
+            + self
+                .capture_clock
+                .unwrap_or_default()
+                .duration(profile.samples() as u64)
+                .expect("bounded source-frame duration")
     }
 }
 
@@ -954,6 +1006,7 @@ struct MediaAdmission {
 }
 
 impl MediaAdmission {
+    #[cfg(test)]
     fn stage(
         &mut self,
         packet: WaitingPacket,
@@ -978,6 +1031,22 @@ impl MediaAdmission {
                 return Err("probe media admission owner closed".into());
             }
         };
+        self.stage_reserved(packet, permit, commits, now, profile, port)
+    }
+
+    fn stage_reserved(
+        &mut self,
+        packet: WaitingPacket,
+        permit: mpsc::OwnedPermit<SendRequest>,
+        commits: usize,
+        now: Instant,
+        profile: LiveProfile,
+        port: &Port,
+    ) -> Result<(), String> {
+        if now >= packet.deadline || self.pending.is_some() || commits >= 2 {
+            port.stats(|stats| stats.dropped_capture += profile.samples() as u64);
+            return Ok(());
+        }
         if let Some(clock) = packet.capture_clock {
             self.capture_clock = clock;
         }
@@ -1088,6 +1157,134 @@ struct Received {
     opus: Zeroizing<Vec<u8>>,
 }
 
+struct DecodeWork {
+    timestamp: u64,
+    end: u64,
+    plc: bool,
+    opus: Option<Zeroizing<Vec<u8>>>,
+}
+
+struct EncodeSource {
+    position: u64,
+    captured_at: Instant,
+    pushed_at: Instant,
+    clock: Option<CaptureClockSpan>,
+    permit: mpsc::OwnedPermit<SendRequest>,
+}
+
+// The existing assembled source frame, not another capture/job queue. It may
+// remain full while the one codec owner serves the current receive frame.
+struct CaptureFrame {
+    pcm: Zeroizing<Vec<i16>>,
+    expected_position: u64,
+    position: u64,
+    captured_at: Instant,
+    pushed_at: Instant,
+    clock: Option<CaptureClockSpan>,
+    port: Arc<Port>,
+}
+
+impl CaptureFrame {
+    fn new(samples: usize, port: Arc<Port>) -> Self {
+        let now = Instant::now();
+        Self {
+            pcm: Zeroizing::new(Vec::with_capacity(samples)),
+            expected_position: 0,
+            position: 0,
+            captured_at: now,
+            pushed_at: now,
+            clock: None,
+            port,
+        }
+    }
+
+    fn discard(&mut self, additional: usize) {
+        let count = self.pcm.len() + additional;
+        self.pcm.zeroize();
+        self.pcm.clear();
+        self.port
+            .stats(|stats| stats.dropped_capture += count as u64);
+    }
+
+    fn full(&self, profile: LiveProfile) -> bool {
+        self.pcm.len() == profile.samples()
+    }
+
+    fn ingest(&mut self, captured: Captured, ready: bool, now: Instant, profile: LiveProfile) {
+        debug_assert!(!self.full(profile));
+        let (hardware_age, capture_age) = captured.ages(now);
+        self.port.stats(|stats| {
+            stats.max_capture_age_us = stats
+                .max_capture_age_us
+                .max(hardware_age.as_micros() as u64);
+            if captured.hardware_age.is_some() {
+                stats.max_additional_capture_age_us = stats
+                    .max_additional_capture_age_us
+                    .max(capture_age.as_micros() as u64);
+            }
+        });
+        if !ready || capture_age > CAPTURE_MAX_AGE {
+            self.discard(captured.len);
+            self.expected_position = captured.position + captured.len as u64;
+            self.port.stats(|stats| {
+                stats.capture_age_rejected_batches += u64::from(capture_age > CAPTURE_MAX_AGE)
+            });
+            return;
+        }
+        if captured.position != self.expected_position {
+            self.discard(0);
+            self.port.stats(|stats| stats.capture_gap_batches += 1);
+        }
+        self.expected_position = captured.position + captured.len as u64;
+        let mut offset = 0;
+        if self.pcm.is_empty() {
+            let residue = captured.position % profile.samples() as u64;
+            if residue != 0 {
+                offset = (profile.samples() as u64 - residue).min(captured.len as u64) as usize;
+            }
+            self.position = captured.position + offset as u64;
+            self.captured_at = captured.at;
+            self.pushed_at = captured.pushed_at;
+            self.clock = captured.capture_clock;
+        }
+        self.port
+            .stats(|stats| stats.dropped_capture += offset as u64);
+        self.pcm
+            .extend_from_slice(&captured.pcm[offset..captured.len]);
+    }
+}
+
+impl Drop for CaptureFrame {
+    fn drop(&mut self) {
+        self.port
+            .stats(|stats| stats.dropped_capture += self.pcm.len() as u64);
+    }
+}
+
+enum CodecSource {
+    Encode(EncodeSource),
+    Decode(DecodeWork),
+}
+
+// A cancelled endpoint future also releases the existing slot and accounts its
+// source loss. Owner::drop joins the C owner before the native carrier can retire.
+struct CodecFlight {
+    source: Option<CodecSource>,
+    port: Arc<Port>,
+    samples: usize,
+}
+
+impl Drop for CodecFlight {
+    fn drop(&mut self) {
+        if let Some(source) = self.source.take() {
+            self.port.stats(|stats| match source {
+                CodecSource::Encode(_) => stats.dropped_capture += self.samples as u64,
+                CodecSource::Decode(_) => stats.dropped_render += self.samples as u64,
+            });
+        }
+    }
+}
+
 struct PlayoutClock {
     cursor: u64,
     due: Instant,
@@ -1136,6 +1333,36 @@ struct ReceiveState {
     playout: Option<PlayoutClock>,
     remote_clock: RemoteClock,
     first_playout: Option<(u64, Instant)>,
+}
+
+#[derive(Clone, Copy)]
+struct ReceiveTiming {
+    body_complete: Instant,
+    noise_done: Instant,
+    dequeued: Instant,
+}
+
+impl ReceiveTiming {
+    fn record(self, admitted: Instant, due: Instant, port: &Port) {
+        let noise = self
+            .noise_done
+            .saturating_duration_since(self.body_complete);
+        let wait = self.dequeued.saturating_duration_since(self.noise_done);
+        let validation = admitted.saturating_duration_since(self.dequeued);
+        port.stats(|stats| {
+            observe_duration(&mut stats.rx_post_noise_wait_bins, wait);
+            observe_duration(&mut stats.rx_validation_duration_bins, validation);
+            stats.max_rx_noise_auth_us = stats.max_rx_noise_auth_us.max(noise.as_micros() as u64);
+            stats.max_rx_post_noise_wait_us =
+                stats.max_rx_post_noise_wait_us.max(wait.as_micros() as u64);
+            stats.max_rx_validation_us = stats
+                .max_rx_validation_us
+                .max(validation.as_micros() as u64);
+            stats.noise_after_nominal_due_packets += u64::from(self.noise_done > due);
+            stats.noise_before_due_admitted_after_due_packets +=
+                u64::from(self.noise_done <= due && admitted > due);
+        });
+    }
 }
 
 impl ReceiveState {
@@ -1188,19 +1415,20 @@ impl ReceiveState {
     // can irreversibly conceal it; do not bias/starve capture or control select.
     fn drain_queued(
         &mut self,
-        incoming: &mut mpsc::Receiver<Result<(u8, Vec<u8>), String>>,
+        incoming: &mut mpsc::Receiver<Result<InboundFrame, String>>,
         receiver: &mut dmsg_srtp_sys::Receiver,
         fixture: &EndpointFixture,
         feedback: &mut packet::Feedback,
         port: &Port,
     ) -> Result<(), String> {
         match incoming.try_recv() {
-            Ok(Ok(frame)) => self.receive(frame, receiver, fixture, feedback, port),
+            Ok(Ok(frame)) => self.receive_lane(frame, receiver, fixture, feedback, port),
             Err(mpsc::error::TryRecvError::Empty) => Ok(()),
             _ => Err("probe media lane failed".into()),
         }
     }
 
+    #[cfg(test)]
     fn receive(
         &mut self,
         frame: (u8, Vec<u8>),
@@ -1208,6 +1436,34 @@ impl ReceiveState {
         fixture: &EndpointFixture,
         feedback: &mut packet::Feedback,
         port: &Port,
+    ) -> Result<(), String> {
+        self.receive_inner(frame, receiver, fixture, feedback, port, None)
+    }
+
+    fn receive_lane(
+        &mut self,
+        frame: InboundFrame,
+        receiver: &mut dmsg_srtp_sys::Receiver,
+        fixture: &EndpointFixture,
+        feedback: &mut packet::Feedback,
+        port: &Port,
+    ) -> Result<(), String> {
+        let timing = ReceiveTiming {
+            body_complete: frame.body_complete,
+            noise_done: frame.noise_done,
+            dequeued: Instant::now(),
+        };
+        self.receive_inner(frame.frame, receiver, fixture, feedback, port, Some(timing))
+    }
+
+    fn receive_inner(
+        &mut self,
+        frame: (u8, Vec<u8>),
+        receiver: &mut dmsg_srtp_sys::Receiver,
+        fixture: &EndpointFixture,
+        feedback: &mut packet::Feedback,
+        port: &Port,
+        timing: Option<ReceiveTiming>,
     ) -> Result<(), String> {
         let (op, cipher) = frame;
         if op != OP_RTP {
@@ -1239,7 +1495,16 @@ impl ReceiveState {
             stats.rx_bytes += (cipher.len() + packet::FRAMING_BYTES) as u64;
             stats.received_rtp_packets += 1;
         });
-        self.admit(timestamp, opus, Instant::now(), profile, feedback, port);
+        let admitted = Instant::now();
+        if let Some(timing) = timing {
+            let due = if self.playout.is_some() {
+                self.source_due(timestamp)
+            } else {
+                admitted + Duration::from_millis(80)
+            };
+            timing.record(admitted, due, port);
+        }
+        self.admit(timestamp, opus, admitted, profile, feedback, port);
         Ok(())
     }
 
@@ -1292,20 +1557,18 @@ impl ReceiveState {
         }
     }
 
-    fn tick(
+    fn maintain_playout(
         &mut self,
         now: Instant,
         profile: LiveProfile,
-        decoder: &mut LiveDecoder,
         feedback: &mut packet::Feedback,
         port: &Port,
-    ) -> Result<(), String> {
-        let tick_started = Instant::now();
+    ) -> bool {
         self.synchronize_clock(now, port);
         let expired = port.render.lock().expect("probe render owner").expire(now);
         port.expired_render(expired);
         let Some(clock) = &mut self.playout else {
-            return Ok(());
+            return false;
         };
         // A renderer stall must not freeze the source baseline. Skip fully elapsed
         // slots without decoding/playing a catch-up burst or rebasing due.
@@ -1324,8 +1587,6 @@ impl ReceiveState {
         if skipped != 0 {
             feedback.playout = Some(clock.cursor);
             port.stats(|stats| stats.skipped_playout_slots += skipped);
-            // Discard stale predictive state once, not one PLC job per old slot.
-            *decoder = LiveDecoder::new(profile)?;
         }
         while self
             .encoded
@@ -1335,54 +1596,140 @@ impl ReceiveState {
             self.encoded.pop_front();
             port.stats(|stats| stats.dropped_render += profile.samples() as u64);
         }
+        skipped != 0
+    }
+
+    fn decode_ready(&self, now: Instant, port: &Port) -> bool {
+        let Some(clock) = &self.playout else {
+            return false;
+        };
         let available = self
             .encoded
             .front()
             .is_some_and(|packet| packet.timestamp == clock.cursor);
-        let sink = port.sink_queue.load(Ordering::Relaxed) as usize;
-        port.stats(|stats| stats.sink_queue_samples = sink);
-        if !clock.can_prepare(now, sink, available, port.sink_rate.load(Ordering::Relaxed))
-            || !port
-                .render
-                .lock()
-                .expect("probe render owner")
-                .pcm
-                .is_empty()
-        {
-            return Ok(());
+        clock.can_prepare(
+            now,
+            port.sink_queue.load(Ordering::Relaxed) as usize,
+            available,
+            port.sink_rate.load(Ordering::Relaxed),
+        ) && port
+            .render
+            .lock()
+            .expect("probe render owner")
+            .pcm
+            .is_empty()
+    }
+
+    fn prepare_decode(
+        &mut self,
+        now: Instant,
+        profile: LiveProfile,
+        feedback: &mut packet::Feedback,
+        port: &Port,
+    ) -> Option<DecodeWork> {
+        if self.playout.is_some() {
+            port.stats(|stats| {
+                stats.sink_queue_samples = port.sink_queue.load(Ordering::Relaxed) as usize
+            });
         }
-        let started = Instant::now();
-        let output = if available {
-            let packet = self.encoded.pop_front().unwrap();
-            let pcm = decoder.decode(&packet.opus)?;
-            port.stats(|stats| stats.decoded_packets += 1);
-            pcm
+        if !self.decode_ready(now, port) {
+            return None;
+        }
+        let clock = self.playout.as_mut()?;
+        let available = self
+            .encoded
+            .front()
+            .is_some_and(|packet| packet.timestamp == clock.cursor);
+        let opus = if available {
+            Some(self.encoded.pop_front().unwrap().opus)
         } else {
             feedback.plc = feedback.plc.saturating_add(1);
             port.stats(|stats| {
                 stats.plc_slots += 1;
                 stats.plc_before_nominal_due_slots += u64::from(now < clock.due);
             });
-            decoder.conceal()?
+            None
         };
-        let elapsed = started.elapsed();
-        let completed = now + tick_started.elapsed();
+        let work = DecodeWork {
+            timestamp: clock.cursor,
+            end: clock.cursor + u64::from(profile.rtp_ticks()),
+            plc: !available,
+            opus,
+        };
+        // Retirement is the one irreversible decode/PLC decision, not the
+        // eventual completion. Authentication continues without rewinding it.
+        clock.cursor = work.end;
+        let (first, due) = self.first_playout.unwrap();
+        clock.due = due + self.remote_clock.rate.duration(work.end - first);
+        feedback.playout = Some(clock.cursor);
+        Some(work)
+    }
+
+    fn apply_decode(
+        &mut self,
+        work: DecodeWork,
+        completed: Instant,
+        duration: Duration,
+        mut output: Zeroizing<Vec<i16>>,
+        port: &Port,
+    ) -> Result<(), String> {
+        let due = self.source_due(work.timestamp);
+        let end_due = self.source_due(work.end);
         port.stats(|stats| {
-            stats.max_decode_us = stats.max_decode_us.max(elapsed.as_micros() as u64);
-            stats.decode_after_nominal_due_slots += u64::from(completed > clock.due);
+            if work.plc {
+                observe_duration(&mut stats.plc_duration_bins, duration);
+            } else {
+                stats.decoded_packets += 1;
+                observe_duration(&mut stats.decode_duration_bins, duration);
+            }
+            stats.max_decode_us = stats.max_decode_us.max(duration.as_micros() as u64);
+            stats.decode_after_nominal_due_slots += u64::from(completed > due);
         });
+        if self.playout.as_ref().unwrap().cursor > work.end || completed >= end_due {
+            port.expired_render(output.len());
+            return Ok(()); // Zeroizing output never reaches AudioPort.
+        }
         let mut render = port.render.lock().expect("probe render owner");
-        render.enqueue(clock.due, output);
-        let end_timestamp = clock.cursor + u64::from(profile.rtp_ticks());
-        render.end_due = Some(first_due + rate.duration(end_timestamp - first_timestamp));
-        render.source_end = Some(end_timestamp);
+        if !render.pcm.is_empty() {
+            return Err("probe decoded slot already occupied".into());
+        }
+        render.enqueue(due, std::mem::take(&mut *output));
+        render.end_due = Some(end_due);
+        render.source_end = Some(work.end);
         let expired = render.expire(completed);
         drop(render);
         port.expired_render(expired);
-        clock.cursor = end_timestamp;
-        clock.due = first_due + rate.duration(end_timestamp - first_timestamp);
-        feedback.playout = Some(clock.cursor);
         Ok(())
+    }
+
+    #[cfg(test)]
+    fn tick(
+        &mut self,
+        now: Instant,
+        profile: LiveProfile,
+        decoder: &mut LiveDecoder,
+        feedback: &mut packet::Feedback,
+        port: &Port,
+    ) -> Result<(), String> {
+        let started = Instant::now();
+        if self.maintain_playout(now, profile, feedback, port) {
+            *decoder = LiveDecoder::new(profile)?;
+        }
+        let Some(mut work) = self.prepare_decode(now, profile, feedback, port) else {
+            return Ok(());
+        };
+        let codec_started = Instant::now();
+        let output = match work.opus.take() {
+            Some(opus) => decoder.decode(&opus)?,
+            None => decoder.conceal()?,
+        };
+        self.apply_decode(
+            work,
+            now + started.elapsed(),
+            codec_started.elapsed(),
+            Zeroizing::new(output),
+            port,
+        )
     }
 }
 
@@ -1412,11 +1759,16 @@ fn reap_commits(
                 counters.since_report = true;
                 let soft_late =
                     at.saturating_duration_since(pending.submitted) > Duration::from_millis(20);
+                let source_delay = at.saturating_duration_since(pending.source_ready);
                 commits.pop_front();
                 port.stats(|stats| {
                     stats.tx_bytes += framed_bytes as u64;
                     stats.max_unconfirmed_bytes = stats.max_unconfirmed_bytes.max(ledger.bytes());
                     stats.tx_soft_deadline_packets += u64::from(soft_late);
+                    observe_duration(&mut stats.source_ready_to_commit_bins, source_delay);
+                    stats.max_source_ready_to_commit_us = stats
+                        .max_source_ready_to_commit_us
+                        .max(source_delay.as_micros() as u64);
                 });
             }
             Ok(Commit::Dropped) => {
@@ -1430,17 +1782,164 @@ fn reap_commits(
     Ok(())
 }
 
+fn apply_codec_completion(
+    completed: codec::Completion,
+    flight: &mut Option<CodecFlight>,
+    received: &mut ReceiveState,
+    admission: &mut MediaAdmission,
+    feedback: &mut packet::Feedback,
+    commits: usize,
+    now: Instant,
+    profile: LiveProfile,
+    port: &Port,
+) -> Result<(), String> {
+    let source = flight
+        .as_mut()
+        .expect("one codec flight")
+        .source
+        .take()
+        .unwrap();
+    flight.take();
+    match (source, completed.output) {
+        (CodecSource::Encode(source), codec::Output::Encoded { mut bytes, in_dtx }) => {
+            port.stats(|stats| {
+                observe_duration(&mut stats.encode_duration_bins, completed.duration);
+                stats.encoded_packets += 1;
+                stats.tiny_non_dtx_packets += u64::from(bytes.len() <= 2 && !in_dtx);
+            });
+            feedback.dtx = in_dtx;
+            let mut waiting = WaitingPacket::new(
+                std::mem::take(&mut *bytes),
+                source.position,
+                source.captured_at,
+                source.pushed_at,
+                completed.finished,
+                profile,
+            );
+            waiting.capture_clock = source.clock;
+            admission.stage_reserved(waiting, source.permit, commits, now, profile, port)
+        }
+        (CodecSource::Decode(work), codec::Output::Decoded(output)) => {
+            // Publishing, not the earlier C completion, determines whether PCM
+            // can still enter the unchanged source-frame presentation interval.
+            received.apply_decode(work, now, completed.duration, output, port)
+        }
+        _ => Err("probe codec completion kind rejected".into()),
+    }
+}
+
+fn dispatch_codec(
+    now: Instant,
+    profile: LiveProfile,
+    received: &mut ReceiveState,
+    capture: &mut CaptureFrame,
+    admission: &MediaAdmission,
+    feedback: &mut packet::Feedback,
+    decoder_reset: &mut bool,
+    codec: &mut codec::Owner,
+    flight: &mut Option<CodecFlight>,
+    outgoing: &mpsc::Sender<SendRequest>,
+    commits: usize,
+    port: &Arc<Port>,
+) -> Result<(), String> {
+    *decoder_reset |= received.maintain_playout(now, profile, feedback, port);
+    // Holding the existing full source frame for decode does not grant it a
+    // fresh age/deadline. Retire it even while the sole codec operation is busy.
+    if capture.full(profile)
+        && now
+            >= capture.captured_at
+                + Duration::from_millis(u64::from(profile.duration_ms()))
+                + CAPTURE_MAX_AGE
+    {
+        capture.discard(0);
+    }
+    if flight.is_some() {
+        return Ok(());
+    }
+    // A ready receive frame gets the freed codec slot now, not on the next
+    // periodic tick or behind a newly assembled encode. Its checks/reserve and
+    // once-only cursor retirement remain ReceiveState's existing decision.
+    if let Some(mut work) = received.prepare_decode(now, profile, feedback, port) {
+        let operation = codec::Operation::Decode {
+            opus: work.opus.take(),
+            reset: std::mem::take(decoder_reset),
+        };
+        *flight = Some(CodecFlight {
+            source: Some(CodecSource::Decode(work)),
+            port: port.clone(),
+            samples: profile.samples(),
+        });
+        return codec.submit(operation);
+    }
+    if !capture.full(profile) || admission.pending.is_some() || commits >= 2 {
+        return Ok(());
+    }
+    let permit = match outgoing.clone().try_reserve_owned() {
+        Ok(permit) => permit,
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            capture.discard(0);
+            return Ok(());
+        }
+        Err(_) => {
+            capture.discard(0);
+            return Err("probe media admission owner closed".into());
+        }
+    };
+    *flight = Some(CodecFlight {
+        source: Some(CodecSource::Encode(EncodeSource {
+            position: capture.position,
+            captured_at: capture.captured_at,
+            pushed_at: capture.pushed_at,
+            clock: capture.clock,
+            permit,
+        })),
+        port: port.clone(),
+        samples: profile.samples(),
+    });
+    codec.submit(codec::Operation::Encode(Zeroizing::new(std::mem::take(
+        &mut *capture.pcm,
+    ))))
+}
+
 async fn endpoint(
+    fixture: EndpointFixture,
+    port: Arc<Port>,
+    input: mpsc::Receiver<Captured>,
+    media: super::lane::Lane,
+    control: super::lane::Lane,
+    stop: watch::Receiver<bool>,
+) -> Result<(), String> {
+    endpoint_owned(
+        fixture,
+        port,
+        input,
+        media,
+        control,
+        stop,
+        #[cfg(test)]
+        None,
+    )
+    .await
+}
+
+async fn endpoint_owned(
     fixture: EndpointFixture,
     port: Arc<Port>,
     mut input: mpsc::Receiver<Captured>,
     mut media: super::lane::Lane,
     mut control: super::lane::Lane,
     mut stop: watch::Receiver<bool>,
+    #[cfg(test)] hold: Option<super::codec::Hold>,
 ) -> Result<(), String> {
     let profile = fixture::profile(fixture.profile_ms)?;
-    let mut encoder = LiveEncoder::new(profile)?;
-    let mut decoder = LiveDecoder::new(profile)?;
+    let mut codec = codec::Owner::start(
+        profile,
+        #[cfg(test)]
+        hold.clone(),
+    )
+    .await?;
+    let mut flight: Option<CodecFlight> = None;
+    let mut decoder_reset = false;
     let mut sender = dmsg_srtp_sys::Sender::new(&fixture.media_tx, fixture.ssrc_tx)?;
     let mut receiver = dmsg_srtp_sys::Receiver::new(&fixture.media_rx, fixture.ssrc_rx)?;
     let mut ledger = packet::Ledger::new(
@@ -1456,12 +1955,7 @@ async fn endpoint(
     let mut commits: VecDeque<PendingCommit> = VecDeque::with_capacity(2);
     let mut admission = MediaAdmission::default();
     let mut control_commits: VecDeque<oneshot::Receiver<Commit>> = VecDeque::with_capacity(2);
-    let mut pcm = Zeroizing::new(Vec::with_capacity(profile.samples()));
-    let mut expected_position = 0u64;
-    let mut frame_position = 0u64;
-    let mut frame_capture = Instant::now();
-    let mut frame_pushed = frame_capture;
-    let mut frame_clock = None;
+    let mut capture = CaptureFrame::new(profile.samples(), port.clone());
     let epoch = Instant::now();
     let wall = clock::ntp_from_system_time(std::time::SystemTime::now());
     let mut local_clock = LocalClock::new(epoch, wall, fixture.initial_timestamp);
@@ -1489,7 +1983,31 @@ async fn endpoint(
     let mut last_control_submission = Instant::now();
 
     let outcome = 'session: loop {
+        if *stop.borrow() {
+            break Ok(());
+        }
         let now = Instant::now();
+        if flight.is_some() {
+            match codec.try_completed() {
+                Ok(Some(completed)) => {
+                    if let Err(error) = apply_codec_completion(
+                        completed,
+                        &mut flight,
+                        &mut received,
+                        &mut admission,
+                        &mut feedback,
+                        commits.len(),
+                        Instant::now(),
+                        profile,
+                        &port,
+                    ) {
+                        break Err(error);
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => break Err(error),
+            }
+        }
         if let Err(error) = reap_commits(
             &mut commits,
             &mut admission,
@@ -1522,11 +2040,54 @@ async fn endpoint(
                 break Err("control submission expired; retire generation".into());
             }
         }
+        if flight.is_none() {
+            #[cfg(test)]
+            let before_drain = port.snapshot().received_rtp_packets;
+            if let Err(error) = received.drain_queued(
+                &mut media.incoming,
+                &mut receiver,
+                &fixture,
+                &mut feedback,
+                &port,
+            ) {
+                break Err(error);
+            }
+            #[cfg(test)]
+            if let Some(hold) = &hold {
+                hold.admitted.fetch_add(
+                    port.snapshot().received_rtp_packets - before_drain,
+                    Ordering::Relaxed,
+                );
+            }
+        }
+        // Reconsider immediately after every completion/admission/capture wake.
+        // Keep this outside select branches so all work shares one decision.
+        if let Err(error) = dispatch_codec(
+            Instant::now(),
+            profile,
+            &mut received,
+            &mut capture,
+            &admission,
+            &mut feedback,
+            &mut decoder_reset,
+            &mut codec,
+            &mut flight,
+            &media.outgoing,
+            commits.len(),
+            &port,
+        ) {
+            break Err(error);
+        }
         let media_wake = admission.wake_at(&mut budget, Instant::now(), profile);
         tokio::select! {
             _ = cancelled(&mut stop) => break Ok(()),
+            result = codec.completed(), if flight.is_some() => {
+                let completed = match result { Ok(completed) => completed, Err(error) => break Err(error) };
+                if let Err(error) = apply_codec_completion(completed, &mut flight, &mut received, &mut admission,
+                    &mut feedback, commits.len(), Instant::now(), profile, &port) { break Err(error); }
+            }
             packet = control.incoming.recv() => {
-                let (op, cipher) = match packet { Some(Ok(frame)) => frame, _ => break Err("probe control lane failed".into()) };
+                let (op, cipher) = match packet { Some(Ok(frame)) => frame.frame, _ => break Err("probe control lane failed".into()) };
                 if op != OP_RTCP { break Err("probe control opcode rejected".into()); }
                 let plain = match receiver.unprotect_rtcp(&cipher) { Ok(packet) => packet, Err(error) => break Err(error) };
                 let remote = match packet::read_compound(&plain, fixture.ssrc_rx, fixture.ssrc_tx, &fixture.peer_cname) { Ok(report) => report, Err(error) => break Err(error) };
@@ -1542,10 +2103,14 @@ async fn endpoint(
                 received.report_clock(remote, Instant::now(), &port);
                 ready = true;
                 port.stats(|stats| { stats.ready = true; stats.rx_bytes += (cipher.len() + packet::FRAMING_BYTES) as u64; });
+                #[cfg(test)]
+                if let Some(hold) = &hold { hold.controlled.fetch_add(1, Ordering::Relaxed); }
             }
             packet = media.incoming.recv() => {
                 let frame = match packet { Some(Ok(frame)) => frame, _ => break Err("probe media lane failed".into()) };
-                if let Err(error) = received.receive(frame, &mut receiver, &fixture, &mut feedback, &port) { break Err(error); }
+                if let Err(error) = received.receive_lane(frame, &mut receiver, &fixture, &mut feedback, &port) { break Err(error); }
+                #[cfg(test)]
+                if let Some(hold) = &hold { hold.admitted.fetch_add(1, Ordering::Relaxed); }
             }
             _ = tokio::time::sleep_until(media_wake.unwrap_or(now).into()), if media_wake.is_some() => {
                 let now = Instant::now();
@@ -1568,65 +2133,28 @@ async fn endpoint(
                 let (committed, receipt) = oneshot::channel();
                 permit.send(SendRequest { opcode: OP_RTP, payload: cipher,
                     deadline: Some(waiting.deadline), committed: Some(committed) });
-                commits.push_back(PendingCommit { index: source_index, timestamp, opus_bytes: waiting.opus.len(), submitted: waiting.encoded_at, receipt });
+                commits.push_back(PendingCommit { index: source_index, timestamp, opus_bytes: waiting.opus.len(), submitted: waiting.encoded_at, source_ready: waiting.source_ready(profile), receipt });
                 let phase = sender_phase.observe(waiting.position, waiting.pushed_at);
                 port.stats(|stats| stats.max_sender_phase_advance_us = stats.max_sender_phase_advance_us.max(phase));
                 source_index += 1;
             }
             // Leave subsequent PCM in the original bounded capture ring while
             // its sole encoded packet waits. RX/control/cancel remain selectable.
-            captured = input.recv(), if admission.pending.is_none() && media.outgoing.capacity() > 0 && commits.len() < 2 => {
+            captured = input.recv(), if flight.is_none() && !capture.full(profile) && admission.pending.is_none() && media.outgoing.capacity() > 0 && commits.len() < 2 => {
                 let Some(captured) = captured else { break Err("probe capture owner closed".into()); };
                 if let Some(source_at) = captured.source_time() {
                     local_clock.observe(captured.position, source_at, captured.capture_clock.map(|span| Rate { ticks: span.frames * 3, ns: span.elapsed_ns }));
                 }
-                let (hardware_age, capture_age) = captured.ages(Instant::now());
-                port.stats(|stats| {
-                    stats.max_capture_age_us = stats.max_capture_age_us.max(hardware_age.as_micros() as u64);
-                    if captured.hardware_age.is_some() {
-                        stats.max_additional_capture_age_us = stats.max_additional_capture_age_us.max(capture_age.as_micros() as u64);
-                    }
-                });
-                if !ready || capture_age > CAPTURE_MAX_AGE {
-                    let discarded = pcm.len();
-                    pcm.zeroize(); pcm.clear(); expected_position = captured.position + captured.len as u64;
-                    port.stats(|stats| {
-                        stats.dropped_capture += (captured.len + discarded) as u64;
-                        stats.capture_age_rejected_batches += u64::from(capture_age > CAPTURE_MAX_AGE);
-                    });
-                    continue;
-                }
-                if captured.position != expected_position {
-                    let discarded = pcm.len();
-                    pcm.zeroize(); pcm.clear();
-                    port.stats(|stats| { stats.capture_gap_batches += 1; stats.dropped_capture += discarded as u64; });
-                }
-                expected_position = captured.position + captured.len as u64;
-                let mut offset = 0;
-                if pcm.is_empty() {
-                    let residue = captured.position % profile.samples() as u64;
-                    if residue != 0 { offset = (profile.samples() as u64 - residue).min(captured.len as u64) as usize; }
-                    frame_position = captured.position + offset as u64;
-                    frame_capture = captured.at;
-                    frame_pushed = captured.pushed_at;
-                    frame_clock = captured.capture_clock;
-                }
-                port.stats(|stats| stats.dropped_capture += offset as u64);
-                pcm.extend_from_slice(&captured.pcm[offset..captured.len]);
-                if pcm.len() != profile.samples() { continue; }
-                let encoded_packet = match encoder.encode(&pcm) { Ok(packet) => packet, Err(error) => break Err(error) };
-                pcm.zeroize(); pcm.clear();
-                port.stats(|stats| { stats.encoded_packets += 1; if encoded_packet.bytes.len() <= 2 && !encoded_packet.in_dtx { stats.tiny_non_dtx_packets += 1; } });
-                feedback.dtx = encoded_packet.in_dtx;
-                let encoded_at = Instant::now();
-                let mut waiting = WaitingPacket::new(encoded_packet.bytes, frame_position, frame_capture, frame_pushed, encoded_at, profile);
-                waiting.capture_clock = frame_clock;
-                if let Err(error) = admission.stage(waiting, &media.outgoing, commits.len(), encoded_at, profile, &port) { break Err(error); }
+                capture.ingest(captured, ready, Instant::now(), profile);
             }
             scheduled = timer.tick() => {
                 let now = Instant::now();
                 port.stats(|stats| stats.max_playout_tick_lateness_ms = stats.max_playout_tick_lateness_ms.max(now.saturating_duration_since(scheduled.into_std()).as_millis() as u64));
+                #[cfg(test)]
+                let before_drain = port.snapshot().received_rtp_packets;
                 if let Err(error) = received.drain_queued(&mut media.incoming, &mut receiver, &fixture, &mut feedback, &port) { break Err(error); }
+                #[cfg(test)]
+                if let Some(hold) = &hold { hold.admitted.fetch_add(port.snapshot().received_rtp_packets - before_drain, Ordering::Relaxed); }
                 if now >= report_due {
                     if control_commits.len() < 2 && control.outgoing.capacity() > 0 && budget.admit_feedback(now) {
                         let compound = packet::compound(packet::Report { sender_ssrc: fixture.ssrc_tx, peer_ssrc: fixture.ssrc_rx, cname: &fixture.cname,
@@ -1641,20 +2169,856 @@ async fn endpoint(
                     }
                     report_due = now + Duration::from_millis(200); // coalesce missed ticks
                 }
-                if let Err(error) = received.tick(Instant::now(), profile, &mut decoder, &mut feedback, &port) { break Err(error); }
             }
         }
     };
+    drop(flight);
     admission.discard(profile, &port);
     port.stats(|stats| stats.remote_clock_valid = false);
+    let joined = codec.close();
     media.joined_close().await;
     control.joined_close().await;
-    outcome
+    outcome.and(joined)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn held_codec_endpoint_progress(kind: super::super::codec::Kind) {
+        use super::super::codec::Hold;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let (a, b, relay_fixture, relay_key) = fixture::pair(PublicConfig {
+            relay_addr: addr.clone(),
+            domain: "m1v.fixture".into(),
+            profile_ms: 40,
+            healthy_cycle_ms: 600,
+            capacity_bps: 50_000,
+            carriers: [None, None],
+        })
+        .unwrap();
+        let (stop, stopped) = watch::channel(false);
+        let (inject, mut injection) = mpsc::channel(1);
+        let peer_stop = stopped.clone();
+        let peer = thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async move {
+                    let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                    let relay_stop = peer_stop.clone();
+                    let relay =
+                        tokio::spawn(relay::serve(listener, relay_fixture, relay_key, relay_stop));
+                    let mut media = relay::connect(&addr, &b, true).await.unwrap();
+                    let mut control = relay::connect(&addr, &b, false).await.unwrap();
+                    let mut sender = dmsg_srtp_sys::Sender::new(&b.media_tx, b.ssrc_tx).unwrap();
+                    for index in 0..2u64 {
+                        injection.recv().await.unwrap();
+                        let plain = packet::compound(packet::Report {
+                            sender_ssrc: b.ssrc_tx,
+                            peer_ssrc: b.ssrc_rx,
+                            cname: &b.cname,
+                            sender: None,
+                            feedback: packet::Feedback::default(),
+                        });
+                        control
+                            .outgoing
+                            .send(SendRequest {
+                                opcode: OP_RTCP,
+                                payload: sender.protect_rtcp(&plain).unwrap(),
+                                deadline: None,
+                                committed: None,
+                            })
+                            .await
+                            .unwrap();
+                        let plain = packet::rtp(
+                            b.ssrc_tx,
+                            u64::from(b.initial_sequence) + index,
+                            b.initial_timestamp.wrapping_add(index as u32 * 1920),
+                            &[0x50],
+                        );
+                        media
+                            .outgoing
+                            .send(SendRequest {
+                                opcode: OP_RTP,
+                                payload: sender.protect_rtp(&plain).unwrap(),
+                                deadline: None,
+                                committed: None,
+                            })
+                            .await
+                            .unwrap();
+                    }
+                    let mut peer_stop = peer_stop;
+                    cancelled(&mut peer_stop).await;
+                    media.joined_close().await;
+                    control.joined_close().await;
+                    relay.abort();
+                    let _ = relay.await;
+                });
+        });
+        let (entered, entry) = std::sync::mpsc::sync_channel(1);
+        let hold = Hold {
+            kind,
+            entered,
+            release: Arc::new((Mutex::new(false), std::sync::Condvar::new())),
+            admitted: Arc::new(AtomicU64::new(0)),
+            controlled: Arc::new(AtomicU64::new(0)),
+        };
+        let port = Arc::new(test_port());
+        let (input, incoming) = mpsc::channel(4);
+        let actor_port = port.clone();
+        let actor_hold = hold.clone();
+        let actor_stop = stopped.clone();
+        let (connected, connection) = std::sync::mpsc::sync_channel(1);
+        let (returned, returning) = std::sync::mpsc::sync_channel(1);
+        let actor = thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async move {
+                    let media = relay::connect(&a.relay_addr, &a, true).await.unwrap();
+                    let control = relay::connect(&a.relay_addr, &a, false).await.unwrap();
+                    connected.send(()).unwrap();
+                    let outcome = endpoint_owned(
+                        a,
+                        actor_port,
+                        incoming,
+                        media,
+                        control,
+                        actor_stop,
+                        Some(actor_hold),
+                    )
+                    .await;
+                    returned.send(()).unwrap();
+                    outcome
+                })
+        });
+        // This supervisor is outside the endpoint's runtime. Even an inline C
+        // operation cannot suppress its release/deadlock guard.
+        connection.recv_timeout(Duration::from_secs(3)).unwrap();
+        inject.blocking_send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !port.snapshot().ready && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        if kind == super::super::codec::Kind::Encode {
+            for batch in 0..4 {
+                let mut captured = Captured {
+                    pcm: [0; 160],
+                    len: 160,
+                    position: batch * 160,
+                    at: Instant::now(),
+                    pushed_at: Instant::now(),
+                    hardware_age: None,
+                    capture_clock: None,
+                };
+                captured
+                    .pcm
+                    .copy_from_slice(&super::super::test_tone(batch as usize * 160, 160));
+                input.blocking_send(captured).unwrap();
+            }
+        }
+        let held = entry.recv_timeout(Duration::from_secs(3)).is_ok();
+        let before_media = hold.admitted.load(Ordering::Relaxed);
+        let before_control = hold.controlled.load(Ordering::Relaxed);
+        inject.blocking_send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < deadline
+            && (hold.admitted.load(Ordering::Relaxed) <= before_media
+                || hold.controlled.load(Ordering::Relaxed) <= before_control)
+        {
+            thread::sleep(Duration::from_millis(1));
+        }
+        let progressed = hold.admitted.load(Ordering::Relaxed) > before_media
+            && hold.controlled.load(Ordering::Relaxed) > before_control;
+        let position = if kind == super::super::codec::Kind::Encode {
+            640
+        } else {
+            0
+        };
+        let mut kept_ring = true;
+        for batch in 0..4 {
+            input
+                .try_send(Captured {
+                    pcm: [0; 160],
+                    len: 160,
+                    position: position + batch * 160,
+                    at: Instant::now(),
+                    pushed_at: Instant::now(),
+                    hardware_age: None,
+                    capture_clock: None,
+                })
+                .unwrap_or_else(|_| kept_ring = false);
+        }
+        kept_ring &= input.capacity() == 0;
+        let _ = stop.send(true);
+        let returned_while_held = returning.recv_timeout(Duration::from_millis(20)).is_ok();
+        hold.release();
+        if !returned_while_held {
+            returning.recv_timeout(Duration::from_secs(3)).unwrap();
+        }
+        let outcome = actor.join().unwrap();
+        peer.join().unwrap();
+        assert!(
+            held,
+            "codec operation was not entered: {outcome:?}, ready={}, encoded={}, received={}",
+            port.snapshot().ready,
+            port.snapshot().encoded_packets,
+            port.snapshot().received_rtp_packets
+        );
+        assert!(
+            progressed,
+            "authenticated endpoint media/control blocked until codec release: {outcome:?}"
+        );
+        assert!(
+            !returned_while_held,
+            "endpoint retired before joining the held codec owner"
+        );
+        assert!(
+            kept_ring,
+            "codec work must leave PCM in the original four-batch ring"
+        );
+    }
+
+    #[test]
+    fn held_encoder_does_not_block_authenticated_endpoint_media_and_control() {
+        held_codec_endpoint_progress(super::super::codec::Kind::Encode);
+    }
+
+    #[test]
+    fn held_decoder_does_not_block_authenticated_endpoint_media_and_control() {
+        held_codec_endpoint_progress(super::super::codec::Kind::Decode);
+    }
+
+    #[tokio::test]
+    async fn paced_codec_dispatch_serves_ready_decode_without_waiting_for_another_tick() {
+        let profile = LiveProfile::Ms40;
+        for decode_us in [8_000u64, 12_151] {
+            for capture_phase_ns in [29_500_000u64, 14_500_000, 36_500_000, 0] {
+                let origin = Instant::now();
+                let at = |ns| origin + Duration::from_nanos(ns);
+                let mut port = test_port();
+                let (input, mut incoming) = mpsc::channel(4);
+                port.input = input;
+                let port = Arc::new(port);
+                let audio = AudioPort { port: port.clone() };
+                let mut capture = CaptureFrame::new(profile.samples(), port.clone());
+                let mut received = test_received();
+                let mut feedback = packet::Feedback::default();
+                let mut reset = false;
+                let mut owner = codec::Owner::start(profile, None).await.unwrap();
+                let mut flight: Option<CodecFlight> = None;
+                let mut admission = MediaAdmission::default();
+                let mut budget = packet::Budget::new(50_000, 144, origin);
+                let (outgoing, mut requests) = mpsc::channel(1);
+                let opus = opus40();
+                let (mut source, mut batch, mut queued, mut consumed, mut written) =
+                    (0u64, 0u64, 0usize, 0u64, 0u64);
+                let mut finish = None;
+                let mut first_expiry = None;
+                let mut operations = Vec::new();
+                // Independent 10ms source/read and render clocks; the latter
+                // deliberately runs just after the actor's 10ms timer. Operation
+                // durations are controlled service times, not host CPU claims.
+                for ns in (0..=1_080_000_000u64).step_by(50_000) {
+                    let now = at(ns);
+                    let mut wake = false;
+                    if ns == source * 40_000_000 {
+                        received.admit(source * 1920, &opus, now, profile, &mut feedback, &port);
+                        source += 1;
+                        wake = true;
+                    }
+                    if ns == capture_phase_ns + batch * 10_000_000 {
+                        assert!(audio.push_at(&[1; 160], batch * 160, now, now, None, None));
+                        batch += 1;
+                        wake = true;
+                    }
+                    if finish.is_some_and(|end| ns >= end) {
+                        let end = finish.take().unwrap();
+                        let mut completed = owner.completed().await.unwrap();
+                        completed.finished = at(end);
+                        completed.duration = Duration::from_micros(
+                            match flight.as_ref().unwrap().source.as_ref().unwrap() {
+                                CodecSource::Encode(_) => 2_000,
+                                CodecSource::Decode(_) => decode_us,
+                            },
+                        );
+                        apply_codec_completion(
+                            completed,
+                            &mut flight,
+                            &mut received,
+                            &mut admission,
+                            &mut feedback,
+                            0,
+                            now,
+                            profile,
+                            &port,
+                        )
+                        .unwrap();
+                        wake = true;
+                    }
+                    if admission
+                        .wake_at(&mut budget, now, profile)
+                        .is_some_and(|due| now >= due)
+                    {
+                        if let Some((waiting, permit)) =
+                            admission.take_ready(&mut budget, now, profile, &port)
+                        {
+                            // Consume the same capacity-one reservation and the
+                            // unchanged integer byte credit; no service backlog.
+                            permit.send(SendRequest {
+                                opcode: OP_RTP,
+                                payload: waiting.opus.to_vec(),
+                                deadline: Some(waiting.deadline),
+                                committed: None,
+                            });
+                            requests.try_recv().unwrap();
+                            admission.committed(now, profile.samples());
+                        }
+                        wake = true;
+                    }
+                    let timer = ns % 10_000_000 == 0;
+                    if wake || timer {
+                        let decode_ready = flight.is_none() && received.decode_ready(now, &port);
+                        dispatch_codec(
+                            now,
+                            profile,
+                            &mut received,
+                            &mut capture,
+                            &admission,
+                            &mut feedback,
+                            &mut reset,
+                            &mut owner,
+                            &mut flight,
+                            &outgoing,
+                            0,
+                            &port,
+                        )
+                        .unwrap();
+                        assert!(!decode_ready || matches!(flight.as_ref().and_then(|flight| flight.source.as_ref()),
+                            Some(CodecSource::Decode(_))),
+                            "ready decode left idle or bypassed: ns={ns} timer={timer} decode_us={decode_us} capture_phase_ns={capture_phase_ns} operations={operations:?}");
+                        while flight.is_none()
+                            && !capture.full(profile)
+                            && admission.pending.is_none()
+                            && outgoing.capacity() > 0
+                        {
+                            let Ok(chunk) = incoming.try_recv() else {
+                                break;
+                            };
+                            capture.ingest(chunk, true, now, profile);
+                            dispatch_codec(
+                                now,
+                                profile,
+                                &mut received,
+                                &mut capture,
+                                &admission,
+                                &mut feedback,
+                                &mut reset,
+                                &mut owner,
+                                &mut flight,
+                                &outgoing,
+                                0,
+                                &port,
+                            )
+                            .unwrap();
+                        }
+                    }
+                    if flight.is_some() && finish.is_none() {
+                        let (kind, us, timestamp) =
+                            match flight.as_ref().unwrap().source.as_ref().unwrap() {
+                                CodecSource::Encode(source) => {
+                                    ("encode", 2_000, source.position * 3)
+                                }
+                                CodecSource::Decode(work) => ("decode", decode_us, work.timestamp),
+                            };
+                        finish = Some(ns + us * 1_000);
+                        operations.push((kind, ns, timestamp));
+                    }
+                    if ns >= 100_000 && (ns - 100_000) % 10_000_000 == 0 {
+                        let drained = queued.min(160);
+                        queued -= drained;
+                        consumed += drained as u64;
+                        let mut render = port.render.lock().unwrap();
+                        let mut pcm = [0; 160];
+                        loop {
+                            port.sink_queue.store(queued as u64, Ordering::Relaxed);
+                            if queued + 160 > 640 {
+                                break;
+                            }
+                            let (count, expired) = render.pull(now, &mut pcm);
+                            port.expired_render(expired);
+                            if expired != 0 {
+                                first_expiry.get_or_insert((ns, expired));
+                            }
+                            if count == 0 {
+                                break;
+                            }
+                            queued += count;
+                            written += count as u64;
+                        }
+                    }
+                    assert!(incoming.len() <= 4 && capture.pcm.len() <= 640 && queued <= 640);
+                    assert!(
+                        received.encoded.len() <= 6 && port.render.lock().unwrap().pcm.len() <= 640
+                    );
+                    assert_eq!(owner.busy(), flight.is_some());
+                }
+                let stats = port.snapshot();
+                assert_eq!(
+                    (
+                        stats.late_packets,
+                        stats.plc_slots,
+                        stats.future_rejected_packets
+                    ),
+                    (0, 0, 0)
+                );
+                assert_eq!(stats.dropped_capture, 0);
+                assert_eq!(stats.expired_render_samples, 0,
+                    "decode_us={decode_us} capture_phase_ns={capture_phase_ns} first_expiry={first_expiry:?} operations={operations:?}");
+                assert_eq!(stats.dropped_render, 0);
+                assert!(stats.decoded_packets > 20 && stats.encoded_packets > 20);
+                assert_eq!(written, consumed + queued as u64);
+                assert_eq!(
+                    stats.decoded_packets * 640,
+                    written + port.render.lock().unwrap().pcm.len() as u64
+                );
+                // The measured finite interval precedes intentional retirement.
+                drop(flight);
+                admission.discard(profile, &port);
+                owner.close().unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ready_decode_holds_only_the_existing_full_source_frame_and_original_deadline() {
+        let profile = LiveProfile::Ms40;
+        for expire in [false, true] {
+            let origin = Instant::now();
+            let at = |ms| origin + Duration::from_millis(ms);
+            let mut port = test_port();
+            let (input, incoming) = mpsc::channel(4);
+            port.input = input.clone();
+            let port = Arc::new(port);
+            let mut capture = CaptureFrame::new(640, port.clone());
+            for batch in 0..4u64 {
+                capture.ingest(
+                    Captured {
+                        pcm: [1; 160],
+                        len: 160,
+                        position: batch * 160,
+                        at: at(50 + batch * 10),
+                        pushed_at: at(50 + batch * 10),
+                        hardware_age: None,
+                        capture_clock: None,
+                    },
+                    true,
+                    at(50 + batch * 10),
+                    profile,
+                );
+            }
+            let mut received = test_received();
+            let mut feedback = packet::Feedback::default();
+            received.admit(0, &opus40(), origin, profile, &mut feedback, &port);
+            let (entered, entry) = std::sync::mpsc::sync_channel(1);
+            let hold = codec::Hold {
+                kind: codec::Kind::Decode,
+                entered,
+                release: Arc::new((Mutex::new(false), std::sync::Condvar::new())),
+                admitted: Arc::new(AtomicU64::new(0)),
+                controlled: Arc::new(AtomicU64::new(0)),
+            };
+            let mut owner = codec::Owner::start(profile, Some(hold.clone()))
+                .await
+                .unwrap();
+            let mut flight = None;
+            let mut admission = MediaAdmission::default();
+            let (outgoing, _requests) = mpsc::channel(1);
+            let mut reset = false;
+            dispatch_codec(
+                at(80),
+                profile,
+                &mut received,
+                &mut capture,
+                &admission,
+                &mut feedback,
+                &mut reset,
+                &mut owner,
+                &mut flight,
+                &outgoing,
+                0,
+                &port,
+            )
+            .unwrap();
+            entry.recv_timeout(Duration::from_secs(3)).unwrap();
+            let decode_selected = matches!(
+                flight.as_ref().and_then(|flight| flight.source.as_ref()),
+                Some(CodecSource::Decode(_))
+            );
+            let held_frame = capture.pcm.len() == 640 && outgoing.capacity() == 1;
+            for batch in 0..4u64 {
+                input
+                    .try_send(Captured {
+                        pcm: [2; 160],
+                        len: 160,
+                        position: 640 + batch * 160,
+                        at: at(90 + batch * 10),
+                        pushed_at: at(90 + batch * 10),
+                        hardware_age: None,
+                        capture_clock: None,
+                    })
+                    .unwrap();
+            }
+            let checked = if expire { 130 } else { 85 };
+            let result = dispatch_codec(
+                at(checked),
+                profile,
+                &mut received,
+                &mut capture,
+                &admission,
+                &mut feedback,
+                &mut reset,
+                &mut owner,
+                &mut flight,
+                &outgoing,
+                0,
+                &port,
+            );
+            let kept_ring = incoming.len() == 4 && input.capacity() == 0;
+            hold.release(); // Release even when an ordering assertion fails.
+            result.unwrap();
+            assert!(decode_selected && held_frame && kept_ring && owner.busy());
+            assert_eq!(received.playout.as_ref().unwrap().cursor, 1920);
+            assert_eq!(feedback.plc, 0);
+            if expire {
+                // Source age is still 50+40+40=130, not release/encode time.
+                assert!(capture.pcm.is_empty());
+                assert_eq!(port.snapshot().dropped_capture, 640);
+                drop(flight);
+                owner.close().unwrap();
+                drop(capture);
+                assert_eq!(port.snapshot().dropped_capture, 640);
+            } else {
+                let completed = owner.completed().await.unwrap();
+                apply_codec_completion(
+                    completed,
+                    &mut flight,
+                    &mut received,
+                    &mut admission,
+                    &mut feedback,
+                    0,
+                    at(85),
+                    profile,
+                    &port,
+                )
+                .unwrap();
+                dispatch_codec(
+                    at(85),
+                    profile,
+                    &mut received,
+                    &mut capture,
+                    &admission,
+                    &mut feedback,
+                    &mut reset,
+                    &mut owner,
+                    &mut flight,
+                    &outgoing,
+                    0,
+                    &port,
+                )
+                .unwrap();
+                assert!(capture.pcm.is_empty() && owner.busy());
+                assert_eq!(outgoing.capacity(), 0); // The existing encode permit.
+                let mut completed = owner.completed().await.unwrap();
+                completed.finished = at(87);
+                apply_codec_completion(
+                    completed,
+                    &mut flight,
+                    &mut received,
+                    &mut admission,
+                    &mut feedback,
+                    0,
+                    at(87),
+                    profile,
+                    &port,
+                )
+                .unwrap();
+                let waiting = &admission.pending.as_ref().unwrap().0;
+                assert_eq!(waiting.captured_at, at(50));
+                assert_eq!(waiting.encoded_at, at(87));
+                assert_eq!(waiting.deadline, at(127));
+                assert_eq!(port.snapshot().dropped_capture, 0);
+                admission.discard(profile, &port);
+                owner.close().unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn codec_finish_time_does_not_extend_the_actual_pcm_publication_deadline() {
+        let profile = LiveProfile::Ms40;
+        for publish_ms in [119, 120] {
+            let origin = Instant::now();
+            let at = |ms| origin + Duration::from_millis(ms);
+            let port = Arc::new(test_port());
+            let mut received = test_received();
+            let mut feedback = packet::Feedback::default();
+            received.admit(0, &opus40(), origin, profile, &mut feedback, &port);
+            let mut work = received
+                .prepare_decode(at(80), profile, &mut feedback, &port)
+                .unwrap();
+            let output = LiveDecoder::new(profile)
+                .unwrap()
+                .decode(work.opus.take().as_ref().unwrap())
+                .unwrap();
+            let mut flight = Some(CodecFlight {
+                source: Some(CodecSource::Decode(work)),
+                port: port.clone(),
+                samples: 640,
+            });
+            let completed = codec::Completion {
+                output: codec::Output::Decoded(Zeroizing::new(output)),
+                duration: Duration::from_millis(12),
+                finished: at(92),
+            };
+            apply_codec_completion(
+                completed,
+                &mut flight,
+                &mut received,
+                &mut MediaAdmission::default(),
+                &mut feedback,
+                0,
+                at(publish_ms),
+                profile,
+                &port,
+            )
+            .unwrap();
+            let mut render = port.render.lock().unwrap();
+            let mut batch = [0; 160];
+            if publish_ms == 119 {
+                assert_eq!(render.end_due, Some(at(120)));
+                assert_eq!(render.pull(at(119), &mut batch), (160, 0));
+                assert_eq!(port.snapshot().expired_render_samples, 0);
+                let expired = render.expire(at(120));
+                port.expired_render(expired);
+                assert_eq!(expired, 480);
+            } else {
+                // C finished on time, but the actor cannot publish stale PCM.
+                assert_eq!(render.pull(at(120), &mut batch), (0, 0));
+                assert_eq!(port.snapshot().expired_render_samples, 640);
+            }
+            assert!(flight.is_none());
+            assert_eq!(received.playout.as_ref().unwrap().cursor, 1920);
+            assert_eq!(port.snapshot().decoded_packets, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn ready_codec_completion_is_consumed_once_without_another_select_turn() {
+        let mut owner = codec::Owner::start(LiveProfile::Ms40, None).await.unwrap();
+        assert!(owner.try_completed().unwrap().is_none());
+        owner
+            .submit(codec::Operation::Encode(Zeroizing::new(vec![1; 640])))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let completed = loop {
+            if let Some(completed) = owner.try_completed().unwrap() {
+                break completed;
+            }
+            assert!(Instant::now() < deadline, "codec result did not arrive");
+            tokio::task::yield_now().await;
+        };
+        assert!(matches!(completed.output, codec::Output::Encoded { .. }));
+        assert!(!owner.busy());
+        assert!(owner.try_completed().unwrap().is_none());
+        owner.close().unwrap();
+    }
+
+    #[tokio::test]
+    async fn codec_slot_is_exclusive_and_state_survives_encode_decode_and_plc() {
+        let (entered, entry) = std::sync::mpsc::sync_channel(1);
+        let hold = codec::Hold {
+            kind: codec::Kind::Encode,
+            entered,
+            release: Arc::new((Mutex::new(false), std::sync::Condvar::new())),
+            admitted: Arc::new(AtomicU64::new(0)),
+            controlled: Arc::new(AtomicU64::new(0)),
+        };
+        let profile = LiveProfile::Ms40;
+        let mut owner = codec::Owner::start(profile, Some(hold.clone()))
+            .await
+            .unwrap();
+        owner
+            .submit(codec::Operation::Encode(Zeroizing::new(
+                super::super::test_tone(0, 640),
+            )))
+            .unwrap();
+        entry.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert!(owner.busy());
+        assert!(owner
+            .submit(codec::Operation::Decode {
+                opus: None,
+                reset: false
+            })
+            .is_err());
+        hold.release();
+        let result = owner.completed().await.unwrap();
+        let codec::Output::Encoded { bytes, .. } = result.output else {
+            panic!("encoded completion expected");
+        };
+        dmsg_opus_sys::live::validate_packet(profile, &bytes).unwrap();
+        assert!(!owner.busy());
+        owner
+            .submit(codec::Operation::Decode {
+                opus: Some(bytes),
+                reset: false,
+            })
+            .unwrap();
+        let result = owner.completed().await.unwrap();
+        let codec::Output::Decoded(pcm) = result.output else {
+            panic!("decoded completion expected");
+        };
+        assert_eq!(pcm.len(), 640);
+        owner
+            .submit(codec::Operation::Decode {
+                opus: None,
+                reset: false,
+            })
+            .unwrap();
+        let result = owner.completed().await.unwrap();
+        let codec::Output::Decoded(pcm) = result.output else {
+            panic!("PLC completion expected");
+        };
+        assert_eq!(pcm.len(), 640);
+        owner.close().unwrap();
+        assert!(owner
+            .submit(codec::Operation::Encode(Zeroizing::new(vec![0; 640])))
+            .is_err());
+    }
+
+    #[test]
+    fn cancelled_codec_owner_joins_held_work_and_discards_unobserved_result() {
+        let (entered, entry) = std::sync::mpsc::sync_channel(1);
+        let hold = codec::Hold {
+            kind: codec::Kind::Encode,
+            entered,
+            release: Arc::new((Mutex::new(false), std::sync::Condvar::new())),
+            admitted: Arc::new(AtomicU64::new(0)),
+            controlled: Arc::new(AtomicU64::new(0)),
+        };
+        let worker_hold = hold.clone();
+        let (cancel, cancelled) = std::sync::mpsc::sync_channel(1);
+        let (returned, returning) = std::sync::mpsc::sync_channel(1);
+        let endpoint = thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            let mut owner = runtime
+                .block_on(codec::Owner::start(LiveProfile::Ms40, Some(worker_hold)))
+                .unwrap();
+            owner
+                .submit(codec::Operation::Encode(Zeroizing::new(vec![0; 640])))
+                .unwrap();
+            cancelled.recv().unwrap();
+            drop(owner); // The endpoint future's cancellation path; no receipt poll.
+            returned.send(()).unwrap();
+        });
+        entry.recv_timeout(Duration::from_secs(3)).unwrap();
+        cancel.send(()).unwrap();
+        let returned_while_held = returning.recv_timeout(Duration::from_millis(20)).is_ok();
+        hold.release();
+        if !returned_while_held {
+            returning.recv_timeout(Duration::from_secs(3)).unwrap();
+        }
+        endpoint.join().unwrap();
+        assert!(
+            !returned_while_held,
+            "replacement cannot overtake a live codec owner"
+        );
+    }
+
+    #[tokio::test]
+    async fn held_plc_retires_once_and_expired_completion_is_never_rendered() {
+        let profile = LiveProfile::Ms40;
+        let port = test_port();
+        let origin = Instant::now();
+        let at = |ms| origin + Duration::from_millis(ms);
+        let mut received = test_received();
+        let mut feedback = packet::Feedback::default();
+        received.admit(0, &opus40(), origin, profile, &mut feedback, &port);
+        let mut decoder = LiveDecoder::new(profile).unwrap();
+        received
+            .tick(at(80), profile, &mut decoder, &mut feedback, &port)
+            .unwrap();
+        port.clear();
+        port.sink_queue.store(160, Ordering::Relaxed);
+        let (entered, entry) = std::sync::mpsc::sync_channel(1);
+        let hold = codec::Hold {
+            kind: codec::Kind::Decode,
+            entered,
+            release: Arc::new((Mutex::new(false), std::sync::Condvar::new())),
+            admitted: Arc::new(AtomicU64::new(0)),
+            controlled: Arc::new(AtomicU64::new(0)),
+        };
+        let mut owner = codec::Owner::start(profile, Some(hold.clone()))
+            .await
+            .unwrap();
+        assert!(!received.maintain_playout(at(110), profile, &mut feedback, &port));
+        let mut work = received
+            .prepare_decode(at(110), profile, &mut feedback, &port)
+            .unwrap();
+        assert!(work.plc);
+        owner
+            .submit(codec::Operation::Decode {
+                opus: work.opus.take(),
+                reset: false,
+            })
+            .unwrap();
+        entry.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(feedback.plc, 1);
+        assert_eq!(feedback.playout, Some(3840));
+        // A packet for the irrevocably concealed slot does not rewind it.
+        received.admit(1920, &opus40(), at(115), profile, &mut feedback, &port);
+        assert_eq!(port.snapshot().late_before_nominal_due_packets, 1);
+        assert!(!received.maintain_playout(at(130), profile, &mut feedback, &port));
+        assert!(received
+            .prepare_decode(at(130), profile, &mut feedback, &port)
+            .is_none());
+        assert!(received.maintain_playout(at(200), profile, &mut feedback, &port));
+        assert_eq!(feedback.playout, Some(5760));
+        hold.release();
+        let result = owner.completed().await.unwrap();
+        let codec::Output::Decoded(output) = result.output else {
+            panic!("PLC completion expected");
+        };
+        received
+            .apply_decode(work, at(200), result.duration, output, &port)
+            .unwrap();
+        assert!(port.render.lock().unwrap().pcm.is_empty());
+        assert_eq!(port.snapshot().expired_render_samples, 640);
+        assert_eq!(port.snapshot().plc_slots, 1);
+        assert_eq!(port.snapshot().skipped_playout_slots, 1);
+        assert_eq!(received.playout.as_ref().unwrap().cursor, 5760);
+        // Reset belongs to the same exclusive owner before its next current slot.
+        let mut next = received
+            .prepare_decode(at(200), profile, &mut feedback, &port)
+            .unwrap();
+        owner
+            .submit(codec::Operation::Decode {
+                opus: next.opus.take(),
+                reset: true,
+            })
+            .unwrap();
+        let _ = owner.completed().await.unwrap();
+        assert_eq!(port.snapshot().plc_slots, 2);
+        assert_eq!(received.playout.as_ref().unwrap().cursor, 7680);
+        owner.close().unwrap();
+    }
 
     fn test_port() -> Port {
         let (input, _) = mpsc::channel(4);
@@ -1680,6 +3044,98 @@ mod tests {
             remote_clock: RemoteClock::default(),
             first_playout: None,
         }
+    }
+
+    #[test]
+    fn timing_bins_are_bounded_and_keep_above_boundary_samples() {
+        let mut bins = [0; 8];
+        for duration in [
+            Duration::ZERO,
+            Duration::from_nanos(1_000_001),
+            Duration::from_millis(81),
+        ] {
+            observe_duration(&mut bins, duration);
+        }
+        assert_eq!(bins, [1, 1, 0, 0, 0, 0, 0, 1]);
+    }
+
+    #[test]
+    fn post_noise_deadline_crossing_is_counted_without_rebasing_admission() {
+        let (local, peer, _, _) = fixture::pair(PublicConfig {
+            relay_addr: "127.0.0.1:1".into(),
+            domain: "timing.invalid".into(),
+            profile_ms: 40,
+            healthy_cycle_ms: 600,
+            capacity_bps: 50_000,
+            carriers: [None, None],
+        })
+        .unwrap();
+        let port = test_port();
+        let origin = Instant::now();
+        let due = origin - Duration::from_millis(10);
+        let mut received = test_received();
+        received.index = u64::from(local.peer_initial_sequence);
+        received.timestamp = u64::from(local.peer_initial_timestamp);
+        received.playout = Some(PlayoutClock {
+            cursor: received.timestamp,
+            due,
+        });
+        let mut sender = dmsg_srtp_sys::Sender::new(&peer.media_tx, peer.ssrc_tx).unwrap();
+        let mut receiver = dmsg_srtp_sys::Receiver::new(&local.media_rx, local.ssrc_rx).unwrap();
+        let cipher = sender
+            .protect_rtp(&packet::rtp(
+                peer.ssrc_tx,
+                u64::from(peer.initial_sequence),
+                peer.initial_timestamp,
+                &opus40(),
+            ))
+            .unwrap();
+        let mut feedback = packet::Feedback::default();
+        received
+            .receive_lane(
+                InboundFrame {
+                    frame: (OP_RTP, cipher.clone()),
+                    body_complete: origin - Duration::from_millis(21),
+                    noise_done: origin - Duration::from_millis(20),
+                },
+                &mut receiver,
+                &local,
+                &mut feedback,
+                &port,
+            )
+            .unwrap();
+        assert_eq!(received.playout.as_ref().unwrap().due, due);
+        assert!(received.encoded.is_empty()); // Diagnostics cannot rescue late audio.
+        let stats = port.stats.lock().unwrap();
+        assert_eq!(stats.late_packets, 1);
+        assert_eq!(stats.noise_after_nominal_due_packets, 0);
+        assert_eq!(stats.noise_before_due_admitted_after_due_packets, 1);
+        assert!(stats.max_rx_post_noise_wait_us >= 20_000);
+        assert_eq!(stats.rx_post_noise_wait_bins.iter().sum::<u64>(), 1);
+        drop(stats);
+        // A replay still fails authentication before timing/receipt accounting.
+        assert!(received
+            .receive_lane(
+                InboundFrame {
+                    frame: (OP_RTP, cipher),
+                    body_complete: origin,
+                    noise_done: origin
+                },
+                &mut receiver,
+                &local,
+                &mut feedback,
+                &port
+            )
+            .is_err());
+        assert_eq!(
+            port.stats
+                .lock()
+                .unwrap()
+                .rx_post_noise_wait_bins
+                .iter()
+                .sum::<u64>(),
+            1
+        );
     }
 
     fn opus40() -> Vec<u8> {
@@ -1895,6 +3351,7 @@ mod tests {
             timestamp: u32::MAX - 959,
             opus_bytes: 30,
             submitted: origin,
+            source_ready: origin,
             receipt,
         }]);
         let mut ledger = packet::Ledger::new(50, 20, 600);
@@ -2861,14 +4318,14 @@ mod tests {
         })
         .await
         .unwrap();
-        let (op, cipher) = received.0.unwrap().unwrap();
+        let (op, cipher) = received.0.unwrap().unwrap().frame;
         assert_eq!(op, OP_RTP);
         assert_eq!(a_receiver.unprotect_rtp(&cipher).unwrap(), rtp);
         for (frame, receiver, fixture) in [
             (received.1, &mut a_receiver, &a),
             (received.2, &mut b_receiver, &b),
         ] {
-            let (op, cipher) = frame.unwrap().unwrap();
+            let (op, cipher) = frame.unwrap().unwrap().frame;
             assert_eq!(op, OP_RTCP);
             let plain = receiver.unprotect_rtcp(&cipher).unwrap();
             packet::read_compound(
@@ -3460,7 +4917,13 @@ mod tests {
             ))
             .unwrap();
         let (tx, mut incoming) = mpsc::channel(1);
-        tx.try_send(Ok((OP_RTP, cipher))).unwrap();
+        let stamp = Instant::now();
+        tx.try_send(Ok(InboundFrame {
+            frame: (OP_RTP, cipher),
+            body_complete: stamp,
+            noise_done: stamp,
+        }))
+        .unwrap_or_else(|_| panic!("timing fixture inbox closed"));
         let mut timer = tokio::time::interval(Duration::from_millis(10));
         let ready_tick = timer.tick().await;
         let mut feedback = packet::Feedback::default();

@@ -209,11 +209,27 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
             "initial_capture_age_floor_us", "max_additional_capture_age_us", "max_capture_clock_observation_gap_us",
             "capture_age_unavailable_batches", "capture_age_rejected_batches", "max_sender_phase_advance_us",
             "max_receiver_phase_advance_us", "future_rejected_packets", "max_future_lead_ms",
-            "remote_clock_ticks", "remote_clock_ns", "remote_clock_rejected_reports", "remote_clock_rejection_mask")
+            "remote_clock_ticks", "remote_clock_ns", "remote_clock_rejected_reports", "remote_clock_rejection_mask",
+            "max_rx_noise_auth_us", "max_rx_post_noise_wait_us", "max_rx_validation_us",
+            "noise_after_nominal_due_packets", "noise_before_due_admitted_after_due_packets",
+            "max_source_ready_to_commit_us")
             .forEach { field ->
                 val value = source.getLong(field)
                 check(value >= 0, "invalid_native_counter")
                 clean.put(field, value)
+            }
+        listOf("encode_duration_bins", "decode_duration_bins", "plc_duration_bins",
+            "rx_post_noise_wait_bins", "rx_validation_duration_bins", "source_ready_to_commit_bins")
+            .forEach { field ->
+                val values = source.getJSONArray(field)
+                check(values.length() == 8, "invalid_native_timing_bins")
+                val bins = org.json.JSONArray()
+                for (index in 0 until 8) {
+                    val value = values.getLong(index)
+                    check(value >= 0, "invalid_native_timing_bins")
+                    bins.put(value)
+                }
+                clean.put(field, bins)
             }
         clean.put("ready", source.getBoolean("ready")).put("dns_carrier", source.getBoolean("dns_carrier"))
         clean.put("failed", source.getBoolean("failed")).put("stopped", source.getBoolean("stopped"))

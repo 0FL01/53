@@ -29,9 +29,18 @@ pub enum Commit {
     Dropped,
 }
 
+/// Local Rust receive boundaries, not physical socket or DNS arrival times.
+pub struct InboundFrame {
+    pub frame: (u8, Vec<u8>),
+    /// Completed ciphertext body read, immediately before Noise authentication.
+    pub body_complete: Instant,
+    /// Successful authentication and exact full application-frame parsing.
+    pub noise_done: Instant,
+}
+
 pub struct Lane {
     pub outgoing: mpsc::Sender<SendRequest>,
-    pub incoming: mpsc::Receiver<Result<(u8, Vec<u8>), String>>,
+    pub incoming: mpsc::Receiver<Result<InboundFrame, String>>,
     actor: Option<JoinHandle<()>>,
 }
 
@@ -110,7 +119,7 @@ async fn run(
     stream: TcpStream,
     mut noise: snow::TransportState,
     requests: &mut mpsc::Receiver<SendRequest>,
-    received: &mpsc::Sender<Result<(u8, Vec<u8>), String>>,
+    received: &mpsc::Sender<Result<InboundFrame, String>>,
     mut service: Option<IngressService>,
 ) -> Result<(), String> {
     let (mut reader, mut writer) = stream.into_split();
@@ -147,6 +156,7 @@ async fn run(
                     }
                     wanted = length + 2;
                 } else {
+                    let body_complete = Instant::now();
                     let length = noise.read_message(&cipher[2..wanted], &mut plain)
                         .map_err(|_| "probe authentication failed".to_string())?;
                     let (_, opcode, payload, consumed) = decode_frame(&plain[..length])
@@ -154,10 +164,15 @@ async fn run(
                     if consumed != length {
                         return Err("probe trailing frame bytes".into());
                     }
+                    let noise_done = Instant::now();
                     if let Some(service) = &mut service {
                         service.authenticated(wanted)?;
                     }
-                    inbound = Some(Ok((opcode, payload.to_vec())));
+                    inbound = Some(Ok(InboundFrame {
+                        frame: (opcode, payload.to_vec()),
+                        body_complete,
+                        noise_done,
+                    }));
                     filled = 0;
                     wanted = 2;
                 }
@@ -296,16 +311,40 @@ mod tests {
             Commit::Dropped => panic!("valid request dropped"),
         }
         assert_eq!(
-            other.incoming.recv().await.unwrap().unwrap(),
+            other.incoming.recv().await.unwrap().unwrap().frame,
             (OP_RTP, vec![2; 100])
         );
         send(&other, vec![3], None).await;
         assert_eq!(
-            lane.incoming.recv().await.unwrap().unwrap(),
+            lane.incoming.recv().await.unwrap().unwrap().frame,
             (OP_RTP, vec![3])
         );
         lane.joined_close().await;
         other.joined_close().await;
+    }
+
+    #[tokio::test]
+    async fn authenticated_inbound_stamps_precede_consumer_observation() {
+        let (mut lane, mut peer, mut noise) = paired().await;
+        let wire = encrypted(&mut noise, &encode_frame(OP_RTP, &[6; 64]).unwrap());
+        let before_body = Instant::now();
+        peer.write_all(&wire).await.unwrap();
+        timeout(Duration::from_secs(2), async {
+            while lane.incoming.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let queued = Instant::now();
+        let inbound = lane.incoming.recv().await.unwrap().unwrap();
+        let observed = Instant::now();
+        assert_eq!(inbound.frame, (OP_RTP, vec![6; 64]));
+        assert!(before_body <= inbound.body_complete);
+        assert!(inbound.body_complete <= inbound.noise_done);
+        assert!(inbound.noise_done <= queued);
+        assert!(queued <= observed);
+        lane.joined_close().await;
     }
 
     #[tokio::test]
@@ -339,7 +378,8 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap()
-                .unwrap(),
+                .unwrap()
+                .frame,
             (OP_RTCP, vec![7])
         );
         lane.joined_close().await;
@@ -370,7 +410,8 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap()
-                .unwrap(),
+                .unwrap()
+                .frame,
             (OP_RTP, vec![4; 64])
         );
         lane.joined_close().await;
@@ -448,7 +489,8 @@ mod tests {
                     .await
                     .unwrap()
                     .unwrap()
-                    .unwrap(),
+                    .unwrap()
+                    .frame,
                 (OP_RTP, vec![4; 122]),
             );
             let following = encrypted(&mut noise, &encode_frame(OP_RTP, &[5]).unwrap());
@@ -458,7 +500,8 @@ mod tests {
                     .await
                     .unwrap()
                     .unwrap()
-                    .unwrap(),
+                    .unwrap()
+                    .frame,
                 (OP_RTP, vec![5]),
             );
             // Retirement destroys the next partial frame; it cannot be refunded,

@@ -10,7 +10,9 @@ use tokio::task::JoinSet;
 use zeroize::Zeroizing;
 
 use super::fixture::{EndpointFixture, RelayFixture};
-use super::lane::{self, Commit, Lane, SendRequest, OP_BIND, OP_BOUND, OP_RTCP, OP_RTP};
+use super::lane::{
+    self, Commit, InboundFrame, Lane, SendRequest, OP_BIND, OP_BOUND, OP_RTCP, OP_RTP,
+};
 use super::service::SyntheticServiceModel;
 
 const SETUP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -50,7 +52,7 @@ pub async fn connect(addr: &str, fixture: &EndpointFixture, media: bool) -> Resu
             return Err(error);
         }
         let bound = lane.incoming.recv().await;
-        if !matches!(bound, Some(Ok((OP_BOUND, ref payload))) if *payload == body) {
+        if !matches!(bound, Some(Ok(InboundFrame { frame: (OP_BOUND, ref payload), .. })) if *payload == body) {
             lane.joined_close().await;
             return Err("probe binding rejected".into());
         }
@@ -244,14 +246,15 @@ async fn stopped(stop: &mut watch::Receiver<bool>) {
 }
 
 fn forward(
-    packet: Option<Result<(u8, Vec<u8>), String>>,
+    packet: Option<Result<InboundFrame, String>>,
     destination: &mpsc::Sender<SendRequest>,
     opcode: u8,
     cap: usize,
 ) -> Result<(), String> {
     let (received_opcode, payload) = packet
         .ok_or_else(|| "probe relay lane closed".to_string())?
-        .map_err(|_| "probe relay lane failed".to_string())?;
+        .map_err(|_| "probe relay lane failed".to_string())?
+        .frame;
     if received_opcode != opcode || payload.is_empty() || payload.len() > cap {
         return Err("probe relay packet rejected".into());
     }
@@ -504,7 +507,7 @@ mod tests {
             lane.joined_close().await;
             return Err(error);
         }
-        if !matches!(lane.incoming.recv().await, Some(Ok((dmsg_protocol::OP_WELCOME, payload))) if payload == domain.as_bytes())
+        if !matches!(lane.incoming.recv().await, Some(Ok(InboundFrame { frame: (dmsg_protocol::OP_WELCOME, payload), .. })) if payload == domain.as_bytes())
         {
             lane.joined_close().await;
             return Err("test domain rejected".into());
@@ -513,7 +516,8 @@ mod tests {
             lane.joined_close().await;
             return Err(error);
         }
-        if !matches!(lane.incoming.recv().await, Some(Ok((OP_BOUND, payload))) if payload == body) {
+        if !matches!(lane.incoming.recv().await, Some(Ok(InboundFrame { frame: (OP_BOUND, payload), .. })) if payload == body)
+        {
             lane.joined_close().await;
             return Err("test binding rejected".into());
         }
@@ -550,6 +554,7 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap()
+            .frame
     }
 
     async fn retire(stop: watch::Sender<bool>, job: JoinHandle<Result<(), String>>) {
@@ -718,13 +723,20 @@ mod tests {
     #[tokio::test]
     async fn full_pending_hop_drops_plaintext_without_reordering_survivors() {
         let (outgoing, mut requests) = mpsc::channel(1);
-        forward(Some(Ok((OP_RTP, vec![1]))), &outgoing, OP_RTP, 122).unwrap();
-        forward(Some(Ok((OP_RTP, vec![2]))), &outgoing, OP_RTP, 122).unwrap();
+        let inbound = |ordinal| {
+            Some(Ok(InboundFrame {
+                frame: (OP_RTP, vec![ordinal]),
+                body_complete: Instant::now(),
+                noise_done: Instant::now(),
+            }))
+        };
+        forward(inbound(1), &outgoing, OP_RTP, 122).unwrap();
+        forward(inbound(2), &outgoing, OP_RTP, 122).unwrap();
         let first = requests.recv().await.unwrap();
         assert_eq!(first.payload, [1]);
         let deadline = first.deadline.unwrap();
         assert!(deadline <= Instant::now() + HOP_DEADLINE);
-        forward(Some(Ok((OP_RTP, vec![3]))), &outgoing, OP_RTP, 122).unwrap();
+        forward(inbound(3), &outgoing, OP_RTP, 122).unwrap();
         assert_eq!(requests.recv().await.unwrap().payload, [3]);
         assert!(requests.try_recv().is_err());
         assert_eq!(media_cap(20).unwrap(), 72);

@@ -5,7 +5,12 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.Process
 import android.os.SystemClock
+import android.system.ErrnoException
+import android.system.Os
+import android.system.OsConstants
+import android.system.StructStat
 import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
@@ -17,6 +22,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TestName
 import org.junit.runner.RunWith
+import java.io.File
 
 /** Exact-method .gate probes. Local memory-pair progress is not DNS or call-quality acceptance.
  * Operator grants RECORD_AUDIO before the run; changing/revoking it here can kill the UID.
@@ -48,6 +54,60 @@ class CallMediaProbeGatesTest {
         instrumentation.sendStatus(0, Bundle().apply { putString(name, value.toString()) })
     }
 
+    private fun finishMarkerStat(marker: File): StructStat? = try {
+        Os.lstat(marker.absolutePath)
+    } catch (error: ErrnoException) {
+        if (error.errno == OsConstants.ENOENT) null else throw error
+    }
+
+    private fun finishMarker(app: Context, path: String): File {
+        val marker = File(path)
+        val root = File(app.filesDir.canonicalFile, "voice-probe")
+        assertTrue("probe_finish_marker_path must be absolute/canonical inside filesDir/voice-probe/<fixture-run>/",
+            marker.isAbsolute && marker.absolutePath == marker.canonicalPath && marker.parentFile?.parentFile == root)
+        listOf(root, marker.parentFile!!).forEach { directory ->
+            val stat = Os.lstat(directory.absolutePath)
+            assertTrue("finish marker directories must be owned directories, never symlinks",
+                OsConstants.S_ISDIR(stat.st_mode) && stat.st_uid == Process.myUid())
+        }
+        assertNull("finish marker must be new for this interval", finishMarkerStat(marker))
+        return marker
+    }
+
+    /** Controller atomically publishes byte 0x01, owner0400, only after both frozen intervals. */
+    private fun awaitFinishMarker(marker: File) {
+        val deadline = SystemClock.elapsedRealtime() + 15_000
+        while (SystemClock.elapsedRealtime() < deadline) {
+            assertEquals("finish marker path must remain canonical/non-symlink", marker.absolutePath, marker.canonicalPath)
+            val stat = finishMarkerStat(marker)
+            if (stat != null) {
+                assertTrue("finish marker must be a UID-private regular owner0400 one-byte file",
+                    OsConstants.S_ISREG(stat.st_mode) && stat.st_uid == Process.myUid() &&
+                        (stat.st_mode and 0xfff) == 0x100 && stat.st_size == 1L)
+                val fd = Os.open(marker.absolutePath,
+                    OsConstants.O_RDONLY or OsConstants.O_CLOEXEC or OsConstants.O_NOFOLLOW or OsConstants.O_NONBLOCK, 0)
+                try {
+                    val opened = Os.fstat(fd)
+                    assertTrue("finish marker must remain the validated regular owner0400 file",
+                        OsConstants.S_ISREG(opened.st_mode) && opened.st_uid == Process.myUid() &&
+                            (opened.st_mode and 0xfff) == 0x100 && opened.st_size == 1L &&
+                            opened.st_dev == stat.st_dev && opened.st_ino == stat.st_ino)
+                    val bytes = ByteArray(2)
+                    assertEquals("finish marker has exactly one byte", 1, Os.read(fd, bytes, 0, bytes.size))
+                    assertEquals("finish marker release byte is 0x01", 1, bytes[0].toInt())
+                    assertEquals("finish marker has no trailing bytes", 0, Os.read(fd, bytes, 0, bytes.size))
+                    assertTrue("finish marker must arrive within 15s", SystemClock.elapsedRealtime() <= deadline)
+                } finally {
+                    Os.close(fd)
+                }
+                return
+            }
+            val remaining = deadline - SystemClock.elapsedRealtime()
+            if (remaining > 0) Thread.sleep(minOf(50L, remaining))
+        }
+        fail("paired finish marker did not arrive in 15s")
+    }
+
     @Test(timeout = 30_000) fun packagedLiveCodecActivationOnlyInGatePackage() {
         gate()
         val value = JSONObject(CallProbeJni.codecEvidence())
@@ -67,6 +127,8 @@ class CallMediaProbeGatesTest {
 
     /** Required instrumentation arguments: probe_fixture_path (private owner0400 file),
      * probe_duration_seconds (6..3600). Missing/invalid inputs fail, never skip.
+     * Optional probe_finish_marker_path: new canonical filesDir/voice-probe/<fixture-run>/ marker.
+     * Paired controller releases owner0400 byte 0x01 after both call_probe_interval_complete statuses.
      * Peer/relay topology and actual DNS service rate must be independently documented.
      */
     @Test(timeout = 3_840_000) fun foregroundMicrophoneProtectedDnsAndCleanupOnlyInGatePackage() {
@@ -75,7 +137,8 @@ class CallMediaProbeGatesTest {
         assertFalse("required explicit probe_fixture_path", path.isNullOrBlank())
         val duration = arguments.getString("probe_duration_seconds")?.toLongOrNull()
         assertTrue("required probe_duration_seconds in 6..3600", duration != null && duration in 6..3600)
-        runAudio(app, path!!, duration!! * 1_000, exerciseRate = false)
+        val finishMarker = arguments.getString("probe_finish_marker_path")?.let { finishMarker(app, it) }
+        runAudio(app, path!!, duration!! * 1_000, exerciseRate = false, finishMarker = finishMarker)
     }
 
     private fun assertHealthy(activity: CallProbeActivity, owner: CallProbeAudio): CallProbeAudio.Snapshot {
@@ -83,7 +146,7 @@ class CallMediaProbeGatesTest {
         return owner.snapshot().also { assertNull("audio/native failure: ${it.failure}", it.failure) }
     }
 
-    private fun runAudio(app: Context, fixture: String?, durationMs: Long, exerciseRate: Boolean) {
+    private fun runAudio(app: Context, fixture: String?, durationMs: Long, exerciseRate: Boolean, finishMarker: File? = null) {
         assertEquals("operator must externally grant RECORD_AUDIO before instrumentation; denial is not PASS",
             PackageManager.PERMISSION_GRANTED, app.checkSelfPermission(Manifest.permission.RECORD_AUDIO))
         val intent = Intent(app, CallProbeActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -150,6 +213,22 @@ class CallMediaProbeGatesTest {
                     Thread.sleep(50)
                 }
                 val state = assertHealthy(host, audio)
+                // Snapshot and duration are immutable measurement-end evidence. The wait keeps
+                // producers alive but contributes no counters/time to the measured interval.
+                val interval = JSONObject().put("duration_ms", SystemClock.elapsedRealtime() - started).put("running", state.json())
+                // Preserve frozen active evidence on a subsequent assertion failure,
+                // rather than exposing only teardown loss in the final snapshot.
+                report = JSONObject().put("duration_ms", interval.getLong("duration_ms"))
+                    .put("ready_native", readyNative).put("running", interval.getJSONObject("running"))
+                    .put("rate_experiment", rateEvidence ?: JSONObject.NULL)
+                    .put("playback_timestamp_available", state.playbackClock.latest != null)
+                    .put("capture_timestamp_available", state.captureClock.latest != null)
+                    .put("evidence_scope", if (fixture == null) "one_phone_local_protected_memory_pair" else "one_phone_explicit_dns_fixture")
+                if (finishMarker != null) {
+                    assertNull("finish marker must not precede interval_complete", finishMarkerStat(finishMarker))
+                    evidence("call_probe_interval_complete", interval)
+                    awaitFinishMarker(finishMarker)
+                }
                 if (exerciseRate) assertEquals("explicit actuator restoration", 16_000, state.playbackRate)
                 else assertTrue("automatic platform correction remains within the supported +/-500ppm",
                     state.playbackRate in 15_992..16_008)
@@ -208,12 +287,6 @@ class CallMediaProbeGatesTest {
                 listOf(state.aec, state.ns).filter { it.available }.forEach {
                     assertTrue(it.created); assertEquals(0, it.enableResult); assertTrue(it.enabled); assertTrue(it.control)
                 }
-                report = JSONObject().put("duration_ms", SystemClock.elapsedRealtime() - started)
-                    .put("ready_native", readyNative)
-                    .put("running", state.json()).put("rate_experiment", rateEvidence ?: JSONObject.NULL)
-                    .put("playback_timestamp_available", state.playbackClock.latest != null)
-                    .put("capture_timestamp_available", state.captureClock.latest != null)
-                    .put("evidence_scope", if (fixture == null) "one_phone_local_protected_memory_pair" else "one_phone_explicit_dns_fixture")
                 // Real lifecycle pause, not only a Stop callback returning/null Activity.
                 scenario.moveToState(Lifecycle.State.CREATED)
                 await("pause cleanup did not complete in 10s; do not start a second owner") {

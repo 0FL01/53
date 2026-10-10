@@ -618,3 +618,64 @@ the asymmetric delivery is explicitly **not quality PASS**. A comparable80k serv
 attempt fails Mi's unchanged nonzero-microphone assertion (all-zero PCM), not crypto
 or a claimed bitrate result. Capacity/F0 remain declared inputs, the byte-service
 meter is synthetic, and acoustic/source-active/listening acceptance remains open.
+
+### Exclusive codec owner and paired measurement retirement
+
+The current-thread endpoint used to execute Opus inline with lane reads and
+control/media admission. Independent held-encode/held-decode regressions reproduce
+that scheduling failure. One private `m1v-codec` owner now exclusively owns encoder
+and decoder, with **one** operation and one result. The actor selects completion
+alongside authenticated RX/control/timer/cancel. The existing assembled source and
+native render frame are the work slots, not an added job backlog. Cancellation
+erases unobserved audio and joins the owner before generation replacement.
+
+Ready decode is reconsidered when the actor wakes/worker becomes free; a ready
+completion is consumed once before another select. A paced production-path model
+reproduced timer-only dispatch delay at99.5ms and fixes it without changing source
+age, byte credit, jitter, source cursor or presentation end. Publication time still
+governs PCM expiry: finishing C decoding earlier cannot authorize late output.
+The model did not reproduce the first physical160-sample tail expiry; that observed
+local failure and its separate teardown totals are retained, not reclassified.
+
+Lane envelopes carry local completed-body/Noise timestamps. Fixed8-bin durations
+use inclusive upper bounds1/2/5/10/20/40/80ms and above for encode, decode, PLC,
+post-Noise dequeue, validation and source-ready→Noise commitment. These are **local
+Rust** diagnostics, not socket/DNS/acoustic arrival. The post-SRTP first-arrival
+anchor and acceptance deadline remain unchanged. Crypto failures do not contribute
+trusted admission metrics.
+
+For a physical pair only, an optional `probe_finish_marker_path` must be the
+Android-canonical private `filesDir/voice-probe/<run>/finish.marker`, absent at setup
+and interval end. Each test freezes running state/duration, emits structured
+`call_probe_interval_complete`, and continues producers for at most15s while the
+controller atomically renames a prepared UID-owned0400 one-byte0x01 marker after
+**both** interval reports. Canonical path, regular file, UID, mode, length,
+no-follow open/inode and payload checks are enforced. Barrier time is excluded
+from the frozen interval. No marker argument preserves single/local behavior;
+clock, microphone, timing, progress and cleanup assertions are not weakened.
+
+Current checks:99 focused,2 CLI,354 workspace and127 JVM tests pass; the same two
+explicit native ignores remain. Arm64/API26, debug/release and instrumentation
+builds pass. Both subsequent strict local8s gates pass: Moto206 decoded and Mi209,
+late/PLC/render expiry0, while source capture losses remain observable.
+
+The latest120s pair uses actual Moto/API35 and Mi/API30 C/DNS/audio paths on the
+direct-authoritative LAN, existing BBR, no synthetic service meter, declared
+admission50k/F0=600ms, and finite known PC-speaker test speech. Both frozen
+clock/lifecycle/cleanup gates pass; both clocks have zero rejected reports.
+
+| Endpoint | Decoded / late / PLC | Capture ready→running | Render expiry | Post-Noise deadline crossings |
+| --- | --- | --- | --- | --- |
+| Moto | 2990 /10 /10 | 27520→101120 | 0 | 0 |
+| Mi | 2888 /4 /119 | 3200→3200 | 0 | 0 |
+
+Moto's73600 post-ready lost samples are115 frame-equivalents, consistent with
+Mi's119 PLC minus4 late; this is not packet-correlated or active-speech accounting.
+The earlier unmetered timing pair had Mi320 late,318 already late at Noise
+completion and2 crossing during local post-Noise work. Repeated workloads and
+initial phases differ; the improvement does not attribute every prior loss to
+codec blocking. The newly observable remaining capture loss is not erased.
+Capacity and F0 are declared, not measured recursive-DNS service; no QPS, latest
+long-run, common-clock acoustic or human listening acceptance follows from this
+plumbing result. Main, identity, native pin/scheduler and device wall clocks remain
+unchanged. Gate fixtures and microphone grants remain only for authorized tests.
