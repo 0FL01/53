@@ -5,10 +5,12 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 case "${1:-}" in
     '') set -- ;;
     --voice-probe) set -- --features voice-probe ;;
+    --voice-probe-tcp-nodelay) set -- --features voice-probe-tcp-nodelay ;;
     *) exit 2 ;;
 esac
 # cargo-ndk's panic reporter can print its environment: pass no credentials.
 exec env -i HOME="$HOME" PATH="$PATH" ANDROID_NDK_HOME="$ANDROID_NDK_HOME" \
+    TMPDIR="${TMPDIR:-}" \
     OPENSSL_SRC_PERL="${OPENSSL_SRC_PERL:-perl}" \
     CARGO_PROFILE_RELEASE_LTO=thin CARGO_PROFILE_RELEASE_STRIP=symbols \
     RUSTFLAGS='-C link-arg=-Wl,-z,max-page-size=16384' \

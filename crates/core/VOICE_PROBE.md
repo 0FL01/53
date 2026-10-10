@@ -739,3 +739,65 @@ the profile. Service/capacity/F0 remain synthetic or declared; no common-clock
 acoustic, source-active loss, listening, measured recursive capacity or latest
 long-pair result is claimed. Device clocks/timezones, Main, pin and scheduler remain
 untouched. The next TCP-only candidate is opt-in and remains a causal experiment.
+
+### Opt-in TCP seam, ordered clock bursts and partial renderer writes
+
+The default build still leaves the pinned C TCP socket options unchanged. The
+private `voice-probe-tcp-nodelay` core feature (and corresponding
+`android/build-native.sh --voice-probe-tcp-nodelay`) enables a staged TCP-only
+patch for the accepted client FD and outbound server target FD. Both creation
+seams check `setsockopt(TCP_NODELAY,1)` and exact `getsockopt` readback before
+stream ownership; failure follows the existing close/reset path. AF_UNIX tests,
+FIN semantics, receive windows, DNS/QUIC/CC/scheduler and the transport Git pin
+are unchanged. The disposable CLI server must also be built with Meson's
+`-Dprobe_tcp_nodelay=true`; the production Dockerfile is not changed.
+
+The isolated `crates/slipstream-sys/tests/new_probe_tcp_gates.py` runner completed
+one clean invocation: default and enabled Cargo/seam checks, all four pinned
+Meson suites in both modes, and enabled embedded loopback with PEM/DER pins,
+wrong-pin rejection, eight exact streams and terminal-loss cleanup. Earlier
+intermittent fixture failures remain recorded; assertions were not suppressed.
+Baseline binaries are hash-checked and not overwritten. This is evidence of the
+socket option and ownership, not a causal Nagle or voice-quality result.
+
+A separate protected clock regression reproduced an invalid arrival-frequency
+restriction. Authenticated reports spaced100/200ms in source NTP can legitimately
+arrive10ms apart after bounded ordered-stream delay. Arrival now must progress
+strictly and stay within2s, while the minimum50ms interval remains on source NTP.
+Frequency still uses only authenticated NTP/RTP deltas. Existing source/packet
+progress,500ms arrival/source divergence, replay,2500/502ppm rate checks,
+20s calibration and2s freshness are preserved. Duplicate/backward arrival still
+fails; valid debunching no longer invalidates a calibrated clock.
+
+The renderer's fresh pull still reserves160 samples, but a pending partial write
+reserves only its actual remainder. Depth560 plus pending80 can finish at640,
+rather than unnecessarily parking until depth480. Five JVM regressions retain
+partial/zero-write ownership and the original640-sample sink cap. The correction
+does not prove the cause of a missing subsequent native pull or resolve the
+historical Moto tail expiry; the bounded Rust sink model uses the same predicate.
+
+Current checks:112 focused,368 workspace (two existing explicit native ignores),
+138 JVM, formatting, native arm64/API26 and full Android builds pass. The candidate
+client/server build and both phone APKs are labelled separately from the default.
+All following120s records use two real Android/C/DNS/audio endpoints, existing
+BBR, the opt-in TCP option, synthetic50k framed ingress per role, declared
+admission50k/F0=600ms, a finite PC-speaker test stimulus and coordinated interval
+retirement. Both clock/lifecycle/cleanup checks pass, with zero clock rejections.
+
+| Packet duration | Moto decoded / late / PLC / expired samples | Mi decoded / late / PLC / expired samples | Post-ready capture loss Moto / Mi |
+| --- | --- | --- | --- |
+| 40ms | 2974 /27 /27 /160 | 2918 /82 /85 /0 | 1920 /0 |
+| 20ms | 5958 /44 /44 /1440 | 5948 /63 /64 /640 | 320 /0 |
+| 60ms | 1984 /17 /17 /0 | 1984 /18 /19 /0 | 960 /0 |
+
+The40ms Mi trace has78 packets already late at Rust Noise completion and one
+post-Noise crossing. The20ms Mi last expiry is a whole320-sample completion;
+Moto still shows queued tails. The60ms sample has no expiry but longer
+packetization and more20–40ms codec operations. Workloads and first-arrival phases
+differ, so these short records do not select an optimum, demonstrate p95
+mouth-to-ear, or establish active-speech loss. Earlier reverse baseline has
+Mi418 late and candidate12 late, but candidate clock health failed; that is not a
+causal promotion of TCP_NODELAY. Admission capacity and healthy feedback cycle
+remain declared, the service ceiling is synthetic after DNS transit, and the
+direct-authoritative fixture supplies no public-recursive capacity or DNS-QPS
+acceptance. Latest-build long-pair and common-clock acoustic evidence remain open.

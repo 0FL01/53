@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.18)
 project(dmsg_slipstream C CXX)
+option(DMSG_PROBE_TCP_NODELAY "Opt-in checked TCP_NODELAY probe at TCP ownership seams" OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(PICOQUIC_FETCH_PTLS ON CACHE BOOL "" FORCE)
@@ -38,6 +39,9 @@ add_library(dmsg_slipstream STATIC
     ${S}/extern/SPCDNS/src/codec.c ${S}/extern/SPCDNS/src/mappings.c
     ${S}/extern/SPCDNS/src/netsimple.c ${S}/extern/SPCDNS/src/output.c)
 target_compile_definitions(dmsg_slipstream PRIVATE DMSG_EMBEDDED DISABLE_DEBUG_PRINTF)
+if(DMSG_PROBE_TCP_NODELAY)
+    target_compile_definitions(dmsg_slipstream PRIVATE DMSG_PROBE_TCP_NODELAY=1)
+endif()
 target_compile_options(dmsg_slipstream PRIVATE -Wall -Wextra)
 target_include_directories(dmsg_slipstream PRIVATE
     . ${S}/include ${S}/extern ${S}/extern/SPCDNS/src

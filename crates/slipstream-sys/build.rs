@@ -30,6 +30,14 @@ fn main() {
         .env("PKG_CONFIG_LIBDIR", ssl.lib_dir().join("pkgconfig"))
         .env("PKG_CONFIG_PATH", "")
         .define("SLIPSTREAM_SOURCE", &source)
+        .define(
+            "DMSG_PROBE_TCP_NODELAY",
+            if env::var_os("CARGO_FEATURE_PROBE_TCP_NODELAY").is_some() {
+                "ON"
+            } else {
+                "OFF"
+            },
+        )
         .define("OPENSSL_ROOT_DIR", ssl.lib_dir().parent().unwrap())
         .define("OPENSSL_INCLUDE_DIR", ssl.include_dir())
         .define("OPENSSL_CRYPTO_LIBRARY", ssl.lib_dir().join("libcrypto.a"))

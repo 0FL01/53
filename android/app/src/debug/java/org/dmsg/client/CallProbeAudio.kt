@@ -36,6 +36,12 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
         const val SAMPLE_RATE = 16_000
         const val BATCH_SAMPLES = 160
         const val QUEUE_BOUND_SAMPLES = 640 // 40 ms of submitted, not yet rendered PCM.
+        internal fun renderHasCapacity(depth: Long, pending: Int): Boolean {
+            // Finish the owned remainder; reserve a full batch only for a fresh pull.
+            val required = if (pending > 0) pending else BATCH_SAMPLES
+            return depth + required <= QUEUE_BOUND_SAMPLES
+        }
+
         private val nativeCounters = listOf("encoded_packets", "decoded_packets", "plc_slots",
             "tx_bytes", "rx_bytes", "dropped_capture", "dropped_render", "terminal_feedback",
             "late_packets", "max_unconfirmed_bytes", "max_feedback_cycle_ms", "sink_queue_samples",
@@ -600,7 +606,7 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
                     nextTimestamp = now + 100_000_000
                 }
                 // Account the *actual* sink queue, irrespective of its minBuffer/capacity.
-                if (depth + (valid - offset).coerceAtLeast(BATCH_SAMPLES) > QUEUE_BOUND_SAMPLES) {
+                if (!renderHasCapacity(depth, valid - offset)) {
                     LockSupport.parkNanos(2_000_000); continue
                 }
                 if (valid == offset) {

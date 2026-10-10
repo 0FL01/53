@@ -10,13 +10,14 @@ import tarfile
 PIN = "d7cd5555a88933053551128ff8b3741ae93049a0"
 vendor, dest, patch = map(pathlib.Path, sys.argv[1:])
 opt_patch = pathlib.Path(__file__).with_name("spcdns-opt.patch")
+tcp_patch = pathlib.Path(__file__).with_name("probe-tcp-nodelay.patch")
 
 def git(repo, *args):
     return subprocess.check_output(["git", "-C", str(repo), *args])
 
 if git(vendor, "rev-parse", "HEAD").decode().strip() != PIN:
     sys.exit("vendor/slipstream must be at the approved pinned revision")
-stamp = PIN + hashlib.sha256(patch.read_bytes() + opt_patch.read_bytes() + pathlib.Path(__file__).read_bytes()).hexdigest()
+stamp = PIN + hashlib.sha256(patch.read_bytes() + opt_patch.read_bytes() + tcp_patch.read_bytes() + pathlib.Path(__file__).read_bytes()).hexdigest()
 if (dest / ".embedding-stamp").exists() and (dest / ".embedding-stamp").read_text() == stamp:
     sys.exit(0)
 if dest.exists():
@@ -40,4 +41,6 @@ export(vendor, PIN, dest)
 subprocess.run(["git", "-C", str(dest / "extern/SPCDNS"), "apply", str(opt_patch.resolve())], check=True)
 subprocess.run(["python3", str(dest / "patches/apply-picoquic-patch.py")], check=True)
 subprocess.run(["git", "-C", str(dest), "apply", "--recount", "--unidiff-zero", str(patch.resolve())], check=True)
+subprocess.run(["git", "-C", str(dest), "apply", "--check", str(tcp_patch.resolve())], check=True)
+subprocess.run(["git", "-C", str(dest), "apply", str(tcp_patch.resolve())], check=True)
 (dest / ".embedding-stamp").write_text(stamp)

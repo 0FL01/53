@@ -2810,7 +2810,12 @@ mod tests {
                             && !(stalled && (98_000_000..122_000_000).contains(&ns))
                         {
                             let depth = (submitted - head) as usize;
-                            if depth + pending.len().max(160) <= 640 {
+                            let required = if pending.is_empty() {
+                                160
+                            } else {
+                                pending.len()
+                            };
+                            if depth + required <= 640 {
                                 if pending.is_empty() {
                                     let mut pcm = [0; 160];
                                     let count = audio.pull_at(now, &mut pcm);

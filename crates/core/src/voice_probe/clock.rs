@@ -62,6 +62,216 @@ mod tests {
             .unwrap()
     }
 
+    fn protected_report(sender: &mut dmsg_srtp_sys::Sender, source: SenderClock) -> Vec<u8> {
+        let plain = packet::compound(packet::Report {
+            sender_ssrc: 7,
+            peer_ssrc: 8,
+            cname: b"test0001",
+            sender: Some((source.ntp, source.rtp, source.packets, source.octets)),
+            feedback: packet::Feedback {
+                terminal: Some(9),
+                ..packet::Feedback::default()
+            },
+        });
+        assert_eq!(plain.len(), 116);
+        let cipher = sender.protect_rtcp(&plain).unwrap();
+        assert_eq!(cipher.len() + packet::FRAMING_BYTES, 152);
+        cipher
+    }
+
+    fn authenticated_report(receiver: &mut dmsg_srtp_sys::Receiver, cipher: &[u8]) -> SenderClock {
+        let plain = receiver.unprotect_rtcp(cipher).unwrap();
+        let parsed = packet::read_compound(&plain, 7, 8, b"test0001").unwrap();
+        assert_eq!(parsed.terminal, Some(9));
+        parsed.sender_clock.unwrap()
+    }
+
+    #[test]
+    fn authenticated_debunched_reports_keep_source_frequency_and_health() {
+        // R5's source/receiver decision separates authenticated NTP/RTP frequency
+        // from transport jitter. A fresh, ordered burst has the same source pairs
+        // as punctual delivery: it must not require twenty seconds of recovery.
+        // At the nominal 200ms cadence, <=300ms backlog permits a two-report
+        // burst. Three/four reports need 100ms source intervals (still >=50ms);
+        // four nominal 200ms reports would necessarily exceed that backlog bound.
+        for ppm in [-500, -100, 100, 500] {
+            for (period_ms, burst_reports) in [(200u64, 2u64), (100, 3), (100, 4)] {
+                // Leave >=50ms before the next unbunched source report too.
+                let burst_delay_ms = if burst_reports == 3 { 230 } else { 300 };
+                let origin = Instant::now();
+                let mut local = LocalClock::new(origin, u64::MAX - (1 << 31), u32::MAX - 1_000);
+                local.observe(0, origin, Some(rate(ppm)));
+                let mut sender = dmsg_srtp_sys::Sender::new(&[46; 30], 7).unwrap();
+                let mut receiver = dmsg_srtp_sys::Receiver::new(&[46; 30], 7).unwrap();
+                let mut punctual = RemoteClock::default();
+                let mut debunched = RemoteClock::default();
+                let mut previous_arrival: Option<Instant> = None;
+                let mut short_arrivals = 0;
+                let mut max_backlog_ms = 0;
+                for millis in (0..=120_000u64).step_by(period_ms as usize) {
+                    let source_at = origin + Duration::from_millis(millis);
+                    let source = clock_report(&local, origin, millis);
+                    let cipher = protected_report(&mut sender, source);
+                    let parsed = authenticated_report(&mut receiver, &cipher);
+                    assert_eq!(parsed, source);
+                    assert!(punctual.observe(parsed, source_at));
+                    let delay_ms = if (40_001..=80_000).contains(&millis) {
+                        let slot = ((millis - 40_000) / period_ms - 1) % (burst_reports + 2);
+                        if slot < burst_reports {
+                            burst_delay_ms - slot * (period_ms - 10)
+                        } else {
+                            0
+                        }
+                    } else {
+                        0
+                    };
+                    max_backlog_ms = max_backlog_ms.max(delay_ms);
+                    let arrival = source_at + Duration::from_millis(delay_ms);
+                    let gap = previous_arrival.map(|previous| arrival - previous);
+                    if let Some(gap) = gap {
+                        assert!(!gap.is_zero() && gap <= FRESH);
+                        assert!(
+                            gap.abs_diff(Duration::from_millis(period_ms))
+                                <= Duration::from_millis(300)
+                        );
+                        if gap < Duration::from_millis(50) {
+                            short_arrivals += 1;
+                        }
+                    }
+                    let accepted = debunched.observe(parsed, arrival);
+                    assert!(
+                        accepted,
+                        "{ppm}ppm/{burst_reports}-report burst: source={millis}ms, backlog={delay_ms}ms, arrival_gap={gap:?}, mask={}, calibrated={}, valid={}",
+                        debunched.rejection_mask,
+                        debunched.calibrated,
+                        debunched.valid(arrival),
+                    );
+                    // Both estimators see identical source pairs. Arrival phase
+                    // cannot affect either the rate or the source calibration span.
+                    assert_eq!(debunched.rate, punctual.rate);
+                    assert_eq!(debunched.calibrated, millis >= 20_000);
+                    assert_eq!(debunched.valid(arrival), millis >= 20_000);
+                    if millis >= 20_000 {
+                        assert_eq!(debunched.rate.ppb(), ppm * 1_000);
+                    }
+                    previous_arrival = Some(arrival);
+                }
+                assert!(short_arrivals > 0);
+                assert_eq!(max_backlog_ms, burst_delay_ms);
+                assert!(max_backlog_ms <= 300);
+                assert_eq!(debunched.rejection_mask, 0);
+                let end = origin + Duration::from_secs(120);
+                assert_eq!(debunched.fresh_until(), Some(end + FRESH));
+                assert!(debunched.valid(end + FRESH));
+                assert!(!debunched.valid(end + FRESH + Duration::from_nanos(1)));
+            }
+        }
+    }
+
+    #[test]
+    fn authenticated_burst_keeps_replay_source_and_stale_arrival_guards() {
+        let origin = Instant::now();
+        let mut local = LocalClock::new(origin, 1 << 32, 7);
+        local.observe(0, origin, Some(rate(100)));
+        let before = clock_report(&local, origin, 40_000);
+        let normal = clock_report(&local, origin, 40_200);
+        let cases = [
+            (SenderClock { ntp: 0, ..normal }, 200, Rejection::ZeroNtp),
+            (
+                clock_report(&local, origin, 40_049),
+                200,
+                Rejection::SourceInterval,
+            ),
+            (
+                clock_report(&local, origin, 42_001),
+                200,
+                Rejection::SourceInterval,
+            ),
+            (before, 200, Rejection::SourceInterval),
+            (
+                clock_report(&local, origin, 39_800),
+                200,
+                Rejection::SourceInterval,
+            ),
+            (
+                SenderClock {
+                    rtp: before.rtp,
+                    ..normal
+                },
+                200,
+                Rejection::RtpProgress,
+            ),
+            (
+                SenderClock {
+                    rtp: before.rtp - 1,
+                    ..normal
+                },
+                200,
+                Rejection::RtpProgress,
+            ),
+            (
+                SenderClock {
+                    packets: before.packets,
+                    ..normal
+                },
+                200,
+                Rejection::PacketProgress,
+            ),
+            (
+                SenderClock {
+                    packets: before.packets - 1,
+                    ..normal
+                },
+                200,
+                Rejection::PacketProgress,
+            ),
+            (normal, 0, Rejection::ArrivalInterval),
+            (normal, -1, Rejection::ArrivalInterval),
+            (normal, 2_001, Rejection::ArrivalInterval),
+            (normal, 701, Rejection::ArrivalSourceGap),
+            (
+                SenderClock {
+                    rtp: normal.rtp + 48,
+                    ..normal
+                },
+                10,
+                Rejection::ShortRate,
+            ),
+        ];
+        for (bad, arrival_ms, reason) in cases {
+            let mut sender = dmsg_srtp_sys::Sender::new(&[47; 30], 7).unwrap();
+            let mut receiver = dmsg_srtp_sys::Receiver::new(&[47; 30], 7).unwrap();
+            let mut remote = RemoteClock::default();
+            for millis in (0..=40_000).step_by(200) {
+                let source = clock_report(&local, origin, millis);
+                let cipher = protected_report(&mut sender, source);
+                let parsed = authenticated_report(&mut receiver, &cipher);
+                assert!(remote.observe(parsed, origin + Duration::from_millis(millis)));
+            }
+            let frozen = remote.rate;
+            let fresh_until = remote.fresh_until();
+            assert!(remote.valid(origin + Duration::from_secs(40)));
+            let cipher = protected_report(&mut sender, bad);
+            let mut forged = cipher.clone();
+            forged[16] ^= 1; // A changed RTP clock must fail whole-compound authentication.
+            assert!(receiver.unprotect_rtcp(&forged).is_err());
+            assert_eq!(remote.rate, frozen);
+            assert_eq!(remote.fresh_until(), fresh_until);
+            let parsed = authenticated_report(&mut receiver, &cipher);
+            assert_eq!(parsed, bad);
+            assert!(receiver.unprotect_rtcp(&cipher).is_err()); // No replay reaches observe().
+            assert_eq!(remote.fresh_until(), fresh_until);
+            let arrival = origin + Duration::from_millis((40_000 + arrival_ms) as u64);
+            assert!(!remote.observe(parsed, arrival));
+            assert_eq!(remote.rejection_mask, reason.bit());
+            assert_eq!(remote.rate, frozen);
+            assert!(remote.calibrated);
+            assert!(!remote.valid(arrival));
+            assert_eq!(remote.fresh_until(), None);
+            assert!(remote.first.is_none() && remote.updated_ntp.is_none());
+        }
+    }
+
     #[test]
     fn source_report_pairs_current_clock_not_last_commit_or_wall_readback() {
         let origin = Instant::now();
@@ -658,7 +868,9 @@ mod tests {
                 200,
                 Rejection::PacketProgress,
             ),
-            (normal, 20, Rejection::ArrivalInterval),
+            // Debunching may shorten positive arrival intervals, but duplicate
+            // monotonic observations remain invalid even with source progress.
+            (normal, 0, Rejection::ArrivalInterval),
             (normal, 900, Rejection::ArrivalSourceGap),
             (
                 SenderClock {
@@ -1017,13 +1229,18 @@ impl RemoteClock {
             let arrival_gap = arrival.checked_duration_since(previous.arrival);
             // The final short-rate guard has one-tick quantization. It is a
             // discontinuity check, not the long-window frequency estimate.
+            // Ordered transport can debunch fresh authenticated reports. The
+            // >=50ms sampling interval belongs to source NTP, not arrival: all
+            // frequency checks still use source NTP/RTP only. Authentication/
+            // replay precedes observe(); arrival must still progress strictly
+            // and retain the existing stale/divergence bounds.
             let rejected = if ns < 50_000_000 || ns > FRESH.as_nanos() {
                 Some(Rejection::SourceInterval)
             } else if delta_ticks == 0 || delta_ticks >= 1 << 31 {
                 Some(Rejection::RtpProgress)
             } else if packet_progress == 0 || packet_progress >= 1 << 31 {
                 Some(Rejection::PacketProgress)
-            } else if arrival_gap.is_none_or(|gap| gap < Duration::from_millis(50) || gap > FRESH) {
+            } else if arrival_gap.is_none_or(|gap| gap.is_zero() || gap > FRESH) {
                 Some(Rejection::ArrivalInterval)
             } else if arrival_gap.is_some_and(|gap| {
                 gap.abs_diff(Duration::from_nanos(ns.min(u128::from(u64::MAX)) as u64))

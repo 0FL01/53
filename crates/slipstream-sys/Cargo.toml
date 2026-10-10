@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 links = "dmsg_slipstream"
 
+[features]
+default = []
+probe-tcp-nodelay = []
+
 [build-dependencies]
 cmake = "0.1.57"
 openssl-src = "=300.5.4"

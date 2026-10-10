@@ -1,0 +1,111 @@
+diff --git a/include/slipstream_probe_tcp.h b/include/slipstream_probe_tcp.h
+new file mode 100644
+--- /dev/null
++++ b/include/slipstream_probe_tcp.h
+@@ -0,0 +1,22 @@
++#ifndef SLIPSTREAM_PROBE_TCP_H
++#define SLIPSTREAM_PROBE_TCP_H
++
++#ifdef DMSG_PROBE_TCP_NODELAY
++#include <sys/socket.h>
++#include <netinet/in.h>
++#include <netinet/tcp.h>
++
++/* TCP creation seams only. The caller retains FD ownership on failure. */
++static int ss_probe_tcp_nodelay(int fd) {
++    int enabled = 1;
++    if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &enabled, sizeof(enabled))) return -1;
++    int actual = 0;
++    socklen_t length = sizeof(actual);
++    if (getsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &actual, &length)) return -1;
++    if (length != sizeof(actual) || actual != 1) return -1;
++    return 0;
++}
++#endif
++
++#endif
++
+diff --git a/src/slipstream_client_runtime.c b/src/slipstream_client_runtime.c
+--- a/src/slipstream_client_runtime.c
++++ b/src/slipstream_client_runtime.c
+@@ -1,6 +1,7 @@
+ #include "slipstream.h"
+ #include "slipstream_runtime.h"
+ #include "slipstream_sockloop.h"
++#include "slipstream_probe_tcp.h"
+ #include <picoquic_config.h>
+ #include <picosocks.h>
+ #include <unistd.h>
+@@ -84,7 +85,11 @@
+     for (unsigned accepted = 0; accepted < 16 && c->count < SS_STREAM_LIMIT; accepted++) {
+         int fd = accept(r->loop.listener, NULL, NULL);
+         if (fd < 0) break;
+-        if (ss_nonblock(fd) || !ss_stream_create(c, fd, UINT64_MAX)) close(fd);
++        if (
++#ifdef DMSG_PROBE_TCP_NODELAY
++            ss_probe_tcp_nodelay(fd) ||
++#endif
++            ss_nonblock(fd) || !ss_stream_create(c, fd, UINT64_MAX)) close(fd);
+         else c->last_activity = now;
+     }
+     ss_conn_service(c, now);
+diff --git a/src/slipstream_server_runtime.c b/src/slipstream_server_runtime.c
+--- a/src/slipstream_server_runtime.c
++++ b/src/slipstream_server_runtime.c
+@@ -1,6 +1,7 @@
+ #include "slipstream.h"
+ #include "slipstream_runtime.h"
+ #include "slipstream_sockloop.h"
++#include "slipstream_probe_tcp.h"
+ #include "slipstream_server_cc.h"
+ #include <picoquic_config.h>
+ #include <signal.h>
+@@ -44,7 +45,11 @@
+     if (!stream && (event == picoquic_callback_stream_data || event == picoquic_callback_stream_fin)) {
+         int fd = socket(c->target.ss_family, SOCK_STREAM, 0);
+         ss_stream *s = NULL;
+-        if (fd >= 0 && !ss_nonblock(fd)) s = ss_stream_create(c, fd, id);
++        if (fd >= 0 &&
++#ifdef DMSG_PROBE_TCP_NODELAY
++            !ss_probe_tcp_nodelay(fd) &&
++#endif
++            !ss_nonblock(fd)) s = ss_stream_create(c, fd, id);
+         if (!s) {
+             if (fd >= 0) close(fd);
+             picoquic_reset_stream(cnx, id, SLIPSTREAM_INTERNAL_ERROR);
+diff --git a/meson.options b/meson.options
+--- a/meson.options
++++ b/meson.options
+@@ -1,3 +1,5 @@
+ # Enable picoquic-log
+ option('build_loglib', type : 'boolean', value: false)
+-
++
++# Disposable TCP socket experiment; production/default builds remain opt-out.
++option('probe_tcp_nodelay', type: 'boolean', value: false)
+diff --git a/meson.build b/meson.build
+--- a/meson.build
++++ b/meson.build
+@@ -127,3 +127,8 @@
++probe_tcp_args = []
++if get_option('probe_tcp_nodelay')
++  probe_tcp_args += ['-DDMSG_PROBE_TCP_NODELAY=1']
++endif
++
+ # The final client executable
+ client_exe = executable(
+   'slipstream-client',
+@@ -131,5 +136,6 @@
+   dependencies: slipstream_cli_deps,
+   include_directories: include_dirs,
+   link_args: link_args,
++  c_args: probe_tcp_args,
+   build_by_default: true,
+ )
+@@ -141,5 +147,6 @@
+   dependencies: slipstream_cli_deps,
+   include_directories: include_dirs,
+   link_args: link_args,
++  c_args: probe_tcp_args,
+   build_by_default: true,
+ )

@@ -6,6 +6,7 @@ description = "dmsg client core: pinned DNS transport, unified auth, sealed loca
 
 [features]
 voice-probe = ["dep:dmsg-srtp-sys"]
+voice-probe-tcp-nodelay = ["voice-probe", "slipstream-sys/probe-tcp-nodelay"]
 
 [dependencies]
 tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "io-util", "time", "sync"] }
