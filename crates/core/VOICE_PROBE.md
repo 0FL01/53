@@ -679,3 +679,63 @@ Capacity and F0 are declared, not measured recursive-DNS service; no QPS, latest
 long-run, common-clock acoustic or human listening acceptance follows from this
 plumbing result. Main, identity, native pin/scheduler and device wall clocks remain
 unchanged. Gate fixtures and microphone grants remain only for authorized tests.
+
+### Source collection, bounded render preparation and sink qualification
+
+A held decode operation owns the render slot, not the assembled source frame.
+The actor now collects into that original free source frame while decode runs;
+encode/result ownership, the four160-sample input ring, full-frame/pending/commit
+guards and the40ms additional-age limit are unchanged. Deterministic15/25/35ms
+held-decode cases previously lost640 valid capture samples; the corrected slot
+ownership collects them without increasing memory or moving source deadlines.
+
+Present authenticated packets may start computation with a20ms compute reserve
+inside the original80ms timeline. Missing packets retain the10ms preparation
+reserve. Native pulls gate each next untransferred sample against its original
+source time and the actual rate-aware sink lead; earlier computation cannot play
+early, move the immutable frame end or rescue an expired completion.
+
+`last_render_expiry` is one optional bounded diagnostic, not a history queue. It
+records queued versus completion expiry, publication/codec/pull offsets, transferred
+and discarded samples, original frame duration and last declared sink state. All
+times are local monotonic offsets; returned native PCM is not proof of AudioTrack
+acceptance or acoustic presentation. The latest frozen running snapshot retains
+active evidence even if later teardown replaces the record. Earlier intermittent
+Moto320-sample tail expiry is not declared causally resolved: subsequent8s/16s
+local checks have no expiry, but the old failure remains recorded.
+
+The optional local duration argument `probe_local_duration_seconds` accepts8–16s
+(default8), retaining strict active zero-render-drop and platform actuator checks.
+One new exact source diagnostic, `foregroundMicrophoneSourceDiagnosticOnlyInGatePackage`,
+compares6s MIC then6s VOICE_COMMUNICATION with the existing effects in a visible
+gate-only host. It emits only counters, route/effect/timestamp and cleanup evidence;
+both-zero input fails. One actual Mi result has89802 nonzero MIC samples but zero
+processed samples, despite enabled effects and hardware progress. The sequential
+source/effect comparison is not isolated AEC/NS causality or voice acceptance, and
+the original live gate still requires a real nonzero microphone signal.
+
+Initial AudioTrack calibration now qualifies two adjacent≥10s hardware spans over
+at least20s. Their slopes must agree within one-frame endpoint uncertainty. A
+reproduced18.34ms startup pause previously froze approximately−919ppm and made a
+steady16kHz sink unusable; the contaminated window is now rejected and a subsequent
+steady window calibrates without rebasing an established ratio. Supported frequency,
+freshness, actuator, jitter, queue and physical assertions are unchanged.
+
+Checks:110 focused,133 JVM and complete native/debug/release/instrumentation builds
+pass. Workspace default-native checks pass365 tests plus the separately implemented
+TCP seam test; two existing explicit native ignores remain unchanged. A120s actual
+Moto/Mi pair with synthetic50k framed-ingress service and qualified sink clocks
+passes both clock/lifecycle/cleanup gates, with the following frozen counters:
+
+| Endpoint | Decoded / late / PLC | Capture ready→running | Render expiry | Already late at Noise / post-Noise crossing |
+| --- | --- | --- | --- | --- |
+| Moto | 2997 /4 /4 | 27520→28800 | 0 | 2 /0 |
+| Mi | 2757 /241 /243 | 3200→3200 | 0 | 239 /0 |
+
+Moto additional loss is1280 samples; Mi delivery remains variable and most lateness
+precedes completed Rust Noise authentication. The earlier comparable trace had
+36 Mi late packets, so neither clock/lifecycle PASS nor this comparison qualifies
+the profile. Service/capacity/F0 remain synthetic or declared; no common-clock
+acoustic, source-active loss, listening, measured recursive capacity or latest
+long-pair result is claimed. Device clocks/timezones, Main, pin and scheduler remain
+untouched. The next TCP-only candidate is opt-in and remains a causal experiment.

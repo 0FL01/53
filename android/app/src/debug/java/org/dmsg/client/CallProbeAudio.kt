@@ -231,6 +231,35 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
                 }
                 clean.put(field, bins)
             }
+        if (source.isNull("last_render_expiry")) {
+            clean.put("last_render_expiry", JSONObject.NULL)
+        } else {
+            val trace = source.getJSONObject("last_render_expiry")
+            val expiry = JSONObject()
+            val kind = trace.getString("kind")
+            check(kind == "queued" || kind == "completion", "invalid_native_render_expiry")
+            expiry.put("kind", kind)
+            listOf("publication_vs_start_us", "first_pull_vs_start_us", "last_pull_vs_start_us")
+                .forEach { field ->
+                    check(trace.has(field), "invalid_native_render_expiry")
+                    expiry.put(field, if (trace.isNull(field)) JSONObject.NULL else trace.getLong(field))
+                }
+            val codecDuration = if (trace.isNull("codec_duration_us")) null else trace.getLong("codec_duration_us")
+            check(trace.has("codec_duration_us") && (codecDuration == null || codecDuration >= 0),
+                "invalid_native_render_expiry")
+            expiry.put("codec_duration_us", codecDuration ?: JSONObject.NULL)
+            listOf("successful_pull_calls", "initial_samples", "transferred_samples", "discarded_samples",
+                "source_frame_duration_us", "sink_queue_samples").forEach { field ->
+                val value = trace.getLong(field)
+                check(value >= 0, "invalid_native_render_expiry")
+                expiry.put(field, value)
+            }
+            expiry.put("expiry_vs_end_us", trace.getLong("expiry_vs_end_us"))
+            val sinkRate = trace.getLong("sink_rate_ppb")
+            check(sinkRate in -1_000_000L..1_000_000L, "invalid_native_render_expiry")
+            expiry.put("sink_rate_ppb", sinkRate)
+            clean.put("last_render_expiry", expiry)
+        }
         clean.put("ready", source.getBoolean("ready")).put("dns_carrier", source.getBoolean("dns_carrier"))
         clean.put("failed", source.getBoolean("failed")).put("stopped", source.getBoolean("stopped"))
         clean.put("capture_clock_calibrated", source.getBoolean("capture_clock_calibrated"))

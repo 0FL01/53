@@ -25,6 +25,9 @@ use zeroize::{Zeroize, Zeroizing};
 /// Fixed early missing-packet preparation allowance, not a render/skip SLA.
 pub const DECODE_WRITE_PREPARATION_MS: u64 = 10;
 const PREPARATION: Duration = Duration::from_millis(DECODE_WRITE_PREPARATION_MS);
+// Bounded compute headroom for authenticated PRESENT packets. It is not a
+// missing-packet retirement allowance or a later presentation/expiry deadline.
+const KNOWN_PACKET_COMPUTE: Duration = Duration::from_millis(20);
 const SAMPLE_NS: u64 = 1_000_000_000 / 16_000;
 // Application backlog above the frozen observed initial hardware-age floor.
 const CAPTURE_MAX_AGE: Duration = Duration::from_millis(40);
@@ -41,6 +44,49 @@ fn observe_duration(buckets: &mut [u64; 8], duration: Duration) {
 }
 #[cfg(any(target_os = "android", test))]
 const CAPTURE_CALIBRATION_BATCHES: u8 = 20;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RenderExpiryKind {
+    Queued,
+    Completion,
+}
+
+/// One local monotonic observation, not AudioTrack submission or presentation.
+/// Signed differences are truncated toward zero to microseconds. Unknown times
+/// remain null; no absolute timestamp, source identifier or PCM is serialized.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RenderExpiry {
+    pub kind: RenderExpiryKind,
+    pub publication_vs_start_us: Option<i64>,
+    pub codec_duration_us: Option<u64>,
+    pub first_pull_vs_start_us: Option<i64>,
+    pub last_pull_vs_start_us: Option<i64>,
+    pub successful_pull_calls: u64,
+    pub expiry_vs_end_us: i64,
+    pub initial_samples: u64,
+    /// Samples returned by successful native pulls, not hardware-consumed PCM.
+    pub transferred_samples: u64,
+    pub discarded_samples: u64,
+    pub source_frame_duration_us: u64,
+    /// Last declared values read at accounting, not a new hardware observation.
+    pub sink_queue_samples: u64,
+    pub sink_rate_ppb: i64,
+}
+
+fn relative_micros(at: Instant, reference: Instant) -> i64 {
+    let distance = if at >= reference {
+        at - reference
+    } else {
+        reference - at
+    };
+    let magnitude = distance.as_micros().min(i64::MAX as u128) as i64;
+    if at >= reference {
+        magnitude
+    } else {
+        -magnitude
+    }
+}
 
 #[derive(Clone, Serialize)]
 pub struct Stats {
@@ -87,6 +133,7 @@ pub struct Stats {
     pub plc_before_nominal_due_slots: u64,
     pub skipped_playout_slots: u64,
     pub expired_render_samples: u64,
+    pub last_render_expiry: Option<RenderExpiry>,
     pub decode_after_nominal_due_slots: u64,
     pub max_decode_us: u64,
     /// Fixed duration bins bracket only the named synchronous operation.
@@ -157,6 +204,7 @@ impl Default for Stats {
             plc_before_nominal_due_slots: 0,
             skipped_playout_slots: 0,
             expired_render_samples: 0,
+            last_render_expiry: None,
             decode_after_nominal_due_slots: 0,
             max_decode_us: 0,
             encode_duration_bins: [0; 8],
@@ -369,51 +417,152 @@ impl SendPhase {
 
 struct RenderQueue {
     pcm: VecDeque<i16>,
+    start_due: Option<Instant>,
     end_due: Option<Instant>,
     source_end: Option<u64>,
+    frame_samples: usize,
+    rate: Rate,
+    published_at: Option<Instant>,
+    codec_duration: Option<Duration>,
+    first_pull: Option<Instant>,
+    last_pull: Option<Instant>,
+    successful_pull_calls: u64,
 }
 
 impl RenderQueue {
     fn new() -> Self {
         Self {
             pcm: VecDeque::with_capacity(640),
+            start_due: None,
             end_due: None,
             source_end: None,
+            frame_samples: 0,
+            rate: Rate::default(),
+            published_at: None,
+            codec_duration: None,
+            first_pull: None,
+            last_pull: None,
+            successful_pull_calls: 0,
         }
     }
 
+    #[cfg(test)]
     fn enqueue(&mut self, due: Instant, pcm: Vec<i16>) {
+        self.enqueue_observed(due, pcm, None, None);
+    }
+
+    fn enqueue_observed(
+        &mut self,
+        due: Instant,
+        pcm: Vec<i16>,
+        published_at: Option<Instant>,
+        codec_duration: Option<Duration>,
+    ) {
         debug_assert!(self.pcm.is_empty()); // One decoded frame, including PLC.
+        self.start_due = Some(due);
         self.end_due = Some(due + Duration::from_nanos(pcm.len() as u64 * SAMPLE_NS));
+        self.frame_samples = pcm.len();
+        self.rate = Rate::default();
+        self.published_at = published_at;
+        self.codec_duration = codec_duration;
+        self.first_pull = None;
+        self.last_pull = None;
+        self.successful_pull_calls = 0;
         self.pcm.extend(pcm);
     }
 
     // JNI transfers whole batches, not samples at their nominal presentation
     // instants. Expire the remaining frame at its immutable source end, rather
     // than trimming prefixes using the unrelated early-PLC preparation reserve.
+    #[cfg(test)]
     fn expire(&mut self, now: Instant) -> usize {
-        let Some(end) = self.end_due else {
-            return 0;
-        };
-        if now < end {
-            return 0;
-        }
-        let count = self.pcm.len();
-        self.clear();
-        count
+        self.expire_observed(now).0
     }
 
+    fn expire_observed(&mut self, now: Instant) -> (usize, Option<RenderExpiry>) {
+        let Some(end) = self.end_due else {
+            return (0, None);
+        };
+        if now < end {
+            return (0, None);
+        }
+        let count = self.pcm.len();
+        let trace = (count != 0).then(|| {
+            let start = self.start_due.expect("probe render source start");
+            RenderExpiry {
+                kind: RenderExpiryKind::Queued,
+                publication_vs_start_us: self.published_at.map(|at| relative_micros(at, start)),
+                codec_duration_us: self
+                    .codec_duration
+                    .map(|duration| duration.as_micros().min(u128::from(u64::MAX)) as u64),
+                first_pull_vs_start_us: self.first_pull.map(|at| relative_micros(at, start)),
+                last_pull_vs_start_us: self.last_pull.map(|at| relative_micros(at, start)),
+                successful_pull_calls: self.successful_pull_calls,
+                expiry_vs_end_us: relative_micros(now, end),
+                initial_samples: self.frame_samples as u64,
+                transferred_samples: (self.frame_samples - count) as u64,
+                discarded_samples: count as u64,
+                source_frame_duration_us: end
+                    .saturating_duration_since(start)
+                    .as_micros()
+                    .min(u128::from(u64::MAX)) as u64,
+                sink_queue_samples: 0,
+                sink_rate_ppb: 0,
+            }
+        });
+        self.clear();
+        (count, trace)
+    }
+
+    #[cfg(test)]
     fn pull(&mut self, now: Instant, pcm: &mut [i16]) -> (usize, usize) {
-        let expired = self.expire(now);
+        self.pull_with_lead(now, Duration::ZERO, pcm)
+    }
+
+    #[cfg(test)]
+    fn pull_with_lead(&mut self, now: Instant, lead: Duration, pcm: &mut [i16]) -> (usize, usize) {
+        let (count, expired, _) = self.pull_observed(now, lead, pcm);
+        (count, expired)
+    }
+
+    fn pull_observed(
+        &mut self,
+        now: Instant,
+        lead: Duration,
+        pcm: &mut [i16],
+    ) -> (usize, usize, Option<RenderExpiry>) {
+        let (expired, trace) = self.expire_observed(now);
+        if self.pcm.is_empty() {
+            return (0, expired, trace);
+        }
+        // Computing early must not present early. Project the next untransferred
+        // sample from the immutable frame start, including through partial pulls.
+        let offset = self.frame_samples - self.pcm.len();
+        let start = self.start_due.unwrap() + self.rate.duration(offset as u64 * 3);
+        if now + lead < start {
+            return (0, expired, trace);
+        }
         let count = pcm.len().min(self.pcm.len());
         for sample in &mut pcm[..count] {
             *sample = self.pcm.pop_front().unwrap();
         }
+        if count != 0 {
+            self.first_pull.get_or_insert(now);
+            self.last_pull = Some(now);
+            self.successful_pull_calls = self.successful_pull_calls.saturating_add(1);
+        }
         if self.pcm.is_empty() {
+            self.start_due = None;
             self.end_due = None;
             self.source_end = None;
+            self.frame_samples = 0;
+            self.published_at = None;
+            self.codec_duration = None;
+            self.first_pull = None;
+            self.last_pull = None;
+            self.successful_pull_calls = 0;
         }
-        (count, expired)
+        (count, expired, trace)
     }
 
     fn clear(&mut self) {
@@ -421,8 +570,15 @@ impl RenderQueue {
             sample.zeroize();
         }
         self.pcm.clear();
+        self.start_due = None;
         self.end_due = None;
         self.source_end = None;
+        self.frame_samples = 0;
+        self.published_at = None;
+        self.codec_duration = None;
+        self.first_pull = None;
+        self.last_pull = None;
+        self.successful_pull_calls = 0;
     }
 }
 
@@ -458,11 +614,21 @@ impl Port {
     fn clear(&self) {
         self.render.lock().expect("probe render owner").clear();
     }
-    fn expired_render(&self, samples: usize) {
+    fn expired_render(&self, samples: usize, trace: Option<RenderExpiry>) {
         if samples != 0 {
+            // The caller builds the value under the render lock, then releases
+            // it before accounting. Never reacquire render from the stats path.
+            let trace = trace.map(|mut trace| {
+                trace.sink_queue_samples = self.sink_queue.load(Ordering::Relaxed);
+                trace.sink_rate_ppb = self.sink_rate.load(Ordering::Relaxed);
+                trace
+            });
             self.stats(|stats| {
                 stats.expired_render_samples += samples as u64;
                 stats.dropped_render += samples as u64;
+                if let Some(trace) = trace {
+                    stats.last_render_expiry = Some(trace);
+                }
             });
         }
     }
@@ -612,15 +778,23 @@ impl AudioPort {
     }
 
     pub(crate) fn pull(&self, pcm: &mut [i16]) -> usize {
+        self.pull_at(Instant::now(), pcm)
+    }
+
+    fn pull_at(&self, now: Instant, pcm: &mut [i16]) -> usize {
         if pcm.is_empty() || pcm.len() > 160 || self.port.closed.load(Ordering::Relaxed) {
             return 0;
         }
         let Ok(mut queue) = self.port.render.try_lock() else {
             return 0;
         };
-        let (count, expired) = queue.pull(Instant::now(), pcm);
+        let lead = clock::sink_lead(
+            self.port.sink_queue.load(Ordering::Relaxed) as usize,
+            self.port.sink_rate.load(Ordering::Relaxed),
+        );
+        let (count, expired, trace) = queue.pull_observed(now, lead, pcm);
         drop(queue);
-        self.port.expired_render(expired);
+        self.port.expired_render(expired, trace);
         count
     }
 
@@ -1210,6 +1384,28 @@ impl CaptureFrame {
         self.pcm.len() == profile.samples()
     }
 
+    fn can_ingest(
+        &self,
+        profile: LiveProfile,
+        flight: Option<&CodecFlight>,
+        admission: &MediaAdmission,
+        outgoing: &mpsc::Sender<SendRequest>,
+        commits: usize,
+    ) -> bool {
+        // Decode owns only the render slot. Its held operation must not age
+        // valid input in the ring while the original source frame is free.
+        // Encode (including its unconsumed result) still owns that source slot.
+        let source_free = match flight {
+            None => true,
+            Some(flight) => matches!(flight.source.as_ref(), Some(CodecSource::Decode(_))),
+        };
+        source_free
+            && !self.full(profile)
+            && admission.pending.is_none()
+            && outgoing.capacity() > 0
+            && commits < 2
+    }
+
     fn ingest(&mut self, captured: Captured, ready: bool, now: Instant, profile: LiveProfile) {
         debug_assert!(!self.full(profile));
         let (hardware_age, capture_age) = captured.ages(now);
@@ -1320,9 +1516,14 @@ impl PlayoutClock {
 
     fn can_prepare(&self, now: Instant, sink: usize, available: bool, ppb: i64) -> bool {
         let lead = clock::sink_lead(sink, ppb);
-        // Sink lead permits preparing PRESENT audio early. It cannot establish
-        // loss. Missing audio gets only the fixed decode/write allowance.
-        now + lead >= self.due && (available || now + PREPARATION >= self.due)
+        if available {
+            // The existing native frame may hold computed PCM until its actual
+            // sink handoff is due. No added PCM/job queue or presentation delay.
+            now + lead + KNOWN_PACKET_COMPUTE >= self.due
+        } else {
+            // Preserve the original missing-packet decision and 10ms allowance.
+            now + lead >= self.due && now + PREPARATION >= self.due
+        }
     }
 }
 
@@ -1386,7 +1587,10 @@ impl ReceiveState {
             self.playout.as_mut().unwrap().due = due;
             let mut render = port.render.lock().expect("probe render owner");
             if let Some(timestamp) = render.source_end {
+                render.start_due =
+                    Some(self.source_due(timestamp - render.frame_samples as u64 * 3));
                 render.end_due = Some(self.source_due(timestamp));
+                render.rate = self.remote_clock.rate;
             }
         }
         *port
@@ -1565,8 +1769,12 @@ impl ReceiveState {
         port: &Port,
     ) -> bool {
         self.synchronize_clock(now, port);
-        let expired = port.render.lock().expect("probe render owner").expire(now);
-        port.expired_render(expired);
+        let (expired, trace) = port
+            .render
+            .lock()
+            .expect("probe render owner")
+            .expire_observed(now);
+        port.expired_render(expired, trace);
         let Some(clock) = &mut self.playout else {
             return false;
         };
@@ -1686,19 +1894,47 @@ impl ReceiveState {
             stats.decode_after_nominal_due_slots += u64::from(completed > due);
         });
         if self.playout.as_ref().unwrap().cursor > work.end || completed >= end_due {
-            port.expired_render(output.len());
+            let samples = output.len();
+            port.expired_render(
+                samples,
+                Some(RenderExpiry {
+                    kind: RenderExpiryKind::Completion,
+                    publication_vs_start_us: Some(relative_micros(completed, due)),
+                    codec_duration_us: Some(duration.as_micros().min(u128::from(u64::MAX)) as u64),
+                    first_pull_vs_start_us: None,
+                    last_pull_vs_start_us: None,
+                    successful_pull_calls: 0,
+                    expiry_vs_end_us: relative_micros(completed, end_due),
+                    initial_samples: samples as u64,
+                    transferred_samples: 0,
+                    discarded_samples: samples as u64,
+                    source_frame_duration_us: end_due
+                        .saturating_duration_since(due)
+                        .as_micros()
+                        .min(u128::from(u64::MAX))
+                        as u64,
+                    sink_queue_samples: 0,
+                    sink_rate_ppb: 0,
+                }),
+            );
             return Ok(()); // Zeroizing output never reaches AudioPort.
         }
         let mut render = port.render.lock().expect("probe render owner");
         if !render.pcm.is_empty() {
             return Err("probe decoded slot already occupied".into());
         }
-        render.enqueue(due, std::mem::take(&mut *output));
+        render.enqueue_observed(
+            due,
+            std::mem::take(&mut *output),
+            Some(completed),
+            Some(duration),
+        );
         render.end_due = Some(end_due);
         render.source_end = Some(work.end);
-        let expired = render.expire(completed);
+        render.rate = self.remote_clock.rate;
+        let (expired, trace) = render.expire_observed(completed);
         drop(render);
-        port.expired_render(expired);
+        port.expired_render(expired, trace);
         Ok(())
     }
 
@@ -2138,9 +2374,9 @@ async fn endpoint_owned(
                 port.stats(|stats| stats.max_sender_phase_advance_us = stats.max_sender_phase_advance_us.max(phase));
                 source_index += 1;
             }
-            // Leave subsequent PCM in the original bounded capture ring while
-            // its sole encoded packet waits. RX/control/cancel remain selectable.
-            captured = input.recv(), if flight.is_none() && !capture.full(profile) && admission.pending.is_none() && media.outgoing.capacity() > 0 && commits.len() < 2 => {
+            // Collect into the original source frame even during decode, but
+            // leave subsequent PCM in the ring while its source slot is owned.
+            captured = input.recv(), if capture.can_ingest(profile, flight.as_ref(), &admission, &media.outgoing, commits.len()) => {
                 let Some(captured) = captured else { break Err("probe capture owner closed".into()); };
                 if let Some(source_at) = captured.source_time() {
                     local_clock.observe(captured.position, source_at, captured.capture_clock.map(|span| Rate { ticks: span.frames * 3, ns: span.elapsed_ns }));
@@ -2395,6 +2631,804 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn known_decode_compute_precedes_empty_sink_handoff_without_moving_presentation() {
+        let profile = LiveProfile::Ms40;
+        let mut results = Vec::new();
+        for head_quantum in [160u64, 320] {
+            for write_limit in [160usize, 80] {
+                for stalled in [false, true] {
+                    let origin = Instant::now();
+                    let at = |ns| origin + Duration::from_nanos(ns);
+                    let mut port = test_port();
+                    let (input, mut incoming) = mpsc::channel(4);
+                    port.input = input;
+                    let port = Arc::new(port);
+                    let audio = AudioPort { port: port.clone() };
+                    let mut capture = CaptureFrame::new(640, port.clone());
+                    let mut received = test_received();
+                    let mut feedback = packet::Feedback::default();
+                    received.admit(0, &opus40(), origin, profile, &mut feedback, &port);
+                    let mut owner = codec::Owner::start(profile, None).await.unwrap();
+                    let mut flight: Option<CodecFlight> = None;
+                    let mut reset = false;
+                    let mut admission = MediaAdmission::default();
+                    let mut budget = packet::Budget::new(50_000, 144, origin);
+                    let (outgoing, mut requests) = mpsc::channel(1);
+                    let mut finish = None;
+                    let mut decode_started = None;
+                    let mut published = None;
+                    let mut first_write = None;
+                    let mut first_presentation = None;
+                    let mut hardware = VecDeque::new();
+                    let (mut submitted, mut consumed) = (0u64, 0u64);
+                    let mut consumption_remainder = 0u64;
+                    let mut pending = VecDeque::new(); // The renderer's existing <=160 batch.
+                    let mut next_sample = 0usize;
+                    let mut max_native_hold = 0u64;
+                    for ns in (0..=160_000_000u64).step_by(50_000) {
+                        let now = at(ns);
+                        // Actual consumption and independently quantized head readback.
+                        // Tags preserve each sample's source presentation time.
+                        if hardware.is_empty() {
+                            consumption_remainder = 0;
+                        } else {
+                            consumption_remainder += 50_000 * 16_000;
+                            while consumption_remainder >= 1_000_000_000 {
+                                consumption_remainder -= 1_000_000_000;
+                                let Some((sample, _pcm)) = hardware.pop_front() else {
+                                    consumption_remainder = 0;
+                                    break;
+                                };
+                                assert!(
+                                    ns >= 80_000_000 + sample as u64 * SAMPLE_NS,
+                                    "early actual presentation: ns={ns} sample={sample}"
+                                );
+                                consumed += 1;
+                            }
+                        }
+                        let head = consumed / head_quantum * head_quantum;
+                        audio.sink_queued((submitted - head) as usize);
+                        let mut wake = ns % 10_000_000 == 0;
+                        if ns <= 30_000_000 && ns % 10_000_000 == 0 {
+                            assert!(audio.push_at(
+                                &[1; 160],
+                                ns / 10_000_000 * 160,
+                                now,
+                                now,
+                                None,
+                                None
+                            ));
+                            wake = true;
+                        }
+                        if finish.is_some_and(|due| ns >= due) {
+                            let end = finish.take().unwrap();
+                            let decode = matches!(
+                                flight.as_ref().unwrap().source.as_ref(),
+                                Some(CodecSource::Decode(_))
+                            );
+                            let mut completed = owner.completed().await.unwrap();
+                            completed.finished = at(end);
+                            completed.duration =
+                                Duration::from_micros(if decode { 12_151 } else { 2_000 });
+                            apply_codec_completion(
+                                completed,
+                                &mut flight,
+                                &mut received,
+                                &mut admission,
+                                &mut feedback,
+                                0,
+                                now,
+                                profile,
+                                &port,
+                            )
+                            .unwrap();
+                            if decode {
+                                published = Some(ns);
+                            }
+                            wake = true;
+                        }
+                        if admission
+                            .wake_at(&mut budget, now, profile)
+                            .is_some_and(|due| now >= due)
+                        {
+                            if let Some((waiting, permit)) =
+                                admission.take_ready(&mut budget, now, profile, &port)
+                            {
+                                permit.send(SendRequest {
+                                    opcode: OP_RTP,
+                                    payload: waiting.opus.to_vec(),
+                                    deadline: Some(waiting.deadline),
+                                    committed: None,
+                                });
+                                requests.try_recv().unwrap();
+                                admission.committed(now, 640);
+                            }
+                            wake = true;
+                        }
+                        if wake {
+                            // Declared finite input: no imaginary PLC after its last frame.
+                            if received.playout.as_ref().unwrap().cursor < 1920 {
+                                dispatch_codec(
+                                    now,
+                                    profile,
+                                    &mut received,
+                                    &mut capture,
+                                    &admission,
+                                    &mut feedback,
+                                    &mut reset,
+                                    &mut owner,
+                                    &mut flight,
+                                    &outgoing,
+                                    0,
+                                    &port,
+                                )
+                                .unwrap();
+                            } else {
+                                received.maintain_playout(now, profile, &mut feedback, &port);
+                            }
+                            while capture.can_ingest(
+                                profile,
+                                flight.as_ref(),
+                                &admission,
+                                &outgoing,
+                                0,
+                            ) {
+                                let Ok(batch) = incoming.try_recv() else {
+                                    break;
+                                };
+                                capture.ingest(batch, true, now, profile);
+                                dispatch_codec(
+                                    now,
+                                    profile,
+                                    &mut received,
+                                    &mut capture,
+                                    &admission,
+                                    &mut feedback,
+                                    &mut reset,
+                                    &mut owner,
+                                    &mut flight,
+                                    &outgoing,
+                                    0,
+                                    &port,
+                                )
+                                .unwrap();
+                            }
+                        }
+                        if flight.is_some() && finish.is_none() {
+                            let decode = matches!(
+                                flight.as_ref().unwrap().source.as_ref(),
+                                Some(CodecSource::Decode(_))
+                            );
+                            if decode {
+                                decode_started = Some(ns);
+                            }
+                            finish = Some(ns + if decode { 12_151_000 } else { 2_000_000 });
+                        }
+                        // Same bounded <=160 ownership through partial nonblocking writes.
+                        // A controlled 24ms renderer stall is separate from codec service.
+                        if ns % 2_000_000 == 0
+                            && !(stalled && (98_000_000..122_000_000).contains(&ns))
+                        {
+                            let depth = (submitted - head) as usize;
+                            if depth + pending.len().max(160) <= 640 {
+                                if pending.is_empty() {
+                                    let mut pcm = [0; 160];
+                                    let count = audio.pull_at(now, &mut pcm);
+                                    if count != 0 {
+                                        max_native_hold =
+                                            max_native_hold.max(ns - published.unwrap());
+                                        for value in &pcm[..count] {
+                                            pending.push_back((next_sample, *value));
+                                            next_sample += 1;
+                                        }
+                                    }
+                                }
+                                for _ in 0..pending.len().min(write_limit) {
+                                    let sample = pending.pop_front().unwrap();
+                                    if hardware.is_empty() {
+                                        first_presentation.get_or_insert(ns);
+                                        assert!(
+                                            ns >= 80_000_000 + sample.0 as u64 * SAMPLE_NS,
+                                            "early empty-sink write: ns={ns} sample={}",
+                                            sample.0
+                                        );
+                                    }
+                                    first_write.get_or_insert(ns);
+                                    hardware.push_back(sample);
+                                    submitted += 1;
+                                }
+                            }
+                        }
+                        assert!(incoming.len() <= 4 && capture.pcm.len() <= 640);
+                        assert!(
+                            hardware.len() <= 640
+                                && submitted - head <= 640
+                                && pending.len() <= 160
+                        );
+                        assert!(port.render.lock().unwrap().pcm.len() <= 640);
+                        assert_eq!(owner.busy(), flight.is_some());
+                        assert_eq!(received.first_playout, Some((0, at(80_000_000))));
+                    }
+                    let stats = port.snapshot();
+                    assert_eq!(
+                        (
+                            stats.late_packets,
+                            stats.plc_slots,
+                            stats.future_rejected_packets
+                        ),
+                        (0, 0, 0)
+                    );
+                    assert_eq!(stats.dropped_capture, 0);
+                    assert_eq!((stats.encoded_packets, stats.decoded_packets), (1, 1));
+                    assert!(hardware.is_empty() && pending.is_empty());
+                    assert_eq!(submitted, consumed);
+                    assert_eq!(submitted + stats.expired_render_samples, 640);
+                    results.push((
+                        head_quantum,
+                        write_limit,
+                        stalled,
+                        decode_started.unwrap(),
+                        published.unwrap(),
+                        first_write.unwrap(),
+                        first_presentation.unwrap(),
+                        stats.expired_render_samples,
+                        max_native_hold,
+                    ));
+                    owner.close().unwrap();
+                }
+            }
+        }
+        assert!(
+            results.iter().all(|row| row.3 == 60_000_000
+                && row.4 == 72_200_000
+                && row.5 == 80_000_000
+                && row.6 == 80_000_000
+                && row.7 == 0
+                && row.8 == if row.1 == 160 { 13_800_000 } else { 19_800_000 }),
+            "first source due must remain80ms, no active tail expiry: {results:?}"
+        );
+    }
+
+    #[test]
+    fn known_compute_headroom_never_becomes_a_missing_packet_reserve() {
+        let origin = Instant::now();
+        let due = origin + Duration::from_millis(80);
+        let clock = PlayoutClock { cursor: 0, due };
+        let early = due - KNOWN_PACKET_COMPUTE;
+        assert!(!clock.can_prepare(early - Duration::from_nanos(1), 0, true, 0));
+        assert!(clock.can_prepare(early, 0, true, 0));
+        for samples in [0usize, 160, 640] {
+            assert!(!clock.can_prepare(early, samples, false, 0));
+            assert!(!clock.can_prepare(
+                due - PREPARATION - Duration::from_nanos(1),
+                samples,
+                false,
+                0
+            ));
+            assert_eq!(
+                clock.can_prepare(due - PREPARATION, samples, false, 0),
+                samples >= 160
+            );
+        }
+        // Actual lead and compute headroom combine, but cannot change due.
+        assert!(clock.can_prepare(due - Duration::from_millis(60), 640, true, 0));
+        assert_eq!(clock.due, due);
+    }
+
+    #[test]
+    fn computed_pcm_handoff_uses_remaining_source_samples_and_actual_sink_rate() {
+        let profile = LiveProfile::Ms40;
+        for ppm in [-500i64, -100, 0, 100, 500] {
+            for sink_ppb in [-1_000_000i64, 0, 1_000_000] {
+                let origin = Instant::now();
+                let due = origin + Duration::from_millis(80);
+                let port = Arc::new(test_port());
+                let audio = AudioPort { port: port.clone() };
+                let mut received = test_received();
+                let mut feedback = packet::Feedback::default();
+                received.admit(0, &opus40(), origin, profile, &mut feedback, &port);
+                let rate = Rate {
+                    ticks: (48_000 * (1_000_000 + ppm)) as u64,
+                    ns: 1_000_000_000_000_000,
+                };
+                received.remote_clock.rate = rate;
+                received.remote_clock.calibrated = true;
+                received.synchronize_clock(origin, &port);
+                let mut work = received
+                    .prepare_decode(due - KNOWN_PACKET_COMPUTE, profile, &mut feedback, &port)
+                    .unwrap();
+                let output = LiveDecoder::new(profile)
+                    .unwrap()
+                    .decode(work.opus.take().as_ref().unwrap())
+                    .unwrap();
+                received
+                    .apply_decode(
+                        work,
+                        due - Duration::from_micros(7_849),
+                        Duration::from_micros(12_151),
+                        Zeroizing::new(output),
+                        &port,
+                    )
+                    .unwrap();
+                let end = due + rate.duration(1920);
+                assert!(audio.sink_rate(sink_ppb));
+                audio.sink_queued(80);
+                let earliest = due - clock::sink_lead(80, sink_ppb);
+                assert!(earliest >= due - Duration::from_micros(7_849));
+                let mut pcm = [77; 160];
+                assert_eq!(
+                    audio.pull_at(earliest - Duration::from_nanos(1), &mut pcm),
+                    0
+                );
+                assert_eq!(pcm, [77; 160]);
+                assert_eq!(audio.pull_at(earliest, &mut pcm), 160);
+                audio.sink_queued(0);
+                for offset in [160u64, 320, 480] {
+                    let next = due + rate.duration(offset * 3);
+                    assert_eq!(audio.pull_at(next - Duration::from_nanos(1), &mut pcm), 0);
+                    assert_eq!(port.render.lock().unwrap().end_due, Some(end));
+                    assert_eq!(audio.pull_at(next, &mut pcm), 160);
+                }
+                assert!(port.render.lock().unwrap().pcm.is_empty());
+                assert_eq!(audio.pull_at(end, &mut pcm), 0);
+                assert_eq!(received.first_playout, Some((0, due)));
+                let stats = port.snapshot();
+                assert_eq!(
+                    (
+                        stats.dropped_render,
+                        stats.expired_render_samples,
+                        stats.plc_slots
+                    ),
+                    (0, 0, 0)
+                );
+                assert_eq!(stats.decoded_packets, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn early_computation_does_not_rescue_a_stalled_native_tail() {
+        let profile = LiveProfile::Ms40;
+        let origin = Instant::now();
+        let at = |ms| origin + Duration::from_millis(ms);
+        let port = Arc::new(test_port());
+        let audio = AudioPort { port: port.clone() };
+        let mut received = test_received();
+        let mut feedback = packet::Feedback::default();
+        received.admit(0, &opus40(), origin, profile, &mut feedback, &port);
+        let mut work = received
+            .prepare_decode(at(60), profile, &mut feedback, &port)
+            .unwrap();
+        let output = LiveDecoder::new(profile)
+            .unwrap()
+            .decode(work.opus.take().as_ref().unwrap())
+            .unwrap();
+        received
+            .apply_decode(
+                work,
+                at(73),
+                Duration::from_micros(12_151),
+                Zeroizing::new(output),
+                &port,
+            )
+            .unwrap();
+        let mut pcm = [77; 160];
+        assert_eq!(audio.pull_at(at(79), &mut pcm), 0);
+        assert_eq!(pcm, [77; 160]);
+        assert_eq!(audio.pull_at(at(80), &mut pcm), 160);
+        assert_eq!(port.render.lock().unwrap().end_due, Some(at(120)));
+        // A real renderer stall still discards every untransferred stale sample.
+        assert_eq!(audio.pull_at(at(120), &mut pcm), 0);
+        assert_eq!(audio.pull_at(at(121), &mut pcm), 0);
+        let stats = port.snapshot();
+        assert_eq!(
+            (stats.dropped_render, stats.expired_render_samples),
+            (480, 480)
+        );
+        assert_eq!(received.playout.as_ref().unwrap().cursor, 1920);
+        assert_eq!(received.first_playout, Some((0, at(80))));
+    }
+
+    #[test]
+    fn render_expiry_trace_records_partial_pulls_and_only_relative_frame_times() {
+        let profile = LiveProfile::Ms40;
+        let origin = Instant::now();
+        let at = |ms| origin + Duration::from_millis(ms);
+        let port = Arc::new(test_port());
+        let audio = AudioPort { port: port.clone() };
+        assert!(port.snapshot().last_render_expiry.is_none());
+        assert!(serde_json::to_value(port.snapshot()).unwrap()["last_render_expiry"].is_null());
+        let mut received = test_received();
+        let mut feedback = packet::Feedback::default();
+        received.admit(0, &opus40(), origin, profile, &mut feedback, &port);
+        let mut work = received
+            .prepare_decode(at(60), profile, &mut feedback, &port)
+            .unwrap();
+        let output = LiveDecoder::new(profile)
+            .unwrap()
+            .decode(work.opus.take().as_ref().unwrap())
+            .unwrap();
+        received
+            .apply_decode(
+                work,
+                at(73),
+                Duration::from_micros(12_151),
+                Zeroizing::new(output),
+                &port,
+            )
+            .unwrap();
+        let mut pcm = [77; 160];
+        assert_eq!(audio.pull_at(at(79), &mut pcm), 0);
+        assert_eq!(audio.pull_at(at(80), &mut pcm), 160);
+        assert_eq!(audio.pull_at(at(89), &mut pcm), 0);
+        assert_eq!(audio.pull_at(at(90), &mut pcm), 160);
+        assert!(port.snapshot().last_render_expiry.is_none());
+        audio.sink_queued(181);
+        assert!(audio.sink_rate(500_000));
+        pcm.fill(77);
+        assert_eq!(audio.pull_at(at(123), &mut pcm), 0);
+        assert_eq!(pcm, [77; 160]);
+        let snapshot = port.snapshot();
+        assert_eq!(
+            serde_json::to_value(&snapshot).unwrap()["last_render_expiry"],
+            serde_json::json!({
+                "kind": "queued",
+                "publication_vs_start_us": -7_000,
+                "codec_duration_us": 12_151,
+                "first_pull_vs_start_us": 0,
+                "last_pull_vs_start_us": 10_000,
+                "successful_pull_calls": 2,
+                "expiry_vs_end_us": 3_000,
+                "initial_samples": 640,
+                "transferred_samples": 320,
+                "discarded_samples": 320,
+                "source_frame_duration_us": 40_000,
+                "sink_queue_samples": 181,
+                "sink_rate_ppb": 500_000,
+            })
+        );
+        assert_eq!(
+            (snapshot.dropped_render, snapshot.expired_render_samples),
+            (320, 320)
+        );
+        assert_eq!(snapshot.decoded_packets, 1);
+        assert_eq!(received.first_playout, Some((0, at(80))));
+        assert_eq!(received.playout.as_ref().unwrap().cursor, 1920);
+        assert_eq!(audio.pull_at(at(130), &mut pcm), 0);
+        let unchanged = port.snapshot();
+        assert_eq!(unchanged.last_render_expiry, snapshot.last_render_expiry);
+        assert_eq!(unchanged.expired_render_samples, 320);
+    }
+
+    #[test]
+    fn render_expiry_trace_replaces_one_record_without_counting_valid_or_cleared_pcm() {
+        let origin = Instant::now();
+        let at = |ms| origin + Duration::from_millis(ms);
+        let port = Arc::new(test_port());
+        let audio = AudioPort { port: port.clone() };
+        port.render.lock().unwrap().enqueue_observed(
+            at(80),
+            vec![7; 640],
+            Some(at(73)),
+            Some(Duration::from_millis(12)),
+        );
+        let mut pcm = [0; 160];
+        assert_eq!(audio.pull_at(at(121), &mut pcm), 0);
+        let frozen = port.snapshot();
+        let first = frozen.last_render_expiry.as_ref().unwrap();
+        assert_eq!(first.discarded_samples, 640);
+        assert_eq!(first.expiry_vs_end_us, 1_000);
+        assert_eq!(first.source_frame_duration_us, 40_000);
+
+        port.render.lock().unwrap().enqueue_observed(
+            at(160),
+            vec![8; 640],
+            Some(at(153)),
+            Some(Duration::from_millis(12)),
+        );
+        for ms in [160, 170, 180, 190] {
+            assert_eq!(audio.pull_at(at(ms), &mut pcm), 160);
+        }
+        assert_eq!(audio.pull_at(at(200), &mut pcm), 0);
+        assert_eq!(
+            port.snapshot().last_render_expiry,
+            frozen.last_render_expiry
+        );
+        assert_eq!(port.snapshot().expired_render_samples, 640);
+
+        port.render.lock().unwrap().enqueue_observed(
+            at(240),
+            vec![9; 640],
+            Some(at(233)),
+            Some(Duration::from_millis(12)),
+        );
+        assert_eq!(audio.pull_at(at(240), &mut pcm), 160);
+        port.clear(); // Retirement clearing is not a newly observed expiry.
+        assert_eq!(audio.pull_at(at(280), &mut pcm), 0);
+        assert_eq!(
+            port.snapshot().last_render_expiry,
+            frozen.last_render_expiry
+        );
+        assert_eq!(port.snapshot().expired_render_samples, 640);
+
+        let rate = Rate {
+            ticks: 48_024,
+            ns: 1_000_000_000,
+        };
+        let end = at(320) + rate.duration(1920);
+        {
+            let mut render = port.render.lock().unwrap();
+            render.enqueue_observed(
+                at(320),
+                vec![10; 640],
+                Some(at(313)),
+                Some(Duration::from_millis(13)),
+            );
+            render.end_due = Some(end);
+            render.rate = rate;
+        }
+        assert_eq!(audio.pull_at(end + Duration::from_millis(3), &mut pcm), 0);
+        let snapshot = port.snapshot();
+        let replacement = snapshot.last_render_expiry.as_ref().unwrap();
+        assert_eq!(replacement.publication_vs_start_us, Some(-7_000));
+        assert_eq!(replacement.codec_duration_us, Some(13_000));
+        assert_eq!(replacement.source_frame_duration_us, 39_980);
+        assert_eq!(replacement.expiry_vs_end_us, 3_000);
+        assert_eq!(replacement.first_pull_vs_start_us, None);
+        assert_eq!(replacement.last_pull_vs_start_us, None);
+        assert_eq!(replacement.successful_pull_calls, 0);
+        assert_ne!(snapshot.last_render_expiry, frozen.last_render_expiry);
+        assert_eq!(
+            frozen.last_render_expiry.as_ref().unwrap().expiry_vs_end_us,
+            1_000
+        );
+        assert_eq!(
+            (snapshot.dropped_render, snapshot.expired_render_samples),
+            (1280, 1280)
+        );
+    }
+
+    #[test]
+    fn render_expiry_trace_distinguishes_completed_output_and_unknown_fixture_times() {
+        let profile = LiveProfile::Ms40;
+        for publish_ms in [119, 125] {
+            let origin = Instant::now();
+            let at = |ms| origin + Duration::from_millis(ms);
+            let port = Arc::new(test_port());
+            let audio = AudioPort { port: port.clone() };
+            let mut received = test_received();
+            let mut feedback = packet::Feedback::default();
+            received.admit(0, &opus40(), origin, profile, &mut feedback, &port);
+            let mut work = received
+                .prepare_decode(at(60), profile, &mut feedback, &port)
+                .unwrap();
+            let output = LiveDecoder::new(profile)
+                .unwrap()
+                .decode(work.opus.take().as_ref().unwrap())
+                .unwrap();
+            received
+                .apply_decode(
+                    work,
+                    at(publish_ms),
+                    Duration::from_millis(12),
+                    Zeroizing::new(output),
+                    &port,
+                )
+                .unwrap();
+            if publish_ms == 119 {
+                assert!(port.snapshot().last_render_expiry.is_none());
+                assert_eq!(port.render.lock().unwrap().pcm.len(), 640);
+                received.maintain_playout(at(120), profile, &mut feedback, &port);
+            }
+            let snapshot = port.snapshot();
+            let trace = snapshot.last_render_expiry.as_ref().unwrap();
+            assert_eq!(
+                trace.kind,
+                if publish_ms == 119 {
+                    RenderExpiryKind::Queued
+                } else {
+                    RenderExpiryKind::Completion
+                }
+            );
+            assert_eq!(
+                trace.publication_vs_start_us,
+                Some((publish_ms as i64 - 80) * 1000)
+            );
+            assert_eq!(
+                trace.expiry_vs_end_us,
+                if publish_ms == 119 { 0 } else { 5_000 }
+            );
+            assert_eq!(trace.codec_duration_us, Some(12_000));
+            assert_eq!(trace.first_pull_vs_start_us, None);
+            assert_eq!(trace.last_pull_vs_start_us, None);
+            assert_eq!(trace.successful_pull_calls, 0);
+            assert_eq!(
+                (
+                    trace.initial_samples,
+                    trace.transferred_samples,
+                    trace.discarded_samples
+                ),
+                (640, 0, 640)
+            );
+            assert_eq!(trace.source_frame_duration_us, 40_000);
+            assert!(port.render.lock().unwrap().pcm.is_empty());
+            assert_eq!(snapshot.decoded_packets, 1);
+            assert_eq!(snapshot.expired_render_samples, 640);
+            assert_eq!(snapshot.dropped_render, 640);
+            assert_eq!(received.playout.as_ref().unwrap().cursor, 1920);
+
+            // Old synthetic enqueue fixtures have no claimed publication/C-call
+            // observation. An expiry cannot turn those unknowns into a timestamp.
+            port.render.lock().unwrap().enqueue(at(200), vec![7; 640]);
+            let mut pcm = [77; 160];
+            assert_eq!(audio.pull_at(at(240), &mut pcm), 0);
+            assert_eq!(pcm, [77; 160]);
+            let unknown = port.snapshot();
+            let trace = unknown.last_render_expiry.as_ref().unwrap();
+            assert_eq!(trace.kind, RenderExpiryKind::Queued);
+            assert_eq!(trace.publication_vs_start_us, None);
+            assert_eq!(trace.codec_duration_us, None);
+            assert_eq!(trace.first_pull_vs_start_us, None);
+            assert_eq!(trace.last_pull_vs_start_us, None);
+            assert_eq!(unknown.expired_render_samples, 1280);
+            assert_eq!(snapshot.expired_render_samples, 640);
+        }
+    }
+
+    #[tokio::test]
+    async fn held_decode_collects_physical_capture_before_native_wait_expires_it() {
+        let profile = LiveProfile::Ms40;
+        let mut results = Vec::new();
+        for held_ms in [15u64, 25, 35] {
+            let origin = Instant::now();
+            let at = |ms| origin + Duration::from_millis(ms);
+            let (audio, mut input) = test_audio();
+            calibrate_audio(&audio, &[50; 20]);
+            let port = audio.port.clone();
+            let baseline = port.snapshot().dropped_capture;
+            let mut capture = CaptureFrame::new(640, port.clone());
+            let mut received = test_received();
+            let mut feedback = packet::Feedback::default();
+            received.admit(0, &opus40(), origin, profile, &mut feedback, &port);
+            let (entered, entry) = std::sync::mpsc::sync_channel(1);
+            let hold = codec::Hold {
+                kind: codec::Kind::Decode,
+                entered,
+                release: Arc::new((Mutex::new(false), std::sync::Condvar::new())),
+                admitted: Arc::new(AtomicU64::new(0)),
+                controlled: Arc::new(AtomicU64::new(0)),
+            };
+            let mut owner = codec::Owner::start(profile, Some(hold.clone()))
+                .await
+                .unwrap();
+            let mut flight = None;
+            let mut admission = MediaAdmission::default();
+            let (outgoing, _requests) = mpsc::channel(1);
+            let mut reset = false;
+            dispatch_codec(
+                at(80),
+                profile,
+                &mut received,
+                &mut capture,
+                &admission,
+                &mut feedback,
+                &mut reset,
+                &mut owner,
+                &mut flight,
+                &outgoing,
+                0,
+                &port,
+            )
+            .unwrap();
+            entry.recv_timeout(Duration::from_secs(3)).unwrap();
+            // Logical service time is controlled; the actual owner supplies the
+            // codec output. No real sleep or hardware/codec timing claim.
+            let mut waiting_ms = 0;
+            let mut collected_while_held = 0;
+            for ms in (80..=115u64).step_by(5) {
+                if ms == 80 + held_ms {
+                    hold.release();
+                    let mut completed = owner.completed().await.unwrap();
+                    completed.finished = at(ms);
+                    apply_codec_completion(
+                        completed,
+                        &mut flight,
+                        &mut received,
+                        &mut admission,
+                        &mut feedback,
+                        0,
+                        at(ms),
+                        profile,
+                        &port,
+                    )
+                    .unwrap();
+                }
+                if ms <= 110 && ms % 10 == 0 {
+                    let position = 3200 + (ms - 80) * 16;
+                    assert!(audio.push_recorded(
+                        &[1; 160],
+                        aged_record_timestamp(position, 85),
+                        at(ms)
+                    ));
+                }
+                while capture.can_ingest(profile, flight.as_ref(), &admission, &outgoing, 0) {
+                    let Ok(batch) = input.try_recv() else {
+                        break;
+                    };
+                    waiting_ms = waiting_ms.max(at(ms).duration_since(batch.pushed_at).as_millis());
+                    if flight.is_some() {
+                        collected_while_held += batch.len;
+                    }
+                    capture.ingest(batch, true, at(ms), profile);
+                }
+                assert!(input.len() <= 4 && capture.pcm.len() <= 640);
+                assert!(input.len() * 160 + capture.pcm.len() <= 1280);
+                assert_eq!(owner.busy(), flight.is_some());
+                dispatch_codec(
+                    at(ms),
+                    profile,
+                    &mut received,
+                    &mut capture,
+                    &admission,
+                    &mut feedback,
+                    &mut reset,
+                    &mut owner,
+                    &mut flight,
+                    &outgoing,
+                    0,
+                    &port,
+                )
+                .unwrap();
+                if matches!(
+                    flight.as_ref().and_then(|flight| flight.source.as_ref()),
+                    Some(CodecSource::Encode(_))
+                ) {
+                    let mut completed = owner.completed().await.unwrap();
+                    completed.finished = at(ms + 2);
+                    apply_codec_completion(
+                        completed,
+                        &mut flight,
+                        &mut received,
+                        &mut admission,
+                        &mut feedback,
+                        0,
+                        at(ms + 2),
+                        profile,
+                        &port,
+                    )
+                    .unwrap();
+                    let waiting = &admission.pending.as_ref().unwrap().0;
+                    assert_eq!(waiting.position, 3200);
+                    assert_eq!(waiting.captured_at, at(45));
+                    assert_eq!(waiting.deadline, at(125)); // Original 45+40+40.
+                }
+            }
+            hold.release();
+            let stats = port.snapshot();
+            results.push((
+                held_ms,
+                stats.dropped_capture - baseline,
+                stats.capture_age_rejected_batches,
+                waiting_ms,
+                stats.max_additional_capture_age_us,
+                stats.encoded_packets,
+                collected_while_held,
+            ));
+            admission.discard(profile, &port);
+            drop(flight);
+            owner.close().unwrap();
+        }
+        assert_eq!(
+            results,
+            vec![
+                (15, 0, 0, 0, 35_000, 1, 320),
+                (25, 0, 0, 0, 35_000, 1, 480),
+                (35, 0, 0, 0, 35_000, 1, 640),
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn paced_codec_dispatch_serves_ready_decode_without_waiting_for_another_tick() {
         let profile = LiveProfile::Ms40;
         for decode_us in [8_000u64, 12_151] {
@@ -2502,10 +3536,7 @@ mod tests {
                         assert!(!decode_ready || matches!(flight.as_ref().and_then(|flight| flight.source.as_ref()),
                             Some(CodecSource::Decode(_))),
                             "ready decode left idle or bypassed: ns={ns} timer={timer} decode_us={decode_us} capture_phase_ns={capture_phase_ns} operations={operations:?}");
-                        while flight.is_none()
-                            && !capture.full(profile)
-                            && admission.pending.is_none()
-                            && outgoing.capacity() > 0
+                        while capture.can_ingest(profile, flight.as_ref(), &admission, &outgoing, 0)
                         {
                             let Ok(chunk) = incoming.try_recv() else {
                                 break;
@@ -2550,8 +3581,9 @@ mod tests {
                             if queued + 160 > 640 {
                                 break;
                             }
-                            let (count, expired) = render.pull(now, &mut pcm);
-                            port.expired_render(expired);
+                            let (count, expired) =
+                                render.pull_with_lead(now, clock::sink_lead(queued, 0), &mut pcm);
+                            port.expired_render(expired, None);
                             if expired != 0 {
                                 first_expiry.get_or_insert((ns, expired));
                             }
@@ -2593,6 +3625,302 @@ mod tests {
                 owner.close().unwrap();
             }
         }
+    }
+
+    #[tokio::test]
+    async fn held_encode_retains_source_ownership_and_never_replays_aged_input() {
+        let profile = LiveProfile::Ms40;
+        for release_ms in [125u64, 145] {
+            let origin = Instant::now();
+            let at = |ms| origin + Duration::from_millis(ms);
+            let (audio, mut input) = test_audio();
+            calibrate_audio(&audio, &[50; 20]);
+            let port = audio.port.clone();
+            let baseline = port.snapshot().dropped_capture;
+            let mut capture = CaptureFrame::new(640, port.clone());
+            let mut admission = MediaAdmission::default();
+            let (outgoing, mut requests) = mpsc::channel(1);
+            for batch in 0..4u64 {
+                let now = at(50 + batch * 10);
+                assert!(audio.push_recorded(
+                    &[1; 160],
+                    aged_record_timestamp(3200 + batch * 160, 50),
+                    now
+                ));
+                assert!(capture.can_ingest(profile, None, &admission, &outgoing, 0));
+                capture.ingest(input.try_recv().unwrap(), true, now, profile);
+            }
+            let (entered, entry) = std::sync::mpsc::sync_channel(1);
+            let hold = codec::Hold {
+                kind: codec::Kind::Encode,
+                entered,
+                release: Arc::new((Mutex::new(false), std::sync::Condvar::new())),
+                admitted: Arc::new(AtomicU64::new(0)),
+                controlled: Arc::new(AtomicU64::new(0)),
+            };
+            let mut owner = codec::Owner::start(profile, Some(hold.clone()))
+                .await
+                .unwrap();
+            let mut flight = None;
+            let mut received = test_received();
+            let mut feedback = packet::Feedback::default();
+            let mut reset = false;
+            dispatch_codec(
+                at(80),
+                profile,
+                &mut received,
+                &mut capture,
+                &admission,
+                &mut feedback,
+                &mut reset,
+                &mut owner,
+                &mut flight,
+                &outgoing,
+                0,
+                &port,
+            )
+            .unwrap();
+            entry.recv_timeout(Duration::from_secs(3)).unwrap();
+            let mut kept_source = capture.pcm.is_empty() && outgoing.capacity() == 0;
+            for batch in 0..4u64 {
+                assert!(audio.push_recorded(
+                    &[2; 160],
+                    aged_record_timestamp(3840 + batch * 160, 85),
+                    at(90 + batch * 10)
+                ));
+                kept_source &=
+                    !capture.can_ingest(profile, flight.as_ref(), &admission, &outgoing, 0);
+            }
+            let kept_ring = input.len() == 4 && port.input.capacity() == 0;
+            hold.release();
+            assert!(kept_source && kept_ring && owner.busy());
+            // A ready result still owns the same source slot until consumed.
+            assert!(!capture.can_ingest(profile, flight.as_ref(), &admission, &outgoing, 0));
+            let mut completed = owner.completed().await.unwrap();
+            completed.finished = at(release_ms);
+            apply_codec_completion(
+                completed,
+                &mut flight,
+                &mut received,
+                &mut admission,
+                &mut feedback,
+                0,
+                at(release_ms),
+                profile,
+                &port,
+            )
+            .unwrap();
+            if release_ms == 125 {
+                assert!(!capture.can_ingest(profile, None, &admission, &outgoing, 0));
+                assert_eq!(admission.pending.as_ref().unwrap().0.deadline, at(130));
+                let mut budget = packet::Budget::new(50_000, 144, origin);
+                let (waiting, permit) = admission
+                    .take_ready(&mut budget, at(125), profile, &port)
+                    .unwrap();
+                permit.send(SendRequest {
+                    opcode: OP_RTP,
+                    payload: waiting.opus.to_vec(),
+                    deadline: Some(waiting.deadline),
+                    committed: None,
+                });
+                requests.try_recv().unwrap();
+            } else {
+                assert!(admission.pending.is_none());
+                assert_eq!(port.snapshot().dropped_capture - baseline, 640);
+            }
+            let now = at(release_ms + 1);
+            while capture.can_ingest(profile, flight.as_ref(), &admission, &outgoing, 0) {
+                let Ok(batch) = input.try_recv() else {
+                    break;
+                };
+                capture.ingest(batch, true, now, profile);
+            }
+            assert!(capture.pcm.is_empty() && input.is_empty());
+            assert_eq!(port.snapshot().capture_age_rejected_batches, 4);
+            assert_eq!(
+                port.snapshot().dropped_capture - baseline,
+                if release_ms == 125 { 640 } else { 1280 }
+            );
+            assert_eq!(port.position.load(Ordering::Relaxed), 4480);
+            dispatch_codec(
+                now,
+                profile,
+                &mut received,
+                &mut capture,
+                &admission,
+                &mut feedback,
+                &mut reset,
+                &mut owner,
+                &mut flight,
+                &outgoing,
+                0,
+                &port,
+            )
+            .unwrap();
+            assert!(flight.is_none() && !owner.busy()); // No old input replay.
+            assert_eq!(port.snapshot().encoded_packets, 1);
+            owner.close().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn held_decode_source_expiry_and_cancellation_keep_original_slot_accounting() {
+        let profile = LiveProfile::Ms40;
+        for expire in [false, true] {
+            let origin = Instant::now();
+            let at = |ms| origin + Duration::from_millis(ms);
+            let (audio, mut input) = test_audio();
+            calibrate_audio(&audio, &[50; 20]);
+            let port = audio.port.clone();
+            let baseline = port.snapshot().dropped_capture;
+            let mut capture = CaptureFrame::new(640, port.clone());
+            let mut received = test_received();
+            let mut feedback = packet::Feedback::default();
+            received.admit(0, &opus40(), origin, profile, &mut feedback, &port);
+            let (entered, entry) = std::sync::mpsc::sync_channel(1);
+            let hold = codec::Hold {
+                kind: codec::Kind::Decode,
+                entered,
+                release: Arc::new((Mutex::new(false), std::sync::Condvar::new())),
+                admitted: Arc::new(AtomicU64::new(0)),
+                controlled: Arc::new(AtomicU64::new(0)),
+            };
+            let mut owner = codec::Owner::start(profile, Some(hold.clone()))
+                .await
+                .unwrap();
+            let mut flight = None;
+            let admission = MediaAdmission::default();
+            let (outgoing, _requests) = mpsc::channel(1);
+            let mut reset = false;
+            dispatch_codec(
+                at(80),
+                profile,
+                &mut received,
+                &mut capture,
+                &admission,
+                &mut feedback,
+                &mut reset,
+                &mut owner,
+                &mut flight,
+                &outgoing,
+                0,
+                &port,
+            )
+            .unwrap();
+            entry.recv_timeout(Duration::from_secs(3)).unwrap();
+            for batch in 0..4u64 {
+                let now = at(80 + batch * 10);
+                assert!(audio.push_recorded(
+                    &[1; 160],
+                    aged_record_timestamp(3200 + batch * 160, 85),
+                    now
+                ));
+                if capture.can_ingest(profile, flight.as_ref(), &admission, &outgoing, 0) {
+                    capture.ingest(input.try_recv().unwrap(), true, now, profile);
+                }
+            }
+            let full_source = capture.full(profile) && input.is_empty();
+            assert!(audio.push_recorded(&[2; 160], aged_record_timestamp(3840, 85), at(120)));
+            let stops_when_full =
+                !capture.can_ingest(profile, flight.as_ref(), &admission, &outgoing, 0);
+            if expire {
+                dispatch_codec(
+                    at(125),
+                    profile,
+                    &mut received,
+                    &mut capture,
+                    &admission,
+                    &mut feedback,
+                    &mut reset,
+                    &mut owner,
+                    &mut flight,
+                    &outgoing,
+                    0,
+                    &port,
+                )
+                .unwrap();
+            }
+            hold.release(); // Never leave the owned C operation held after a failing assertion.
+            assert!(full_source && stops_when_full && owner.busy());
+            if expire {
+                assert!(capture.pcm.is_empty());
+                assert_eq!(port.snapshot().dropped_capture - baseline, 640);
+                assert!(capture.can_ingest(profile, flight.as_ref(), &admission, &outgoing, 0));
+                // A different current batch at its exact 40ms bound can occupy
+                // the released slot. The expired 3200..3840 frame is not replayed.
+                capture.ingest(input.try_recv().unwrap(), true, at(125), profile);
+                assert_eq!(capture.position, 3840);
+                assert_eq!(capture.pcm.len(), 160);
+                assert_eq!(capture.captured_at, at(85));
+            }
+            drop(flight);
+            drop(capture);
+            owner.close().unwrap();
+            assert_eq!(
+                port.snapshot().dropped_capture - baseline,
+                if expire { 800 } else { 640 }
+            );
+            assert_eq!(port.snapshot().dropped_render, 640);
+            assert_eq!(port.snapshot().encoded_packets, 0);
+            assert_eq!(port.snapshot().capture_age_rejected_batches, 0);
+        }
+    }
+
+    #[test]
+    fn decode_source_collection_still_obeys_all_admission_and_readiness_guards() {
+        let profile = LiveProfile::Ms40;
+        let (audio, mut input) = test_audio();
+        calibrate_audio(&audio, &[50; 20]);
+        let port = audio.port.clone();
+        let baseline = port.snapshot().dropped_capture;
+        let mut capture = CaptureFrame::new(640, port.clone());
+        let mut admission = MediaAdmission::default();
+        let (outgoing, _requests) = mpsc::channel(1);
+        let mut flight = CodecFlight {
+            source: Some(CodecSource::Decode(DecodeWork {
+                timestamp: 0,
+                end: 1920,
+                plc: true,
+                opus: None,
+            })),
+            port: port.clone(),
+            samples: 640,
+        };
+        assert!(capture.can_ingest(profile, Some(&flight), &admission, &outgoing, 1));
+        assert!(!capture.can_ingest(profile, Some(&flight), &admission, &outgoing, 2));
+        let source = flight.source.take();
+        assert!(!capture.can_ingest(profile, Some(&flight), &admission, &outgoing, 0));
+        flight.source = source;
+        let permit = outgoing.clone().try_reserve_owned().unwrap();
+        assert!(!capture.can_ingest(profile, Some(&flight), &admission, &outgoing, 0));
+        let now = Instant::now();
+        admission.pending = Some((
+            WaitingPacket::new(vec![1], 0, now, now, now, profile),
+            permit,
+        ));
+        assert!(!capture.can_ingest(profile, Some(&flight), &admission, &outgoing, 0));
+        drop(admission.pending.take());
+        assert!(capture.can_ingest(profile, Some(&flight), &admission, &outgoing, 0));
+        assert!(audio.push_recorded(&[1; 160], aged_record_timestamp(3200, 85), now));
+        capture.ingest(input.try_recv().unwrap(), false, now, profile);
+        assert!(capture.pcm.is_empty());
+        assert_eq!(port.snapshot().dropped_capture - baseline, 160);
+        // Starting readiness later cannot recover the discarded earlier prefix.
+        assert!(audio.push_recorded(
+            &[2; 160],
+            aged_record_timestamp(3360, 85),
+            now + Duration::from_millis(10)
+        ));
+        capture.ingest(
+            input.try_recv().unwrap(),
+            true,
+            now + Duration::from_millis(10),
+            profile,
+        );
+        assert!(capture.pcm.is_empty());
+        assert_eq!(capture.expected_position, 3520);
+        assert_eq!(port.snapshot().dropped_capture - baseline, 320);
+        flight.source.take(); // No real operation was dispatched in this guard test.
     }
 
     #[tokio::test]
@@ -2805,7 +4133,7 @@ mod tests {
                 assert_eq!(render.pull(at(119), &mut batch), (160, 0));
                 assert_eq!(port.snapshot().expired_render_samples, 0);
                 let expired = render.expire(at(120));
-                port.expired_render(expired);
+                port.expired_render(expired, None);
                 assert_eq!(expired, 480);
             } else {
                 // C finished on time, but the actor cannot publish stale PCM.
@@ -5113,7 +6441,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 received.playout.as_ref().unwrap().cursor,
-                first_timestamp + slot * 1920
+                first_timestamp + (slot + u64::from(slot != 4)) * 1920
             );
             received
                 .tick(due, profile, &mut decoder, &mut feedback, &port)
@@ -5127,8 +6455,24 @@ mod tests {
                 assert_eq!(stats.plc_slots - before.plc_slots, u64::from(slot == 4));
             }
             let mut batch = [0; 160];
-            for _ in 0..4 {
-                assert_eq!(port.render.lock().unwrap().pull(due, &mut batch), (160, 0));
+            // Present packets can now be computed early; the empty-sink gate
+            // and the original due still prevent an early first presentation.
+            assert_eq!(
+                port.render
+                    .lock()
+                    .unwrap()
+                    .pull(due - Duration::from_nanos(1), &mut batch),
+                (0, 0)
+            );
+            for queued in (0..640usize).step_by(160) {
+                assert_eq!(
+                    port.render.lock().unwrap().pull_with_lead(
+                        due,
+                        clock::sink_lead(queued, 0),
+                        &mut batch
+                    ),
+                    (160, 0)
+                );
                 rendered_samples += batch.len();
             }
             received
@@ -5204,9 +6548,13 @@ mod tests {
                     first_plc = Some((slot, due(slot).duration_since(origin).as_nanos() as u64));
                 }
                 let mut batch = [0; 160];
-                for _ in 0..4 {
+                for queued in (0..640usize).step_by(160) {
                     assert_eq!(
-                        port.render.lock().unwrap().pull(due(slot), &mut batch),
+                        port.render.lock().unwrap().pull_with_lead(
+                            due(slot),
+                            clock::sink_lead(queued, 0),
+                            &mut batch
+                        ),
                         (160, 0)
                     );
                 }
@@ -5386,13 +6734,20 @@ mod tests {
                     max_native = max_native.max(render.pcm.len());
                     let mut batch = [0; 160];
                     while queued + 160 <= 640 && !render.pcm.is_empty() {
-                        let (count, expired) = render.pull(now, &mut batch);
+                        let (count, expired) = render.pull_with_lead(
+                            now,
+                            clock::sink_lead(queued as usize, ppb),
+                            &mut batch,
+                        );
                         assert_eq!(
                             expired,
                             0,
                             "profile={} ppm={ppm} tick={tick}",
                             profile.duration_ms()
                         );
+                        if count == 0 {
+                            break;
+                        }
                         queued += count as u64;
                         written += count as u64;
                     }
@@ -5985,8 +7340,12 @@ mod tests {
         let mut bounded_sink = RenderQueue::new();
         bounded_sink.enqueue(due, vec![7; 640]);
         let mut consumed = 0;
-        for _ in 0..4 {
-            let (count, loss) = bounded_sink.pull(due + Duration::from_millis(10), &mut output);
+        for queued in (0..640usize).step_by(160) {
+            let (count, loss) = bounded_sink.pull_with_lead(
+                due + Duration::from_millis(10),
+                clock::sink_lead(queued, 0),
+                &mut output,
+            );
             assert_eq!(loss, 0);
             consumed += count;
         }

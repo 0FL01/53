@@ -12,6 +12,7 @@ internal class CallProbePlaybackClock {
         val healthy: Boolean, val relativePpm: Double?, val rejectionMask: Long)
     private data class Point(val frame: Long, val ns: Long, val rate: Int, val underruns: Int)
     private var first: Point? = null
+    private var middle: Point? = null
     private var latest: Point? = null
     private var neutralRatio: Double? = null
     private var healthy = false
@@ -25,17 +26,17 @@ internal class CallProbePlaybackClock {
     fun observe(frame: Long, timestampNs: Long, nowNs: Long, actualRate: Int, underruns: Int) {
         if (frame < 0 || timestampNs <= 0 || nowNs < timestampNs) {
             rejectionMask = rejectionMask or 1L
-            first = null; healthy = false; return
+            first = null; middle = null; healthy = false; return
         }
         if (nowNs - timestampNs > 500_000_000L || actualRate !in 15_992..16_008) {
             rejectionMask = rejectionMask or 2L
-            first = null; healthy = false; return
+            first = null; middle = null; healthy = false; return
         }
         val previous = latest
         if (previous != null && (frame < previous.frame || timestampNs < previous.ns ||
                 ((frame == previous.frame) != (timestampNs == previous.ns)))) {
             rejectionMask = rejectionMask or 4L
-            first = null; latest = null; healthy = false; return
+            first = null; middle = null; latest = null; healthy = false; return
         }
         if (previous != null && timestampNs == previous.ns) return
         val point = Point(frame, timestampNs, actualRate, underruns)
@@ -44,11 +45,30 @@ internal class CallProbePlaybackClock {
         // A rate change/underrun cannot certify a hardware-frequency sample.
         if (anchor == null || anchor.rate != actualRate || anchor.underruns != underruns ||
             timestampNs - anchor.ns > 60_000_000_000L) {
-            first = point; anchor = point
+            first = point; middle = null; anchor = point
+        }
+        if (neutralRatio == null && middle == null && timestampNs - anchor.ns >= 10_000_000_000L) {
+            middle = point
         }
         if (timestampNs - anchor.ns >= 20_000_000_000L && frame > anchor.frame) {
             val ratio = (frame - anchor.frame).toDouble() * 1e9 / (timestampNs - anchor.ns) / actualRate
-            if (ratio.isFinite() && abs(ratio - 1.0) <= 0.001) {
+            var qualified = ratio.isFinite() && abs(ratio - 1.0) <= 0.001
+            if (qualified && neutralRatio == null) {
+                val midpoint = middle ?: return
+                val beforeNs = midpoint.ns - anchor.ns
+                val afterNs = timestampNs - midpoint.ns
+                if (afterNs < 10_000_000_000L) return
+                // A short unreported startup pause can pass the whole-window
+                // +/-1000ppm guard. Certify the first neutral only when two
+                // independent >=10s spans agree, allowing one frame of timestamp
+                // position uncertainty at each endpoint. No arrival/PCM slope.
+                val beforeFrames = midpoint.frame - anchor.frame
+                val afterFrames = frame - midpoint.frame
+                // Cross products are bounded by the <=60s, +/-1000ppm span
+                // above; integer comparison keeps the exact tick boundary.
+                qualified = abs(beforeFrames * afterNs - afterFrames * beforeNs) <= 2L * (beforeNs + afterNs)
+            }
+            if (qualified) {
                 // Freeze the first steady hardware ratio for this recording epoch.
                 // Later stalls must not grow a rate estimate or move a timeline.
                 if (neutralRatio == null) neutralRatio = ratio
@@ -59,7 +79,7 @@ internal class CallProbePlaybackClock {
                 // Reject this entire hardware sample. Start a new observation
                 // window; never retain a bad startup span as a frequency anchor.
                 // The established neutral ratio and media timeline do not move.
-                first = point
+                first = point; middle = null
             }
         }
     }
