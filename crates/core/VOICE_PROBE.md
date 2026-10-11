@@ -1132,8 +1132,8 @@ Their asynchronous sample clocks are not assumed to share an origin or rate.
 stdlib, with three explicit sources: both pickups and the PC speaker monitor.
 It changes no default, route or system volume, bounds capture to20s and retains
 only20ms mutable PCM scratch per source, wiped after analysis. It emits scalar
-0.5s host-delivery windows, including400Hz energy and raw stream timing/latency
-metadata. Three optional JSON stdin labels identify host-observed test phases.
+0.5s host-delivery windows, including400Hz energy and stream-position/software
+timing metadata. Three optional JSON stdin labels identify host-observed test phases.
 The monitor is digital, callback/label times are not sample-acquisition times,
 and `physical_capture_time=false`, `acoustic_latency=null` remain explicit.
 
@@ -1167,3 +1167,74 @@ planes. Subsequent duplex analysis must distinguish that crosstalk rather than
 assigning every camera signal to Mi. Helper PCM/filter state is zeroized and
 read-only postflight finds0 owned Pulse clients/record streams. No full DNS,
 mouth-to-ear, source-active-loss, intelligibility or profile acceptance follows.
+
+### Software sample brackets and fresh short DNS pair (2026-10-11)
+
+The host fixture now attaches contiguous half-open `position_bytes` to scalar
+windows, using Pulse read indices before dropping fragments (holes included).
+Detached timing snapshots retain request/receipt monotonic brackets, read/write
+indices and source/sink latency. `software_host_ns` uses those brackets and the
+nominal byte rate, with outward rounding; corrupt, stale, suspended or unknown
+positions produce null ranges. There is no clock fit, interpolation or assumption
+that the independent USB clocks agree. `anchor_uncertainty_ns` is only half the
+request/receipt width: backend, source-latency and physical errors remain unknown.
+These estimates still cannot provide acoustic latency or calibrated mouth/ear planes.
+
+Actual4s known-testsound capture passes:7 contiguous position/software windows on
+each stream, zero clipping/holes,190080 USB frames,121600 C920 frames and188160
+monitor frames. Maximum half-brackets are9.688/8.605/9.226ms; maximum JSON packet
+3346B remains below4096B. Scratch/filter state is zeroized, children joined, and
+postflight finds0 owned Pulse clients/record streams. Different frame totals do
+not measure clock drift. `physical_capture_time=false`, `acoustic_latency=null`.
+
+Fresh two-Android120s probes use the same145-build native/gate APK and current
+test APK, actual pinned C DNS carriers, BBR and the existing opt-in TCP_NODELAY
+candidate on both ends. An owned unchanged-datagram LAN forwarder connects to
+an isolated C server/opaque relay;80kbit/s remains the **post-DNS framed-application
+service model**, not measured recursive DNS capacity. Private0400 descriptors,
+keys, certificates and finish markers are all freshly generated per run; Main,
+production authority, firewall, device clocks and vendor revision are untouched.
+
+The first controller's synchronous ADB marker publication could stall its UDP
+forwarding during teardown; a separate forwarding owner removes that coupling.
+The next pair completes120019/120035ms but Mi fails the unchanged platform-clock
+health assertion: active late0/45, PLC0/50, post-ready capture loss3200/0 and
+render expiry0/0. Native source clocks and cleanup pass. This remains a FAIL.
+
+The further finite discriminator preserves already emitted hardware/head-clock,
+rate and underrun fields instead of filtering them out. Both framework gates now
+pass without runtime/APK changes,120020/120031ms:
+
+| Frozen active evidence | Moto | Mi A2 Lite |
+|---|---:|---:|
+| encoded / decoded packets |3009 /3000|3003 /2878|
+| late / PLC |4 /4|126 /128|
+| post-ready capture loss, samples |1280|0|
+| render drop / expiry |0 /0|0 /0|
+| framed tx / rx bytes |332479 /335216|335126 /332344|
+| maximum feedback cycle, ms |536|448|
+| maximum sink queue, samples |640|640|
+| native/platform clocks healthy at frozen end |yes|yes|
+
+Mi underruns remain4 from the first10s snapshot onwards; calibration/health is
+delayed until the70s snapshot, then healthy despite historical mask13. This run
+does not demonstrate sustained underruns or a permanent compensation lockout,
+and does not locate the preceding FAIL. Aggregate late/PLC are not source-active
+percentages. Frozen active counters exclude subsequent teardown expiry3237/3520.
+Both final cleanup receipts pass; children join, owned fresh fixtures disappear,
+Moto returns to its original Wi-Fi0/mobile-data1 and no audio is saved.
+
+Forwarder totals include startup/teardown, roles are not mapped:107549 and579193
+queries/responses, query bytes14571101/75888652, response bytes16125431/78060087.
+Relay final service elapsed151011ms and framed bytes333499/335947 likewise include
+those phases; neither totals nor nominal model establish safe useful DNS capacity.
+Only the host fixture changed publicly; Rust/native/JVM/Android builds were not
+rerun for it. The12k/40ms profile remains **not qualified**: calibrated acoustic,
+source-active-loss, intelligibility and current full-duration evidence are missing.
+
+The offered local Whisper API was inspected read-only, without audio submission.
+All STT endpoints forward to whisper-server started with `--convert`, which writes
+input/converted audio files; `/asr/raw` also writes Python temporary audio files.
+It cannot currently be used under the RAM-only/no-audio-files permission. No STT
+dependency or service change is introduced, and STT would not replace latency or
+source-active-loss measurements.

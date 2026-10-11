@@ -5,7 +5,9 @@ Capture is bounded to 20 s; 20 ms PCM scratch per source is wiped after analysis
 No audio files/waveform output, default/volume/route changes or latency tuning.
 Optional stdin: three newline-delimited {"label":"TOKEN"} phase observations.
 0.5 s HOST DELIVERY windows and labels are not sample-acquisition timestamps.
-Public libpulse timing is raw, without interpolation or clock fitting:
+Sample positions use Pulse read indices, including holes. Software host ranges
+use request/receipt MONOTONIC brackets and the nominal stream rate, without
+interpolation or clock fitting; backend/source-latency/physical error is unknown:
 physical_capture_time=false, acoustic_latency=null; the monitor is digital.
 """
 
@@ -64,7 +66,7 @@ class Pulse:
         if (C.sizeof(TimingInfo) != 104 or TimingInfo.write_index.offset != 56 or TimingInfo.read_index.offset != 72 or
                 C.sizeof(SampleSpec) != 12 or C.sizeof(BufferAttr) != 20):
             raise Error("unsupported_public_abi_layout")
-        p, i, u = C.c_void_p, C.c_int, C.c_uint64
+        p, i = C.c_void_p, C.c_int
         bindings = [
             ("mainloop_new", p, ()), ("mainloop_get_api", p, (p,)),
             ("mainloop_iterate", i, (p, i, C.POINTER(i))), ("mainloop_free", None, (p,)),
@@ -81,8 +83,6 @@ class Pulse:
             ("stream_drop", i, (p,)), ("stream_cork", p, (p, i, SUCCESS_CB, p)),
             ("stream_update_timing_info", p, (p, SUCCESS_CB, p)),
             ("stream_get_timing_info", C.POINTER(TimingInfo), (p,)),
-            ("stream_get_time", i, (p, C.POINTER(u))),
-            ("stream_get_latency", i, (p, C.POINTER(u), C.POINTER(i))),
             ("stream_disconnect", i, (p,)), ("stream_unref", None, (p,)), ("operation_unref", None, (p,))]
         for name, result, args in bindings:
             fn = getattr(self.lib, "pa_" + name)
@@ -133,6 +133,18 @@ class Stats:
     def __init__(self):
         self.frames = self.samples = self.squares = self.peak = self.clipping = self.holes = self.hole_frames = 0
         self.tone_power, self.tone_blocks = 0.0, 0
+        self.position_bytes, self.position_known = None, True
+
+    def locate(self, begin, length):
+        # One contiguous, half-open window range; never bridge an unknown read.
+        if not self.position_known:
+            return
+        if begin is None or (self.position_bytes is not None and self.position_bytes[1] != begin):
+            self.position_bytes, self.position_known = None, False
+        elif self.position_bytes is None:
+            self.position_bytes = [begin, begin + length]
+        else:
+            self.position_bytes[1] = begin + length
 
     def report(self):
         square = self.squares / max(1, self.samples)
@@ -155,7 +167,7 @@ class Levels:
         C.memset(C.addressof(self.state), 0, C.sizeof(self.state))
         self.position = 0
 
-    def consume(self, samples, count):
+    def consume(self, samples, count, begin):
         square = peak = clipping = 0
         for base in range(0, count, self.channels):
             for channel in range(self.channels):
@@ -182,6 +194,7 @@ class Levels:
             stats.squares += square
             stats.peak = max(stats.peak, peak)
             stats.clipping += clipping
+        self.window.locate(begin, count * 2)
 
 
 class Capture:
@@ -200,7 +213,7 @@ class Capture:
             spec = SampleSpec(S16LE, source["rate"], source["channels"])
             if not self.p.sample_spec_valid(C.byref(spec)):
                 raise Error("source_sample_spec_invalid")
-            source.update(handle=None, timing_pending=False, timing=None, uncork_ack=None)
+            source.update(handle=None, timing_pending=False, timing_request_ns=None, timing=None, uncork_ack=None)
             source["levels"] = Levels(source["rate"], source["channels"])
             source["pcm"] = (C.c_int16 * (source["rate"] // 50 * source["channels"]))()
 
@@ -283,11 +296,25 @@ class Capture:
                 raise Error("uncork_failed")
             self.p.operation_unref(operation)  # Library owns the pending request.
         self.wait(lambda: all(s["uncork_ack"] for s in self.sources), min(deadline, self.end))
+        # Give initial timing a bounded opportunity; absent/corrupt data stays unknown.
+        while any(s["timing_pending"] for s in self.sources) and time.monotonic_ns() < min(deadline, self.end):
+            self.pump()
+            time.sleep(0.002)
+        for source in self.sources:
+            source["levels"].window = Stats()
+            source["levels"].wipe_filter()
 
     def uncorked(self, handle, success, _userdata):
         if not success:
             raise Error("uncork_failed")
-        self.by_handle[handle]["uncork_ack"] = time.monotonic_ns()
+        source = self.by_handle[handle]
+        source["uncork_ack"] = time.monotonic_ns()
+        source["timing_pending"] = True
+        source["timing_request_ns"] = time.monotonic_ns()
+        operation = self.p.stream_update_timing_info(handle, self.timing_callback, None)
+        if not operation:
+            raise Error("timing_request_failed")
+        self.p.operation_unref(operation)
 
     def read(self, handle, _requested, _userdata):
         source = self.by_handle[handle]
@@ -303,10 +330,17 @@ class Capture:
                 frame_bytes, levels = source["channels"] * 2, source["levels"]
                 if length.value % frame_bytes or levels.total.frames + levels.total.hole_frames + length.value // frame_bytes > source["rate"] * 22:
                     raise Error("fragment_or_frame_bound_invalid")
+                info, read_index = self.p.stream_get_timing_info(handle), None
+                if source["timing"] and source["timing"]["indices_bytes"] is not None and info:
+                    raw = info.contents
+                    if (not raw.read_index_corrupt and not raw.write_index_corrupt and
+                            raw.read_index >= 0 and raw.read_index % frame_bytes == 0):
+                        read_index = raw.read_index
                 if not address.value:
                     for stats in (levels.total, levels.window):
                         stats.holes += 1
                         stats.hole_frames += length.value // frame_bytes
+                    levels.window.locate(read_index, length.value)
                     levels.wipe_filter()
                 else:
                     offset, pcm = 0, source["pcm"]
@@ -314,7 +348,7 @@ class Capture:
                         count = min(C.sizeof(pcm), length.value - offset)
                         C.memmove(C.addressof(pcm), address.value + offset, count)
                         try:
-                            levels.consume(pcm, count // 2)
+                            levels.consume(pcm, count // 2, read_index + offset if read_index is not None else None)
                         finally:
                             C.memset(C.addressof(pcm), 0, C.sizeof(pcm))
                         offset += count
@@ -325,41 +359,61 @@ class Capture:
                 return
 
     def timing(self, handle, success, _userdata):
-        self.by_handle[handle]["timing_pending"] = False
+        receipt = time.monotonic_ns()
+        source = self.by_handle[handle]
+        source["timing_pending"] = False
         info = self.p.stream_get_timing_info(handle)
-        stream_time, latency, negative = C.c_uint64(), C.c_uint64(), C.c_int()
-        time_error = self.p.stream_get_time(handle, C.byref(stream_time))
-        latency_error = self.p.stream_get_latency(handle, C.byref(latency), C.byref(negative))
-        result = {"host_receipt_monotonic_ns": time.monotonic_ns(), "update_success": bool(success),
-                  "get_time_error": time_error, "get_latency_error": latency_error,
-                  "stream_time_us": stream_time.value if time_error == 0 else None,
-                  "signed_latency_us": (-latency.value if negative.value else latency.value) if latency_error == 0 else None}
-        if info:
+        result = {"anchor_host_ns": [source["timing_request_ns"], receipt], "update_success": bool(success),
+                  "indices_bytes": None, "source_sink_us": None}
+        if success and info:
             raw = info.contents
-            stamp = raw.timestamp.tv_sec * 1_000_000 + raw.timestamp.tv_usec
-            result.update(timestamp_realtime_us=stamp, timestamp_age_us_at_receipt=time.time_ns() // 1000 - stamp,
-                          read_index_corrupt=bool(raw.read_index_corrupt), write_index_corrupt=bool(raw.write_index_corrupt))
-        self.by_handle[handle]["timing"] = result
+            frame_bytes = source["channels"] * 2
+            if (not raw.read_index_corrupt and not raw.write_index_corrupt and
+                    raw.read_index >= 0 and raw.write_index >= 0 and
+                    raw.read_index % frame_bytes == 0 and raw.write_index % frame_bytes == 0):
+                result.update(indices_bytes=[raw.read_index, raw.write_index],
+                              source_sink_us=[raw.source_usec, raw.sink_usec])
+        source["timing"] = result
 
     def snapshot(self, begin, end):
         rows = []
         for source in self.sources:
-            timing = dict(source["timing"]) if source["timing"] else {"update_success": False}
-            age = end - timing["host_receipt_monotonic_ns"] if source["timing"] else None
+            timing = dict(source["timing"]) if source["timing"] else {
+                "update_success": False, "anchor_host_ns": None, "indices_bytes": None, "source_sink_us": None}
+            anchor = timing["anchor_host_ns"]
+            age = end - anchor[1] if anchor else None
             timing.update(age_since_receipt_ns=age, stale=not timing["update_success"] or age is None or age > 1_500_000_000)
+            timing["anchor_uncertainty_ns"] = (anchor[1] - anchor[0] + 1) // 2 if anchor and timing["indices_bytes"] is not None else None
+            suspended = self.p.stream_is_suspended(source["handle"])
+            window = source["levels"].window.report()
+            positions = source["levels"].window.position_bytes
+            window.update(position_bytes=positions, software_host_ns=None)
+            if positions is not None and timing["indices_bytes"] is not None and not timing["stale"] and suspended == 0:
+                # At the server snapshot: U(write) + source - sink. No transport
+                # correction: the server's timing work lies inside this bracket.
+                write = timing["indices_bytes"][1]
+                byte_rate = source["rate"] * source["channels"] * 2
+                shift = (timing["source_sink_us"][1] - timing["source_sink_us"][0]) * 1000
+                lower = (positions[0] - write) * 1_000_000_000 // byte_rate
+                upper = -(-(positions[1] - write) * 1_000_000_000 // byte_rate)
+                window["software_host_ns"] = [anchor[0] + lower + shift, anchor[1] + upper + shift]
             rows.append({"role": source["role"], "plane": "digital_monitor" if source["role"] == ROLES[2] else "acoustic_pickup",
                          "native_format": source["native_format"], "format": "s16le", "rate": source["rate"], "channels": source["channels"],
-                         "uncork_ack_host_ns": source["uncork_ack"], "suspended": self.p.stream_is_suspended(source["handle"]),
-                         "window": source["levels"].window.report(), "total": source["levels"].total.report(), "timing": timing})
+                         "uncork_ack_host_ns": source["uncork_ack"], "suspended": suspended,
+                         "window": window, "total": source["levels"].total.report(), "timing": timing})
         return {"host_window_start_ns": begin, "host_window_end_ns": end, "window_basis": "host_delivery",
                 "label": self.label, "label_host_observed_ns": self.label_time,
+                "timing_basis": "pulse_software_nominal_rate",
+                "timing_uncertainty_ns": {"backend": None, "source_latency": None, "physical": None},
                 "physical_capture_time": False, "acoustic_latency": None, "sources": rows}
 
     def run(self):
         self.open()
         emit("ready", capture_start_host_ns=self.start, duration_seconds=self.duration,
+             timing_ready=all(s["timing"] and s["timing"]["indices_bytes"] is not None for s in self.sources),
              physical_capture_time=False, acoustic_latency=None)
-        begin, next_window = self.start, self.start + 500_000_000
+        begin = time.monotonic_ns()
+        next_window = begin + 500_000_000
         while not self.stop and time.monotonic_ns() < self.end:
             self.pump()
             if time.monotonic_ns() >= next_window:
@@ -372,6 +426,7 @@ class Capture:
                     source["levels"].wipe_filter()
                     if not source["timing_pending"]:
                         source["timing_pending"] = True
+                        source["timing_request_ns"] = time.monotonic_ns()
                         operation = self.p.stream_update_timing_info(source["handle"], self.timing_callback, None)
                         if not operation:
                             raise Error("timing_request_failed")
