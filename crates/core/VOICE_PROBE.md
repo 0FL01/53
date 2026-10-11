@@ -1080,3 +1080,42 @@ Moto Wi-Fi/LTE check restores its original Wi-Fi0/data1/CELLULAR state and prove
 system DNS/ICMP reachability only; private LAN resolver access, protected voice
 and safe useful DNS capacity do not follow. Main, device clocks, deployed
 authority/delegation/firewall and the pinned transport remain unchanged.
+
+### Native-free playback/source discriminator and current local acceptance (2026-10-11)
+
+The existing exact `foregroundMicrophoneSourceDiagnosticOnlyInGatePackage` accepts
+`-e probe_source_playback toggle` (default `off`). Only its VOICE_COMMUNICATION
+interval adds a platform AudioTrack: nominal2s before playback,2s of a bounded
+16k PCM16/400Hz test tone,2s after pause/flush. Three bounded counter objects
+include every partial read; no native/DNS owner or PCM file is created. The
+original active mode/effects/route/foreground/focus/restoration guards remain;
+nonblocking writes enforce the same640-frame application-facing sink bound.
+Both API30 and API35 exercise the toggle with complete cleanup/zeroized buffers.
+
+Mi initially returns zero processed input in **all three stages**, and a separate
+off control also returns zero. This does not reproduce a native or playback-only
+defect. A finite PC-speaker phrase at50% per-stream volume still gives raw MIC
+peak88/zero processed input. Normal unity volume (no amplification or system
+volume/route change) gives MIC93426/95040 nonzero samples, peak2686, and processed
+VOICE15632/92160, peak549; clipping0, available AEC/NS still enabled/controlled.
+
+The unchanged strict protected local8s gate then PASSes on Mi/Moto:8035/8029ms,
+mic peaks593/33, render peak13609, sink≤640, all active capture/render losses,
+late/PLC/render expiry0, complete cleanup. The45s phrase helper had finished by
+instrumentation result delivery, so these passes do not establish continuous
+known-speech coverage or intelligibility. Earlier zero-input failures remain
+recorded; no production audio/effect/acceptance change is made.
+
+Only gate.test is replaced, SHA256
+`0b0e1669af5bc9544787fb3d49ed16a8458e0b2fb6c13f500e726ddf9daab8a5`;
+the gate APK/native remain the previously frozen145 build. Clean Android
+debug/release/androidTest packaging passes (unchanged JVM gate up-to-date;
+165 tests were explicitly rerun in the preceding checkpoint).
+
+Two further2.048s simultaneous speaker-monitor/C920 captures stay in RAM only,
+no clipping, PCM zeroized and children joined. At normal unity volume, monitor
+peak14491 and camera peaks3607/3538 give short normalized source correlations
+0.2802/0.33317. These are not calibrated acoustic delay or independent source/ear
+reference planes. Their positions/isolation and listening annotations remain
+external dependencies. R5 is blocked on that physical qualification;12k/40ms
+remains **not qualified** for normal/pilot use, not declared impossible or PASS.

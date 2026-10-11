@@ -10,6 +10,7 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTimestamp
+import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.AudioEffect
@@ -29,6 +30,7 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Rule
@@ -39,6 +41,7 @@ import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
+import kotlin.math.sin
 
 /** Exact-method .gate probes. Local memory-pair progress is not DNS or call-quality acceptance.
  * Operator grants RECORD_AUDIO before the run; changing/revoking it here can kill the UID.
@@ -146,6 +149,8 @@ class CallMediaProbeGatesTest {
     /** Sequential input counters only. The operator's external speech stimulus is not generated here. */
     @Test(timeout = 60_000) fun foregroundMicrophoneSourceDiagnosticOnlyInGatePackage() {
         val app = gate()
+        val playback = arguments.getString("probe_source_playback") ?: "off"
+        assertTrue("probe_source_playback must be off or toggle", playback in listOf("off", "toggle"))
         assertEquals("capture worker must run in the target UID", app.applicationInfo.uid, Process.myUid())
         assertEquals("operator must externally grant RECORD_AUDIO before instrumentation; denial is not PASS",
             PackageManager.PERMISSION_GRANTED, app.checkSelfPermission(Manifest.permission.RECORD_AUDIO))
@@ -213,7 +218,7 @@ class CallMediaProbeGatesTest {
                         Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
                         sources.forEachIndexed { index, (_, id) ->
                             if (!stopping.get()) captureMicrophoneSource(app, manager, stopping, failure,
-                                id, index == 1, pcm, results[index])
+                                id, index == 1, pcm, results[index], playback == "toggle" && index == 1)
                         }
                     } catch (_: Throwable) {
                         failure.compareAndSet(null, "microphone_source_worker_failed")
@@ -262,6 +267,7 @@ class CallMediaProbeGatesTest {
                     else -> "both_sources_nonzero_counters_only"
                 }
                 evidence("call_probe_microphone_sources", JSONObject().put("evidence_scope", "foreground_sequential_source_counters_only")
+                    .put("playback_control", playback)
                     .put("voice_acceptance", false).put("finding", finding).put("mic", raw).put("voice_communication", processed)
                     .put("failure", failure.get() ?: JSONObject.NULL).put("worker_joined", joined)
                     .put("worker_alive", worker?.isAlive == true).put("cleanup_complete", complete)
@@ -282,12 +288,26 @@ class CallMediaProbeGatesTest {
 
     private fun captureMicrophoneSource(app: Context, manager: AudioManager, stopping: AtomicBoolean,
         failure: AtomicReference<String?>, source: Int, withEffects: Boolean, pcm: ShortArray,
-        result: AtomicReference<JSONObject>) {
+        result: AtomicReference<JSONObject>, playbackToggle: Boolean) {
         val report = JSONObject(result.get().toString()).put("capture_uid", Process.myUid())
             .put("worker_priority", Process.getThreadPriority(Process.myTid()))
         var record: AudioRecord? = null
         var aec: AcousticEchoCanceler? = null
         var ns: NoiseSuppressor? = null
+        var track: AudioTrack? = null
+        var playbackReleased = !playbackToggle
+        var playbackStarted = false; var playbackPaused = false
+        var playbackWritten = 0L; var maxPlaybackQueued = 0L
+        var outputId = 0; var outputType = 0
+        val tone = if (playbackToggle) ShortArray(160) {
+            (8_000 * sin(2 * Math.PI * it / 40)).toInt().toShort()
+        } else ShortArray(0)
+        val stages = if (playbackToggle) listOf("before_playback", "during_playback", "after_pause").map {
+            JSONObject().put("stage", it).put("captured_samples", 0L).put("nonzero_samples", 0L)
+                .put("peak", 0).put("clipped_samples", 0L)
+        } else emptyList()
+        report.put("playback_toggle_requested", playbackToggle)
+        if (playbackToggle) report.put("playback_stages", JSONArray(stages))
         var captured = 0L; var zeros = 0L; var peak = 0; var clipped = 0L
         var firstFrame = -1L; var firstTime = -1L; var lastFrame = -1L; var lastTime = -1L
         var unavailable = 0L; var monotonic = true
@@ -332,6 +352,24 @@ class CallMediaProbeGatesTest {
                 requireSource(it.getBoolean("created") && it.optInt("enable_result", -1) == AudioEffect.SUCCESS &&
                     it.getBoolean("control") && it.getBoolean("enabled"), "available_effect_enable_failed")
             }
+            if (playbackToggle) {
+                val trackMinimum = AudioTrack.getMinBufferSize(16_000, AudioFormat.CHANNEL_OUT_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT)
+                requireSource(trackMinimum > 0, "unsupported_16k_playback_path")
+                track = AudioTrack.Builder().setAudioAttributes(AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+                    .setAudioFormat(AudioFormat.Builder().setSampleRate(16_000)
+                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO).setEncoding(AudioFormat.ENCODING_PCM_16BIT).build())
+                    .setTransferMode(AudioTrack.MODE_STREAM).setBufferSizeInBytes(maxOf(trackMinimum, 640 * 2)).build()
+                requireSource(track.state == AudioTrack.STATE_INITIALIZED, "track_initialization_failed")
+                requireSource(track.setBufferSizeInFrames(640) in 160..640, "track_buffer_exceeds_original_bound")
+                if (Build.VERSION.SDK_INT >= 31) {
+                    requireSource(track.setStartThresholdInFrames(160) > 0 && track.startThresholdInFrames <= 640,
+                        "track_start_threshold_exceeds_original_bound")
+                }
+                report.put("playback_signal", "pcm16_16k_400hz_peak8000")
+            }
             requireSource(!stopping.get(), "source_stopped_before_start")
             record.startRecording()
             requireSource(record.recordingState == AudioRecord.RECORDSTATE_RECORDING, "microphone_start_failed")
@@ -342,17 +380,48 @@ class CallMediaProbeGatesTest {
             var nextObservation = 0L
             while (!stopping.get() && SystemClock.elapsedRealtime() < deadline) {
                 requireSource(manager.mode == AudioManager.MODE_IN_COMMUNICATION, "communication_mode_changed")
+                val stage = ((SystemClock.elapsedRealtime() - started) / 2_000).toInt().coerceIn(0, 2)
+                if (playbackToggle && stage == 1) {
+                    if (!playbackStarted) { track!!.play(); playbackStarted = true }
+                    requireSource(track!!.playState == AudioTrack.PLAYSTATE_PLAYING, "playback_stopped_early")
+                    track.routedDevice?.let {
+                        requireSource(outputId == 0 || outputId == it.id, "output_route_changed")
+                        outputId = it.id; outputType = it.type
+                    } ?: requireSource(outputId == 0, "output_route_lost")
+                    val queued = playbackWritten - track.playbackHeadPosition.toLong()
+                    requireSource(queued in 0L..640L, "playback_queue_exceeds_original_bound")
+                    val offset = (playbackWritten % tone.size).toInt()
+                    val offered = minOf(tone.size - offset, (640 - queued).toInt())
+                    if (offered > 0) {
+                        val written = track.write(tone, offset, offered, AudioTrack.WRITE_NON_BLOCKING)
+                        requireSource(written in 0..offered, "playback_write_failed")
+                        playbackWritten += written
+                        maxPlaybackQueued = maxOf(maxPlaybackQueued, queued + written)
+                    }
+                } else if (playbackStarted && !playbackPaused) {
+                    track!!.pause(); track.flush(); playbackPaused = true
+                }
                 // Nonblocking read plus two independent deadlines avoids an unbounded recording read thread.
                 val count = record.read(pcm, 0, pcm.size, AudioRecord.READ_NON_BLOCKING)
                 requireSource(count in 0..pcm.size, if (count < 0) "capture_read_error_$count" else "capture_read_invalid")
                 // Every returned partial read is counted exactly once; there is no PCM FIFO or padded batch.
+                var readNonzero = 0L; var readPeak = 0; var readClipped = 0L
                 for (index in 0 until count) {
                     val magnitude = abs(pcm[index].toInt())
                     peak = maxOf(peak, magnitude)
                     if (magnitude == 0) zeros++
                     if (magnitude >= 32767) clipped++
+                    if (magnitude > 0) readNonzero++
+                    readPeak = maxOf(readPeak, magnitude)
+                    if (magnitude >= 32767) readClipped++
                 }
                 captured += count
+                if (playbackToggle) stages[stage].let {
+                    it.put("captured_samples", it.getLong("captured_samples") + count)
+                        .put("nonzero_samples", it.getLong("nonzero_samples") + readNonzero)
+                        .put("peak", maxOf(it.getInt("peak"), readPeak))
+                        .put("clipped_samples", it.getLong("clipped_samples") + readClipped)
+                }
                 pcm.fill(0)
                 val now = SystemClock.elapsedRealtime()
                 if (now >= nextObservation) {
@@ -391,11 +460,24 @@ class CallMediaProbeGatesTest {
             requireSource(routeId > 0 && routeType > 0, "input_route_unobserved")
             requireSource(firstFrame < 0 || (monotonic && lastFrame > firstFrame && lastTime > firstTime),
                 "available_capture_timestamp_did_not_advance")
+            if (playbackToggle) {
+                requireSource(playbackStarted && playbackPaused && playbackWritten > 16_000, "playback_toggle_incomplete")
+                requireSource(stages.all { it.getLong("captured_samples") >= 16_000 }, "capture_stage_incomplete")
+                requireSource(outputId > 0 && outputType > 0, "output_route_unobserved")
+            }
         } catch (_: Throwable) {
             if (sourceFailure == null) sourceFailure = "microphone_source_capture_failed"
             failure.compareAndSet(null, sourceFailure); stopping.set(true)
         } finally {
             pcm.fill(0)
+            tone.fill(0)
+            try {
+                track?.let { try { it.pause(); it.flush() } finally { it.release() } }
+                playbackReleased = true
+            } catch (_: Throwable) { failure.compareAndSet(null, "track_release_failed") }
+            report.put("playback_released", playbackReleased).put("playback_written_samples", playbackWritten)
+                .put("max_playback_queued_samples", maxPlaybackQueued)
+                .put("output_route_id", outputId).put("output_route_type", outputType)
             if (started != 0L && duration == 0L) duration = SystemClock.elapsedRealtime() - started
             try {
                 record?.let { if (it.recordingState == AudioRecord.RECORDSTATE_RECORDING) it.stop() }
@@ -419,7 +501,7 @@ class CallMediaProbeGatesTest {
                 .put("frame_monotonic", if (firstFrame >= 0) monotonic && lastFrame > firstFrame && lastTime > firstTime else JSONObject.NULL)
                 .put("failure", sourceFailure ?: JSONObject.NULL).put("record_stopped", stopped)
                 .put("record_released", recordReleased).put("effects_released", effectsReleased)
-                .put("cleanup_complete", stopped && recordReleased && effectsReleased))
+                .put("cleanup_complete", stopped && recordReleased && effectsReleased && playbackReleased))
             if (failure.get() != null) stopping.set(true)
         }
     }
