@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.media.AudioFocusRequest
 import android.media.AudioFormat
 import android.media.AudioManager
@@ -31,7 +32,8 @@ import kotlin.math.max
  * The owner handles setup/telemetry/teardown. Capture and render never encode, join,
  * or do network IO: push/pull must be nonblocking bounded native queue operations.
  */
-class CallProbeAudio(context: Context, private val fixturePath: String? = null) {
+class CallProbeAudio(context: Context, private val fixturePath: String? = null, private val outputMuted: Boolean = false,
+    private val loudspeaker: Boolean = false) {
     companion object {
         const val SAMPLE_RATE = 16_000
         const val BATCH_SAMPLES = 160
@@ -71,6 +73,11 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
             .put("healthy", command.healthy).put("selected_rate", command.rate)
             .put("sink_ppb", command.sinkPpb ?: JSONObject.NULL)
             .put("hardware_rejection_mask", command.rejectionMask)
+            .put("last_rejected_hardware_window", command.rejectedWindow?.let { window ->
+                JSONObject().put("frames", window.frames).put("ns", window.ns).put("rate", window.rate)
+                    .put("before_frames", window.beforeFrames ?: JSONObject.NULL).put("before_ns", window.beforeNs ?: JSONObject.NULL)
+                    .put("after_frames", window.afterFrames ?: JSONObject.NULL).put("after_ns", window.afterNs ?: JSONObject.NULL)
+            } ?: JSONObject.NULL)
             .put("relative_ppm", command.relativePpm ?: JSONObject.NULL).toString()
     }) {
         private var lastCommand: CallProbePlaybackClock.Output? = null
@@ -294,7 +301,8 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
         val playbackRate: Int, val requestedRate: Int, val underruns: Int,
         val captureClock: ClockPair, val playbackClock: ClockPair, val playbackHeadClock: ClockPair,
         val nativeStats: String, val stopResult: String?, val playbackCompensation: String,
-        val lastRenderLoopTrace: RenderLoopTrace? = null
+        val lastRenderLoopTrace: RenderLoopTrace? = null, val outputMuted: Boolean = false,
+        val outputRouteRestored: Boolean = true
     ) {
         fun json() = JSONObject().put("phase", phase).put("failure", failure ?: JSONObject.NULL)
             .put("stop_reason", stopReason ?: JSONObject.NULL).put("path", if (dns) "dns_fixture" else "local_memory_pair")
@@ -309,6 +317,8 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
             .put("rejected_capture_batches", rejectedCaptureBatches)
             .put("capture_peak", capturePeak).put("capture_clipped", captureClipped).put("capture_zero_samples", captureZeroSamples)
             .put("render_peak", renderPeak).put("render_clipped", renderClipped)
+            .put("fixture_output_muted", outputMuted)
+            .put("fixture_output_route_restored", outputRouteRestored)
             .put("record_min_bytes", recordMinBytes).put("track_min_bytes", trackMinBytes)
             .put("record_buffer_frames", recordBufferFrames).put("track_buffer_frames", trackBufferFrames)
             .put("track_capacity_frames", trackCapacityFrames).put("start_threshold_frames", startThresholdFrames)
@@ -381,6 +391,7 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
     @Volatile private var aecOpen = false
     @Volatile private var nsOpen = false
     @Volatile private var underruns = 0
+    @Volatile private var outputRouteRestored = true
     private val owner = Thread(::run, "call-probe-owner")
 
     fun start() { owner.start() }
@@ -407,7 +418,7 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
         inputId, inputType, outputId, outputType, micMuted, silenced, silencingObservable, focusGranted, focusAbandoned,
         previousMode, communicationMode, restoredMode, aecState, nsState, playbackRate.get(), requestedRate.get(), underruns,
         captureClock.get(), playbackClock.get(), headClock.get(), nativeStats.get(), stopResult.get(), playbackCompensation.get(),
-        renderLoopRecorder.latest)
+        renderLoopRecorder.latest, outputMuted, outputRouteRestored)
 
     private class ProbeFailure(val diagnostic: String) : RuntimeException()
     private fun check(condition: Boolean, diagnostic: String) { if (!condition) throw ProbeFailure(diagnostic) }
@@ -557,6 +568,8 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
         var aec: AcousticEchoCanceler? = null
         var ns: NoiseSuppressor? = null
         var modeOwned = false
+        var speakerOwned = false
+        var previousSpeaker = false
         try {
             check(app.packageName == "org.dmsg.client.gate", "gate_package_required")
             check(app.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED,
@@ -564,6 +577,7 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
             if (stopping.get()) return
             manager = app.getSystemService(AudioManager::class.java)
             previousMode = manager.mode
+            if (loudspeaker && Build.VERSION.SDK_INT < 31) previousSpeaker = manager.isSpeakerphoneOn
             val attributes = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
                 .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()
             focus = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
@@ -577,6 +591,17 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
             manager.mode = AudioManager.MODE_IN_COMMUNICATION
             communicationMode = manager.mode
             check(communicationMode == AudioManager.MODE_IN_COMMUNICATION, "communication_mode_failed")
+            if (loudspeaker) {
+                speakerOwned = true; outputRouteRestored = false
+                if (Build.VERSION.SDK_INT >= 31) {
+                    val speaker = manager.availableCommunicationDevices
+                        .firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+                    check(speaker != null && manager.setCommunicationDevice(speaker), "speaker_selection_failed")
+                } else {
+                    manager.isSpeakerphoneOn = true
+                    check(manager.isSpeakerphoneOn, "speaker_selection_failed")
+                }
+            }
             micMuted = manager.isMicrophoneMute
             check(!micMuted, "microphone_muted")
             recordMin = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
@@ -592,6 +617,7 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
                 "record_format_mismatch")
             recordFrames = record.bufferSizeInFrames
             track = AudioTrack.Builder().setAudioAttributes(attributes)
+                .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
                 .setAudioFormat(AudioFormat.Builder().setSampleRate(SAMPLE_RATE).setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
                     .setEncoding(AudioFormat.ENCODING_PCM_16BIT).build())
                 .setTransferMode(AudioTrack.MODE_STREAM).setBufferSizeInBytes(max(trackMin, QUEUE_BOUND_SAMPLES * 2)).build()
@@ -599,6 +625,8 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
             check(track.state == AudioTrack.STATE_INITIALIZED, "track_initialization_failed")
             check(track.sampleRate == SAMPLE_RATE && track.channelCount == 1 && track.audioFormat == AudioFormat.ENCODING_PCM_16BIT,
                 "track_format_mismatch")
+            // Acoustic attribution only: consume the same PCM without changing the system volume.
+            if (outputMuted) check(track.setVolume(0f) == AudioTrack.SUCCESS, "track_volume_failed")
             check(track.setBufferSizeInFrames(QUEUE_BOUND_SAMPLES) > 0, "track_buffer_size_failed")
             trackFrames = track.bufferSizeInFrames
             trackCapacity = track.bufferCapacityInFrames
@@ -687,6 +715,16 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
             catch (_: Throwable) { failure.compareAndSet(null, "record_release_failed") }
             try { track?.release(); trackOpen.set(false); queued.set(0) }
             catch (_: Throwable) { failure.compareAndSet(null, "track_release_failed") }
+            if (speakerOwned && manager != null) {
+                try {
+                    if (Build.VERSION.SDK_INT >= 31) manager.clearCommunicationDevice()
+                    else {
+                        manager.isSpeakerphoneOn = previousSpeaker
+                        check(manager.isSpeakerphoneOn == previousSpeaker, "speaker_restore_failed")
+                    }
+                    outputRouteRestored = true
+                } catch (_: Throwable) { failure.compareAndSet(null, "speaker_restore_failed") }
+            }
             if (manager != null && focus != null) {
                 try { focusAbandoned = manager.abandonAudioFocusRequest(focus) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED }
                 catch (_: Throwable) { failure.compareAndSet(null, "audio_focus_abandon_failed") }
@@ -708,7 +746,7 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
                 } catch (_: Throwable) { failure.compareAndSet(null, "native_stop_failed") }
             }
             complete.set(!micActive.get() && !recordOpen.get() && !trackOpen.get() && !aecOpen && !nsOpen && handle.get() == 0L &&
-                (!focusGranted || focusAbandoned) && (!modeOwned || restoredMode == previousMode))
+                (!focusGranted || focusAbandoned) && (!modeOwned || restoredMode == previousMode) && outputRouteRestored)
             phase.set(if (failure.get() == null) "stopped" else "failed")
         }
     }
@@ -741,6 +779,7 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
             inputId = route.id; inputType = route.type
         }
         output?.let { route ->
+            check(!loudspeaker || route.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER, "speaker_route_not_selected")
             check(outputId == 0 || outputId == route.id, "output_route_changed")
             outputId = route.id; outputType = route.type
         }

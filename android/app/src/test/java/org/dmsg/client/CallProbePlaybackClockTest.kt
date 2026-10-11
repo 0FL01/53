@@ -227,6 +227,11 @@ class CallProbePlaybackClockTest {
                 recovered.calibrated && recovered.healthy)
             assertFalse("the biased first window must not freeze: $initial", initial!!.calibrated)
             assertFalse(initial.healthy)
+            val rejected = initial.rejectedWindow!!
+            assertEquals(319_706L, rejected.frames)
+            assertEquals(20_000_000_000L, rejected.ns)
+            assertEquals(159_706L, rejected.beforeFrames)
+            assertEquals(160_000L, rejected.afterFrames)
             assertEquals(16_000, recovered.rate)
             assertEquals(0L, recovered.sinkPpb)
             assertEquals(0.0, recovered.relativePpm!!, 1e-6)

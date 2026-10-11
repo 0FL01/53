@@ -1238,3 +1238,70 @@ input/converted audio files; `/asr/raw` also writes Python temporary audio files
 It cannot currently be used under the RAM-only/no-audio-files permission. No STT
 dependency or service change is introduced, and STT would not replace latency or
 source-active-loss measurements.
+
+### Temporarily returned Pacman: speaker and hardware-window controls (2026-10-11)
+
+The user requires live acceptance and temporarily returns Pacman/API36, extending
+the deadline to07:30 PM. Pacman is placed20–30cm from the PC speaker beside C920;
+USB pickup remains at Moto. Mi was also moved nearer, but its local speaker path
+still loses100320 post-ready samples/16s with31 underruns. The existing two-cycle
+trace observes a105ms `WRITE_NON_BLOCKING` write; it does not prove HAL/ROM causation.
+
+Default-false `.gate` controls `probe_output_muted=true|false` and
+`probe_loudspeaker=true|false` permit attribution without changing media production.
+Mute uses per-track zero gain, still consuming the same PCM. Speaker selection owns
+an AudioManager communication request: SDK31+ releases it with `clearCommunicationDevice`,
+SDK30 restores the prior speakerphone flag after track release. Restoration is part
+of cleanup. The local gate also accepts speaker selection and its existing8..16s
+duration. Normal defaults, focus/effects/route checks, JNI160 and sink640 remain.
+AudioTrack requests native low-latency performance; no actual FAST grant or Mi fix
+is claimed. No native/JNI/vendor/protocol/production-call change is made.
+
+On the first candidate, Moto/Pacman local speaker gates pass16014/16041ms with
+zero active late/PLC/render expiry, nonzero capture/render and route2. Packaged
+Pacman codec evidence:100 WB packets,31998 NoLACE-changed and1907 DeepPLC-changed
+samples. Sequential source-only diagnostic initially fails when Android resets
+mode after MIC release. Reclaiming communication mode before each new capture
+preserves strict active checks and then passes both6s sources, complete cleanup;
+quiet VOICE1189/94240 nonzero/peak16 is counter evidence, not intelligibility.
+
+| Frozen DNS evidence, Moto / Pacman |80 model,480s|50 model,180s diagnostic|
+|---|---:|---:|
+| measured interval, ms |480045 /480031|180007 /180010|
+| late / PLC |1,1 /2,36|17,17 /2,2|
+| post-ready capture loss, samples |21760 /0|0 /0|
+| render expiry, samples |0 /299|0 /542|
+| maximum sink queue, samples |640 /640|640 /640|
+| native/platform clock healthy at frozen end |yes /yes|yes /yes|
+
+Both functional gates pass in these rows, not quality acceptance.80-model Moto
+render peak reaches32767; clip count was not retained. The user lowers volume
+during that run; the finite300s PC source does not cover the entire480s interval.
+The first quiet50-model180s run separately fails Pacman platform health, despite
+zero Pacman underruns. These are actual pinned-C, BBR/TCP_NODELAY-candidate controlled
+LAN DNS paths with post-DNS application service models, not measured safe recursive
+capacity. Model and datagram totals include startup/teardown unless explicitly frozen.
+
+Existing cached compensation diagnostics now retain only the latest rejected
+hardware window: whole span and optional before/after frame/time deltas, actual
+rate. No observation backlog, clock fitting or qualification change. The nearest
+startup-pause test verifies the tuple. New diagnostic50 run recovers Moto by~50s,
+Pacman by~110s; earlier80 run needs~450s for Pacman. Rejected initial range/split
+samples and sticky masks are not proof of permanent lockout.500ms freshness,
+two steady>=10s spans, frozen neutral ratio and supported-rate checks remain strict.
+
+Two quiet90s80-model controls (both outputs muted, then only Pacman muted) pass
+functional gates. Bounded16s pickup captures close/zeroize all waveform/filter/FFT
+buffers, but correlations remain unknown/no-signal/unrelated; no attributable
+forwarded copy or acoustic latency is obtained. User-lowered system volume is never
+raised; the controls use20% per-stream PC volume. No Whisper/audio-file submission.
+
+Latest clean-env debug/androidTest builds and31 focused clock/capacity/cache JVM
+tests pass. Gate APK4be9ea504c4ac23e4d093ee168e8cef7c8460a252b8c5fa3b5b1c7736a8a6c1f,
+test APKf0cb40b5bc958ed814b2d6e7c8ebc5b8d6ad1e1cdd83aa19ad540c2b75f5357a;
+CLI/native/carrier remain unchanged. Only gate packages are installed-r, no reset.
+All fresh keys/phone leaves/listeners are retired, children join, Moto Wi-Fi0/data1
+restores. Final gate processes/owned Pulse clients/streams are0, device operations
+stop19:21:11 host time; further Pacman use after return requires renewed permission.
+Current>=30min chosen-profile, source-active loss, mouth-to-ear, listening and safe
+DNS capacity remain unqualified. Old long-run failures and the first50 FAIL remain.

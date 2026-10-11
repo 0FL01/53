@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.media.AudioFocusRequest
 import android.media.AudioFormat
 import android.media.AudioManager
@@ -143,7 +144,9 @@ class CallMediaProbeGatesTest {
     @Test(timeout = 90_000) fun foregroundMicrophoneProtectedLoopbackAndCleanupOnlyInGatePackage() {
         val seconds = arguments.getString("probe_local_duration_seconds")?.toInt() ?: 8
         assertTrue("local actuator/expiry diagnostic interval is 8..16 seconds", seconds in 8..16)
-        runAudio(gate(), null, seconds * 1_000L, exerciseRate = true)
+        val speaker = arguments.getString(CallProbeActivity.EXTRA_LOUDSPEAKER) ?: "false"
+        assertTrue("probe_loudspeaker must be true or false", speaker in listOf("true", "false"))
+        runAudio(gate(), null, seconds * 1_000L, exerciseRate = true, loudspeaker = speaker == "true")
     }
 
     /** Sequential input counters only. The operator's external speech stimulus is not generated here. */
@@ -217,8 +220,12 @@ class CallMediaProbeGatesTest {
                     try {
                         Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
                         sources.forEachIndexed { index, (_, id) ->
-                            if (!stopping.get()) captureMicrophoneSource(app, manager, stopping, failure,
-                                id, index == 1, pcm, results[index], playback == "toggle" && index == 1)
+                            if (!stopping.get()) {
+                                // Reclaim mode for each new source after Android may reset it on release.
+                                manager.mode = AudioManager.MODE_IN_COMMUNICATION
+                                captureMicrophoneSource(app, manager, stopping, failure,
+                                    id, index == 1, pcm, results[index], playback == "toggle" && index == 1)
+                            }
                         }
                     } catch (_: Throwable) {
                         failure.compareAndSet(null, "microphone_source_worker_failed")
@@ -530,7 +537,12 @@ class CallMediaProbeGatesTest {
         val duration = arguments.getString("probe_duration_seconds")?.toLongOrNull()
         assertTrue("required probe_duration_seconds in 6..3600", duration != null && duration in 6..3600)
         val finishMarker = arguments.getString("probe_finish_marker_path")?.let { finishMarker(app, it) }
-        runAudio(app, path!!, duration!! * 1_000, exerciseRate = false, finishMarker = finishMarker)
+        val muted = arguments.getString(CallProbeActivity.EXTRA_OUTPUT_MUTED) ?: "false"
+        assertTrue("probe_output_muted must be true or false", muted in listOf("true", "false"))
+        val speaker = arguments.getString(CallProbeActivity.EXTRA_LOUDSPEAKER) ?: "false"
+        assertTrue("probe_loudspeaker must be true or false", speaker in listOf("true", "false"))
+        runAudio(app, path!!, duration!! * 1_000, exerciseRate = false, finishMarker = finishMarker,
+            outputMuted = muted == "true", loudspeaker = speaker == "true")
     }
 
     private fun assertHealthy(activity: CallProbeActivity, owner: CallProbeAudio): CallProbeAudio.Snapshot {
@@ -538,11 +550,14 @@ class CallMediaProbeGatesTest {
         return owner.snapshot().also { assertNull("audio/native failure: ${it.failure}", it.failure) }
     }
 
-    private fun runAudio(app: Context, fixture: String?, durationMs: Long, exerciseRate: Boolean, finishMarker: File? = null) {
+    private fun runAudio(app: Context, fixture: String?, durationMs: Long, exerciseRate: Boolean, finishMarker: File? = null,
+        outputMuted: Boolean = false, loudspeaker: Boolean = false) {
         assertEquals("operator must externally grant RECORD_AUDIO before instrumentation; denial is not PASS",
             PackageManager.PERMISSION_GRANTED, app.checkSelfPermission(Manifest.permission.RECORD_AUDIO))
         val intent = Intent(app, CallProbeActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             .putExtra(CallProbeActivity.EXTRA_AUTO_START, true)
+            .putExtra(CallProbeActivity.EXTRA_OUTPUT_MUTED, outputMuted)
+            .putExtra(CallProbeActivity.EXTRA_LOUDSPEAKER, loudspeaker)
         if (fixture != null) intent.putExtra(CallProbeActivity.EXTRA_FIXTURE_PATH, fixture)
         var owner: CallProbeAudio? = null
         var activity: CallProbeActivity? = null
@@ -605,6 +620,8 @@ class CallMediaProbeGatesTest {
                     Thread.sleep(50)
                 }
                 val state = assertHealthy(host, audio)
+                assertEquals("fixture output gain selection", outputMuted, state.outputMuted)
+                if (loudspeaker) assertEquals("fixture loudspeaker route", AudioDeviceInfo.TYPE_BUILTIN_SPEAKER, state.outputRouteType)
                 // Snapshot and duration are immutable measurement-end evidence. The wait keeps
                 // producers alive but contributes no counters/time to the measured interval.
                 val interval = JSONObject().put("duration_ms", SystemClock.elapsedRealtime() - started).put("running", state.json())

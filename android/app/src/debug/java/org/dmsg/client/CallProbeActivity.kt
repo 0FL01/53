@@ -21,6 +21,8 @@ class CallProbeActivity : DmsgActivity() {
         const val EXTRA_AUTO_START = "probe_auto_start"
         const val EXTRA_FIXTURE_PATH = "probe_fixture_path"
         const val EXTRA_RATE_OFFSET_HZ = "probe_playback_rate_offset_hz"
+        const val EXTRA_OUTPUT_MUTED = "probe_output_muted"
+        const val EXTRA_LOUDSPEAKER = "probe_loudspeaker"
     }
 
     var probeOwner: CallProbeAudio? = null
@@ -120,7 +122,9 @@ class CallProbeActivity : DmsgActivity() {
         val offset = intent.getIntExtra(EXTRA_RATE_OFFSET_HZ, 0)
         if (offset !in -8..8) { probeFailure = "playback_rate_offset_out_of_bounds"; return false }
         probeFailure = null
-        probeOwner = CallProbeAudio(this, fixture).also { it.setPlaybackRateOffsetHz(offset); it.start() }
+        probeOwner = CallProbeAudio(this, fixture, intent.getBooleanExtra(EXTRA_OUTPUT_MUTED, false),
+            intent.getBooleanExtra(EXTRA_LOUDSPEAKER, false))
+            .also { it.setPlaybackRateOffsetHz(offset); it.start() }
         return true
     }
 

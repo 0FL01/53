@@ -8,8 +8,11 @@ import kotlin.math.roundToLong
  * Network arrival/queue delay is deliberately absent. Route changes retire the owner.
  */
 internal class CallProbePlaybackClock {
+    data class RejectedWindow(val frames: Long, val ns: Long, val rate: Int,
+        val beforeFrames: Long?, val beforeNs: Long?, val afterFrames: Long?, val afterNs: Long?)
     data class Output(val rate: Int, val sinkPpb: Long?, val calibrated: Boolean,
-        val healthy: Boolean, val relativePpm: Double?, val rejectionMask: Long)
+        val healthy: Boolean, val relativePpm: Double?, val rejectionMask: Long,
+        val rejectedWindow: RejectedWindow? = null)
     private data class Point(val frame: Long, val ns: Long, val rate: Int, val underruns: Int)
     private var first: Point? = null
     private var middle: Point? = null
@@ -22,6 +25,7 @@ internal class CallProbePlaybackClock {
     private var selected = 16_000
     private var relativePpm: Double? = null
     private var rejectionMask = 0L
+    private var rejectedWindow: RejectedWindow? = null
 
     fun observe(frame: Long, timestampNs: Long, nowNs: Long, actualRate: Int, underruns: Int) {
         if (frame < 0 || timestampNs <= 0 || nowNs < timestampNs) {
@@ -75,6 +79,9 @@ internal class CallProbePlaybackClock {
                 healthy = true
             } else {
                 rejectionMask = rejectionMask or 8L
+                rejectedWindow = RejectedWindow(frame - anchor.frame, timestampNs - anchor.ns, actualRate,
+                    middle?.let { it.frame - anchor.frame }, middle?.let { it.ns - anchor.ns },
+                    middle?.let { frame - it.frame }, middle?.let { timestampNs - it.ns })
                 healthy = false
                 // Reject this entire hardware sample. Start a new observation
                 // window; never retain a bad startup span as a frequency anchor.
@@ -114,6 +121,6 @@ internal class CallProbePlaybackClock {
         }
         val sink = ratio?.let { ((it * selected / 16_000.0 - 1.0) * 1e9).roundToLong() }
         return Output(selected, sink?.takeIf { it in -1_000_000L..1_000_000L }, ratio != null,
-            valid && healthy, relativePpm, rejectionMask)
+            valid && healthy, relativePpm, rejectionMask, rejectedWindow)
     }
 }
