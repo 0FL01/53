@@ -378,6 +378,7 @@ class CallMediaProbeGatesTest {
             val deadline = started + 6_000
             val timestamp = AudioTimestamp()
             var nextObservation = 0L
+            var reportedPlaybackStage = -1
             while (!stopping.get() && SystemClock.elapsedRealtime() < deadline) {
                 requireSource(manager.mode == AudioManager.MODE_IN_COMMUNICATION, "communication_mode_changed")
                 val stage = ((SystemClock.elapsedRealtime() - started) / 2_000).toInt().coerceIn(0, 2)
@@ -400,6 +401,16 @@ class CallMediaProbeGatesTest {
                     }
                 } else if (playbackStarted && !playbackPaused) {
                     track!!.pause(); track.flush(); playbackPaused = true
+                }
+                if (playbackToggle && stage != reportedPlaybackStage) {
+                    val observed = System.nanoTime()
+                    stages[stage].put("started_monotonic_ns", observed)
+                    evidence("call_probe_source_playback_phase", JSONObject()
+                        .put("stage", stages[stage].getString("stage")).put("device_monotonic_ns", observed)
+                        .put("elapsed_ms", SystemClock.elapsedRealtime() - started)
+                        .put("playback_started", playbackStarted).put("playback_paused", playbackPaused)
+                        .put("playback_written", playbackWritten).put("max_queue_samples", maxPlaybackQueued))
+                    reportedPlaybackStage = stage
                 }
                 // Nonblocking read plus two independent deadlines avoids an unbounded recording read thread.
                 val count = record.read(pcm, 0, pcm.size, AudioRecord.READ_NON_BLOCKING)

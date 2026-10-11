@@ -1117,5 +1117,53 @@ no clipping, PCM zeroized and children joined. At normal unity volume, monitor
 peak14491 and camera peaks3607/3538 give short normalized source correlations
 0.2802/0.33317. These are not calibrated acoustic delay or independent source/ear
 reference planes. Their positions/isolation and listening annotations remain
-external dependencies. R5 is blocked on that physical qualification;12k/40ms
+external dependencies at that checkpoint. R5 was blocked on that physical qualification;12k/40ms
 remains **not qualified** for normal/pilot use, not declared impossible or PASS.
+
+### Two identified pickups and finite output attribution (2026-10-11)
+
+The user now identifies C920 directly at the Mi A2 Lite loudspeaker and the USB
+PnP Audio Device Mono above the Moto loudspeaker. The prior placement blocker
+is removed; the goal is active, not accepted. Read-only hardware inspection and
+real capture confirm USB mono48k/S16 and C920 stereo32k/S16 on the same PC.
+Their asynchronous sample clocks are not assumed to share an origin or rate.
+
+`android/measure-probe-audio.py` uses installed public libpulse17 through Python
+stdlib, with three explicit sources: both pickups and the PC speaker monitor.
+It changes no default, route or system volume, bounds capture to20s and retains
+only20ms mutable PCM scratch per source, wiped after analysis. It emits scalar
+0.5s host-delivery windows, including400Hz energy and raw stream timing/latency
+metadata. Three optional JSON stdin labels identify host-observed test phases.
+The monitor is digital, callback/label times are not sample-acquisition times,
+and `physical_capture_time=false`, `acoustic_latency=null` remain explicit.
+
+Example, using operator-selected public source names and a clean environment:
+
+```sh
+env -i HOME="$HOME" PATH=/usr/bin:/bin XDG_RUNTIME_DIR="/run/user/$(id -u)" \
+  python3 -B android/measure-probe-audio.py --duration 20 \
+  --moto-source "$MOTO_SOURCE" --mi-source "$MI_SOURCE" \
+  --monitor-source "$SPEAKER_MONITOR" --labels-stdin
+```
+
+The existing exact source diagnostic with `probe_source_playback=toggle` now
+emits only three finite `call_probe_source_playback_phase` JSON markers. No
+runtime audio/mute API, native ABI, PCM sizes, effects or queue bounds change.
+Only gate.test is replaced, SHA256
+`1af3630766edd9c7d1fcaf7dcf68d9fc0a6224bbb72bc6f2cb72f251882ec748`;
+the145-build gate APK/native are unchanged. Clean `assembleDebugAndroidTest`
+passes; the selected diagnostic passes separately on both phones, VOICE peaks
+541/662, original≤640 queue, all source/worker/mode cleanup complete.
+
+Both20s captures use known PC speech at normal unity per-stream volume, save no
+audio/video, and report zero clipping/holes with all three streams progressing.
+Median400Hz RMS, normalized to full scale, before/during/after the Mi tone:
+C9200.001036/0.003284/0.001035; USB0.000159/0.000123/0.000201. For the Moto tone:
+USB0.000383/0.007895/0.000178; C9200.002061/0.012058/0.000851. The PC monitor does
+not gain the phone tone in either control. Host phase-boundary windows are
+excluded; these values are output-attribution evidence, not acoustic latency.
+Importantly, C920 also hears Moto strongly: two pickups are not isolated ear
+planes. Subsequent duplex analysis must distinguish that crosstalk rather than
+assigning every camera signal to Mi. Helper PCM/filter state is zeroized and
+read-only postflight finds0 owned Pulse clients/record streams. No full DNS,
+mouth-to-ear, source-active-loss, intelligibility or profile acceptance follows.
