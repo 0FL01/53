@@ -981,5 +981,44 @@ freshness, timestamp/rate validation and supported relative range remain intact.
 
 The165 JVM tests pass, including unchanged healthy command sequences and less than
 one sample of fractional error over2700s at +/-3.49ppm. These are controller-model
-results. The currently running141-build physical pair uses its original APK; no
+results. The separately frozen141-build physical pair used its original APK; no
 replacement, rebuild or new physical acceptance is inferred from the model.
+
+## Same-generation media and feedback frontier observations
+
+The fresh-identity141 paired80 run also retired around19.4min. Its two original
+top-turn observations identify uncovered commitments, not byte exhaustion:
+oldest77799/40277, age727359/721272us,19 entries and1076/883 bytes, with no pending
+receipts or waiting frame. Applied terminal frontiers are77798/40276. The most
+recent completed control handlers are624134/73417us old at those separate local
+decisions. These records do not reproduce the covered-prefix/accounting bugs and
+cannot locate upstream transit or identify which phone retired first.
+
+The145-test diagnostic atom adds three nullable integers, reset with every fresh
+generation:
+
+| Field | Actual update boundary |
+| --- | --- |
+| `last_validated_peer_media_index` | Full SRTP authentication and existing packet/source/ordering validation, before any subsequent late-audio discard |
+| `last_prepared_feedback_terminal` | Successful submission to the existing capacity-one control lane, not compound construction or protection |
+| `last_committed_feedback_terminal` | Actual Noise-commit receipt, tagged with that submission's terminal rather than a newer current frontier |
+
+The existing two pending control slots carry only terminal/receipt pairs; no new
+queue, credit, timing rule or native ABI is added. Unknown values remain JSON null,
+not zero. Failed submissions, unresolved/dropped/closed receipts, and forged,
+replayed, malformed or source/order-invalid media cannot manufacture these
+observations. The Kotlin forwarder preserves nullable nonnegative integers.
+
+Same-generation opposite-role indices can distinguish missing media validation
+from missing covering-report production. Noise commitment still does not mean
+completed TCP transmission or remote receipt; those outcomes remain separate.
+No independent phone-clock comparison, longer720ms/window bound, receipt credit
+forgiveness or physical-failure attribution is implied.
+
+Verification:145 focused,401 workspace with two unchanged explicit native
+ignores, two example tests and formatting pass. Candidate arm64/API26 and full
+debug/release/instrumentation packaging pass;165 JVM tests actually execute.
+The hardware-recovery correction is included in this package. Native pin,
+default/candidate C-server hashes and host codegen artifacts remain unchanged.
+One new finite physical discriminator is still required; build/model PASS does
+not establish R5 acoustic, active-source or measured DNS-capacity acceptance.

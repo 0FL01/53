@@ -171,6 +171,12 @@ pub struct Stats {
     pub encoded_packets: u64,
     pub decoded_packets: u64,
     pub received_rtp_packets: u64,
+    /// Extended peer RTP index after full authentication/source/order validation, even if late.
+    pub last_validated_peer_media_index: Option<u64>,
+    /// APP terminal in the last control frame successfully submitted to the one-slot lane.
+    pub last_prepared_feedback_terminal: Option<u64>,
+    /// APP terminal tagged on the last received Noise Commit; not write/remote receipt progress.
+    pub last_committed_feedback_terminal: Option<u64>,
     pub capture_gap_batches: u64,
     /// Oldest batch sample age at JNI/dequeue; host synthetic pushes aren't hardware evidence.
     pub max_capture_age_us: u64,
@@ -250,6 +256,9 @@ impl Default for Stats {
             encoded_packets: 0,
             decoded_packets: 0,
             received_rtp_packets: 0,
+            last_validated_peer_media_index: None,
+            last_prepared_feedback_terminal: None,
+            last_committed_feedback_terminal: None,
             capture_gap_batches: 0,
             max_capture_age_us: 0,
             initial_capture_age_floor_us: 0,
@@ -1210,6 +1219,57 @@ struct PendingCommit {
     receipt: oneshot::Receiver<Commit>,
 }
 
+struct PendingControlCommit {
+    // Snapshot the submitted APP terminal, never the newer receive frontier.
+    terminal: Option<u64>,
+    receipt: oneshot::Receiver<Commit>,
+}
+
+impl PendingControlCommit {
+    fn submit(
+        outgoing: &mpsc::Sender<SendRequest>,
+        payload: Vec<u8>,
+        terminal: Option<u64>,
+        deadline: Instant,
+        port: &Port,
+    ) -> Result<Self, String> {
+        let (committed, receipt) = oneshot::channel();
+        outgoing
+            .try_send(SendRequest {
+                opcode: OP_RTCP,
+                payload,
+                deadline: Some(deadline),
+                committed: Some(committed),
+            })
+            .map_err(|_| "probe control admission failed")?;
+        port.stats(|stats| stats.last_prepared_feedback_terminal = terminal);
+        Ok(Self { terminal, receipt })
+    }
+}
+
+fn reap_control_commits(
+    commits: &mut VecDeque<PendingControlCommit>,
+    port: &Port,
+) -> Result<(), String> {
+    while let Some(pending) = commits.front_mut() {
+        match pending.receipt.try_recv() {
+            Ok(Commit::Committed { framed_bytes, .. }) => {
+                port.stats(|stats| {
+                    stats.tx_bytes += framed_bytes as u64;
+                    stats.last_committed_feedback_terminal = pending.terminal;
+                });
+                commits.pop_front();
+            }
+            Ok(Commit::Dropped) => {
+                commits.pop_front();
+            }
+            Err(oneshot::error::TryRecvError::Empty) => break,
+            Err(_) => return Err("probe control commitment owner closed".into()),
+        }
+    }
+    Ok(())
+}
+
 struct WaitingPacket {
     opus: Zeroizing<Vec<u8>>,
     position: u64,
@@ -1791,6 +1851,7 @@ impl ReceiveState {
         port.stats(|stats| {
             stats.rx_bytes += (cipher.len() + packet::FRAMING_BYTES) as u64;
             stats.received_rtp_packets += 1;
+            stats.last_validated_peer_media_index = Some(index);
         });
         let admitted = Instant::now();
         if let Some(timing) = timing {
@@ -2530,7 +2591,7 @@ async fn endpoint_owned(
     );
     let mut commits: VecDeque<PendingCommit> = VecDeque::with_capacity(2);
     let mut admission = MediaAdmission::default();
-    let mut control_commits: VecDeque<oneshot::Receiver<Commit>> = VecDeque::with_capacity(2);
+    let mut control_commits: VecDeque<PendingControlCommit> = VecDeque::with_capacity(2);
     let mut capture = CaptureFrame::new(profile.samples(), port.clone());
     let epoch = Instant::now();
     let wall = clock::ntp_from_system_time(std::time::SystemTime::now());
@@ -2585,18 +2646,8 @@ async fn endpoint_owned(
                 Err(error) => break Err(error),
             }
         }
-        while let Some(pending) = control_commits.front_mut() {
-            match pending.try_recv() {
-                Ok(Commit::Committed { framed_bytes, .. }) => {
-                    port.stats(|stats| stats.tx_bytes += framed_bytes as u64);
-                    control_commits.pop_front();
-                }
-                Ok(Commit::Dropped) => {
-                    control_commits.pop_front();
-                }
-                Err(oneshot::error::TryRecvError::Empty) => break,
-                Err(_) => break 'session Err("probe control commitment owner closed".into()),
-            }
+        if let Err(error) = reap_control_commits(&mut control_commits, &port) {
+            break 'session Err(error);
         }
         // Give the existing one-frame control turn its known-prefix opportunity
         // before reaping media receipts; it also retains the empty-inbox reap.
@@ -2749,10 +2800,8 @@ async fn endpoint_owned(
                         let compound = packet::compound(packet::Report { sender_ssrc: fixture.ssrc_tx, peer_ssrc: fixture.ssrc_rx, cname: &fixture.cname,
                             sender: sent.since_report.then(|| local_clock.report(now, sent.packets, sent.octets)).flatten().map(|report| (report.ntp, report.rtp, report.packets, report.octets)), feedback });
                         let cipher = sender.protect_rtcp(&compound)?;
-                        let (committed, receipt) = oneshot::channel();
-                        control.outgoing.try_send(SendRequest { opcode: OP_RTCP, payload: cipher, deadline: Some(now + Duration::from_millis(200)), committed: Some(committed) })
-                            .map_err(|_| "probe control admission failed")?;
-                        control_commits.push_back(receipt);
+                        control_commits.push_back(PendingControlCommit::submit(&control.outgoing, cipher,
+                            feedback.terminal, now + Duration::from_millis(200), &port)?);
                         last_control_submission = now;
                         sent.since_report = false;
                     }
@@ -7041,6 +7090,249 @@ mod tests {
     }
 
     #[test]
+    fn feedback_frontiers_serialize_unknown_and_reset_for_fresh_generation() {
+        let fields = [
+            "last_validated_peer_media_index",
+            "last_prepared_feedback_terminal",
+            "last_committed_feedback_terminal",
+        ];
+        let old = test_port();
+        let initial = serde_json::to_value(old.snapshot()).unwrap();
+        for field in fields {
+            assert_eq!(initial.get(field), Some(&serde_json::Value::Null));
+        }
+        old.stats(|stats| {
+            stats.last_validated_peer_media_index = Some(65_537);
+            stats.last_prepared_feedback_terminal = Some(65_536);
+            stats.last_committed_feedback_terminal = Some(65_535);
+        });
+        let populated = serde_json::to_value(old.snapshot()).unwrap();
+        for (field, index) in fields.into_iter().zip([65_537u64, 65_536, 65_535]) {
+            assert_eq!(populated[field].as_u64(), Some(index));
+        }
+        // Each fresh generation owns a new Port with Stats::default(); retiring
+        // the old port must not carry its diagnostic frontiers into that owner.
+        old.closed.store(true, Ordering::Relaxed);
+        let fresh = test_port();
+        let reset = serde_json::to_value(fresh.snapshot()).unwrap();
+        for field in fields {
+            assert_eq!(reset.get(field), Some(&serde_json::Value::Null));
+        }
+        assert_eq!(
+            old.snapshot().last_committed_feedback_terminal,
+            Some(65_535)
+        );
+    }
+
+    #[test]
+    fn feedback_receipts_keep_their_submitted_terminals() {
+        for first_terminal in [None, Some(7)] {
+            let mut turn = ControlTurn::new();
+            let first_cipher = turn
+                .sender
+                .protect_rtcp(&turn.compound(first_terminal))
+                .unwrap();
+            let second_cipher = turn.sender.protect_rtcp(&turn.compound(Some(11))).unwrap();
+            let port = &turn.port;
+            // Constructing/protecting either compound is not lane preparation.
+            assert_eq!(port.snapshot().last_prepared_feedback_terminal, None);
+            let (outgoing, mut requests) = mpsc::channel(1);
+            let mut commits = VecDeque::with_capacity(2);
+            commits.push_back(
+                PendingControlCommit::submit(
+                    &outgoing,
+                    first_cipher,
+                    first_terminal,
+                    turn.at(200),
+                    port,
+                )
+                .unwrap(),
+            );
+            assert_eq!(outgoing.capacity(), 0);
+            assert_eq!(
+                port.snapshot().last_prepared_feedback_terminal,
+                first_terminal
+            );
+            let first = requests.try_recv().unwrap();
+            commits.push_back(
+                PendingControlCommit::submit(
+                    &outgoing,
+                    second_cipher,
+                    Some(11),
+                    turn.at(400),
+                    port,
+                )
+                .unwrap(),
+            );
+            assert_eq!(commits.len(), 2);
+            assert_eq!(port.snapshot().last_prepared_feedback_terminal, Some(11));
+            assert_eq!(
+                PendingControlCommit::submit(&outgoing, vec![1], Some(13), turn.at(600), port)
+                    .err()
+                    .as_deref(),
+                Some("probe control admission failed")
+            );
+            assert_eq!(port.snapshot().last_prepared_feedback_terminal, Some(11));
+            let second = requests.try_recv().unwrap();
+            reap_control_commits(&mut commits, port).unwrap();
+            assert_eq!(commits.len(), 2); // No received Commit yet.
+            assert_eq!(port.snapshot().last_committed_feedback_terminal, None);
+            assert_eq!(port.snapshot().tx_bytes, 0);
+            first
+                .committed
+                .unwrap()
+                .send(Commit::Committed {
+                    framed_bytes: 132,
+                    at: turn.at(100),
+                })
+                .unwrap_or_else(|_| panic!("control receipt closed"));
+            reap_control_commits(&mut commits, port).unwrap();
+            assert_eq!(commits.len(), 1);
+            assert_eq!(
+                port.snapshot().last_committed_feedback_terminal,
+                first_terminal
+            );
+            assert_eq!(port.snapshot().last_prepared_feedback_terminal, Some(11));
+            assert_eq!(port.snapshot().tx_bytes, 132);
+            second
+                .committed
+                .unwrap()
+                .send(Commit::Committed {
+                    framed_bytes: 132,
+                    at: turn.at(300),
+                })
+                .unwrap_or_else(|_| panic!("control receipt closed"));
+            reap_control_commits(&mut commits, port).unwrap();
+            assert!(commits.is_empty());
+            assert_eq!(port.snapshot().last_committed_feedback_terminal, Some(11));
+            assert_eq!(port.snapshot().tx_bytes, 264);
+            drop(requests);
+            assert!(
+                PendingControlCommit::submit(&outgoing, vec![1], Some(17), turn.at(600), port)
+                    .is_err()
+            );
+            assert_eq!(port.snapshot().last_prepared_feedback_terminal, Some(11));
+        }
+    }
+
+    #[test]
+    fn uncommitted_feedback_receipts_never_advance_frontier() {
+        for closed in [false, true] {
+            let port = test_port();
+            let (outgoing, mut requests) = mpsc::channel(1);
+            let mut commits = VecDeque::with_capacity(2);
+            let deadline = Instant::now();
+            commits.push_back(
+                PendingControlCommit::submit(&outgoing, vec![1], Some(7), deadline, &port).unwrap(),
+            );
+            let request = requests.try_recv().unwrap();
+            assert_eq!(request.deadline, Some(deadline));
+            assert_eq!(port.snapshot().last_prepared_feedback_terminal, Some(7));
+            reap_control_commits(&mut commits, &port).unwrap();
+            assert_eq!(commits.len(), 1);
+            assert_eq!(port.snapshot().last_committed_feedback_terminal, None);
+            let notify = request.committed.unwrap();
+            if closed {
+                drop(notify);
+                assert_eq!(
+                    reap_control_commits(&mut commits, &port),
+                    Err("probe control commitment owner closed".into())
+                );
+                assert_eq!(commits.len(), 1);
+            } else {
+                // The existing lane sends Dropped when this deadline has expired
+                // before Noise; preparation alone must not fabricate a Commit.
+                notify
+                    .send(Commit::Dropped)
+                    .unwrap_or_else(|_| panic!("control receipt closed"));
+                reap_control_commits(&mut commits, &port).unwrap();
+                assert!(commits.is_empty());
+            }
+            assert_eq!(port.snapshot().last_committed_feedback_terminal, None);
+            assert_eq!(port.snapshot().last_prepared_feedback_terminal, Some(7));
+            assert_eq!(port.snapshot().tx_bytes, 0);
+        }
+    }
+
+    #[test]
+    fn rejected_media_cannot_advance_peer_frontier() {
+        for invalid in 0..9 {
+            let mut turn = ControlTurn::new();
+            let index = u64::from(turn.peer.initial_sequence) + 10;
+            let timestamp = u64::from(turn.peer.initial_timestamp) + 10 * 1920;
+            turn.received.index = u64::from(turn.peer.initial_sequence);
+            turn.received.timestamp = u64::from(turn.peer.initial_timestamp);
+            let opus = opus40();
+            let valid = turn
+                .sender
+                .protect_rtp(&packet::rtp(
+                    turn.peer.ssrc_tx,
+                    index,
+                    timestamp as u32,
+                    &opus,
+                ))
+                .unwrap();
+            let mut feedback = packet::Feedback::default();
+            turn.received
+                .receive(
+                    (OP_RTP, valid.clone()),
+                    &mut turn.receiver,
+                    &turn.fixture,
+                    &mut feedback,
+                    &turn.port,
+                )
+                .unwrap();
+            let before = serde_json::to_value(turn.port.snapshot()).unwrap();
+            let mut plain = packet::rtp(
+                turn.peer.ssrc_tx,
+                if invalid == 7 { index - 1 } else { index + 1 },
+                match invalid {
+                    5 => (timestamp as u32).wrapping_add(1), // Invalid source-clock grid.
+                    6 => timestamp as u32,                   // Non-increasing source clock.
+                    _ => (timestamp as u32).wrapping_add(1920),
+                },
+                if invalid == 4 { &[0xff] } else { &opus },
+            );
+            if invalid == 2 {
+                plain[1] = 96; // Authenticated RTP outside the fixed packet profile.
+            }
+            let mut cipher = if invalid == 1 {
+                valid // Exact SRTP replay.
+            } else {
+                turn.sender.protect_rtp(&plain).unwrap()
+            };
+            if invalid == 0 {
+                *cipher.last_mut().unwrap() ^= 1; // Forged authentication tag.
+            }
+            if invalid == 3 {
+                turn.fixture.ssrc_rx ^= 1; // SRTP-valid, wrong expected packet source.
+            }
+            assert!(
+                turn.received
+                    .receive(
+                        (if invalid == 8 { OP_RTCP } else { OP_RTP }, cipher),
+                        &mut turn.receiver,
+                        &turn.fixture,
+                        &mut feedback,
+                        &turn.port,
+                    )
+                    .is_err(),
+                "invalid media case {invalid} was accepted"
+            );
+            assert_eq!(feedback.terminal, Some(index));
+            assert_eq!(
+                (turn.received.index, turn.received.timestamp),
+                (index, timestamp)
+            );
+            assert_eq!(
+                turn.port.snapshot().last_validated_peer_media_index,
+                Some(index)
+            );
+            assert_eq!(serde_json::to_value(turn.port.snapshot()).unwrap(), before);
+        }
+    }
+
+    #[test]
     fn timing_bins_are_bounded_and_keep_above_boundary_samples() {
         let mut bins = [0; 8];
         for duration in [
@@ -7102,6 +7394,10 @@ mod tests {
         assert!(received.encoded.is_empty()); // Diagnostics cannot rescue late audio.
         let stats = port.stats.lock().unwrap();
         assert_eq!(stats.late_packets, 1);
+        assert_eq!(
+            stats.last_validated_peer_media_index,
+            Some(u64::from(peer.initial_sequence))
+        );
         assert_eq!(stats.noise_after_nominal_due_packets, 0);
         assert_eq!(stats.noise_before_due_admitted_after_due_packets, 1);
         assert!(stats.max_rx_post_noise_wait_us >= 20_000);
@@ -7129,6 +7425,10 @@ mod tests {
                 .iter()
                 .sum::<u64>(),
             1
+        );
+        assert_eq!(
+            port.snapshot().last_validated_peer_media_index,
+            Some(u64::from(peer.initial_sequence))
         );
     }
 
@@ -8991,6 +9291,7 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(feedback.terminal, Some(index));
+            assert_eq!(port.snapshot().last_validated_peer_media_index, Some(index));
             assert_eq!(
                 received.timestamp,
                 u64::from(peer.initial_timestamp) + 1920 * step

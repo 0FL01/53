@@ -525,6 +525,13 @@ class CallProbeAudio(context: Context, private val fixturePath: String? = null) 
             }
             clean.put("last_progress_failure", progress)
         }
+        listOf("last_validated_peer_media_index", "last_prepared_feedback_terminal",
+            "last_committed_feedback_terminal").forEach { field ->
+            check(source.has(field), "invalid_native_feedback_frontier")
+            val value = if (source.isNull(field)) null else source.getLong(field)
+            check(value == null || value >= 0, "invalid_native_feedback_frontier")
+            clean.put(field, value ?: JSONObject.NULL)
+        }
         clean.put("ready", source.getBoolean("ready")).put("dns_carrier", source.getBoolean("dns_carrier"))
         clean.put("failed", source.getBoolean("failed")).put("stopped", source.getBoolean("stopped"))
         clean.put("capture_clock_calibrated", source.getBoolean("capture_clock_calibrated"))
