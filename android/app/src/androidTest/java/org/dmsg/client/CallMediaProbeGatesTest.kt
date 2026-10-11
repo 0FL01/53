@@ -158,7 +158,8 @@ class CallMediaProbeGatesTest {
             listOf("duration_ms", "captured_samples", "zero_samples", "nonzero_samples", "peak", "clipped_samples",
                 "sample_rate", "channel_count", "channel_mask", "encoding", "input_route_id", "input_route_type",
                 "timestamp_available", "first_frame", "first_monotonic_ns", "last_frame", "last_monotonic_ns",
-                "frame_monotonic", "record_stopped", "record_released", "effects_released").forEach { initial.put(it, JSONObject.NULL) }
+                "frame_monotonic", "record_stopped", "record_released", "effects_released",
+                "communication_mode_after_record_release").forEach { initial.put(it, JSONObject.NULL) }
             listOf("aec", "ns").forEach { effect ->
                 initial.put(effect, JSONObject().apply {
                     listOf("available", "created", "enable_result", "control", "enabled").forEach { put(it, JSONObject.NULL) }
@@ -222,7 +223,9 @@ class CallMediaProbeGatesTest {
                 try {
                     await("microphone source worker exceeded 20s", 20_000) {
                         assertTrue("capture requires the visible resumed target window", foreground())
-                        assertEquals("communication mode changed", AudioManager.MODE_IN_COMMUNICATION, manager.mode)
+                        // The worker checks mode while AudioRecord is active. Android
+                        // may reset it once the final record is released, before this
+                        // observer sees worker completion; that is cleanup, not capture.
                         assertFalse("DNS service must remain stopped", DmsgService.running(app))
                         !worker!!.isAlive
                     }
@@ -332,11 +335,13 @@ class CallMediaProbeGatesTest {
             requireSource(!stopping.get(), "source_stopped_before_start")
             record.startRecording()
             requireSource(record.recordingState == AudioRecord.RECORDSTATE_RECORDING, "microphone_start_failed")
+            requireSource(manager.mode == AudioManager.MODE_IN_COMMUNICATION, "communication_mode_changed")
             started = SystemClock.elapsedRealtime()
             val deadline = started + 6_000
             val timestamp = AudioTimestamp()
             var nextObservation = 0L
             while (!stopping.get() && SystemClock.elapsedRealtime() < deadline) {
+                requireSource(manager.mode == AudioManager.MODE_IN_COMMUNICATION, "communication_mode_changed")
                 // Nonblocking read plus two independent deadlines avoids an unbounded recording read thread.
                 val count = record.read(pcm, 0, pcm.size, AudioRecord.READ_NON_BLOCKING)
                 requireSource(count in 0..pcm.size, if (count < 0) "capture_read_error_$count" else "capture_read_invalid")
@@ -400,6 +405,8 @@ class CallMediaProbeGatesTest {
             try { ns?.release(); ns = null } catch (_: Throwable) { failure.compareAndSet(null, "ns_release_failed") }
             effectsReleased = aec == null && ns == null
             try { record?.release(); recordReleased = true } catch (_: Throwable) { failure.compareAndSet(null, "record_release_failed") }
+            report.put("communication_mode_after_record_release",
+                try { manager.mode } catch (_: Exception) { JSONObject.NULL })
             result.set(report.put("duration_ms", duration).put("captured_samples", captured).put("zero_samples", zeros)
                 .put("nonzero_samples", captured - zeros).put("peak", peak).put("clipped_samples", clipped)
                 .put("input_route_id", routeId).put("input_route_type", routeType)

@@ -1022,3 +1022,61 @@ The hardware-recovery correction is included in this package. Native pin,
 default/candidate C-server hashes and host codegen artifacts remain unchanged.
 One new finite physical discriminator is still required; build/model PASS does
 not establish R5 acoustic, active-source or measured DNS-capacity acceptance.
+
+## Resumed finite relay and microphone discriminators, 2026-10-11
+
+The145-build fresh paired80 discriminator did run: its last healthy intervals
+are1194546/1194268ms, followed by retirement, not45-minute completion. A expires
+entry43835 at725855us with applied terminal43834,883/2880 ledger bytes,19 entries
+and no pending/waiting charge. B's independent FINAL has validated43853 and
+prepared/Noise-committed terminal43850. That covering commitment is not proof of
+timely transmission, relay forwarding or A's receipt; independent final clocks
+do not order those events. Cleanup completes and owned listeners close.
+
+Two test-only real TCP/Noise/SRTP discriminators use the production relay route
+and original one-slot/20ms forwarding policy. A committed144-byte media packet
+can have its covering152-byte source-committed SRTCP dropped on a Full
+B-control→A-control hop. A later distinct covering compound still authenticates
+and releases exactly the original ledger charge. A queued compound expiring
+before Noise does not desynchronize the following valid compound. These tests
+prove possible bounded plaintext loss, not the physical retirement's cause or
+a credit/nonce violation. Runtime relay/lane code and720ms/window bounds do not
+change. Relay9, focused147, workspace403 (two unchanged explicit native ignores),
+example2, formatting, full Android packaging and165 rerun JVM tests pass.
+
+The exact `foregroundMicrophoneSourceDiagnosticOnlyInGatePackage` diagnostic
+uses two sequential6s captures and an explicit external PC test phrase. The
+original Moto observer asserted mode3 after its final AudioRecord could already
+be released; two runs failed despite complete intervals and cleanup. Mode is
+now required at recording startup and before every active nonblocking read,
+not after release. Foreground/effects/route/focus/restoration checks stay intact.
+The post-release mode counter directly records Moto3 after MIC and0 after
+VOICE_COMMUNICATION; Mi records3 after both. Both new source diagnostics PASS:
+
+| Device | MIC nonzero / samples | VOICE_COMMUNICATION nonzero / samples | Clipped | Cleanup |
+| --- | ---: | ---: | ---: | --- |
+| Moto/API35 |88526/93760 |19467/94080 |0/0 |complete |
+| Mi/API30 |90159/94720 |8668/92320 |0/0 |complete |
+
+This is input-counter evidence, not listening or protected DNS quality. The
+unchanged gate APK is `deace45dfbfa8ef6451d7ffde927fcad5c0aae3364081251c9dfab3cc8c7926c`;
+the updated test APK is `fe11b276f50150d7667c55418508375cc699630bd991f68d8c5d1a17a046d03d`.
+Only gate instrumentation is replaced; native/bindings/Main are untouched.
+
+A separate unchanged local AudioTrack gate passes on Moto but fails Mi's
+nonzero-input assertion. An isolated Mi repeat, with no Moto playback and the
+per-stream test phrase volume increased3277→13107, still reads134720 entirely
+zero samples. Available AEC/NS remain enabled/controlled, mode is3, routes are
+input15/output1, microphone mute/system silencing are false, sink≤640 and active
+late/PLC/capture/render-expiry losses are0. Cleanup completes. This preserves a
+real failed gate; it does not establish whether native code or the platform's
+playback/processed-input path causes that difference. The next bounded experiment
+must separate those paths before any production audio correction.
+
+Authorized C920 capture has established only2.048s stereo32k input capability:
+nonzero/no-clipping RAM PCM, subsequently zeroized, no audio files. Its channels
+are not independently qualified source/ear reference planes. The finite wired
+Moto Wi-Fi/LTE check restores its original Wi-Fi0/data1/CELLULAR state and proves
+system DNS/ICMP reachability only; private LAN resolver access, protected voice
+and safe useful DNS capacity do not follow. Main, device clocks, deployed
+authority/delegation/firewall and the pinned transport remain unchanged.

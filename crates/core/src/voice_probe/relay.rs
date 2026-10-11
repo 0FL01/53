@@ -420,7 +420,10 @@ async fn read_handshake(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::packet;
     use super::*;
+    use std::future::Future;
+    use tokio::net::TcpSocket;
     use tokio::task::JoinHandle;
     use tokio::time::timeout;
 
@@ -566,6 +569,203 @@ mod tests {
         for lane in lanes {
             lane.joined_close().await;
         }
+    }
+
+    // The watchdog is outside the actor runtime, so a stuck actor cannot also
+    // suppress the test's bound. These are public, in-memory fixture keys only.
+    fn supervised(experiment: impl Future<Output = ()> + Send + 'static) {
+        let (finished, completion) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(experiment);
+            }));
+            let _ = finished.send(outcome);
+        });
+        let outcome = completion
+            .recv_timeout(Duration::from_secs(10))
+            .expect("control-hop experiment exceeded independent supervisor bound");
+        worker.join().unwrap();
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    // Same real TCP / independent Noise transport construction as lane::tests.
+    // Small kernel buffers make unread-peer backpressure finite; no actor hook,
+    // application queue, oversized frame or runtime scheduling block is needed.
+    async fn bounded_tcp_lane() -> (Lane, TcpStream, snow::TransportState) {
+        let mut responder = snow::Builder::new(crate::transport::PATTERN.parse().unwrap())
+            .local_private_key(&RELAY_PRIVATE)
+            .unwrap()
+            .build_responder()
+            .unwrap();
+        let mut initiator = snow::Builder::new(crate::transport::PATTERN.parse().unwrap())
+            .local_private_key(&DEVICE_PRIVATE[0])
+            .unwrap()
+            .remote_public_key(&crate::olm::device_pubkey(&RELAY_PRIVATE))
+            .unwrap()
+            .build_initiator()
+            .unwrap();
+        let mut cipher = [0; 256];
+        let mut plain = [0; 256];
+        let length = initiator.write_message(&[], &mut cipher).unwrap();
+        responder
+            .read_message(&cipher[..length], &mut plain)
+            .unwrap();
+        let length = responder.write_message(&[], &mut cipher).unwrap();
+        initiator
+            .read_message(&cipher[..length], &mut plain)
+            .unwrap();
+
+        let socket = TcpSocket::new_v4().unwrap();
+        socket.set_recv_buffer_size(1024).unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = socket.listen(1).unwrap();
+        let socket = TcpSocket::new_v4().unwrap();
+        socket.set_send_buffer_size(1024).unwrap();
+        let stream = socket
+            .connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (peer, _) = listener.accept().await.unwrap();
+        (
+            lane::spawn(stream, initiator.into_transport_mode().unwrap()).unwrap(),
+            peer,
+            responder.into_transport_mode().unwrap(),
+        )
+    }
+
+    const A_SSRC: u32 = 0x0102_0304;
+    const B_SSRC: u32 = 0x0506_0708;
+    const B_CNAME: &[u8; 8] = b"probe-b1";
+    const B_MEDIA_KEY: [u8; dmsg_srtp_sys::KEY_MATERIAL_BYTES] = [91; 30];
+
+    fn protected_report(
+        sender: &mut dmsg_srtp_sys::Sender,
+        terminal: Option<u64>,
+        late: u32,
+    ) -> Vec<u8> {
+        let plain = packet::compound(packet::Report {
+            sender_ssrc: B_SSRC,
+            peer_ssrc: A_SSRC,
+            cname: B_CNAME,
+            sender: Some((1 << 32, 1920, 1, 100)),
+            feedback: packet::Feedback {
+                terminal,
+                late,
+                ..packet::Feedback::default()
+            },
+        });
+        let protected = sender.protect_rtcp(&plain).unwrap();
+        assert_eq!(protected.len(), 130);
+        assert_eq!(protected.len() + packet::FRAMING_BYTES, 152);
+        protected
+    }
+
+    async fn request(
+        lane: &Lane,
+        opcode: u8,
+        payload: Vec<u8>,
+        deadline: Option<Instant>,
+    ) -> oneshot::Receiver<Commit> {
+        let (committed, receipt) = oneshot::channel();
+        lane.outgoing
+            .try_send(SendRequest {
+                opcode,
+                payload,
+                deadline,
+                committed: Some(committed),
+            })
+            .unwrap_or_else(|_| panic!("the original pending slot was not free"));
+        receipt
+    }
+
+    // Only bounded, genuine 152-byte protected control frames. Each completed
+    // commitment frees the same one plaintext slot; no packet backlog is added.
+    // The first uncommitted request stays in that slot behind a committed TCP
+    // frame. Its original 20ms hop deadline keeps running while the peer is held.
+    async fn fill_control_writer(
+        destination: &Lane,
+        sender: &mut dmsg_srtp_sys::Sender,
+    ) -> (usize, oneshot::Receiver<Commit>) {
+        assert_eq!(HOP_DEADLINE, Duration::from_millis(20));
+        assert_eq!(destination.outgoing.max_capacity(), 1);
+        let mut committed = 0;
+        for _ in 0..512 {
+            let mut receipt = request(
+                destination,
+                OP_RTCP,
+                protected_report(sender, None, 0),
+                Some(Instant::now() + HOP_DEADLINE),
+            )
+            .await;
+            match timeout(Duration::from_millis(80), &mut receipt).await {
+                Ok(Ok(Commit::Committed { framed_bytes, .. })) => {
+                    assert_eq!(framed_bytes, packet::FEEDBACK_FRAMED_MAX);
+                    committed += 1;
+                }
+                Ok(Ok(Commit::Dropped)) => {}
+                Ok(Err(_)) => panic!("destination actor closed during TCP saturation"),
+                Err(_) => {
+                    assert!(committed > 0);
+                    assert_eq!(destination.outgoing.capacity(), 0);
+                    assert!(matches!(
+                        destination.outgoing.try_reserve(),
+                        Err(mpsc::error::TrySendError::Full(_))
+                    ));
+                    return (committed, receipt);
+                }
+            }
+        }
+        panic!("unread TCP peer did not establish bounded write backpressure");
+    }
+
+    async fn wait_queued(lane: &Lane) {
+        timeout(TEST_TIMEOUT, async {
+            while lane.incoming.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    // Poll the unmodified four-direction route with exactly one ready inbox.
+    // It must consume that inbox through its real select branch and forward(),
+    // then become pending. Cancelling this borrowed select does not close any
+    // lane or discard an actor's committed frame; retirement is joined below.
+    async fn route_queued(listener: &TcpListener, lanes: &mut [Lane; 4], index: usize) {
+        for (slot, lane) in lanes.iter().enumerate() {
+            assert_eq!(lane.incoming.len(), usize::from(slot == index));
+        }
+        let (_stop, mut stop) = watch::channel(false);
+        {
+            let [a_media, a_control, b_media, b_control] = lanes;
+            let routing = route(
+                listener, a_media, a_control, b_media, b_control, 122, &mut stop,
+            );
+            tokio::pin!(routing);
+            std::future::poll_fn(|cx| {
+                assert!(routing.as_mut().poll(cx).is_pending(), "route failed");
+                std::task::Poll::Ready(())
+            })
+            .await;
+        }
+        assert!(lanes[index].incoming.is_empty());
+    }
+
+    async fn authenticated_report(
+        recipient: &mut Lane,
+        receiver: &mut dmsg_srtp_sys::Receiver,
+    ) -> packet::Feedback {
+        let (opcode, cipher) = receive(recipient).await;
+        assert_eq!(opcode, OP_RTCP);
+        let plain = receiver.unprotect_rtcp(&cipher).unwrap();
+        packet::read_compound(&plain, B_SSRC, A_SSRC, B_CNAME).unwrap()
     }
 
     #[tokio::test]
@@ -742,6 +942,189 @@ mod tests {
         assert_eq!(media_cap(20).unwrap(), 72);
         assert_eq!(media_cap(40).unwrap(), 122);
         assert_eq!(media_cap(60).unwrap(), 172);
+    }
+
+    #[test]
+    fn source_committed_covering_srtcp_is_lost_on_full_b_control_to_a_control_hop() {
+        supervised(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let (a_media, a_peer, a_noise) = bounded_tcp_lane().await;
+            let (a_control, held_peer, held_noise) = bounded_tcp_lane().await;
+            let (b_media, b_peer, b_noise) = bounded_tcp_lane().await;
+            let (b_control, source_peer, source_noise) = bounded_tcp_lane().await;
+            let mut relay = [a_media, a_control, b_media, b_control];
+            let mut source_media = lane::spawn(a_peer, a_noise).unwrap();
+            let mut peer_media = lane::spawn(b_peer, b_noise).unwrap();
+            let mut source_control = lane::spawn(source_peer, source_noise).unwrap();
+
+            // A real media commitment, route, and SRTP validation establish the
+            // terminal being covered, rather than manufacturing an ACK frontier.
+            let mut media_sender = dmsg_srtp_sys::Sender::new(&[92; 30], A_SSRC).unwrap();
+            let mut media_receiver = dmsg_srtp_sys::Receiver::new(&[92; 30], A_SSRC).unwrap();
+            let media = packet::rtp(A_SSRC, 7, 1920, &[0x50; 100]);
+            let receipt = request(
+                &source_media,
+                OP_RTP,
+                media_sender.protect_rtp(&media).unwrap(),
+                Some(Instant::now() + Duration::from_millis(40)),
+            )
+            .await;
+            let Commit::Committed { framed_bytes, at } =
+                timeout(TEST_TIMEOUT, receipt).await.unwrap().unwrap()
+            else {
+                panic!("source media was not committed");
+            };
+            assert_eq!(framed_bytes, 144);
+            let mut ledger = packet::Ledger::new(100, 40, 600);
+            ledger.commit(7, framed_bytes, at).unwrap();
+            wait_queued(&relay[0]).await;
+            route_queued(&listener, &mut relay, 0).await;
+            let (opcode, cipher) = receive(&mut peer_media).await;
+            assert_eq!(opcode, OP_RTP);
+            let validated = media_receiver.unprotect_rtp(&cipher).unwrap();
+            assert_eq!(packet::read_rtp(&validated, A_SSRC).unwrap().0, 7);
+
+            let mut sender = dmsg_srtp_sys::Sender::new(&B_MEDIA_KEY, B_SSRC).unwrap();
+            let mut receiver = dmsg_srtp_sys::Receiver::new(&B_MEDIA_KEY, B_SSRC).unwrap();
+            let (survivors, mut pending) = fill_control_writer(&relay[1], &mut sender).await;
+            // B's source receipt is actual lane::run Noise commitment, not a
+            // fabricated receipt or a claim that A has received its terminal.
+            let receipt = request(
+                &source_control,
+                OP_RTCP,
+                protected_report(&mut sender, Some(7), 1),
+                Some(Instant::now() + Duration::from_millis(200)),
+            )
+            .await;
+            assert!(matches!(
+                timeout(TEST_TIMEOUT, receipt).await.unwrap().unwrap(),
+                Commit::Committed {
+                    framed_bytes: 152,
+                    ..
+                }
+            ));
+            wait_queued(&relay[3]).await;
+            assert_eq!(relay[1].outgoing.capacity(), 0);
+            route_queued(&listener, &mut relay, 3).await;
+            assert_eq!(relay[1].outgoing.capacity(), 0);
+            assert!(matches!(
+                pending.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+            assert_eq!(
+                ledger.bytes(),
+                144,
+                "source commitment must not release credit"
+            );
+
+            // Release only recipient reads. Every surviving committed Noise
+            // frame must finish in order; the aged pending plaintext is dropped.
+            let mut recipient = lane::spawn(held_peer, held_noise).unwrap();
+            for _ in 0..survivors {
+                assert_eq!(
+                    authenticated_report(&mut recipient, &mut receiver)
+                        .await
+                        .terminal,
+                    None
+                );
+            }
+            assert!(matches!(
+                timeout(TEST_TIMEOUT, pending).await.unwrap().unwrap(),
+                Commit::Dropped
+            ));
+            assert!(recipient.incoming.try_recv().is_err());
+
+            // A following covering report takes the same B-control route and
+            // authenticates despite the missing SRTCP index and unadvanced hop
+            // nonce. The authenticated late counter distinguishes this report
+            // from the lost one, so it cannot silently substitute for report 2.
+            let receipt = request(
+                &source_control,
+                OP_RTCP,
+                protected_report(&mut sender, Some(7), 2),
+                Some(Instant::now() + Duration::from_millis(200)),
+            )
+            .await;
+            assert!(matches!(
+                timeout(TEST_TIMEOUT, receipt).await.unwrap().unwrap(),
+                Commit::Committed {
+                    framed_bytes: 152,
+                    ..
+                }
+            ));
+            wait_queued(&relay[3]).await;
+            route_queued(&listener, &mut relay, 3).await;
+            let report = authenticated_report(&mut recipient, &mut receiver).await;
+            assert_eq!(report.terminal, Some(7));
+            assert_eq!(
+                report.late, 2,
+                "the Full-dropped covering report was delivered"
+            );
+            assert_eq!(ledger.bytes(), 144);
+            ledger
+                .acknowledge(report.terminal.unwrap(), Instant::now())
+                .unwrap();
+            assert_eq!(ledger.bytes(), 0);
+
+            close_all(&mut relay).await;
+            source_media.joined_close().await;
+            peer_media.joined_close().await;
+            source_control.joined_close().await;
+            recipient.joined_close().await;
+        });
+    }
+
+    #[test]
+    fn queued_control_expired_before_noise_does_not_desync_following_srtcp() {
+        supervised(async {
+            let (mut destination, held_peer, held_noise) = bounded_tcp_lane().await;
+            let mut sender = dmsg_srtp_sys::Sender::new(&B_MEDIA_KEY, B_SSRC).unwrap();
+            let mut receiver = dmsg_srtp_sys::Receiver::new(&B_MEDIA_KEY, B_SSRC).unwrap();
+            let (survivors, mut pending) = fill_control_writer(&destination, &mut sender).await;
+            assert!(matches!(
+                pending.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+            let mut recipient = lane::spawn(held_peer, held_noise).unwrap();
+            for _ in 0..survivors {
+                assert_eq!(
+                    authenticated_report(&mut recipient, &mut receiver)
+                        .await
+                        .terminal,
+                    None
+                );
+            }
+            assert!(matches!(
+                timeout(TEST_TIMEOUT, pending).await.unwrap().unwrap(),
+                Commit::Dropped
+            ));
+            assert!(recipient.incoming.try_recv().is_err());
+            let receipt = request(
+                &destination,
+                OP_RTCP,
+                protected_report(&mut sender, Some(7), 1),
+                Some(Instant::now() + HOP_DEADLINE),
+            )
+            .await;
+            assert!(matches!(
+                timeout(TEST_TIMEOUT, receipt).await.unwrap().unwrap(),
+                Commit::Committed {
+                    framed_bytes: 152,
+                    ..
+                }
+            ));
+            assert_eq!(
+                authenticated_report(&mut recipient, &mut receiver)
+                    .await
+                    .terminal,
+                Some(7)
+            );
+            assert!(recipient.incoming.try_recv().is_err());
+            destination.joined_close().await;
+            recipient.joined_close().await;
+            assert!(destination.outgoing.is_closed());
+            assert!(recipient.outgoing.is_closed());
+        });
     }
 
     #[tokio::test]
