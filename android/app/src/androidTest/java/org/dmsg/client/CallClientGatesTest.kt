@@ -90,6 +90,7 @@ class CallClientGatesTest {
             .put("tearing_down", state.tearingDown).put("listener", state.incomingAvailable)
             .put("telecom_ready", state.telecomReady).put("telecom_active", state.telecomActive)
             .put("audio_failure", state.audio?.failure).put("error_resource", state.errorRes)
+            .put("dns_status", runCatching { facade.dnsStatus() }.getOrNull())
             .put("native_failed", native?.optBoolean("failed"))
             .put("last_progress_failure", native?.opt("last_progress_failure"))
         if (native != null) {
@@ -160,6 +161,7 @@ class CallClientGatesTest {
     }
     private fun retired(reason: CallEndReason, timeout: Long = 90_000) {
         waitFor("call teardown incomplete", timeout) { CallUi.state.value.call?.phase == CallPhase.ENDED && !CallUi.state.value.tearingDown }
+        report("retired")
         assertEquals(reason, CallUi.state.value.call?.reason)
         CallUi.state.value.audio?.let { audio ->
             assertTrue(audio.cleanupComplete); assertFalse(audio.microphoneActive); assertFalse(audio.recordOpen)

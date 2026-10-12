@@ -1,12 +1,15 @@
 # Managed Slipstream native boundary
 
 Builds the production C client from Git revision
-`d7cd5555a88933053551128ff8b3741ae93049a0`, its pinned submodules and the
+`62b964998be3c3d7fd1bee2195547613d053b202` (`fix/dns-prepared-send`), its pinned submodules and the
 upstream-pinned picotls revision. OpenSSL is built from locked `openssl-src`
 3.5.4. Git archives, patches, fetched dependencies and binaries stay in Cargo's
-`OUT_DIR` under `target/`. The live submodule is never patched or checked out.
-`native/embedding.patch` is the only transport-source delta; its hooks are
-conditional on `DMSG_EMBEDDED`, so normal CLI/server behavior is preserved.
+`OUT_DIR` under `target/`. The build never mutates the live submodule; approved
+source edits are committed in the transport repository, then its gitlink/PIN
+are updated together. This revision fixes prepared data/ACK packet submission
+in the poll path and explicit client encoding failure. Existing embedding,
+SPCDNS and opt-in TCP_NODELAY overlays remain separate; embedding hooks are
+conditional on `DMSG_EMBEDDED` and the TCP_NODELAY option remains default-OFF.
 
 ## Rust API
 
@@ -84,7 +87,8 @@ errors, late-stop failure preservation, 16 simultaneous starts, 64 restart/stop
 cycles, bound-port release, stable FD/task counts and unchanged SIGINT/SIGTERM
 handlers. Its public certificate and unread loopback UDP sink require no live
 deployment. The explicit `loopback.rs` gate is ignored in ordinary Cargo runs;
-the script runs it after all four pinned Meson suites. It covers PEM/DER readiness,
+the script runs it after all five pinned Meson suites, including the actual-loop
+prepared-packet submission regression. It covers PEM/DER readiness,
 wrong full-leaf rejection, eight exact raw streams and terminal established loss.
 Disposable native server fixtures receive only public test key/cert paths.
 

@@ -25,6 +25,8 @@
 
 ## M1. Вертикальная интеграция сервера и Android
 
+**Transport scope 2026-10-12.** Пользователь разрешил редактировать исходники Slipstream (DNS/QUIC/congestion/scheduler) для исправления DNS-связи; прежние запреты в завершённых целях не применяются к этой работе. Реализация начинается с prepared-packet discard, затем real-client gates и новая общая Git-ревизия client/carrier по `docs/goals/2026-10-11-call-client-apk.md`. Соседний интернет-туннель и pins/data сохраняются.
+
 **Сервер.** Multistage Dockerfile для C-транспорта и Rust msgd, Compose из двух сервисов, фиксированный loopback target через общий network namespace, только UDP DNS наружу. Persistent data/secrets, non-root, healthchecks, restart policy, совместное пересоздание сервисов. Не зависеть от локального образа из benchmark build environment.
 
 **Android.** Kotlin-оболочка, UniFFI, Rust core, C transport library. Реализовать start/stop/status без захвата глобальных process signals. Rust supervisor управляет reconnect/backoff и сетевыми переходами. Один native transport instance; очистка handles/buffers проверяется. При необходимости TCP-DNS добавляется bounded Rust adapter по модели проверенного пути, не Python runtime.

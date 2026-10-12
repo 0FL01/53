@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tarfile
 
-PIN = "d7cd5555a88933053551128ff8b3741ae93049a0"
+PIN = "62b964998be3c3d7fd1bee2195547613d053b202"
 vendor, dest, patch = map(pathlib.Path, sys.argv[1:])
 opt_patch = pathlib.Path(__file__).with_name("spcdns-opt.patch")
 tcp_patch = pathlib.Path(__file__).with_name("probe-tcp-nodelay.patch")
