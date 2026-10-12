@@ -1,4 +1,4 @@
-//! One private probe lane: a single Noise owner, bounded queues, cancellable IO.
+//! One ordered lane: a single Noise owner, bounded queues, cancellable IO.
 
 use std::time::Instant;
 
@@ -9,6 +9,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use zeroize::Zeroizing;
 
+#[cfg(feature = "voice-probe")]
 use super::service::IngressService;
 
 pub const OP_BIND: u8 = 240;
@@ -55,7 +56,7 @@ impl Lane {
     }
 
     /// Relay retirement joins cancellation before a replacement can be started.
-    pub(super) async fn joined_close(&mut self) {
+    pub(crate) async fn joined_close(&mut self) {
         self.close();
         if let Some(actor) = self.actor.take() {
             let _ = actor.await;
@@ -70,11 +71,17 @@ impl Drop for Lane {
 }
 
 pub fn spawn(stream: TcpStream, noise: snow::TransportState) -> Result<Lane, String> {
-    spawn_inner(stream, noise, None)
+    spawn_inner(
+        stream,
+        noise,
+        #[cfg(feature = "voice-probe")]
+        None,
+    )
 }
 
 /// Relay-only ingress service; outbound Noise commitment and deadlines are unchanged.
-pub(super) fn spawn_with_ingress_service(
+#[cfg(feature = "voice-probe")]
+pub(crate) fn spawn_with_ingress_service(
     stream: TcpStream,
     noise: snow::TransportState,
     service: IngressService,
@@ -85,7 +92,7 @@ pub(super) fn spawn_with_ingress_service(
 fn spawn_inner(
     stream: TcpStream,
     noise: snow::TransportState,
-    service: Option<IngressService>,
+    #[cfg(feature = "voice-probe")] service: Option<IngressService>,
 ) -> Result<Lane, String> {
     stream
         .set_nodelay(true)
@@ -93,7 +100,16 @@ fn spawn_inner(
     let (outgoing, mut requests) = mpsc::channel(1);
     let (received, incoming) = mpsc::channel(1);
     let actor = tokio::spawn(async move {
-        if let Err(error) = run(stream, noise, &mut requests, &received, service).await {
+        if let Err(error) = run(
+            stream,
+            noise,
+            &mut requests,
+            &received,
+            #[cfg(feature = "voice-probe")]
+            service,
+        )
+        .await
+        {
             // Never wait for an unresponsive consumer during teardown.
             let _ = received.try_send(Err(error));
         }
@@ -120,7 +136,7 @@ async fn run(
     mut noise: snow::TransportState,
     requests: &mut mpsc::Receiver<SendRequest>,
     received: &mpsc::Sender<Result<InboundFrame, String>>,
-    mut service: Option<IngressService>,
+    #[cfg(feature = "voice-probe")] mut service: Option<IngressService>,
 ) -> Result<(), String> {
     let (mut reader, mut writer) = stream.into_split();
     // Offsets live outside select futures: cancelled read/write calls lose no bytes.
@@ -136,10 +152,11 @@ async fn run(
         tokio::select! {
             _ = received.closed() => return Err("probe consumer closed".into()),
             read = async {
-                match &mut service {
-                    Some(service) => service.read(&mut reader, &mut cipher[filled..wanted]).await,
-                    None => reader.read(&mut cipher[filled..wanted]).await,
+                #[cfg(feature = "voice-probe")]
+                if let Some(service) = &mut service {
+                    return service.read(&mut reader, &mut cipher[filled..wanted]).await;
                 }
+                reader.read(&mut cipher[filled..wanted]).await
             }, if inbound.is_none() => {
                 let count = read.map_err(|_| "probe read failed".to_string())?;
                 if count == 0 {
@@ -165,6 +182,7 @@ async fn run(
                         return Err("probe trailing frame bytes".into());
                     }
                     let noise_done = Instant::now();
+                    #[cfg(feature = "voice-probe")]
                     if let Some(service) = &mut service {
                         service.authenticated(wanted)?;
                     }
@@ -218,7 +236,7 @@ async fn run(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "voice-probe"))]
 mod tests {
     use super::*;
     use std::time::Duration;

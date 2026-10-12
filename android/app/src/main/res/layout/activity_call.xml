@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" android:layout_width="match_parent" android:layout_height="match_parent" android:orientation="vertical" android:background="@color/background">
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="center_vertical">
+        <Button android:id="@+id/btn_back" style="@style/Widget.Dmsg.Icon" android:layout_width="48dp" android:layout_height="48dp" android:drawableTop="@drawable/ic_back" android:contentDescription="@string/back" />
+        <TextView android:id="@+id/screen_title" style="@style/Dmsg.Title" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" />
+    </LinearLayout>
+    <ScrollView android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:fillViewport="true">
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:gravity="center" android:padding="24dp">
+            <ImageView android:layout_width="72dp" android:layout_height="72dp" android:padding="16dp" android:background="@color/accent_soft" android:src="@drawable/ic_call" android:importantForAccessibility="no" />
+            <TextView android:id="@+id/call_peer" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="24dp" android:gravity="center" android:textSize="24sp" android:fontFamily="sans-serif-medium" android:accessibilityHeading="true" />
+            <TextView android:id="@+id/call_status" android:layout_width="match_parent" android:layout_height="wrap_content" android:padding="16dp" android:gravity="center" android:accessibilityLiveRegion="polite" />
+            <TextView android:id="@+id/call_duration" android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="center" android:textSize="20sp" />
+            <TextView android:id="@+id/call_availability" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="24dp" android:padding="12dp" android:background="@color/surface" android:textSize="14sp" />
+            <LinearLayout android:id="@+id/call_audio_controls" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:layout_marginTop="24dp">
+                <Button android:id="@+id/call_mute" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/call_mute" />
+                <Button android:id="@+id/call_speaker" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/call_speaker" />
+                <Button android:id="@+id/call_endpoint" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/call_endpoint" />
+            </LinearLayout>
+            <Button android:id="@+id/call_dial" style="@style/Widget.Dmsg.Primary" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="24dp" android:text="@string/call_dial" />
+            <Button android:id="@+id/call_accept" style="@style/Widget.Dmsg.Primary" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="24dp" android:text="@string/call_accept" />
+            <Button android:id="@+id/call_decline" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/call_decline" />
+            <Button android:id="@+id/call_hangup" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/call_hangup" android:textColor="@color/error" />
+        </LinearLayout>
+    </ScrollView>
+</LinearLayout>

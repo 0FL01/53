@@ -13,6 +13,9 @@ object Prefs {
         if (!ok) throw DmsgError(R.string.error_profile_save)
     }
     fun economy(c: Context): Boolean = c.getSharedPreferences(F, Context.MODE_PRIVATE).getBoolean("economy", false)
-    fun setEconomy(c: Context, v: Boolean) { c.getSharedPreferences(F, Context.MODE_PRIVATE).edit().putBoolean("economy", v).apply() }
+    fun setEconomy(c: Context, v: Boolean) {
+        c.getSharedPreferences(F, Context.MODE_PRIVATE).edit().putBoolean("economy", v).apply()
+        DmsgService.modeChanged()
+    }
     fun bytesToHex(b: ByteArray): String = b.joinToString("") { "%02x".format(it.toInt() and 255) }
 }

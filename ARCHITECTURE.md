@@ -176,6 +176,27 @@ VOICE manifest внутри Olm содержит случайный blob key/non
 
 При непрохождении gate сохраняем текст, voice notes и файлы, а live-call остаётся экспериментальным. PTT может улучшить разговорную очередность, но не гарантирует устранения сетевых stalls. Переход на настоящий unreliable media transport — отдельный будущий проект; существующий транспорт ради него в MVP не переписывается.
 
+### Клиентский call pilot, 2026-10-11
+
+Пользователь отдельно утвердил выпуск настоящего GUI/APK на замороженном media
+baseline35a6b56 вместо продолжения M1-V qualification. Это не positive quality
+PASS: p95/source-active loss/listening/C_safe остаются неизвестными.
+Контракт и текущая приёмка — `docs/goals/2026-10-11-call-client-apk.md`.
+
+Общий runtime находится в `core::live_media`, fixture orchestration — только
+`voice_probe`. Один NativeClient, три account-authenticated independent Noise
+streams/endpoint: persistent signal, RTP и SRTCP. Directional SRTP material
+передаётся strict ephemeral Olm envelope, без call SQL/history/outbox. msgd
+держит volatile bounded hub (2calls/16listeners/one-device), opaque relay и
+закрывает все routes при End/revoke/block/disconnect. Wire — `docs/protocol.md`.
+
+Один DmsgService владеет Core-Telecom/audio/CallStyle; Activity не владеет звонком.
+Telecom выбирает endpoint, note/bulk owners приостанавливаются с сохранением
+durable data. No microphone before answer; mute сохраняет capture timeline.
+Потеря транспорта заканчивает вызов, следующая попытка получает fresh keys;
+active-call autoreconnect, history/video/hold отсутствуют. Frozen40ms/100B,
+80ms jitter/640sink/720ms ledger/2880B window не увеличены.
+
 ## 10. Эксплуатация, история и дальнейшее развитие
 
 Исходники транспорта закреплены Git submodule/subtree, приложение и небольшие адаптации отслеживаются обычными коммитами. Решения, протокол и benchmark summaries лежат в Git. Нет отдельных реестров контрольных сумм для истории разработки. Подпись APK и криптографическая проверка сообщений остаются необходимыми механизмами безопасности.
@@ -183,6 +204,11 @@ VOICE manifest внутри Olm содержит случайный blob key/non
 CI: native tests, sanitizers, fuzz bounded parsers, Rust tests, Android release build, ABI/page-size smoke, protocol compatibility, two-client integration. Секреты, raw QNAME, содержимое и аудио не сохраняются в CI artifacts.
 
 Резервная копия создаётся согласованно через backup API/остановку записи, вместе с immutable blobs и нужными ключами сервера; восстановление проверяется на отдельном инстансе. Копирование одного live SQLite файла без WAL не считается backup. До обновления schema делается backup; несовместимый downgrade не обещается. APK подписывается постоянным release key с отдельным защищённым хранением.
+
+Для конкретного client-call cutover пользователь явно разрешил fresh messenger
+DB/blob reset **без нового backup** и прежнюю APK signing identity. Этот reset
+выполнен на server7 без изменения carrier/pins; он не является общим wipe
+разрешением и не разрешает автоматическую очистку старого Main8/core store.
 
 К HA заранее оставляем только разделение transport/server identity и account identity, reconnect и idempotence. Не добавляем распределённую БД, несколько серверов или фальшивую отказоустойчивость через два NS на одном VPS. Один сервер остаётся единой точкой отказа.
 

@@ -1,4 +1,4 @@
-//! The pre-agreed M1V-RTCP-1 fixture profile, not generic RTP negotiation.
+//! The frozen M1V-RTCP-1 media profile, not generic RTP negotiation.
 use std::{
     collections::VecDeque,
     time::{Duration, Instant},

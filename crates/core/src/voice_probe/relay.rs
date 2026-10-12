@@ -10,10 +10,10 @@ use tokio::task::JoinSet;
 use zeroize::Zeroizing;
 
 use super::fixture::{EndpointFixture, RelayFixture};
-use super::lane::{
+use super::service::SyntheticServiceModel;
+use crate::live_media::lane::{
     self, Commit, InboundFrame, Lane, SendRequest, OP_BIND, OP_BOUND, OP_RTCP, OP_RTP,
 };
-use super::service::SyntheticServiceModel;
 
 const SETUP_TIMEOUT: Duration = Duration::from_secs(30);
 const HOP_DEADLINE: Duration = Duration::from_millis(20);
@@ -38,7 +38,7 @@ pub async fn connect(addr: &str, fixture: &EndpointFixture, media: bool) -> Resu
         .await
         .map_err(|_| "probe connection failed".to_string())?;
         let (stream, noise) = transport
-            .into_probe_parts()
+            .into_lane_parts()
             .map_err(|_| "probe transport unavailable".to_string())?;
         let mut lane = lane::spawn(stream, noise)?;
         let body = binding(
@@ -420,8 +420,8 @@ async fn read_handshake(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::packet;
     use super::*;
+    use crate::live_media::packet;
     use std::future::Future;
     use tokio::net::TcpSocket;
     use tokio::task::JoinHandle;

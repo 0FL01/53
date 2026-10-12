@@ -1,0 +1,35 @@
+<resources>
+    <string name="title_call">Голосовой звонок</string>
+    <string name="call_channel">Голосовые звонки</string>
+    <string name="call_private_caller">Личный голосовой звонок</string>
+    <string name="call_dial">Позвонить</string>
+    <string name="call_accept">Ответить</string>
+    <string name="call_decline">Отклонить</string>
+    <string name="call_hangup">Завершить звонок</string>
+    <string name="call_mute">Выключить микрофон</string>
+    <string name="call_unmute">Включить микрофон</string>
+    <string name="call_speaker">Динамик</string>
+    <string name="call_endpoint">Аудиоустройство</string>
+    <string name="call_ready">Можно позвонить</string>
+    <string name="call_dialing">Вызов…</string>
+    <string name="call_ringing">Ожидание ответа…</string>
+    <string name="call_connecting">Соединение…</string>
+    <string name="call_active">Соединено</string>
+    <string name="call_ending">Завершение звонка…</string>
+    <string name="call_ended">Звонок завершён</string>
+    <string name="call_remote_ended">Собеседник завершил звонок</string>
+    <string name="call_unavailable">Собеседник недоступен</string>
+    <string name="call_busy">Собеседник занят</string>
+    <string name="call_expired">Время ожидания истекло</string>
+    <string name="call_rejected">Звонок отклонён</string>
+    <string name="call_connection_lost">Соединение потеряно</string>
+    <string name="call_invalid">Не удалось установить звонок</string>
+    <string name="call_revoked">Контакт больше недоступен для звонков</string>
+    <string name="call_audio_unavailable">Звук звонка недоступен</string>
+    <string name="call_microphone_permission">Разрешите доступ к микрофону, чтобы ответить или позвонить</string>
+    <string name="call_route_failed">Не удалось изменить аудиоустройство</string>
+    <string name="call_duration">%1$d:%2$02d</string>
+    <string name="call_messages_paused">Обновление сообщений и передача голосовых приостановлены на время звонка</string>
+    <string name="call_incoming_available">Ожидание входящих при включённой «На связи» в обычном режиме. Принудительная остановка и ограничения фона могут помешать звонкам.</string>
+    <string name="call_incoming_unavailable">Для входящих нужна «На связи» в обычном режиме. В экономии, при выключенной связи или после принудительной остановки входящие не гарантируются. Позвонить можно с этого экрана.</string>
+</resources>

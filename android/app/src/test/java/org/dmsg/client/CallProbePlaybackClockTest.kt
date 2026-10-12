@@ -1,4 +1,5 @@
 package org.dmsg.client
+import org.dmsg.client.CallPlaybackClock as CallProbePlaybackClock
 
 import org.junit.Assert.*
 import org.junit.Test
@@ -151,6 +152,18 @@ class CallProbePlaybackClockTest {
         assertEquals(good.rate, stale.rate)
         assertFalse(stale.healthy)
         assertFalse(established.choose(24_000_000_001, 0, 0, true).healthy)
+    }
+
+    @Test fun stationaryPositionRejectsCalibrationButOnlyARealReversalIsBackwards() {
+        val clock = calibrated()
+        clock.observe(320_000, 20_100_000_001, 20_100_000_001, 16_000, 0)
+        val stalled = clock.choose(20_100_000_001, 48_000, 1_000_000_000, true)
+        assertFalse(stalled.healthy)
+        assertEquals(4L, stalled.rejectionMask)
+        assertFalse("a stationary hardware position is not a backwards clock", clock.backwards)
+        clock.observe(320_160, 20_200_000_001, 20_200_000_001, 16_000, 0)
+        clock.observe(320_000, 20_300_000_001, 20_300_000_001, 16_000, 0)
+        assertTrue("a real reversal must still fail closed", clock.backwards)
     }
 
     @Test fun relativeHardwareSkewIsCorrectedAndUnsupportedRatesAreExplicit() {

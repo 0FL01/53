@@ -172,6 +172,10 @@ class ChatActivity : DmsgActivity() {
         findViewById<Button>(R.id.btn_contact).setOnClickListener {
             startActivity(Intent(this, ProfileActivity::class.java).putExtra("peer", id))
         }
+        findViewById<Button>(R.id.btn_call).setOnClickListener {
+            if (callContactAllowed(memory.contact)) startActivity(Intent(this, CallActivity::class.java)
+                .putExtra("peer", id).putExtra("alias", intent.getStringExtra("alias")))
+        }
         setupVoice()
     }
 
@@ -274,16 +278,21 @@ class ChatActivity : DmsgActivity() {
         val unresolved = memory.uncertain != null || memory.uncertainAction != null || memory.uncertainVoice != null
         findViewById<TextView>(R.id.peer).text = intent.getStringExtra("alias") ?: id
         findViewById<Button>(R.id.btn_contact).contentDescription = getString(if (allowed) R.string.contact_card else R.string.check_contact)
+        findViewById<Button>(R.id.btn_call).apply {
+            visibility = if (callContactAllowed(memory.contact)) View.VISIBLE else View.GONE
+            isEnabled = !CallUi.state.value.busy
+        }
         findViewById<View>(R.id.edit_banner).visibility = if (editing == null) View.GONE else View.VISIBLE
         findViewById<Button>(R.id.btn_save_edit).visibility = if (editing == null) View.GONE else View.VISIBLE
         findViewById<Button>(R.id.btn_cancel_edit).visibility = if (editing == null) View.GONE else View.VISIBLE
         findViewById<Button>(R.id.btn_cancel_edit).isEnabled = !memory.pending && !unresolved
         renderReply()
-        findViewById<Button>(R.id.btn_retry).isEnabled = allowed && !memory.pending && quoteJump == null
+        findViewById<Button>(R.id.btn_retry).isEnabled = allowed && !memory.pending && quoteJump == null && !CallUi.state.value.busy
         composer.isEnabled = (allowed || editing != null) && !memory.pending && !unresolved && !memory.voice.busy
-        findViewById<Button>(R.id.btn_history_retry).isEnabled = !pageGuard.pending && !memory.pending && quoteJump == null
+        findViewById<Button>(R.id.btn_history_retry).isEnabled = !pageGuard.pending && !memory.pending && quoteJump == null && !CallUi.state.value.busy
         val reply = displayedReply()
-        info.text = listOf(if (allowed) "" else trustLabel(resources, memory.contact), memory.action(resources), pageError,
+        info.text = listOf(if (CallUi.state.value.busy) getString(R.string.call_messages_paused) else "",
+            if (allowed) "" else trustLabel(resources, memory.contact), memory.action(resources), pageError,
             if (reply != null && !reply.available) getString(R.string.reply_target_unavailable) else "").filter { it.isNotEmpty() }.joinToString("\n")
         findViewById<View>(R.id.chat_notice).visibility = if (info.text.isEmpty()) View.GONE else View.VISIBLE
         info.setBackgroundResource(if (memory.contact?.identityMismatch == true || memory.contact?.state == "blocked") R.color.error_surface

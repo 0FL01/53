@@ -96,16 +96,27 @@ pub type FixturePair = (
 );
 
 pub fn profile(ms: u16) -> Result<dmsg_opus_sys::live::LiveProfile, String> {
-    use dmsg_opus_sys::live::LiveProfile;
-    match ms {
-        20 => Ok(LiveProfile::Ms20),
-        40 => Ok(LiveProfile::Ms40),
-        60 => Ok(LiveProfile::Ms60),
-        _ => Err("invalid probe duration".into()),
-    }
+    crate::live_media::session::profile(ms)
 }
 
 impl EndpointFixture {
+    pub(crate) fn media_config(&self) -> crate::live_media::MediaConfig {
+        crate::live_media::MediaConfig {
+            profile_ms: self.profile_ms,
+            media_tx: self.media_tx,
+            media_rx: self.media_rx,
+            ssrc_tx: self.ssrc_tx,
+            ssrc_rx: self.ssrc_rx,
+            cname: self.cname,
+            peer_cname: self.peer_cname,
+            initial_sequence: self.initial_sequence,
+            peer_initial_sequence: self.peer_initial_sequence,
+            initial_timestamp: self.initial_timestamp,
+            peer_initial_timestamp: self.peer_initial_timestamp,
+            healthy_cycle_ms: self.healthy_cycle_ms,
+            capacity_bps: self.capacity_bps,
+        }
+    }
     pub fn load(path: &Path) -> Result<Self, String> {
         let raw = read_private(path, 16 * 1024)?;
         let fixture: Self = serde_json::from_slice(&raw).map_err(|_| "invalid endpoint fixture")?;

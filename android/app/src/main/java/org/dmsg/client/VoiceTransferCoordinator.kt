@@ -18,6 +18,7 @@ internal object VoiceTransferCoordinator {
     private val main = Handler(Looper.getMainLooper())
     private var app: Context? = null
     private var serviceEnabled = false
+    @Volatile private var callPaused = false
     @Volatile private var activeTransfer: VoiceTransferHandle? = null
     @Volatile private var activeKey: VoiceKey? = null
     @Volatile private var activeDownload = false
@@ -37,6 +38,12 @@ internal object VoiceTransferCoordinator {
     private fun updateWanted() {
         if (foreground.isNotEmpty() || serviceEnabled) { worker.start(); worker.wake() }
         else { worker.stop(); activeTransfer?.cancel() }
+    }
+    /** Suspend bulk without stopping the connection worker or its DNS carrier. */
+    fun callPaused(value: Boolean) {
+        callPaused = value
+        if (value) activeTransfer?.cancel()
+        worker.wake()
     }
     fun wake() = worker.wake()
     fun download(row: uniffi.dmsg_core.HistoryMessage) {
@@ -58,6 +65,7 @@ internal object VoiceTransferCoordinator {
     /** FINISH uploads the blob, not its E2E message. Reuse the existing control lane. */
     private fun retrySaved(context: Context, key: VoiceKey? = null) {
         Core.dispatch {
+            if (callPaused) return@dispatch
             runCatching { Core.facade(context).retry() }.onFailure { error ->
                 key?.let { publish(it, state(it).copy(active = false, errorRes = humanErrorRes(error))) }
             }
@@ -69,6 +77,7 @@ internal object VoiceTransferCoordinator {
         retrySaved(context)
         var facade: DmsgFacade? = null
         while (worker.active) {
+            if (callPaused) { if (!worker.awaitNext(1_000)) break; continue }
             var key: VoiceKey? = null
             var download = false
             try {
@@ -83,13 +92,14 @@ internal object VoiceTransferCoordinator {
                     synchronized(lock) { downloads.remove(requested) }; continue
                 }
                 if (!worker.active) break
+                if (callPaused) continue
                 val handle = f.prepareVoiceTransfer(row.contactId, row.localId, download)
                 activeDownload = download; activeKey = key; activeTransfer = handle
                 try {
-                    while (worker.active) {
+                    while (worker.active && !callPaused) {
                         if (download && !synchronized(lock) { key in downloads }) break
                         handle.advance() // Blocking network, explicitly OUTSIDE Core.storeLock.
-                        if (!worker.active) break
+                        if (!worker.active || callPaused) break
                         if (download && (!synchronized(lock) { key in downloads } || !key.matches(f.historyMessage(key.contactId, key.localId)))) break
                         val progress = handle.commit() // Short durable commit.
                         publish(key, VoiceTransferUi(progress.transferred, progress.total, !progress.complete, progress.complete))

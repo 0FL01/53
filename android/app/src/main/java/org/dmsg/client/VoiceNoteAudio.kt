@@ -47,9 +47,17 @@ internal class VoiceNoteAudio(context: Context) {
         const val RATE = 16_000
         const val BATCH = 1_600 // 100 ms maximum across JNI
         private var owner: VoiceNoteAudio? = null
-        @Synchronized private fun claim(next: VoiceNoteAudio) {
+        internal val callClaim = CallAudioClaim()
+        @Synchronized private fun claim(next: VoiceNoteAudio): Boolean {
+            if (!callClaim.allowNote()) return false
             if (owner !== next) owner?.interruptAudio()
             owner = next
+            return true
+        }
+        /** Main dispatcher only: note callbacks and focus release have their existing UI owner. */
+        @Synchronized internal fun interruptForCall(): VoiceNoteAudio? {
+            callClaim.reserveCall()
+            return owner?.also { it.interruptAudio() }
         }
     }
     private val app = context.applicationContext
@@ -87,7 +95,7 @@ internal class VoiceNoteAudio(context: Context) {
     private enum class EndRecord { None, Pause, Finish, Cancel }
 
     private fun acquire(): Boolean {
-        claim(this)
+        if (!claim(this)) return false
         if (Build.VERSION.SDK_INT >= 29) manager.setAllowedCapturePolicy(AudioAttributes.ALLOW_CAPTURE_BY_NONE)
         if (manager.requestAudioFocus(focus) != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) return false
         focusHeld = true
@@ -277,5 +285,13 @@ internal class VoiceNoteAudio(context: Context) {
         else { playback = VoicePlayback(key, preview, false, sample, playback.total); onPlayback?.invoke(playback) }
     }
     fun background() { finishRecording(); stopPlayer() }
+    /** Called on Dispatchers.IO after interruptForCall, before Telecom activation/call capture. */
+    internal fun joinForCall() {
+        if (!recorderThread.isShutdown) recorderThread.submit {}.get()
+        else recorderThread.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS).also { check(it) }
+        if (!playerThread.isShutdown) playerThread.submit {}.get()
+        else playerThread.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS).also { check(it) }
+    }
+    internal fun releaseForCall() { recording = false; release() }
     fun close() { cancelRecording(); stopPlayer(); playBytes?.fill(0); playBytes = null; recorderThread.shutdown(); playerThread.shutdown() }
 }

@@ -1,4 +1,5 @@
 package org.dmsg.client
+import org.dmsg.client.CallAudio as CallProbeAudio
 
 import org.junit.Assert.*
 import org.junit.Test

@@ -545,7 +545,7 @@ class CallMediaProbeGatesTest {
             outputMuted = muted == "true", loudspeaker = speaker == "true")
     }
 
-    private fun assertHealthy(activity: CallProbeActivity, owner: CallProbeAudio): CallProbeAudio.Snapshot {
+    private fun assertHealthy(activity: CallProbeActivity, owner: CallProbeAudio): CallAudio.Snapshot {
         assertNull("Activity precondition failed", activity.probeFailure)
         return owner.snapshot().also { assertNull("audio/native failure: ${it.failure}", it.failure) }
     }
@@ -587,7 +587,7 @@ class CallMediaProbeGatesTest {
                 val started = SystemClock.elapsedRealtime()
                 var initialFrames: Long? = null
                 var initialCapture: Long? = null
-                var initialPlaybackTimestamp: CallProbeAudio.Clock? = null
+                var initialPlaybackTimestamp: CallAudio.Clock? = null
                 var rateRaised = false
                 var rateRestored = false
                 var rateEvidence: JSONObject? = null
@@ -718,7 +718,7 @@ class CallMediaProbeGatesTest {
         }
     }
 
-    private fun assertStopped(state: CallProbeAudio.Snapshot) {
+    private fun assertStopped(state: CallAudio.Snapshot) {
         assertNull(state.failure)
         assertEquals("stopped", state.phase)
         assertTrue(state.cleanupComplete)

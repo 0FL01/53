@@ -24,12 +24,17 @@
 mod android_audio_jni;
 #[cfg(all(target_os = "android", feature = "voice-probe"))]
 mod android_call_jni;
+#[cfg(target_os = "android")]
+mod android_live_call_jni;
 pub mod auth;
+mod call_media_handles;
+pub mod calls;
 pub mod chat;
 pub mod contacts;
 pub mod dns;
 pub mod ffi;
 pub mod history;
+pub mod live_media;
 pub mod olm;
 mod secure;
 pub mod store;

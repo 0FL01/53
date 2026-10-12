@@ -1,8 +1,8 @@
-# Containerized 53.apk build: rust native (cargo-ndk) + gradle export53Apk.
+# Containerized 53.apk build: rust native (cargo-ndk) + Gradle debug/client export.
 # Context: repository root with deploy/Dockerfile.apk.dockerignore (whitelist).
-# Keystore: android/keystore/debug.keystore is COPY'd to the AGP default
-# location so the container signs with the same identity as the host —
-# `adb install -r` updates keep app data. No secrets beyond that local key.
+# Keystore: a required read-only BuildKit secret at the AGP default location
+# signs both debug and client release with the existing identity. The key is
+# excluded from the context and never copied into an image or cache layer.
 #
 # Layers of `deps` cache the toolchain; cargo and gradle caches live in
 # BuildKit cache mounts and survive rebuilds. First build is slow, later
@@ -64,20 +64,26 @@ RUN --mount=type=cache,target=/root/.cargo/registry,id=apk-cargo-registry,sharin
     --mount=type=cache,target=/src/target,id=apk-rust-target,sharing=locked \
     sh android/build-native.sh
 
-# ---- APK: gradle export53Apk with the project's own sources. ----------------
+# ---- APK: Gradle debug/client export with the project's own sources. --------
 FROM deps AS apk
 WORKDIR /src
 COPY --from=native /src/android/app/build/nativeLibs ./android/app/build/nativeLibs
 COPY android/ ./android/
-# Same signing identity as the host build (AGP debug keystore default location).
-COPY android/keystore/debug.keystore /root/.android/debug.keystore
 ARG SERVER_PROFILE_SHA256=none
+ARG CLIENT_APK=false
 RUN --mount=type=cache,target=/root/.gradle,id=apk-gradle-home,sharing=locked \
     --mount=type=secret,id=server-profile \
+    --mount=type=secret,id=debug-keystore,target=/root/.android/debug.keystore,required=true \
     test -n "$SERVER_PROFILE_SHA256" && cd android && \
-    if [ -f /run/secrets/server-profile ]; then \
-      sh gradlew --no-daemon export53Apk -PserverProfileFile=/run/secrets/server-profile; \
-    else sh gradlew --no-daemon export53Apk; fi
+    case "$CLIENT_APK" in \
+      true) test -f /run/secrets/server-profile && \
+        sh gradlew --no-daemon export53ClientApk -PclientRelease=true \
+          -PserverProfileFile=/run/secrets/server-profile ;; \
+      false) if [ -f /run/secrets/server-profile ]; then \
+        sh gradlew --no-daemon export53Apk -PserverProfileFile=/run/secrets/server-profile; \
+        else sh gradlew --no-daemon export53Apk; fi ;; \
+      *) echo "CLIENT_APK must be true or false" >&2; exit 2 ;; \
+    esac
 
 # ---- Output only: 53.apk (docker buildx --target=out --output=type=local). --
 FROM scratch AS out

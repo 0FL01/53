@@ -15,6 +15,17 @@ import android.net.Network
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.app.Person
+import android.content.pm.ServiceInfo
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import uniffi.dmsg_core.CallDirection
+import uniffi.dmsg_core.CallPhase
 
 /**
  * Single always-on foreground service (K4 audit).
@@ -23,6 +34,11 @@ import androidx.core.app.ServiceCompat
  * Doze/force-stop limits are disclosed, not masked (gate checklist).
  */
 class DmsgService : Service() {
+    private lateinit var calls: CallSessionOwner
+    private val main = Handler(Looper.getMainLooper())
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var connectivityWanted = false
+    private var stoppingLink = false
     private val networkEvents = java.util.concurrent.Executors.newSingleThreadExecutor()
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         private fun changed() {
@@ -42,6 +58,12 @@ class DmsgService : Service() {
         const val CH = "dmsg-link"
         const val ID = 53
         const val ACTION_STOP = "org.dmsg.client.STOP"
+        const val ACTION_DIAL = "org.dmsg.client.CALL_DIAL"
+        const val ACTION_END_CALL = "org.dmsg.client.CALL_END"
+        const val ACTION_REJECT_CALL = "org.dmsg.client.CALL_REJECT"
+        private var instance: DmsgService? = null
+        internal fun callOwner(): CallSessionOwner? = instance?.let { if (it::calls.isInitialized) it.calls else null }
+        internal fun modeChanged() { instance?.main?.post { instance?.syncListener() } }
         const val POLL_NORMAL_MS = 15_000L
         const val POLL_ECONOMY_MS = 300_000L
         private const val TAG = "DmsgService"
@@ -62,8 +84,9 @@ class DmsgService : Service() {
         }
 
         fun stop(c: Context) {
-            Worker.stop() // immediate native cancellation, independent of the UI command/store lock
-            c.stopService(Intent(c, DmsgService::class.java))
+            val service = instance
+            if (service == null) { Worker.stop(); c.stopService(Intent(c, DmsgService::class.java)) }
+            else service.main.post { service.stopLink() }
         }
 
         private fun recordFailure(kind: ErrorKind) = facts.finish(facts.begin(), System.currentTimeMillis(), kind)
@@ -86,8 +109,6 @@ class DmsgService : Service() {
             } catch (e: Exception) {
                 facts.finish(stamp, System.currentTimeMillis(), (e as? DmsgError)?.kind ?: ErrorKind.Other)
                 throw e
-            } finally {
-                if (!keepGoing()) f.dnsStop()
             }
         }
 
@@ -116,19 +137,18 @@ class DmsgService : Service() {
                 .build()
         }
 
-        private fun Context.notify(n: Notification) {
-            try {
-                getSystemService(NotificationManager::class.java).notify(ID, n)
-            } catch (_: SecurityException) {
-                // POST_NOTIFICATIONS denied: stay alive, stay silent.
-            }
-        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
+        calls = CallSessionOwner(this, ::refreshForeground, Worker::pauseMessages) {
+            syncListener()
+            if (!connectivityWanted && !calls.busy && !stoppingLink) stopLink()
+        }
+        CallUi.mutable.value = calls.state
         getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(networkCallback)
         updateChannel()
     }
@@ -136,36 +156,106 @@ class DmsgService : Service() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         updateChannel()
-        if (Worker.running) notify(buildCountNotif(Worker.countSnapshot()))
+        refreshForeground()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
-            Worker.stop()
-            stopSelf()
+            stopLink()
             return START_NOT_STICKY
         }
-        val notif = buildCountNotif(if (Worker.running) Worker.countSnapshot() else 0)
-        ServiceCompat.startForeground(
-            this, ID, notif,
-            if (android.os.Build.VERSION.SDK_INT >= 34)
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0
-        )
-        Worker.start(this)
-        return START_STICKY
+        when (intent?.action) {
+            ACTION_DIAL -> {
+                refreshForeground()
+                calls.dial(intent.getStringExtra("peer").orEmpty())
+            }
+            ACTION_END_CALL -> {
+                calls.end(intent.getStringExtra("callId").orEmpty(), intent.getLongExtra("epoch", -1))
+                if (!connectivityWanted && !calls.busy) stopSelf()
+            }
+            ACTION_REJECT_CALL -> {
+                calls.reject(intent.getStringExtra("callId").orEmpty(), intent.getLongExtra("epoch", -1))
+                if (!connectivityWanted && !calls.busy) stopSelf()
+            }
+            else -> {
+                connectivityWanted = true
+                refreshForeground()
+                Worker.start(this)
+                syncListener()
+            }
+        }
+        return if (connectivityWanted) START_STICKY else START_NOT_STICKY
     }
 
     override fun onDestroy() {
         getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(networkCallback)
         networkEvents.shutdownNow()
-        Worker.stop()
+        if (instance === this) instance = null
+        calls.destroy { Worker.stop() }
         super.onDestroy()
     }
 
     override fun onTimeout(startId: Int, fgsType: Int) {
         // Never rely on a service category to override an OS stop requirement.
-        Worker.stop()
-        stopSelf()
+        stopLink()
+    }
+
+    private fun stopLink() {
+        if (stoppingLink) return
+        stoppingLink = true; connectivityWanted = false
+        serviceScope.launch {
+            calls.stop()
+            Worker.stop()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }
+    }
+    private fun syncListener() {
+        Worker.facadeSnapshot()?.let { calls.listener(it, connectivityWanted && Worker.running &&
+            !Prefs.economy(this) && connectionState().lastSuccessAt != null && !stoppingLink) }
+        refreshForeground()
+    }
+    private fun refreshForeground() {
+        if (!::calls.isInitialized || stoppingLink) return
+        val state = calls.state
+        val phone = state.call != null && (state.call.busy() || state.tearingDown)
+        val microphone = state.telecomActive && (state.tearingDown || state.call?.phase in setOf(CallPhase.CONNECTING, CallPhase.ACTIVE))
+        var types = 0
+        if (Build.VERSION.SDK_INT >= 34 && (connectivityWanted || !phone)) types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+        if (Build.VERSION.SDK_INT >= 29 && phone) types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
+        if (Build.VERSION.SDK_INT >= 30 && microphone) types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        try {
+            ServiceCompat.startForeground(this, ID,
+                if (phone) callNotification(state) else buildCountNotif(Worker.countSnapshot()), types)
+        } catch (_: SecurityException) {
+            calls.audioUnavailable()
+        }
+    }
+    private fun callAction(state: CallUiState, action: String, activity: Boolean = false): PendingIntent {
+        val call = requireNotNull(state.call)
+        val intent = Intent(this, if (activity) CallActivity::class.java else DmsgService::class.java)
+            .setAction(action).setData(android.net.Uri.Builder().scheme("dmsg-call").authority(packageName)
+                .appendPath(call.callId).appendPath(state.epoch.toString()).appendPath(action).build())
+            .putExtra("callId", call.callId).putExtra("epoch", state.epoch)
+        val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        return if (activity) PendingIntent.getActivity(this, 0, intent, flags)
+            else PendingIntent.getService(this, 0, intent, flags)
+    }
+    private fun callNotification(state: CallUiState): Notification {
+        getSystemService(NotificationManager::class.java).createNotificationChannel(
+            NotificationChannel("dmsg-call", getString(R.string.call_channel), NotificationManager.IMPORTANCE_HIGH)
+                .apply { lockscreenVisibility = Notification.VISIBILITY_PRIVATE })
+        val call = requireNotNull(state.call)
+        val person = Person.Builder().setName(getString(R.string.call_private_caller)).setImportant(true).build()
+        val incoming = call.direction == CallDirection.INCOMING && call.phase == CallPhase.RINGING && !state.tearingDown
+        val open = callAction(state, "org.dmsg.client.CALL_OPEN", activity = true)
+        val style = if (incoming) NotificationCompat.CallStyle.forIncomingCall(person,
+            callAction(state, ACTION_REJECT_CALL), callAction(state, CallActivity.ACTION_ANSWER, activity = true))
+        else NotificationCompat.CallStyle.forOngoingCall(person, callAction(state, ACTION_END_CALL))
+        return NotificationCompat.Builder(this, "dmsg-call").setSmallIcon(R.drawable.ic_call)
+            .setContentTitle(getString(R.string.app_name)).setContentText(getString(callPhaseRes(call)))
+            .setStyle(style).setCategory(NotificationCompat.CATEGORY_CALL).setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setContentIntent(open).setOngoing(true).setOnlyAlertOnce(!incoming).build()
     }
 
     /** Poll loop: reconnect (refill) -> fetch -> retry. Backoff on failure. */
@@ -175,6 +265,9 @@ class DmsgService : Service() {
         private val worker = SingleWorker { loop(requireNotNull(app)) }
         val running: Boolean get() = worker.running
         @Volatile private var total = 0
+        @Volatile private var messagesPaused = false
+        fun facadeSnapshot() = facade
+        fun pauseMessages(value: Boolean) { messagesPaused = value; worker.wake() }
         fun countSnapshot(): Int = total
 
         fun prepare(f: DmsgFacade) { facade = f }
@@ -190,11 +283,12 @@ class DmsgService : Service() {
             var backoff = 5_000L
             total = 0
             while (worker.active) {
+                if (messagesPaused) { if (!worker.awaitNext(1_000)) break; continue }
                 try {
                     val n = pollOnce(app)
                     total += n
                     backoff = 5_000L
-                    app.notify(app.buildCountNotif(total))
+                    instance?.main?.post { instance?.syncListener() }
                     // Gate-observable poll outcome (no secrets: counts only).
                     Log.d(TAG, "poll ok n=$n total=$total")
                 } catch (e: Exception) {
@@ -237,7 +331,7 @@ class DmsgService : Service() {
             if (!f.isReady()) throw DmsgError(R.string.error_native_unavailable, ErrorKind.NativeUnavailable)
             if (!f.account().authenticated) throw DmsgError(R.string.error_sign_in_required, ErrorKind.NotAuthenticated)
             if (f.dnsProfile() == null) throw DmsgError(R.string.error_server_required, ErrorKind.InvalidInput)
-            val rep = check(f) { worker.active }
+            val rep = check(f) { worker.active && !messagesPaused }
             VoiceTransferCoordinator.wake()
             Log.d(TAG, "receive pending=${rep.skipped.getOrElse(0) { 0 }} blocked=${rep.skipped.getOrElse(1) { 0 }} undecryptable=${rep.skipped.getOrElse(2) { 0 }} mismatch=${rep.skipped.getOrElse(3) { 0 }}")
             return rep.received.size

@@ -19,6 +19,9 @@ use std::sync::Arc;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::auth::AuthError;
+pub use crate::calls::{
+    CallDirection, CallEndReason, CallObserver, CallPhase, CallSnapshot, DmsgCalls,
+};
 use crate::contacts::{self, Contact};
 pub use crate::history::{
     DeleteScope, DeliveryState, DialogSummary, DialogsPage, HistoryMessage, HistoryPage,
@@ -720,6 +723,13 @@ async fn invitation_connected(
 
 #[uniffi::export]
 impl DmsgClient {
+    pub fn start_calls(&self, observer: Box<dyn CallObserver>) -> Result<Arc<DmsgCalls>, FfiError> {
+        DmsgCalls::start(
+            self.db_path.clone(),
+            self.key.as_ref().map(|key| Zeroizing::new(key.to_vec())),
+            Arc::from(observer),
+        )
+    }
     pub fn issue_invitation_dns(&self, issue_id: Vec<u8>) -> Result<IssuedInvitation, FfiError> {
         let id = dmsg_protocol::invitation::parse_issue_id(&issue_id)
             .map_err(|_| FfiError::InvalidInput)?;
@@ -919,6 +929,13 @@ impl DmsgClient {
         let mut core = self.core()?;
         core.preflight_text(&contact_id, &text, reply_to_local_id)
             .map_err(map_olm)?;
+        if crate::calls::busy(&self.db_path) {
+            return core
+                .queue_text_existing_session(&contact_id, &text, reply_to_local_id)
+                .map_err(map_olm)?
+                .map(|mid| hex(&mid))
+                .ok_or(FfiError::Busy);
+        }
         match crate::dns::endpoint(&self.db_path, &p) {
             Ok(a) => self.send_text(
                 a.to_string(),

@@ -89,7 +89,9 @@ class VoiceDnsGatesTest {
     private fun json(name: String): JSONObject = try { JSONObject(read(name)) }
         catch (_: Exception) { throw AssertionError("Invalid bounded fixture JSON: $name") }
     private fun auth(): Auth = try {
-        val input = json("gate-voice-auth.json")
+        val name = InstrumentationRegistry.getArguments().getString("voice_auth_file") ?: "gate-voice-auth.json"
+        require(name in setOf("gate-voice-auth.json", "gate-call-auth.json"))
+        val input = json(name)
         val addresses = input.getJSONArray("resolvers")
         val resolvers = (0 until addresses.length()).map { addresses.getString(it) }
         val result = Auth(input.getString("serverCode").trim(), resolvers, input.getString("login"),

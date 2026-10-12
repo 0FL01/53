@@ -70,6 +70,6 @@ class DiagnosticsActivity : DmsgActivity() {
         ).joinToString("\n")
         findViewById<Button>(R.id.btn_fgs).setText(if (facts.serviceEnabled) R.string.disable_connectivity else R.string.enable_connectivity)
         findViewById<Button>(R.id.btn_economy).setText(if (Prefs.economy(this)) R.string.economy_on else R.string.economy_off)
-        findViewById<Button>(R.id.btn_reconnect).isEnabled = !guard.pending && !facts.pollInFlight
+        findViewById<Button>(R.id.btn_reconnect).isEnabled = !guard.pending && !facts.pollInFlight && !CallUi.state.value.busy
     }
 }

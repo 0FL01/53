@@ -43,6 +43,12 @@
 
 **Решение.** Зафиксировать: live-call приемлем; только экспериментальный; либо временно voice notes/PTT. Не публиковать проценты вероятности без наблюдений и не считать несколько streams эквивалентом unreliable datagrams.
 
+**Scope switch 2026-10-11.** Media baseline35a6b56 заморожен; по явному запросу
+пользователя оставшийся полный M1-V quality gate заменён клиентским call pilot.
+R5 не verified: отрицательные результаты/unknown metrics сохранены в старой
+цели. Новый finish line — `docs/goals/2026-10-11-call-client-apk.md`, не новые
+45min loops и не обещание измеренной сквозной задержки.
+
 ## M2. Код подключения, логин/пароль и учётная запись
 
 **Задачи.** Один готовый публичный код/QR сервера: bounded versioned parser, offline preview, полный certificate pin и Noise server key; без bearer-token, пароля и приватных ключей в профиле. После проверки сервера — «Войти» / «Создать аккаунт» с логином/паролем. На сервере уникальный логин, Argon2id password hash, ограничение попыток и два сохраняемых режима регистрации `open` / `invite_only` (default), управление через msgctl. Приглашение — отдельное дополнительное условие создания аккаунта в `invite_only`, с одноразовостью/TTL/revocation. Локальные device/E2E keys создаются приложением; регистрация/привязка идемпотентны и атомарны. Устройство запоминается, последующие reconnect не требуют пароля.
@@ -92,6 +98,14 @@
 **Готово, когда.** Голосовое и файл проходят между телефонами только через DNS, переживают разрыв и restart. Контрольные сообщения идут, несмотря на bulk. Сервер и принимающее приложение независимо соблюдают доступные им ограничения, не притворяясь, что сервер прочитал E2E media metadata.
 
 ## M6. Продуктовые звонки, если M1-V подтверждён
+
+**Текущий разрешённый client cut.** Shared `live_media`, ephemeral Olm/signaling,
+authenticated opaque relay, Core-Telecom в одном DmsgService и настоящий chat
+call UI реализуются по новой цели выше. Account/schema остаются server7/core10;
+fresh backend без нового backup разрешён отдельно. Приёмка этого пилота — один
+конечный3–5min actual-client call, controls/lifecycle/cleanup и подписанный
+release APK. Полный quality gate ниже остаётся неполученным; history/missed-call
+storage и active autoreconnect в этот cut не входят.
 
 **Задачи.** Состояния invite/ringing/accepted/active/reconnecting/ended/busy, call TTL, согласование возможностей. Раннее нажатие «завершить» идемпотентно. Короткий ring TTL исключает «входящий через час» после восстановления связи. Одновременно один вызов на устройство.
 

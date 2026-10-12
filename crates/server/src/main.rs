@@ -6,11 +6,13 @@
 //! получает только POLICY/SIGNUP/LOGIN/RESUME. Pre-auth bounded: кап + timeout,
 //! close без ban (per-IP ban на общем резолвере отключил бы всех, ARCH §4).
 //! R1: deadline 10s — только handshake-фаза и pre-account чтения; живая сессия —
-//! per-read idle 600s (счётчик idle_close). Двухкап pre 8 / post 20, cleanup
+//! per-read idle 600s (счётчик idle_close). Двухкап pre 8 / post 32, cleanup
 //! live/pre-карт через SessionGuard/Drop, pre-auth реестр device→Notify.
 
 mod auth;
 mod blob;
+mod call_lane;
+mod calls;
 mod contacts;
 mod db;
 mod invite_qr;
@@ -36,7 +38,7 @@ use zeroize::Zeroizing;
 /// Кап незавершённых handshake (≪16 пилота, резерв до транспортных 32).
 const PRE_AUTH_CAP: usize = 8;
 /// Кап post-handshake сессий: permit держится до конца handle_conn.
-const POST_AUTH_CAP: usize = 20;
+const POST_AUTH_CAP: usize = 32;
 /// Deadline handshake-фазы (IK + AUTH_DOMAIN/WELCOME) и pre-account чтений.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Per-read idle-timeout живой authenticated сессии (счётчик idle_close).
@@ -74,6 +76,8 @@ struct State {
     db: Arc<Mutex<rusqlite::Connection>>,
     /// One bounded bulk IO job; backup and GC use the same exclusion permit.
     blob_io: Arc<Semaphore>,
+    /// Volatile call listeners/routes; lock order is DB then hub, never across await.
+    calls: Arc<Mutex<calls::Hub>>,
     live: Arc<Mutex<HashMap<Vec<u8>, Vec<Arc<Notify>>>>>,
     /// Pre-auth реестр device_key→Notify: handshake пройден, account ещё нет.
     /// Только живые pending сессии, ограничены 10s чтением + Drop cleanup.
@@ -380,6 +384,7 @@ async fn handle_conn(
     // Pending reads 10s; authenticated per-read idle 600s.
     // DB-транзакции короткие, никогда через .await.
     let mut authenticated_user: Option<[u8; 16]> = None;
+    let mut resumed = false;
     let close = async {
         loop {
             let idle = if authenticated_user.is_some() {
@@ -413,14 +418,30 @@ async fn handle_conn(
             if total != n {
                 return Err(());
             }
-            let reply = Zeroizing::new(if op == OP_POLICY && payload.is_empty() {
+            if matches!(op, OP_CALL_OPEN | OP_CALL_ATTACH) {
+                if !resumed {
+                    return Err(());
+                }
+                let handoff = match op {
+                    OP_CALL_OPEN if payload == [dmsg_protocol::call::VERSION] => {
+                        calls::Handoff::Signal
+                    }
+                    OP_CALL_ATTACH => calls::Handoff::Media(
+                        dmsg_protocol::call::Attach::decode(payload).map_err(|_| ())?,
+                    ),
+                    _ => return Err(()),
+                };
+                plain.fill(0);
+                return Ok(Some(handoff));
+            }
+            let mut reply = Zeroizing::new(if op == OP_POLICY && payload.is_empty() {
                 let db = st.db.lock().expect("db");
                 match auth::mode(&db) {
                     Ok(mode) => encode_frame(OP_POLICY_RESP, &mode.encode()).expect("fits"),
                     Err(code) => encode_frame(OP_ERROR, &[code]).expect("fits"),
                 }
             } else if matches!(op, OP_SIGNUP | OP_LOGIN | OP_RESUME) {
-                account_reply(
+                let reply = account_reply(
                     &st,
                     &device_key,
                     op,
@@ -428,7 +449,11 @@ async fn handle_conn(
                     &mut guard,
                     &mut authenticated_user,
                 )
-                .await?
+                .await?;
+                if op == OP_RESUME && decode_frame(&reply).map_err(|_| ())?.1 == OP_AUTHENTICATED {
+                    resumed = true;
+                }
+                reply
             } else if authenticated_user.is_some() {
                 let user = authenticated_user.expect("checked");
                 match op {
@@ -466,7 +491,26 @@ async fn handle_conn(
             });
             plain.fill(0);
             let mut out = vec![0u8; HS_BUF_LEN];
-            let wn = transport.write_message(&reply, &mut out).map_err(|_| ())?;
+            // Final egress admission is serialized with call registration up to
+            // Noise commitment. Already committed transport bytes cannot be
+            // removed from an ordered stream without retiring that stream.
+            let wn = {
+                let calls = st.calls.lock().expect("call hub");
+                if matches!(
+                    op,
+                    OP_FETCH
+                        | OP_BLOB_RESERVE
+                        | OP_BLOB_STATUS
+                        | OP_BLOB_PUT
+                        | OP_BLOB_FINISH
+                        | OP_BLOB_GET
+                        | OP_SEND_MEDIA
+                ) && calls.busy(&device_key)
+                {
+                    *reply = encode_frame(OP_ERROR, &[ERR_BUSY]).expect("fits");
+                }
+                transport.write_message(&reply, &mut out).map_err(|_| ())?
+            };
             // Destroy the secret plaintext response before the network await.
             // Zeroizing also covers encryption errors and cancellation.
             drop(reply);
@@ -476,13 +520,21 @@ async fn handle_conn(
             out.fill(0);
         }
         #[allow(unreachable_code)]
-        Ok::<(), ()>(())
+        Ok::<Option<calls::Handoff>, ()>(None)
     };
-    tokio::select! {
+    let handoff = tokio::select! {
         _ = notify.notified() => {
             eprintln!("msgd: session revoked, closing {peer}");
+            None
         }
-        _ = close => {}
+        result = close => result.ok().flatten(),
+    };
+    if let Some(handoff) = handoff {
+        let who = calls::Endpoint {
+            user: authenticated_user.expect("RESUME required"),
+            device: device_key,
+        };
+        calls::serve(stream, transport, st, who, handoff, guard, _post_permit).await;
     }
     // Cleanup — Drop guard (владеет live_key/pre_key/notify); _post_permit
     // жив до конца функции и освобождает post-слот только здесь.
@@ -600,6 +652,11 @@ fn contact_reply(
             _ => Err(ERR_BAD),
         }
     };
+    drop(db);
+    if result.is_ok() && op == OP_CONTACT_DECIDE && payload.len() == 17 && payload[16] == 2 {
+        let peer: [u8; 16] = payload[..16].try_into().expect("checked contact peer");
+        st.calls.lock().expect("call hub").close_pair(user, &peer);
+    }
     match result {
         Ok((op, p)) => encode_frame(op, &p).expect("bounded contacts"),
         Err(e) => encode_frame(OP_ERROR, &[e]).expect("fits"),
@@ -629,6 +686,9 @@ fn send_reply(
     if is_revoked(&db, device_key) {
         c.send_fail.fetch_add(1, Ordering::Relaxed);
         return Ok(encode_frame(OP_ERROR, &[ERR_REVOKED]).expect("fits"));
+    }
+    if st.calls.lock().expect("call hub").busy(device_key) {
+        return Ok(encode_frame(OP_ERROR, &[ERR_BUSY]).expect("fits"));
     }
     let res = mbox::send(
         &mut db,
@@ -678,6 +738,9 @@ fn fetch_reply(
     if is_revoked(&db, device_key) {
         c.mbox_err.fetch_add(1, Ordering::Relaxed);
         return Ok(encode_frame(OP_ERROR, &[ERR_REVOKED]).expect("fits"));
+    }
+    if st.calls.lock().expect("call hub").busy(device_key) {
+        return Ok(encode_frame(OP_ERROR, &[ERR_BUSY]).expect("fits"));
     }
     let rows = mbox::fetch(&db, user, device_key).map_err(|_| {
         c.mbox_err.fetch_add(1, Ordering::Relaxed);
@@ -829,18 +892,28 @@ async fn blob_reply(
     op: u8,
     payload: &[u8],
 ) -> Vec<u8> {
+    if st.calls.lock().expect("call hub").busy(device_key) {
+        return encode_frame(OP_ERROR, &[ERR_BUSY]).expect("fits");
+    }
     let permit = match st.blob_io.clone().try_acquire_owned() {
         Ok(p) => p,
         Err(_) => return encode_frame(OP_ERROR, &[ERR_BUSY]).expect("fits"),
     };
     let db = st.db.clone();
+    let calls = st.calls.clone();
     let root = st.cfg.blobs_dir.clone();
     let (user, device, payload) = (*user, *device_key, payload.to_vec());
     let result = tokio::task::spawn_blocking(move || {
         let _permit = permit;
+        if calls.lock().expect("call hub").busy(&device) {
+            return Ok((OP_ERROR, vec![ERR_BUSY]));
+        }
         blob::process(&db, &root, &user, &device, op, &payload, now_secs())
     })
     .await;
+    if st.calls.lock().expect("call hub").busy(device_key) {
+        return encode_frame(OP_ERROR, &[ERR_BUSY]).expect("fits");
+    }
     match result {
         Ok(Ok((op, p))) => encode_frame(op, &p).expect("bounded blob reply"),
         Ok(Err(e)) => encode_frame(OP_ERROR, &[e.code()]).expect("fits"),
@@ -879,6 +952,10 @@ fn binding_reply(st: &State, device_key: &[u8; 32], payload: &[u8]) -> Result<Ve
 /// Вызывается СТРОГО после commit: msgctl_block/revoke держат только короткие
 /// локи, wake — после их снятия, иначе окно block→notify пропускает SEND.
 fn wake_device(st: &State, device_key: &[u8]) {
+    st.calls
+        .lock()
+        .expect("call hub")
+        .close_device(device_key, dmsg_protocol::call::Reason::Revoked);
     let mut targets = Vec::new();
     {
         let mut live = st.live.lock().expect("live");
@@ -1537,6 +1614,7 @@ async fn run(cfg: Config) -> std::io::Result<()> {
             .map_err(|_| std::io::Error::other("auth initialization"))?,
         db: Arc::new(Mutex::new(conn)),
         blob_io: Arc::new(Semaphore::new(1)),
+        calls: Arc::new(Mutex::new(calls::Hub::default())),
         live: Arc::new(Mutex::new(HashMap::new())),
         pre: Arc::new(Mutex::new(HashMap::new())),
         counters: Arc::new(Counters::default()),
@@ -1548,6 +1626,18 @@ async fn run(cfg: Config) -> std::io::Result<()> {
     tokio::spawn(async move {
         if let Err(e) = serve_msgctl(ctl).await {
             eprintln!("msgd: msgctl error: {e}");
+        }
+    });
+    let call_timer = st.clone();
+    tokio::spawn(async move {
+        let mut timer = tokio::time::interval(Duration::from_millis(250));
+        loop {
+            timer.tick().await;
+            call_timer
+                .calls
+                .lock()
+                .expect("call hub")
+                .expire(std::time::Instant::now());
         }
     });
     // GC только ручной (msgctl gc): объёмы пилота малые, таймер убран —
@@ -1928,6 +2018,7 @@ mod revocation_session_tests {
             }),
             db: Arc::new(Mutex::new(rusqlite::Connection::open_in_memory().unwrap())),
             blob_io: Arc::new(Semaphore::new(1)),
+            calls: Arc::new(Mutex::new(calls::Hub::default())),
             counters: Arc::new(Counters::default()),
             live: Arc::new(Mutex::new(HashMap::from([(
                 key.clone(),

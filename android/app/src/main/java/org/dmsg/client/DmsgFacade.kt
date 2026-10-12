@@ -46,6 +46,8 @@ interface VoiceTransferHandle {
  * Lists are strictly paginated (cursor/limit); no raw DB cursors cross it.
  */
 interface DmsgFacade {
+    fun startCalls(observer: uniffi.dmsg_core.CallObserver): CallCommands =
+        throw DmsgError(R.string.error_native_unavailable, ErrorKind.NativeUnavailable)
     fun dnsProfile(): DnsProfile?
     fun configureDns(code: String, resolvers: List<String>)
     fun registrationPolicyDns(): RegistrationPolicy
@@ -95,4 +97,13 @@ interface DmsgFacade {
     fun fetch(): FetchRes
     fun reconnect(): Long
     fun qrKind(uri: String): QrKind
+}
+
+/** Persistent actor commands. No store lock or synchronous network wait. */
+interface CallCommands {
+    fun dial(contactId: String)
+    fun accept(callId: String)
+    fun reject(callId: String)
+    fun end(callId: String)
+    fun shutdown()
 }

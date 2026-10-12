@@ -354,7 +354,9 @@ pub fn block(conn: &rusqlite::Connection, contact_id: &str) -> Result<(), OlmErr
     if !valid_contact_id(contact_id) {
         return Err(OlmError::Protocol("bad contact id"));
     }
-    conn.execute(
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(|_| OlmError::Store("block transaction".into()))?;
+    tx.execute(
         "INSERT INTO core_contacts(contact_id, state, local_activity_ms) VALUES(?1,'blocked',?2)
          ON CONFLICT(contact_id) DO UPDATE SET state='blocked'",
         rusqlite::params![
@@ -363,6 +365,11 @@ pub fn block(conn: &rusqlite::Connection, contact_id: &str) -> Result<(), OlmErr
         ],
     )
     .map_err(|e| OlmError::Store(format!("block: {e}")))?;
+    tx.commit()
+        .map_err(|_| OlmError::Store("block commit".into()))?;
+    if let Some(owner) = conn.path() {
+        crate::calls::contact_blocked(owner, contact_id);
+    }
     Ok(())
 }
 

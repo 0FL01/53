@@ -6,8 +6,15 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val clientRelease = providers.gradleProperty("clientRelease").map { it == "true" }.orElse(false)
+check(!clientRelease.get() || providers.gradleProperty("gateInstall").orNull != "true") {
+    "clientRelease uses the main package; omit -PgateInstall=true"
+}
+
 /** Optional public deployment input, never a tracked domain/pin or an invitation. */
 abstract class GenerateTrustedServerProfile : DefaultTask() {
+    @get:Input
+    abstract val required: Property<Boolean>
     @get:InputFile
     @get:Optional
     @get:PathSensitive(PathSensitivity.NONE)
@@ -17,6 +24,9 @@ abstract class GenerateTrustedServerProfile : DefaultTask() {
 
     @TaskAction
     fun generate() {
+        check(!required.get() || profile.isPresent) {
+            "clientRelease requires -PserverProfileFile=/absolute/public-profile.txt"
+        }
         val output = assets.get().asFile
         output.deleteRecursively() // Omission must not accidentally package an older deployment.
         check(output.mkdirs()) { "Unable to create generated public assets" }
@@ -40,6 +50,7 @@ abstract class GenerateTrustedServerProfile : DefaultTask() {
 }
 
 val generateTrustedServerProfile = tasks.register<GenerateTrustedServerProfile>("generateTrustedServerProfile") {
+    required.set(clientRelease)
     profile.set(layout.file(providers.gradleProperty("serverProfileFile").map { path ->
         val input = File(path)
         check(input.isAbsolute) { "serverProfileFile must be an absolute public-profile file path" }
@@ -60,8 +71,8 @@ android {
         applicationId = "org.dmsg.client"
         minSdk = 26
         targetSdk = 37
-        versionCode = 2
-        versionName = "0.4.1-53"
+        versionCode = 3
+        versionName = "0.5.0-53"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk { abiFilters += "arm64-v8a" }
         // Budgets (ARCH/WORK_PLAN M4): release APK <= 25 MiB, idle PSS <= 100 MiB.
@@ -70,6 +81,7 @@ android {
 
     buildTypes {
         getByName("release") {
+            isDebuggable = false
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
@@ -83,9 +95,9 @@ android {
             if (providers.gradleProperty("gateInstall").orNull == "true") applicationIdSuffix = ".gate"
         }
         getByName("release") {
-            // Local runtime profiling only; default release remains unsigned for real signing.
+            // Approved client release and isolated profiling use the existing AGP debug identity.
             if (providers.gradleProperty("gateInstall").orNull == "true") applicationIdSuffix = ".gate"
-            if (providers.gradleProperty("gateReleaseSigned").orNull == "true") {
+            if (clientRelease.get() || providers.gradleProperty("gateReleaseSigned").orNull == "true") {
                 signingConfig = signingConfigs.getByName("debug")
             }
         }
@@ -142,10 +154,26 @@ tasks.register<Export53Apk>("export53Apk") {
     gateInstall.set(providers.gradleProperty("gateInstall").map { it == "true" }.orElse(false))
 }
 
+// Signed, optimized main-package artifact with a required public server profile.
+tasks.register<Export53Apk>("export53ClientApk") {
+    dependsOn("assembleRelease")
+    apk.set(layout.buildDirectory.file("outputs/apk/release/app-release.apk"))
+    destination.set(rootProject.layout.projectDirectory.file("../53.apk"))
+    gateInstall.set(providers.gradleProperty("gateInstall").map { it == "true" }.orElse(false))
+}
+
+gradle.taskGraph.whenReady {
+    if (allTasks.any { it.project == project && it.name == "export53ClientApk" }) {
+        check(clientRelease.get()) { "export53ClientApk requires -PclientRelease=true" }
+    }
+}
+
 dependencies {
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("androidx.activity:activity-ktx:1.11.0")
     implementation("androidx.core:core-ktx:1.16.0")
+    implementation("androidx.core:core-telecom:1.0.1")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     // Native message spans only; keep Markwon's default CommonMark dependency.
     implementation("io.noties.markwon:core:4.6.2")
     implementation("io.noties.markwon:ext-strikethrough:4.6.2")

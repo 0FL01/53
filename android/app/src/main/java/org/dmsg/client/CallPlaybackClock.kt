@@ -4,10 +4,10 @@ import kotlin.math.abs
 import kotlin.math.floor
 import kotlin.math.roundToLong
 
-/** Fixture-only hardware-rate calibration and fractional-Hz platform actuator.
- * Network arrival/queue delay is deliberately absent. Route changes retire the owner.
+/** Shared hardware-rate calibration and fractional-Hz platform actuator.
+ * Network arrival/queue delay is deliberately absent.
  */
-internal class CallProbePlaybackClock {
+internal class CallPlaybackClock {
     data class RejectedWindow(val frames: Long, val ns: Long, val rate: Int,
         val beforeFrames: Long?, val beforeNs: Long?, val afterFrames: Long?, val afterNs: Long?)
     data class Output(val rate: Int, val sinkPpb: Long?, val calibrated: Boolean,
@@ -26,6 +26,15 @@ internal class CallProbePlaybackClock {
     private var relativePpm: Double? = null
     private var rejectionMask = 0L
     private var rejectedWindow: RejectedWindow? = null
+    var backwards = false
+        private set
+
+    /** Telecom changed the local hardware route. Media/capture epochs never reset here. */
+    fun resetHardwareCalibration() {
+        first = null; middle = null; latest = null; neutralRatio = null; healthy = false
+        targetHz = 16_000.0; fraction = 0.0; nextActuationNs = 0L; selected = 16_000
+        relativePpm = null; rejectionMask = 0L; rejectedWindow = null; backwards = false
+    }
 
     fun observe(frame: Long, timestampNs: Long, nowNs: Long, actualRate: Int, underruns: Int) {
         if (frame < 0 || timestampNs <= 0 || nowNs < timestampNs) {
@@ -39,6 +48,7 @@ internal class CallProbePlaybackClock {
         val previous = latest
         if (previous != null && (frame < previous.frame || timestampNs < previous.ns ||
                 ((frame == previous.frame) != (timestampNs == previous.ns)))) {
+            backwards = backwards || frame < previous.frame || timestampNs < previous.ns
             rejectionMask = rejectionMask or 4L
             first = null; middle = null; latest = null; healthy = false; return
         }

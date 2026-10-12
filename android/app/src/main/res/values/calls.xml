@@ -1,0 +1,35 @@
+<resources>
+    <string name="title_call">Voice call</string>
+    <string name="call_channel">Voice calls</string>
+    <string name="call_private_caller">Personal voice call</string>
+    <string name="call_dial">Call</string>
+    <string name="call_accept">Answer</string>
+    <string name="call_decline">Decline</string>
+    <string name="call_hangup">End call</string>
+    <string name="call_mute">Mute microphone</string>
+    <string name="call_unmute">Unmute microphone</string>
+    <string name="call_speaker">Speaker</string>
+    <string name="call_endpoint">Audio route</string>
+    <string name="call_ready">Ready to call</string>
+    <string name="call_dialing">Calling…</string>
+    <string name="call_ringing">Ringing…</string>
+    <string name="call_connecting">Connecting…</string>
+    <string name="call_active">Connected</string>
+    <string name="call_ending">Ending call…</string>
+    <string name="call_ended">Call ended</string>
+    <string name="call_remote_ended">The other person ended the call</string>
+    <string name="call_unavailable">The other person is unavailable</string>
+    <string name="call_busy">The other person is busy</string>
+    <string name="call_expired">Call timed out</string>
+    <string name="call_rejected">Call declined</string>
+    <string name="call_connection_lost">Connection lost</string>
+    <string name="call_invalid">Call could not be established</string>
+    <string name="call_revoked">Contact is no longer available for calls</string>
+    <string name="call_audio_unavailable">Call audio is unavailable</string>
+    <string name="call_microphone_permission">Allow microphone access to answer or call</string>
+    <string name="call_route_failed">Could not change the audio route</string>
+    <string name="call_duration">%1$d:%2$02d</string>
+    <string name="call_messages_paused">Message refresh and voice-note transfers are paused during the call</string>
+    <string name="call_incoming_available">Listening for incoming calls while Connectivity is enabled in normal mode. Force stop and background restrictions can prevent calls.</string>
+    <string name="call_incoming_unavailable">Incoming calls require Connectivity enabled in normal mode. Economy, disabled Connectivity or force stop cannot guarantee incoming calls. You can call from this screen.</string>
+</resources>

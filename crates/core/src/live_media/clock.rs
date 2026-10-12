@@ -1,4 +1,4 @@
-//! Fixture source clocks. Arrival time is a health check, never a rate sample.
+//! Source clocks. Arrival time is a health check, never a rate sample.
 use super::packet::SenderClock;
 use std::cell::Cell;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -43,7 +43,7 @@ impl Rate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::voice_probe::packet;
+    use crate::live_media::packet;
 
     fn rate(ppm: i64) -> Rate {
         Rate {

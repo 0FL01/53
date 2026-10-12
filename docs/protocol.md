@@ -1,6 +1,6 @@
 # dmsg wire v2: единая account-auth логика
 
-Реализованный путь: **доверенный профиль сервера → Войти / Создать аккаунт → диалоги**. Регистрация `invite_only` (default) или `open`; приглашение — только одноразовое разрешение signup. Wire2/auth сохраняются; fresh server7 добавляет клиентский выпуск приглашений, local core10/E2Ev2 не меняются. Old-schema/plain→sealed conversion и legacy E2E decode отсутствуют. Working server5/main8 не обновлены; несовместимый cutover отдельно по явному разрешению. Ошибка не вызывает wipe/новую identity. ENROL/token replay/credential attach/admin invite-rebind отсутствуют.
+Реализованный путь: **доверенный профиль сервера → Войти / Создать аккаунт → диалоги**. Регистрация `invite_only` (default) или `open`; приглашение — только одноразовое разрешение signup. Wire2/auth сохраняются; fresh server7 добавляет клиентский выпуск приглашений и volatile call API, local core10/E2Ev2 storage не меняется. Old-schema/plain→sealed conversion и legacy E2E decode отсутствуют. 2026-10-12 явно разрешённый fresh backend cutover на server7 выполнен без нового backup; старый Main8 не обновлён/не очищен. Ошибка не вызывает wipe/новую identity. ENROL/token replay/credential attach/admin invite-rebind отсутствуют.
 
 ## Публичный профиль
 
@@ -82,6 +82,53 @@ Copy/QR-PNG Share разрешают экспорт. PNG — narrow read-only pr
 best-effort cleanup, не public secret link; секретов нет в navigation/saved state.
 Android gallery/phrase import не выполняет autosubmit и не меняет trust/contact QR.
 Runtime contract — `android/SELF_SERVICE_INVITATION_GATES.md`.
+
+## Volatile calls v1
+
+После отдельного `RESUME` каждого stream, на одном process-owned DNS carrier:
+
+| Opcode | Exact payload / meaning |
+|---|---|
+| CALL_OPEN52 / READY53 | `[1]` / `[1,1]`; отдельный persistent signaling stream |
+| CALL_COMMAND54 | request_id4 + action1 + call_id16 + epoch8 + recipient16 + ciphertext_len2 + ciphertext |
+| CALL_ACK55 | request_id4 + call_id16 + epoch8 + reason1 |
+| CALL_EVENT56 | kind1 + call_id16 + epoch8 + peer_user16 + peer_device32 + remaining_ms4 + reason1 + ciphertext_len2 + ciphertext |
+| CALL_ATTACH57 / ATTACHED58 | call_id16 + epoch8 + lane1 / exact echo; ownership transfer на media actor |
+
+Integers BE, request_id nonzero, call_id nonzero/epoch1. Actions Invite1,
+RingingConfirm2, Accept3, Reject4, End5, Heartbeat6; только Invite содержит
+recipient, только Invite/Accept — ciphertext (1..2048B). Heartbeat имеет zero
+call/epoch/recipient и пустой ciphertext. Events Invite1/Ringing2/Accepted3/
+MediaReady4/Ended5; ciphertext только Invite/Accepted. remaining_ms≤30000.
+Unknown tags, invalid field combinations, truncation/trailing bytes отвергаются.
+Причины ACK/Ended: Ok0, Unavailable1, Busy2, Expired3, Rejected4, LocalEnded5,
+RemoteEnded6, ConnectionLost7, Invalid8, Revoked9, AudioUnavailable10 — отдельное
+пространство от обычного OP_ERROR.
+
+Клиент сначала decrypt/validates Invite и получает RingingConfirm ACK, затем
+показывает входящий. Ring TTL30s, attach10s, heartbeat10s/liveness30s; server
+monotonic time. Максимум2 calls/16 listeners, один call/device, events≤4.
+Overflow, revoke/replacement/block, disconnect и End убирают все routes.
+Согласие в любой accepted стороне one-QR contact разрешает звонок; block в
+любой стороне запрещает. Local block также отменяет client owner после DB commit.
+
+Для каждой стороны RTP lane0 и SRTCP lane1 имеют собственные Noise states и
+account sessions. MediaReady выдаётся после всех четырёх attach. RTP242≤122B,
+SRTCP243≤130B, queues capacity1, relay hop20ms. Deadline/full drops только до
+Noise commitment; committed encrypted frame дописывается либо lane уничтожается.
+Сервер пересылает opaque payload, без media keys/PCM. Bulk/SEND/FETCH во время
+call получают Busy; persistent mailbox/outbox остаются сохранёнными.
+
+Ключевой plaintext — отдельный strict173B E2Ev2 kind5/no-Reply parser:
+`[2,5,call_id16,sender_ed32,0,action1,epoch8,sender_binding32,recipient_binding32,
+key_salt30,ssrc4,cname8,sequence2,timestamp4,profile1]`.
+Только Invite/Accept; profile1 = mono16k/12kbit/40ms/cap100. Обе bindings и call
+context проверяются внутри Olm; обычный message parser kind5 не принимает.
+Ratchet/account updates IMMEDIATE и только после validation; calls не создают
+history/inbox/outbox/blob rows. KeyEnvelope zeroizes key, без Debug/Serialize.
+После transport loss текущий call заканчивается; redial использует fresh ID,
+keys/SSRC/counters. API/lifetime — `crates/core/CALLS_API.md`; фактическая приёмка
+и ограничения пилота — `docs/goals/2026-10-11-call-client-apk.md`.
 
 ## Mailbox и peer binding
 

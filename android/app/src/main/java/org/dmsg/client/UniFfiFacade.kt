@@ -31,6 +31,22 @@ class UniFfiFacade(private val dbPath: String, key: ByteArray, private val conte
     }
 
     override fun isReady() = true
+    override fun startCalls(observer: uniffi.dmsg_core.CallObserver): CallCommands {
+        val calls = wrap { core.startCalls(observer) }
+        return object : CallCommands {
+            private val stopped = java.util.concurrent.atomic.AtomicBoolean(false)
+            private fun command(block: () -> Unit) {
+                try { block() } catch (e: FfiException) { throw ffiError(e) }
+            }
+            override fun dial(contactId: String) = command { calls.dial(contactId) }
+            override fun accept(callId: String) = command { calls.accept(callId) }
+            override fun reject(callId: String) = command { calls.reject(callId) }
+            override fun end(callId: String) = command { calls.end(callId) }
+            override fun shutdown() {
+                if (stopped.compareAndSet(false, true)) command { try { calls.shutdown() } finally { calls.close() } }
+            }
+        }
+    }
     override fun dnsProfile(): DnsProfile? = wrap {
         core.dnsProfileInfo()?.let { DnsProfile(it.domain, it.noisePubkey, it.pinFingerprintHex, it.resolvers) }
     }
@@ -177,11 +193,13 @@ class UniFfiFacade(private val dbPath: String, key: ByteArray, private val conte
     }
 
     override fun retry(): LongArray = dnsCommand {
+        if (CallUi.state.value.busy) throw DmsgError("Message transfer paused for call", ErrorKind.Busy)
         val r = core.retryDns()
         longArrayOf(r.resent.toLong(), r.accepted.toLong(), r.delivered.toLong(), r.skipped.toLong())
     }
 
     override fun fetch(): FetchRes = dnsCommand {
+        if (CallUi.state.value.busy) throw DmsgError("Message transfer paused for call", ErrorKind.Busy)
         val r = core.fetchDns()
         FetchRes(
             r.received.map { Msg(it.seq.toLong(), it.contactId, it.text, it.kind, it.voice) },

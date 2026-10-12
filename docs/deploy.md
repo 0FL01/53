@@ -4,6 +4,33 @@
 
 ## Единая account-auth логика и fresh dev rollout
 
+**Текущий backend, 2026-10-12:** явно разрешённый fresh messenger-only reset без
+нового backup выполнен; healthy/pong/schema7/invite_only. Удалены только
+проверенные messenger DB/WAL/SHM и blob contents, не volumes/secrets/archives.
+При fresh reset carrier container/image/PID были сохранены. Позднее один явно
+разрешённый TCP_NODELAY-контроль пересоздал только messenger carrier; после
+отрицательного результата восстановлены исходные image/config/pins. Public
+profile, topology/firewall и соседний туннель не менялись. Ниже schema5 описывает
+исторические rollout, не текущую БД.
+Новый call/client acceptance — `docs/goals/2026-10-11-call-client-apk.md`;
+старый Main8 сам не мигрируется/не очищается. Это не общее разрешение wipe.
+
+Client release сборка:
+
+```sh
+sh deploy/build-apk.sh --client /absolute/public-profile.txt
+```
+
+Выход `53.apk`: release/R8/resource shrink, non-debuggable, прежняя signing
+identity. Public profile обязателен; generic debug build остаётся прежним.
+Keystore исключён из Docker context и передаётся read-only BuildKit secret.
+На текущем build host bridge DNS недоступен; проверенная контейнерная сборка
+использовала per-build `--network=host --allow network.host`, без изменения
+Docker daemon или deployment networking. Фактический artifact/evidence — в цели;
+после runtime edits его необходимо пересобрать. Текущий APK проходит static и
+minified startup gates, но устойчивый физический DNS-call ещё не принят;
+не выдавать этот checkpoint за production call acceptance.
+
 Реализованы public `dmsg://server/` profile, wire2/server schema5/core schema6, password signup/login, key-only resume, persisted `open` / `invite_only` (default) и confirmed device replacement. Приглашение отдельно требуется только для signup в invite_only. ENROL/token-replay/credential attach/admin invite-rebind удалены. Команды ниже относятся к новой ревизии; wire — `docs/protocol.md`, CLI/details — `crates/server/README.md`, Android gates — `android/AUTH_GATES.md`.
 
 **2026-10-01 разрешённый fresh dev rollout выполнен:** remote healthy/schema5, policy `invite_only`; actual recursive Android↔native signup/resume/E2E/retry/trust gates green. Старые16 dev users/devices потеряны намеренно после backup. Основной Android package/Keystore не стирали/не обновляли: physical acceptance только `.gate`.

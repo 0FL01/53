@@ -32,6 +32,8 @@ use crate::contacts::{self, Contact};
 use crate::olm::{self, OlmError};
 use crate::transport::Transport;
 
+pub(crate) mod call;
+
 /// Сырое событие mailbox (без decrypt — для evidence и диагностики K4).
 pub struct RawEvent {
     pub seq: u64,

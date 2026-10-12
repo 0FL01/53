@@ -654,6 +654,41 @@ internal open class UniffiForeignFutureStructVoid(
 internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
     fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructVoid.UniffiByValue,)
 }
+internal interface UniffiCallbackInterfaceCallObserverMethod0 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`state`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+}
+@Structure.FieldOrder("changed", "uniffiFree")
+internal open class UniffiVTableCallbackInterfaceCallObserver(
+    @JvmField internal var `changed`: UniffiCallbackInterfaceCallObserverMethod0? = null,
+    @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+) : Structure() {
+    class UniffiByValue(
+        `changed`: UniffiCallbackInterfaceCallObserverMethod0? = null,
+        `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+    ): UniffiVTableCallbackInterfaceCallObserver(`changed`,`uniffiFree`,), Structure.ByValue
+
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceCallObserver) {
+        `changed` = other.`changed`
+        `uniffiFree` = other.`uniffiFree`
+    }
+
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -845,6 +880,16 @@ fun uniffi_dmsg_core_checksum_func_page_limit(
 ): Short
 fun uniffi_dmsg_core_checksum_func_qr_kind(
 ): Short
+fun uniffi_dmsg_core_checksum_method_dmsgcalls_accept(
+): Short
+fun uniffi_dmsg_core_checksum_method_dmsgcalls_dial(
+): Short
+fun uniffi_dmsg_core_checksum_method_dmsgcalls_end(
+): Short
+fun uniffi_dmsg_core_checksum_method_dmsgcalls_reject(
+): Short
+fun uniffi_dmsg_core_checksum_method_dmsgcalls_shutdown(
+): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_account_info(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_add_contact_qr(
@@ -933,6 +978,8 @@ fun uniffi_dmsg_core_checksum_method_dmsgclient_set_contact_alias(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_signup_dns(
 ): Short
+fun uniffi_dmsg_core_checksum_method_dmsgclient_start_calls(
+): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_stop_dns(
 ): Short
 fun uniffi_dmsg_core_checksum_method_dmsgclient_timeline_page(
@@ -946,6 +993,8 @@ fun uniffi_dmsg_core_checksum_method_voicetransfer_advance(
 fun uniffi_dmsg_core_checksum_method_voicetransfer_cancel(
 ): Short
 fun uniffi_dmsg_core_checksum_constructor_dmsgclient_open_encrypted(
+): Short
+fun uniffi_dmsg_core_checksum_method_callobserver_changed(
 ): Short
 fun ffi_dmsg_core_uniffi_contract_version(
 ): Int
@@ -985,6 +1034,7 @@ internal interface UniffiLib : Library {
             val lib = loadIndirect<UniffiLib>(componentName)
             // No need to check the contract version and checksums, since
             // we already did that with `IntegrityCheckingUniffiLib` above.
+            uniffiCallbackInterfaceCallObserver.register(lib)
             // Loading of library with integrity check done.
             lib
         }
@@ -996,7 +1046,21 @@ internal interface UniffiLib : Library {
     }
 
     // FFI functions
-    fun uniffi_dmsg_core_fn_clone_dmsgclient(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
+    fun uniffi_dmsg_core_fn_clone_dmsgcalls(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
+): Pointer
+fun uniffi_dmsg_core_fn_free_dmsgcalls(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
+): Unit
+fun uniffi_dmsg_core_fn_method_dmsgcalls_accept(`ptr`: Pointer,`callId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): Unit
+fun uniffi_dmsg_core_fn_method_dmsgcalls_dial(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): Unit
+fun uniffi_dmsg_core_fn_method_dmsgcalls_end(`ptr`: Pointer,`callId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): Unit
+fun uniffi_dmsg_core_fn_method_dmsgcalls_reject(`ptr`: Pointer,`callId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): Unit
+fun uniffi_dmsg_core_fn_method_dmsgcalls_shutdown(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
+): Unit
+fun uniffi_dmsg_core_fn_clone_dmsgclient(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
 ): Pointer
 fun uniffi_dmsg_core_fn_free_dmsgclient(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
 ): Unit
@@ -1090,6 +1154,8 @@ fun uniffi_dmsg_core_fn_method_dmsgclient_set_contact_alias(`ptr`: Pointer,`cont
 ): Unit
 fun uniffi_dmsg_core_fn_method_dmsgclient_signup_dns(`ptr`: Pointer,`login`: RustBuffer.ByValue,`password`: RustBuffer.ByValue,`invitation`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
+fun uniffi_dmsg_core_fn_method_dmsgclient_start_calls(`ptr`: Pointer,`observer`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Pointer
 fun uniffi_dmsg_core_fn_method_dmsgclient_stop_dns(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
 ): Unit
 fun uniffi_dmsg_core_fn_method_dmsgclient_timeline_page(`ptr`: Pointer,`contactId`: RustBuffer.ByValue,`beforeLocalId`: RustBuffer.ByValue,`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
@@ -1105,6 +1171,8 @@ fun uniffi_dmsg_core_fn_free_voicetransfer(`ptr`: Pointer,uniffi_out_err: Uniffi
 fun uniffi_dmsg_core_fn_method_voicetransfer_advance(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 fun uniffi_dmsg_core_fn_method_voicetransfer_cancel(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
+): Unit
+fun uniffi_dmsg_core_fn_init_callback_vtable_callobserver(`vtable`: UniffiVTableCallbackInterfaceCallObserver,
 ): Unit
 fun uniffi_dmsg_core_fn_func_invitation_token(`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
@@ -1247,6 +1315,21 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_dmsg_core_checksum_func_qr_kind() != 17251.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgcalls_accept() != 3448.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgcalls_dial() != 7272.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgcalls_end() != 4562.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgcalls_reject() != 55962.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgcalls_shutdown() != 60223.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_account_info() != 20705.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1379,6 +1462,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_signup_dns() != 8953.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_start_calls() != 48292.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_dmsg_core_checksum_method_dmsgclient_stop_dns() != 16687.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1398,6 +1484,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dmsg_core_checksum_constructor_dmsgclient_open_encrypted() != 11807.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dmsg_core_checksum_method_callobserver_changed() != 37095.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -1477,7 +1566,38 @@ inline fun <T : Disposable?, R> T.use(block: (T) -> R) =
  *
  * @suppress
  * */
-object NoPointer
+object NoPointer// Magic number for the Rust proxy to call using the same mechanism as every other method,
+// to free the callback once it's dropped by Rust.
+internal const val IDX_CALLBACK_FREE = 0
+// Callback return codes
+internal const val UNIFFI_CALLBACK_SUCCESS = 0
+internal const val UNIFFI_CALLBACK_ERROR = 1
+internal const val UNIFFI_CALLBACK_UNEXPECTED_ERROR = 2
+
+/**
+ * @suppress
+ */
+public abstract class FfiConverterCallbackInterface<CallbackInterface: Any>: FfiConverter<CallbackInterface, Long> {
+    internal val handleMap = UniffiHandleMap<CallbackInterface>()
+
+    internal fun drop(handle: Long) {
+        handleMap.remove(handle)
+    }
+
+    override fun lift(value: Long): CallbackInterface {
+        return handleMap.get(value)
+    }
+
+    override fun read(buf: ByteBuffer) = lift(buf.getLong())
+
+    override fun lower(value: CallbackInterface) = handleMap.insert(value)
+
+    override fun allocationSize(value: CallbackInterface) = 8UL
+
+    override fun write(value: CallbackInterface, buf: ByteBuffer) {
+        buf.putLong(lower(value))
+    }
+}
 /**
  * The cleaner interface for Object finalization code to run.
  * This is the entry point to any implementation that we're using.
@@ -1810,6 +1930,304 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
 //
 
 
+public interface DmsgCallsInterface {
+
+    fun `accept`(`callId`: kotlin.String)
+
+    fun `dial`(`contactId`: kotlin.String)
+
+    fun `end`(`callId`: kotlin.String)
+
+    fun `reject`(`callId`: kotlin.String)
+
+    /**
+     * The service calls this off the UI thread. It joins only this object's worker.
+     */
+    fun `shutdown`()
+
+    companion object
+}
+
+open class DmsgCalls: Disposable, AutoCloseable, DmsgCallsInterface
+{
+
+    constructor(pointer: Pointer) {
+        this.pointer = pointer
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(pointer))
+    }
+
+    /**
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noPointer: NoPointer) {
+        this.pointer = null
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(pointer))
+    }
+
+    protected val pointer: Pointer?
+    protected val cleanable: UniffiCleaner.Cleanable
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithPointer(block: (ptr: Pointer) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the pointer being freed concurrently.
+        try {
+            return block(this.uniffiClonePointer())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val pointer: Pointer?) : Runnable {
+        override fun run() {
+            pointer?.let { ptr ->
+                uniffiRustCall { status ->
+                    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_free_dmsgcalls(ptr, status)
+                }
+            }
+        }
+    }
+
+    fun uniffiClonePointer(): Pointer {
+        return uniffiRustCall() { status ->
+            UniffiLib.INSTANCE.uniffi_dmsg_core_fn_clone_dmsgcalls(pointer!!, status)
+        }
+    }
+
+
+    @Throws(FfiException::class)override fun `accept`(`callId`: kotlin.String)
+        =
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgcalls_accept(
+        it, FfiConverterString.lower(`callId`),_status)
+}
+    }
+
+
+
+
+    @Throws(FfiException::class)override fun `dial`(`contactId`: kotlin.String)
+        =
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgcalls_dial(
+        it, FfiConverterString.lower(`contactId`),_status)
+}
+    }
+
+
+
+
+    @Throws(FfiException::class)override fun `end`(`callId`: kotlin.String)
+        =
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgcalls_end(
+        it, FfiConverterString.lower(`callId`),_status)
+}
+    }
+
+
+
+
+    @Throws(FfiException::class)override fun `reject`(`callId`: kotlin.String)
+        =
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgcalls_reject(
+        it, FfiConverterString.lower(`callId`),_status)
+}
+    }
+
+
+
+
+    /**
+     * The service calls this off the UI thread. It joins only this object's worker.
+     */
+    @Throws(FfiException::class)override fun `shutdown`()
+        =
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgcalls_shutdown(
+        it, _status)
+}
+    }
+
+
+
+
+
+
+
+    companion object
+
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDmsgCalls: FfiConverter<DmsgCalls, Pointer> {
+
+    override fun lower(value: DmsgCalls): Pointer {
+        return value.uniffiClonePointer()
+    }
+
+    override fun lift(value: Pointer): DmsgCalls {
+        return DmsgCalls(value)
+    }
+
+    override fun read(buf: ByteBuffer): DmsgCalls {
+        // The Rust code always writes pointers as 8 bytes, and will
+        // fail to compile if they don't fit.
+        return lift(Pointer(buf.getLong()))
+    }
+
+    override fun allocationSize(value: DmsgCalls) = 8UL
+
+    override fun write(value: DmsgCalls, buf: ByteBuffer) {
+        // The Rust code always expects pointers written as 8 bytes,
+        // and will fail to compile if they don't fit.
+        buf.putLong(Pointer.nativeValue(lower(value)))
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a Pointer/Arc<T>
+// to the live Rust struct on the other side of the FFI.
+//
+// Each instance implements core operations for working with the Rust `Arc<T>` and the
+// Kotlin Pointer to work with the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque pointer to the underlying Rust struct.
+//     Method calls need to read this pointer from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its pointer should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the pointer, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the pointer, but is interrupted
+//      before it can pass the pointer over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read pointer value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
 /**
  * Фасад ядра для Kotlin. Send+Sync по построению (только путь-строка).
  */
@@ -1977,6 +2395,8 @@ public interface DmsgClientInterface {
     fun `setContactAlias`(`contactId`: kotlin.String, `alias`: kotlin.String?)
 
     fun `signupDns`(`login`: kotlin.String, `password`: kotlin.String, `invitation`: kotlin.String?): AccountInfo
+
+    fun `startCalls`(`observer`: CallObserver): DmsgCalls
 
     /**
      * No SQLite access: cancellation can race a blocked connect/fetch.
@@ -2718,6 +3138,19 @@ open class DmsgClient: Disposable, AutoCloseable, DmsgClientInterface
 
 
 
+    @Throws(FfiException::class)override fun `startCalls`(`observer`: CallObserver): DmsgCalls {
+            return FfiConverterTypeDmsgCalls.lift(
+    callWithPointer {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_dmsg_core_fn_method_dmsgclient_start_calls(
+        it, FfiConverterTypeCallObserver.lower(`observer`),_status)
+}
+    }
+    )
+    }
+
+
+
     /**
      * No SQLite access: cancellation can race a blocked connect/fetch.
      */
@@ -3116,6 +3549,58 @@ public object FfiConverterTypeAccountInfo: FfiConverterRustBuffer<AccountInfo> {
     override fun write(value: AccountInfo, buf: ByteBuffer) {
             FfiConverterBoolean.write(value.`authenticated`, buf)
             FfiConverterOptionalString.write(value.`contactId`, buf)
+    }
+}
+
+
+
+data class CallSnapshot (
+    var `callId`: kotlin.String,
+    var `contactId`: kotlin.String,
+    var `phase`: CallPhase,
+    var `direction`: CallDirection,
+    var `reason`: CallEndReason,
+    var `mediaHandle`: kotlin.Long,
+    var `available`: kotlin.Boolean
+) {
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeCallSnapshot: FfiConverterRustBuffer<CallSnapshot> {
+    override fun read(buf: ByteBuffer): CallSnapshot {
+        return CallSnapshot(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterTypeCallPhase.read(buf),
+            FfiConverterTypeCallDirection.read(buf),
+            FfiConverterTypeCallEndReason.read(buf),
+            FfiConverterLong.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: CallSnapshot) = (
+            FfiConverterString.allocationSize(value.`callId`) +
+            FfiConverterString.allocationSize(value.`contactId`) +
+            FfiConverterTypeCallPhase.allocationSize(value.`phase`) +
+            FfiConverterTypeCallDirection.allocationSize(value.`direction`) +
+            FfiConverterTypeCallEndReason.allocationSize(value.`reason`) +
+            FfiConverterLong.allocationSize(value.`mediaHandle`) +
+            FfiConverterBoolean.allocationSize(value.`available`)
+    )
+
+    override fun write(value: CallSnapshot, buf: ByteBuffer) {
+            FfiConverterString.write(value.`callId`, buf)
+            FfiConverterString.write(value.`contactId`, buf)
+            FfiConverterTypeCallPhase.write(value.`phase`, buf)
+            FfiConverterTypeCallDirection.write(value.`direction`, buf)
+            FfiConverterTypeCallEndReason.write(value.`reason`, buf)
+            FfiConverterLong.write(value.`mediaHandle`, buf)
+            FfiConverterBoolean.write(value.`available`, buf)
     }
 }
 
@@ -4105,6 +4590,110 @@ public object FfiConverterTypeVoiceTransferProgress: FfiConverterRustBuffer<Voic
 
 
 
+enum class CallDirection {
+
+    INCOMING,
+    OUTGOING;
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeCallDirection: FfiConverterRustBuffer<CallDirection> {
+    override fun read(buf: ByteBuffer) = try {
+        CallDirection.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: CallDirection) = 4UL
+
+    override fun write(value: CallDirection, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class CallEndReason {
+
+    NONE,
+    UNAVAILABLE,
+    BUSY,
+    EXPIRED,
+    REJECTED,
+    LOCAL_ENDED,
+    REMOTE_ENDED,
+    CONNECTION_LOST,
+    INVALID,
+    REVOKED,
+    AUDIO_UNAVAILABLE;
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeCallEndReason: FfiConverterRustBuffer<CallEndReason> {
+    override fun read(buf: ByteBuffer) = try {
+        CallEndReason.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: CallEndReason) = 4UL
+
+    override fun write(value: CallEndReason, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class CallPhase {
+
+    STOPPED,
+    LISTENING,
+    DIALING,
+    RINGING,
+    CONNECTING,
+    ACTIVE,
+    ENDED;
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeCallPhase: FfiConverterRustBuffer<CallPhase> {
+    override fun read(buf: ByteBuffer) = try {
+        CallPhase.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: CallPhase) = 4UL
+
+    override fun write(value: CallPhase, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
 enum class DeleteScope {
 
     SELF_ONLY,
@@ -5047,6 +5636,59 @@ public object FfiConverterTypeReplyTargetState: FfiConverterRustBuffer<ReplyTarg
 }
 
 
+
+
+
+
+
+public interface CallObserver {
+
+    fun `changed`(`state`: CallSnapshot)
+
+    companion object
+}
+
+
+
+// Put the implementation in an object so we don't pollute the top-level namespace
+internal object uniffiCallbackInterfaceCallObserver {
+    internal object `changed`: UniffiCallbackInterfaceCallObserverMethod0 {
+        override fun callback(`uniffiHandle`: Long,`state`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeCallObserver.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`changed`(
+                    FfiConverterTypeCallSnapshot.lift(`state`),
+                )
+            }
+            val writeReturn = { _: Unit -> Unit }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
+
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
+        override fun callback(handle: Long) {
+            FfiConverterTypeCallObserver.handleMap.remove(handle)
+        }
+    }
+
+    internal var vtable = UniffiVTableCallbackInterfaceCallObserver.UniffiByValue(
+        `changed`,
+        uniffiFree,
+    )
+
+    // Registers the foreign callback with the Rust side.
+    // This method is generated for each callback interface.
+    internal fun register(lib: UniffiLib) {
+        lib.uniffi_dmsg_core_fn_init_callback_vtable_callobserver(vtable)
+    }
+}
+
+/**
+ * The ffiConverter which transforms the Callbacks in to handles to pass to Rust.
+ *
+ * @suppress
+ */
+public object FfiConverterTypeCallObserver: FfiConverterCallbackInterface<CallObserver>()
 
 
 

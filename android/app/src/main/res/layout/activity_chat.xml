@@ -5,6 +5,7 @@
             <TextView android:id="@+id/screen_title" android:layout_width="match_parent" android:layout_height="wrap_content" android:textSize="20sp" android:fontFamily="sans-serif-medium" android:accessibilityHeading="true"/>
             <TextView android:id="@+id/peer" android:layout_width="match_parent" android:layout_height="wrap_content" android:textSize="14sp"/>
         </LinearLayout>
+        <Button android:id="@+id/btn_call" style="@style/Widget.Dmsg.Icon" android:layout_width="48dp" android:layout_height="48dp" android:drawableTop="@drawable/ic_call" android:contentDescription="@string/call_dial" android:visibility="gone" />
         <Button android:id="@+id/btn_contact" style="@style/Widget.Dmsg.Icon" android:layout_width="48dp" android:layout_height="48dp" android:drawableTop="@drawable/ic_menu" android:contentDescription="@string/contact_card"/>
     </LinearLayout>
     <org.dmsg.client.NoticeScrollView android:id="@+id/chat_notice" android:layout_width="match_parent" android:layout_height="wrap_content">

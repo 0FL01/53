@@ -4,6 +4,7 @@
 
 pub mod auth;
 pub mod blob;
+pub mod call;
 pub mod chronology;
 pub mod contacts;
 pub mod e2e;
@@ -125,6 +126,13 @@ pub const OP_INVITE_REVOKE: u8 = 48;
 pub const OP_INVITE_REVOKED: u8 = 49;
 pub const OP_INVITE_LIST: u8 = 50;
 pub const OP_INVITE_LISTED: u8 = 51;
+pub const OP_CALL_OPEN: u8 = 52;
+pub const OP_CALL_READY: u8 = 53;
+pub const OP_CALL_COMMAND: u8 = 54;
+pub const OP_CALL_ACK: u8 = 55;
+pub const OP_CALL_EVENT: u8 = 56;
+pub const OP_CALL_ATTACH: u8 = 57;
+pub const OP_CALL_ATTACHED: u8 = 58;
 /// Статусы доставки (без «прочитано» — read receipts отложены).
 pub const ST_ACCEPTED: u8 = 1;
 /// Статусы доставки (без «прочитано» — read receipts отложены).

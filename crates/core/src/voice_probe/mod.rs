@@ -1,16 +1,13 @@
 //! Opt-in, memory-only M1-V fixture. No DB, account API, Olm or production calls.
-mod clock;
-mod codec;
 pub mod fixture;
-mod lane;
-mod packet;
 pub mod relay;
 pub mod service;
 mod session;
 
 #[cfg(target_os = "android")]
-pub(crate) use session::{AudioPort, CaptureTimestamp};
-pub use session::{Probe, Stats, DECODE_WRITE_PREPARATION_MS};
+pub(crate) use crate::live_media::{AudioPort, CaptureTimestamp};
+pub use crate::live_media::{Stats, DECODE_WRITE_PREPARATION_MS};
+pub use session::Probe;
 
 use dmsg_opus_sys::live::{LiveDecoder, LiveEncoder, LiveProfile};
 use serde::Serialize;

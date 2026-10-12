@@ -1,4 +1,6 @@
 package org.dmsg.client
+import org.dmsg.client.CallAudio as CallProbeAudio
+import org.dmsg.client.CallPlaybackClock as CallProbePlaybackClock
 
 import org.json.JSONObject
 import org.junit.Assert.*

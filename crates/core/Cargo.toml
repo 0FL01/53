@@ -5,7 +5,7 @@ edition = "2021"
 description = "dmsg client core: pinned DNS transport, unified auth, sealed local store, Olm E2E, contacts and durable outbox"
 
 [features]
-voice-probe = ["dep:dmsg-srtp-sys"]
+voice-probe = []
 voice-probe-tcp-nodelay = ["voice-probe", "slipstream-sys/probe-tcp-nodelay"]
 
 [dependencies]
@@ -13,7 +13,7 @@ tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "io-uti
 dmsg-protocol = { path = "../protocol" }
 slipstream-sys = { path = "../slipstream-sys" }
 dmsg-opus-sys = { path = "../opus-sys" }
-dmsg-srtp-sys = { path = "../srtp-sys", optional = true }
+dmsg-srtp-sys = { path = "../srtp-sys" }
 serde = { version = "1", features = ["derive"] }
 rusqlite = { version = "0.32", features = ["bundled", "functions"] }
 chacha20poly1305 = "0.10"
