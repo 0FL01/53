@@ -1,6 +1,6 @@
 # Goal: клиентские аудиозвонки и подписанный APK
 
-Status: active
+Status: blocked
 Source: план «контакт → настоящий звонок → завершение → клиентский APK», утверждённый пользователем 2026-10-11; «реализовать и коммит пуш».
 Last updated: 2026-10-12
 
@@ -35,8 +35,8 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Source: user «fresh db без бекапов, нехуй плодить мусор, если fresh db всё упростит - апрув, на данные похуй»; «реализовать и коммит пуш».
   - Acceptance: only verified messenger DB/WAL/SHM/blob targets reset without new backup; source schema7 with preserved carrier/pins/topology/tunnel; fresh signup/contact/call/text smoke; intended source/docs committed/pushed, artifacts/private data not committed.
   - Primary evidence: selected deployment receipts, actual DNS client smoke, git status/diff/commit/remote equality.
-  - Status: in_progress
-  - Evidence: approved messenger-only fresh reset completed without new backup; initial image8eea22fd passed pong/schema7/invite_only with unchanged carrier. Current diagnostic msgd image7225cee582c5646388cc212682f74d520875e77149564a531e7b62562ca016d0 is healthy with the same normalized config/data mounts and restored default carrier. Fresh two-client DNS signup/contact/reject smoke and post-call TEXT receive/Delivered passed. Final source synchronization and commit/push remain open.
+  - Status: verified
+  - Evidence: approved messenger-only fresh reset completed without new backup; initial image8eea22fd passed pong/schema7/invite_only with unchanged carrier. Current diagnostic msgd image7225cee582c5646388cc212682f74d520875e77149564a531e7b62562ca016d0 is healthy with the same normalized config/data mounts and restored default carrier. Fresh two-client DNS signup/contact/reject smoke and post-call TEXT receive/Delivered passed. Implementation committed/pushed as `82eb064566c92271c63033f3813c43f956a3c684`, HEAD equalled origin/master. Scoped deployed-source synchronization verified all3180 published files and removed exactly5 obsolete moved paths, without changing containers/config/secrets/volumes/vendor. Only the original unrelated design PNG remained untracked; APK/private artifacts were not committed.
 
 ### Constraints
 - C1: frozen mono16k/12kbit/40ms/cap100, encoder10/decoder7, DTX/PLC; jitter80ms, sink640, JNI≤160,75% admission and all clock/packet-deadline validation remain unchanged. Probe baseline remains F0=600ms/ledger720ms/window2880B. Explicit 2026-10-12 permission permits one product-call F0=1200ms control (existing ledger1320ms/window5040B), retained only after short and3min actual-client PASS; otherwise restore600ms.
@@ -56,9 +56,9 @@ New codecs/FEC, 45min benchmarks/acoustic/STT frameworks, recording/call history
 - Fresh rollout only to verified current messenger data mounts after implementation passes isolated gates; no new backup, volume prune/down-v or key rotation. The explicitly approved TCP_NODELAY control may recreate only the messenger carrier with unchanged revision/pins/config/data; neighbouring tunnel is excluded.
 
 ## Current Checkpoint
-- Closes: R4/publication only; substantive R2 work stopped at the approved change-envelope boundary.
-- Smallest next action: publish the verified implementation/artifact and exact R2 blocker; synchronize only intended remote source, preserving data/config/vendor/secrets. Do not repeat media/parameter controls or add a relay/transport redesign without new approval.
-- Expected evidence: scoped commit/push and deployed-source equality; no new acceptance claim from publication.
+- Closed: R4/publication; substantive R2 work stopped at the approved change-envelope boundary.
+- Evidence: implementation `82eb064` pushed and scoped deployed-source equality verified; publication does not prove R2 acceptance.
+- Next action: none inside the exhausted approved controls. Do not repeat media/parameter controls or add a relay/transport redesign without new approval.
 - Smallest unlock for R2: a working DNS media/feedback path inside the frozen limits, or a new explicit instruction permitting a concrete transport/feedback change. F0=1200 and TCP_NODELAY are not retained.
 
 ## Current State
@@ -66,7 +66,8 @@ New codecs/FEC, 45min benchmarks/acoustic/STT frameworks, recording/call history
 - Last relevant evidence: F0=1200ms short10s actual-client control passed both frameworks, including mute/unmute, recreation, receiver background, normal End and full teardown (Moto270encoded/237decoded, max feedback1039ms). The conditional3min control failed after101encoded packets: Moto oldest49661 age1320189us, 33entries/2160B, frontier49660, latest authenticated control age81527us; Mi reportedConnectionLost. This is not a3min PASS or causal fix. Product F0 restored600ms. Earlier LTE/Wi-Fi720ms and TCP_NODELAY controls remain negative; default carrier image32197dab restored, backend/data/pins/config unchanged. Moto Wi-Fi0/mobile_data1 restored; no experimental flag is retained.
 - Blocker R2: latest default600 provenance gate failed with Mi oldest11814 age727642us>720000, frontier11813 and fresh authenticated control carrying that old frontier. Both profiles matched Android platform resolvers before/after reconnect/media, excluding fixture resolver retention for this run. Earlier server writes16 versus Mi receives4 and Full drops locate delivery gaps but not their sole cause. Changing intentional queue policy, transport or limits is not a proven local fix and lies outside the remaining approved controls.
 - Verified current smoke: post-call TEXT received on Mi and Delivered on Moto via the existing retry/status path; minified release startup/chat call-button passed in isolated Moto `.gate`, no Main/Keystore reset. Root APK fully inspected; user-lowered volume unchanged, no audio files/STT.
-- Next: scoped source/docs publication only. R2 remains blocked; do not mark the overall goal complete.
+- Published: `82eb064` on origin/master; deployed public source matches the published implementation, with5 obsolete moved files removed and container set unchanged. Remote `/opt/srv/53` is a source snapshot, not a Git checkout; its config/secrets/volumes/vendor were excluded from synchronization.
+- Next: R2 unlock only; do not mark the overall goal complete or repeat unchanged failed gates.
 
 ## Material Decisions
 - 2026-10-11: live mandatory; user replaces further M1-V qualification work with sealed-baseline client delivery. Missing latency/source-active/C_safe metrics remain unknown, not PASS.
@@ -83,6 +84,10 @@ New codecs/FEC, 45min benchmarks/acoustic/STT frameworks, recording/call history
 - 2026-10-12: approved product F0=1200ms/ledger1320ms control passed10s but failed conditional3min at age1320189us; both final frameworks negative on that run. Restored source and both phone binaries to F0=600ms, no probe/codec/packet-deadline/transport change. Current-source release rebuilt.
 - 2026-10-12: finite default600ms server-counter discriminator failed: side1/RTP complete TCP writes16 versus Mi authenticated receive4; Full drops occurred (side1 RTP7/SRTCP1, side0 RTP1/SRTCP1), pre-Noise and route-aged expiry0. Counts prove socket acceptance and bounded queue outcomes only, not downstream delivery or sole cause. Diagnostic backend deployed without data reset; next check resolver provenance, not transport/queue redesign.
 - 2026-10-12: default600 resolver-provenance check failed media but both saved profiles matched Android platform DNS throughout. APK static/signature/native/profile checks, minified `.gate` startup/chat button and post-call TEXT/Delivered passed. Stop R2 work at the approved boundary and publish without claiming sustained phone conversation.
+- 2026-10-12: implementation committed/pushed as `82eb064`; scoped source snapshot synchronized on the deployment (3180 file hashes verified, exactly5 obsolete moved files removed, container set unchanged). R4 resolved; R2 remains blocked, with no new physical acceptance inferred from publication.
 
 ## Completion
-- Final status: active pending scoped publication; R1/R3 verified, R2 blocked. Fresh rollout and post-call text smoke verified; final source/commit/push pending. No claim of full M1-V qualification, sustained DNS conversation or Mi firmware repair.
+- Resolved outcomes: R1/R3/R4 verified; R2 blocked by the documented actual-client ledger expiry and exhausted approved controls.
+- Commands/artifacts: host/JVM/native/build checks and selected DNS signup/contact/reject/TEXT gates above; signed `53.apk` (SHA256 `efce8c2b6d894852e179331a5024cb04c65f76dbd3a5de9334856e9d2df487e0`, 9237963B); implementation `82eb064` pushed and deployed-source equality verified.
+- Constraint/scope check: final product/probe F0=600ms, ledger720ms/window2880B; no TCP_NODELAY promotion, clock/codec/jitter/sink/deadline relaxation, Main/Pacman reset, audio files/STT or unrelated tunnel change. Original untracked design PNG preserved.
+- Final status: blocked, not complete. No claim of full M1-V qualification, sustained DNS conversation or Mi firmware repair. Smallest unlock is the R2 instruction/state change recorded above.
