@@ -161,8 +161,23 @@ Android messenger reachability or absence/presence of internet allowlisting.
    Target SHAa25dc7ed/test65808e1a is hash-verified on both preserved identities;
    complete forwarding passes the16KiB guard (maximum6339B), not call acceptance.
    Both gates joined/stopped; carrier/backend/data/default policy are unchanged.
-   Next bind the existing private generation publication to a completed TCP record,
-   without adding clock mapping, queues, workers or media/recovery-policy changes.
+    A subsequent private-generation barrier now binds native publication to a
+    completed TCP record without adding clock mapping, queues, workers or policy.
+    `publication_after_tx_record_end` must equal the paired socket's complete record
+    end. A stable lease owns retirement; each newer completed write invalidates old
+    native evidence until a matching worker publication arrives. Null remains an
+    optional unavailable diagnostic, not an audio failure. Program ordering does
+    not supply publication age, stall duration, stream ACK or timely feedback proof.
+    Host458/2 unchanged native ignores,185 JVM tests/default ARM64/full Android and
+    a same-socket73-byte post-write epoch refresh pass. Actual10s still fails both
+    frameworks: Moto ledger720127us, OnePlus secondaryConnectionLost. During active
+    Moto mute/unmute/recreation, a publication-after1256 reports submitted1124;
+    this is a proven post-write difference, not its duration or failure cause.
+    At expiry Moto write/submission1520 and all receive frontiers1368/index9;
+    OnePlus later write/submission1652 and receive1500/index10. Independent server
+    final SRTCP10 received/written each direction, Full/expiry0, is not timely credit
+    proof. Target SHA3268e29b/test65808e1a is hash-verified on both preserved identities;
+    remote recorder maximum5702B. Both gates joined/stopped; no180s run followed.
 - Actual byte-frontier10s failed both frameworks: OnePlus primary oldest60970
   age720469us/frontier60969, incoming index27/socket read/auth3744 equals native
   contiguous/flush3744 with pending0. Independent server final wrote29 toward it,

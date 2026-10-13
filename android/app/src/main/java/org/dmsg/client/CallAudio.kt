@@ -152,7 +152,7 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
             "tx_records_committed", "tx_records_written", "rx_socket_read", "rx_record_start", "rx_record_end",
             "rx_authenticated_end", "rx_records_authenticated")
         private val socketIndices = listOf("tx_noise_srtcp_index", "tx_record_srtcp_index", "rx_noise_srtcp_index")
-        private val nativeCounters = listOf("age_since_observed_ms", "now_native_us", "tx_submitted",
+        private val nativeCounters = listOf("age_since_observed_ms", "publication_after_tx_record_end", "now_native_us", "tx_submitted",
             "rx_contiguous", "rx_highest", "rx_flushed", "rx_pending", "remote_stream_credit")
         private val nativeFlags = listOf("stream_active", "send_queue", "failed", "local_fin", "remote_fin")
         fun fromNativeStats(source: JSONObject): JSONObject? { return try {
@@ -187,6 +187,7 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
                 val result = linkedMapOf<String, Any?>("schema_version" to 2L, "publication_age_us" to null)
                 nativeCounters.forEach { result[it] = NativeTransportEvidence.number(capture, it) }
                 nativeFlags.forEach { result[it] = NativeTransportEvidence.boolean(capture, it) }
+                require(result.getValue("publication_after_tx_record_end") == copied.getValue("tx_record_end"))
                 val contiguous = result.getValue("rx_contiguous") as Long
                 require(result.getValue("rx_highest") as Long >= contiguous)
                 val flushed = result.getValue("rx_flushed") as Long

@@ -162,6 +162,7 @@ class JvmRenderMetadataCacheTest {
             "rx_record_end" to 1500L, "rx_authenticated_end" to 1500L, "rx_records_authenticated" to 9L,
             "tx_noise_srtcp_index" to 8L, "tx_record_srtcp_index" to 8L, "rx_noise_srtcp_index" to null)
         val native = linkedMapOf<String, Any?>("schema_version" to 2L, "publication_age_us" to null,
+            "publication_after_tx_record_end" to 1220L,
             "age_since_observed_ms" to 25L, "now_native_us" to 50L, "tx_submitted" to 1100L,
             "rx_contiguous" to 1600L, "rx_flushed" to 1540L, "rx_pending" to 60L,
             "rx_highest" to 1700L,
@@ -183,6 +184,7 @@ class JvmRenderMetadataCacheTest {
         val native = clean.getValue("native") as Map<*, *>
         assertFalse(native.containsKey("port")); assertFalse(native.containsKey("generation"))
         assertNull(native["publication_age_us"])
+        assertEquals(1220L, native["publication_after_tx_record_end"])
         assertEquals(1100L, native["tx_submitted"])
         assertEquals(1700L, native["rx_highest"])
         assertFalse((clean.getValue("socket") as Map<*, *>).containsKey("payload"))
@@ -203,6 +205,9 @@ class JvmRenderMetadataCacheTest {
             { deliveryPart(it, "socket")["rx_base"] = 1401L },
             { deliveryPart(it, "native")["rx_pending"] = 59L },
             { deliveryPart(it, "native")["publication_age_us"] = 1L },
+            { deliveryPart(it, "native")["publication_after_tx_record_end"] = 1219L },
+            { deliveryPart(it, "native")["publication_after_tx_record_end"] = 1221L },
+            { deliveryPart(it, "native").remove("publication_after_tx_record_end") },
             { deliveryPart(it, "native")["schema_version"] = 1L },
             { deliveryPart(it, "native")["rx_highest"] = 1599L },
             { deliveryPart(it, "native")["stream_active"] = 1L },

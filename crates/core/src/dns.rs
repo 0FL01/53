@@ -130,26 +130,40 @@ struct ObservedTransport {
 
 struct SelectedStream {
     port: u16,
+    lease_id: u64,
     generation: u64,
+    after_tx_record_end: u64,
     observed: Option<(StreamSnapshot, Instant)>,
 }
 
 /// Private owner/run-scoped lease, not a port in diagnostic output.
 pub(crate) struct StreamSelection {
-    generation: u64,
+    lease_id: u64,
     slot: Arc<Mutex<Option<SelectedStream>>>,
 }
 impl StreamSelection {
-    pub(crate) fn evidence(&self) -> Option<serde_json::Value> {
-        let slot = self.slot.try_lock().ok()?;
-        let selected = slot.as_ref().filter(|s| s.generation == self.generation)?;
+    pub(crate) fn evidence(&self, tx_record_end: u64) -> Option<serde_json::Value> {
+        let mut slot = self.slot.try_lock().ok()?;
+        let selected = slot.as_mut().filter(|s| s.lease_id == self.lease_id)?;
+        // The caller first acquired this end offset from the lane's atomic
+        // publication AFTER a complete TCP write. Only a new native generation
+        // can satisfy this floor. Its worker publication therefore happens after
+        // that write, without comparing either clock or reusing an older copy.
+        if tx_record_end > selected.after_tx_record_end {
+            selected.generation = next_stream_generation()?;
+            selected.after_tx_record_end = tx_record_end;
+            selected.observed = None;
+        } else if tx_record_end < selected.after_tx_record_end {
+            return None;
+        }
         let (s, at) = selected.observed?;
-        if s.generation != self.generation {
+        if s.generation != selected.generation {
             return None;
         }
         Some(serde_json::json!({
             "age_since_observed_ms": u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX),
             "publication_age_us": null,
+            "publication_after_tx_record_end": selected.after_tx_record_end,
             "schema_version": s.schema_version,
             "now_native_us": s.now_native_us,
             "tx_submitted": s.tx_submitted,
@@ -169,18 +183,22 @@ impl StreamSelection {
 impl Drop for StreamSelection {
     fn drop(&mut self) {
         if let Ok(mut slot) = self.slot.lock() {
-            if slot
-                .as_ref()
-                .is_some_and(|s| s.generation == self.generation)
-            {
+            if slot.as_ref().is_some_and(|s| s.lease_id == self.lease_id) {
                 *slot = None;
             }
         }
     }
 }
 
-pub(crate) fn select_stream(owner: &str, port: u16) -> Option<StreamSelection> {
+fn next_stream_generation() -> Option<u64> {
     static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |g| {
+        (g < (1 << 48) - 1).then_some(g + 1)
+    })
+    .ok()
+}
+
+pub(crate) fn select_stream(owner: &str, port: u16) -> Option<StreamSelection> {
     let running = manager().try_lock().ok()?;
     let run = running
         .as_ref()
@@ -188,11 +206,7 @@ pub(crate) fn select_stream(owner: &str, port: u16) -> Option<StreamSelection> {
     if port == 0 {
         return None;
     }
-    let generation = NEXT
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |g| {
-            (g < (1 << 48) - 1).then_some(g + 1)
-        })
-        .ok()?;
+    let generation = next_stream_generation()?;
     let mut slot = run.stream.lock().ok()?;
     // A second owner cannot silently displace a surviving lane lease.
     if slot.is_some() {
@@ -200,11 +214,13 @@ pub(crate) fn select_stream(owner: &str, port: u16) -> Option<StreamSelection> {
     }
     *slot = Some(SelectedStream {
         port,
+        lease_id: generation,
         generation,
+        after_tx_record_end: 0,
         observed: None,
     });
     Some(StreamSelection {
-        generation,
+        lease_id: generation,
         slot: run.stream.clone(),
     })
 }
@@ -226,11 +242,14 @@ fn observe_stream(slot: &Mutex<Option<SelectedStream>>, native: &NativeClient) {
     let snapshot = native.stream_snapshot();
     if let Ok(mut slot) = slot.lock() {
         if let Some(selected) = slot.as_mut() {
-            selected.observed = snapshot
-                .filter(|s| s.generation == selected.generation)
-                .map(|s| (s, Instant::now()));
+            cache_stream_snapshot(selected, snapshot);
         }
     }
+}
+fn cache_stream_snapshot(selected: &mut SelectedStream, snapshot: Option<StreamSnapshot>) {
+    selected.observed = snapshot
+        .filter(|s| s.generation == selected.generation)
+        .map(|s| (s, Instant::now()));
 }
 static RUN: OnceLock<Mutex<Option<Run>>> = OnceLock::new();
 fn manager() -> &'static Mutex<Option<Run>> {
@@ -545,10 +564,9 @@ pub fn stop(owner: &str) -> Result<(), &'static str> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn stream_lease_is_generation_scoped_optional_and_contains_no_selector() {
-        let snapshot = StreamSnapshot {
-            generation: 7,
+    fn stream_fixture(generation: u64) -> StreamSnapshot {
+        StreamSnapshot {
+            generation,
             schema_version: 2,
             now_native_us: 123,
             tx_submitted: 144,
@@ -562,38 +580,114 @@ mod tests {
             local_fin: false,
             remote_fin: false,
             remote_stream_credit: 65536,
-        };
+        }
+    }
+
+    #[test]
+    fn stream_lease_is_owner_scoped_optional_and_contains_no_selector() {
+        let generation = next_stream_generation().unwrap();
+        let snapshot = stream_fixture(generation);
         let slot = Arc::new(Mutex::new(Some(SelectedStream {
             port: 32123,
-            generation: 7,
+            lease_id: generation,
+            generation,
+            after_tx_record_end: 0,
             observed: Some((snapshot, Instant::now())),
         })));
         let lease = StreamSelection {
-            generation: 7,
+            lease_id: generation,
             slot: slot.clone(),
         };
-        let evidence = lease.evidence().unwrap();
+        let evidence = lease.evidence(0).unwrap();
         assert_eq!(evidence["tx_submitted"], 144);
         assert!(evidence.get("port").is_none() && evidence.get("generation").is_none());
         assert!(evidence["publication_age_us"].is_null());
         let lock = slot.lock().unwrap();
         assert!(
-            lease.evidence().is_none(),
+            lease.evidence(0).is_none(),
             "contention cannot reuse a previous copy"
         );
         drop(lock);
         reset_stream_observation(&slot);
-        assert!(lease.evidence().is_none());
+        assert!(lease.evidence(0).is_none());
         // A stale lease must neither read nor clear a replacement generation.
-        slot.lock().unwrap().as_mut().unwrap().generation = 8;
-        assert!(lease.evidence().is_none());
+        let replacement = next_stream_generation().unwrap();
+        slot.lock().unwrap().as_mut().unwrap().lease_id = replacement;
+        assert!(lease.evidence(0).is_none());
         drop(lease);
-        assert_eq!(slot.lock().unwrap().as_ref().unwrap().generation, 8);
+        assert_eq!(slot.lock().unwrap().as_ref().unwrap().lease_id, replacement);
         let current = StreamSelection {
-            generation: 8,
+            lease_id: replacement,
             slot: slot.clone(),
         };
         drop(current);
+        assert!(slot.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn completed_write_barrier_rejects_old_publication_without_replacing_lease() {
+        let lease_id = next_stream_generation().unwrap();
+        let before_write = stream_fixture(lease_id);
+        let slot = Arc::new(Mutex::new(Some(SelectedStream {
+            port: 32123,
+            lease_id,
+            generation: lease_id,
+            after_tx_record_end: 0,
+            observed: Some((before_write, Instant::now())),
+        })));
+        let lease = StreamSelection {
+            lease_id,
+            slot: slot.clone(),
+        };
+        assert!(lease.evidence(0).is_some());
+        // Acquiring a completed record end invalidates any pre-write generation,
+        // even if a delayed supervisor copy arrives afterwards.
+        assert!(lease.evidence(200).is_none());
+        let generation = slot.lock().unwrap().as_ref().unwrap().generation;
+        assert_ne!(generation, lease_id);
+        {
+            let mut guard = slot.lock().unwrap();
+            let selected = guard.as_mut().unwrap();
+            assert_eq!(selected.lease_id, lease_id);
+            assert_eq!(selected.after_tx_record_end, 200);
+            cache_stream_snapshot(selected, Some(before_write));
+        }
+        assert!(
+            lease.evidence(200).is_none(),
+            "old publication cannot satisfy the barrier"
+        );
+        {
+            let mut guard = slot.lock().unwrap();
+            cache_stream_snapshot(guard.as_mut().unwrap(), Some(stream_fixture(generation)));
+        }
+        let evidence = lease.evidence(200).unwrap();
+        assert_eq!(evidence["publication_after_tx_record_end"], 200);
+        assert_eq!(
+            evidence["tx_submitted"], 144,
+            "submission can lag a proven earlier write"
+        );
+        assert!(
+            evidence["publication_age_us"].is_null(),
+            "ordering is not a clock mapping"
+        );
+        assert!(
+            lease.evidence(199).is_none(),
+            "an older socket copy cannot be paired"
+        );
+        assert!(lease.evidence(200).is_some());
+        assert_eq!(
+            slot.lock().unwrap().as_ref().unwrap().generation,
+            generation
+        );
+        assert!(lease.evidence(400).is_none());
+        {
+            let mut guard = slot.lock().unwrap();
+            cache_stream_snapshot(guard.as_mut().unwrap(), Some(stream_fixture(generation)));
+        }
+        assert!(lease.evidence(400).is_none());
+        // Publication generations changed, but the original stable lease still
+        // owns retirement and must clear its slot.
+        drop(lease);
         assert!(slot.lock().unwrap().is_none());
     }
 

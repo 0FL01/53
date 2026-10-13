@@ -192,6 +192,18 @@ fn ready_full_cert_pin_streams_and_terminal_transport_loss() {
         }
         wait_frontier(&client, generation, bytes);
     }
+    // Refresh on the SAME socket only after another complete TCP write. A copy
+    // with the previous generation cannot establish this program-order floor.
+    let data = [0x53; 73];
+    selected[0].write_all(&data).unwrap();
+    client.select_stream(Some((selected[0].local_addr().unwrap().port(), 4)));
+    if let Some(value) = client.stream_snapshot() {
+        assert_eq!(value.generation, 4);
+    }
+    let mut reply = [0; 73];
+    selected[0].read_exact(&mut reply).unwrap();
+    assert_eq!(reply, data);
+    wait_frontier(&client, 4, 390);
     client.select_stream(None);
     assert!(client.stream_snapshot().is_none());
     for mut socket in selected {

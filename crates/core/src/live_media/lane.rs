@@ -151,9 +151,10 @@ impl Lane {
             .and_then(|port| crate::dns::select_stream(owner, port));
     }
     pub(crate) fn delivery_evidence(&self) -> Option<serde_json::Value> {
+        let socket = self.trace.snapshot()?;
         Some(serde_json::json!({
-            "socket": self.trace.snapshot()?,
-            "native": self.selection.as_ref().and_then(|s| s.evidence()),
+            "socket": socket,
+            "native": self.selection.as_ref().and_then(|s| s.evidence(socket.tx_record_end)),
         }))
     }
     /// Abandon the entire ordered stream, including any committed partial frame.
