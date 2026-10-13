@@ -207,4 +207,27 @@ Android messenger reachability or absence/presence of internet allowlisting.
   Formal fresh readiness is JSON `event=listener_ready, ready=true`, with no final
   marker; checking a nonexistent boolean field caused a prior undialed timeout.
   The first coordinated run lacked the instrumentation forwarding key; after its
-  one-key reporter fix, the optional byte-frontier object is physically observable.
+   one-key reporter fix, the optional byte-frontier object is physically observable.
+
+### Latest finite reporter checkpoint (2026-10-14)
+
+- Product/carrier remain matchedc3e/default; target SHA9097fd77 is unchanged.
+  Only test APK changed toSHA274a2787b44e0bdbd7e72bb09bd1322d7478ae98225254bfe820dde5ef612b39,
+  962348B. JVM185/instrumentation build pass, install-r/hash verified on both phones.
+- Finite receiver ACTIVE/1s/2s/3s observations preserve the absolute3s background
+  interval. Short caller intervals report every1s without weakening continuing
+  capture/decode/identity/cleanup assertions or adding a worker/queue/service.
+- Fresh coordinated10s **PASS on both actual frameworks**: ADB0, OK1, nonnegative
+  status codes ending0, final-1, normal local/remote End and complete joins.
+  Moto final ACTIVE283encoded/272decoded/282RTP, render expiry0; OnePlus normal
+  retirement292encoded/247decoded/287RTP, startup render expiry480, nativefailed=false.
+- Receiver remains ACTIVE after3s background, with socket write/native submission/
+  ACK-prefix3104 and all receive frontiers2952/index21. At1s native is null, not a
+  reused observation. Remote maximum recorder line5745B stays within16KiB.
+- Moto naturally reports2 native paths versus1 in the preceding failure; resolver
+  profiles still match platform2/1 and Wi-Fi false/true. Active primary/fallback tier
+  is unknown. The reporter change is not a demonstrated product/network fix.
+- Server final SRTCP ingress/egress60/59 and59/60, Full/pre-Noise/route expiry0.
+  Independent final markers do not supply timely covering-feedback proof.
+  Both gate processes stopped; identities/config/data/pins/defaults preserved.
+  This short PASS permits the next180s gate; it is not full R2 acceptance.

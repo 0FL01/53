@@ -323,7 +323,8 @@ class CallClientGatesTest {
             val deadline = SystemClock.elapsedRealtime() + seconds * 1_000
             var lastCapture = requireNotNull(CallUi.state.value.audio).capturedSamples
             var lastDecoded = JSONObject(requireNotNull(CallUi.state.value.audio).nativeStats).getLong("decoded_packets")
-            var nextReport = SystemClock.elapsedRealtime() + 10_000
+            val reportInterval = if (seconds <= 10) 1_000L else 10_000L
+            var nextReport = SystemClock.elapsedRealtime() + reportInterval
             while (SystemClock.elapsedRealtime() < deadline) {
                 SystemClock.sleep(1_000)
                 healthy()
@@ -337,7 +338,7 @@ class CallClientGatesTest {
                 lastCapture = audio.capturedSamples; lastDecoded = decoded
                 if (SystemClock.elapsedRealtime() >= nextReport) {
                     report("active_interval")
-                    nextReport += 10_000
+                    nextReport += reportInterval
                 }
             }
             if (seconds >= 60) {
@@ -360,8 +361,16 @@ class CallClientGatesTest {
                 ui.onActivity { it.findViewById<Button>(R.id.call_accept).performClick() }
                 healthy()
                 selectSpeaker(ui)
+                report("callee_active")
                 ui.moveToState(androidx.lifecycle.Lifecycle.State.CREATED)
-                SystemClock.sleep(3_000)
+                val backgroundStart = SystemClock.elapsedRealtime()
+                // Finite reporter-only checkpoints: preserve the absolute3s pause,
+                // including reporting time, and never touch the media owner.
+                for (second in 1L..2L) {
+                    SystemClock.sleep((backgroundStart + second * 1_000 - SystemClock.elapsedRealtime()).coerceAtLeast(0))
+                    report("background_${second}s")
+                }
+                SystemClock.sleep((backgroundStart + 3_000 - SystemClock.elapsedRealtime()).coerceAtLeast(0))
                 report("background_observed")
                 assertEquals("UI pause must not end a service-owned call", CallPhase.ACTIVE, CallUi.state.value.call?.phase)
                 assertTrue(CallUi.state.value.audio?.microphoneActive == true)
