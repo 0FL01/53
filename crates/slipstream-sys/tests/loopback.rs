@@ -1,5 +1,5 @@
 //! Explicit synthetic C/Rust gate using the pinned Meson fixture executable.
-use slipstream_sys::{Config, NativeClient, Status};
+use slipstream_sys::{Config, NativeClient, Status, StreamSnapshot};
 use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream, UdpSocket},
@@ -30,6 +30,26 @@ fn wait(client: &NativeClient, predicate: impl Fn(Status) -> bool, seconds: u64)
         thread::sleep(Duration::from_millis(5));
     }
 }
+fn wait_frontier(client: &NativeClient, generation: u64, bytes: u64) -> StreamSnapshot {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(value) = client.stream_snapshot() {
+            assert_eq!(value.generation, generation);
+            if value.tx_submitted == bytes
+                && value.rx_contiguous == bytes
+                && value.rx_flushed == bytes
+            {
+                assert_eq!(value.rx_pending, 0);
+                assert!(!value.failed);
+                assert_eq!(value.schema_version, 1);
+                assert!(value.now_native_us > 0);
+                return value;
+            }
+        }
+        assert!(Instant::now() < deadline, "selected lane frontier deadline");
+        thread::sleep(Duration::from_millis(2));
+    }
+}
 
 #[test]
 #[ignore = "requires DMSG_TEST_SERVER pointing to the pinned Meson slipstream-server"]
@@ -48,7 +68,8 @@ fn ready_full_cert_pin_streams_and_terminal_transport_loss() {
     let backend = TcpListener::bind("127.0.0.1:0").unwrap();
     let target = backend.local_addr().unwrap();
     let echo = thread::spawn(move || {
-        let streams: Vec<_> = (0..8)
+        // Two diagnostic lanes, followed by the original eight parallel streams.
+        let streams: Vec<_> = (0..10)
             .map(|_| {
                 let (mut socket, _) = backend.accept().unwrap();
                 thread::spawn(move || {
@@ -137,6 +158,47 @@ fn ready_full_cert_pin_streams_and_terminal_transport_loss() {
     let Status::Ready(endpoint) = wait(&client, |s| matches!(s, Status::Ready(_)), 5) else {
         unreachable!()
     };
+    // Two live lanes with distinct lengths establish local Rust TCP write ->
+    // real worker QUIC offsets -> local socket flush -> Rust read. A diagnostic
+    // selector never changes lane policy; this synthetic direct-authority path
+    // is not device/recursive acceptance or an application-auth timing proof.
+    let mut selected: Vec<_> = (0..2)
+        .map(|_| {
+            let socket = TcpStream::connect(endpoint).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            socket
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            socket
+        })
+        .collect();
+    for (lane, size) in [(0, 317), (1, 911)] {
+        let data = vec![lane as u8; size];
+        selected[lane].write_all(&data).unwrap();
+        let mut echo = vec![0; size];
+        selected[lane].read_exact(&mut echo).unwrap();
+        assert_eq!(echo, data);
+    }
+    for (lane, generation, bytes) in [(0, 1, 317), (1, 2, 911), (0, 3, 317)] {
+        client.select_stream(Some((
+            selected[lane].local_addr().unwrap().port(),
+            generation,
+        )));
+        if let Some(value) = client.stream_snapshot() {
+            assert_eq!(value.generation, generation); // Never a former selection copy.
+        }
+        wait_frontier(&client, generation, bytes);
+    }
+    client.select_stream(None);
+    assert!(client.stream_snapshot().is_none());
+    for mut socket in selected {
+        socket.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut tail = Vec::new();
+        socket.read_to_end(&mut tail).unwrap();
+        assert!(tail.is_empty());
+    }
     let streams: Vec<_> = (0..8)
         .map(|i| {
             thread::spawn(move || {

@@ -1,5 +1,9 @@
 //! One ordered lane: a single Noise owner, bounded queues, cancellable IO.
 
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use std::time::Instant;
 
 use dmsg_protocol::{decode_frame, encode_frame, HEADER_LEN, MAX_FRAME};
@@ -43,9 +47,115 @@ pub struct Lane {
     pub outgoing: mpsc::Sender<SendRequest>,
     pub incoming: mpsc::Receiver<Result<InboundFrame, String>>,
     actor: Option<JoinHandle<()>>,
+    trace: Arc<SocketTrace>,
+    local_port: Option<u16>,
+    selection: Option<crate::dns::StreamSelection>,
+}
+
+/// Absolute byte frontiers; no socket identifier or cross-device timestamp.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct SocketSnapshot {
+    pub tx_base: u64,
+    pub rx_base: u64,
+    pub tx_socket_written: u64,
+    pub tx_record_start: u64,
+    pub tx_record_end: u64,
+    pub tx_noise_end: u64,
+    pub tx_records_committed: u64,
+    pub tx_records_written: u64,
+    pub rx_socket_read: u64,
+    pub rx_record_start: u64,
+    pub rx_record_end: u64,
+    pub rx_authenticated_end: u64,
+    pub rx_records_authenticated: u64,
+    pub tx_noise_srtcp_index: Option<u32>,
+    pub tx_record_srtcp_index: Option<u32>,
+    /// Noise-authenticated frame metadata, not authenticated SRTCP/ledger credit.
+    pub rx_noise_srtcp_index: Option<u32>,
+}
+
+struct SocketTrace {
+    sequence: AtomicU64,
+    words: [AtomicU64; 16],
+}
+impl SocketTrace {
+    fn new() -> Self {
+        let trace = Self {
+            sequence: AtomicU64::new(0),
+            words: std::array::from_fn(|_| AtomicU64::new(0)),
+        };
+        trace.publish(SocketSnapshot::default());
+        trace
+    }
+    fn publish(&self, s: SocketSnapshot) {
+        self.sequence.fetch_add(1, Ordering::SeqCst);
+        let words = [
+            s.tx_socket_written,
+            s.tx_record_start,
+            s.tx_record_end,
+            s.tx_noise_end,
+            s.tx_records_committed,
+            s.tx_records_written,
+            s.rx_socket_read,
+            s.rx_record_start,
+            s.rx_record_end,
+            s.rx_authenticated_end,
+            s.rx_records_authenticated,
+            s.tx_base,
+            s.rx_base,
+            s.tx_noise_srtcp_index.map(u64::from).unwrap_or(u64::MAX),
+            s.tx_record_srtcp_index.map(u64::from).unwrap_or(u64::MAX),
+            s.rx_noise_srtcp_index.map(u64::from).unwrap_or(u64::MAX),
+        ];
+        for (dst, value) in self.words.iter().zip(words) {
+            dst.store(value, Ordering::SeqCst);
+        }
+        self.sequence.fetch_add(1, Ordering::SeqCst);
+    }
+    fn snapshot(&self) -> Option<SocketSnapshot> {
+        for _ in 0..3 {
+            let before = self.sequence.load(Ordering::SeqCst);
+            if before & 1 != 0 {
+                continue;
+            }
+            let w: [u64; 16] = std::array::from_fn(|i| self.words[i].load(Ordering::SeqCst));
+            if self.sequence.load(Ordering::SeqCst) == before {
+                return Some(SocketSnapshot {
+                    tx_socket_written: w[0],
+                    tx_record_start: w[1],
+                    tx_record_end: w[2],
+                    tx_noise_end: w[3],
+                    tx_records_committed: w[4],
+                    tx_records_written: w[5],
+                    rx_socket_read: w[6],
+                    rx_record_start: w[7],
+                    rx_record_end: w[8],
+                    rx_authenticated_end: w[9],
+                    rx_records_authenticated: w[10],
+                    tx_base: w[11],
+                    rx_base: w[12],
+                    tx_noise_srtcp_index: u32::try_from(w[13]).ok(),
+                    tx_record_srtcp_index: u32::try_from(w[14]).ok(),
+                    rx_noise_srtcp_index: u32::try_from(w[15]).ok(),
+                });
+            }
+        }
+        None
+    }
 }
 
 impl Lane {
+    pub(crate) fn select_native_stream(&mut self, owner: &str) {
+        self.selection = self
+            .local_port
+            .and_then(|port| crate::dns::select_stream(owner, port));
+    }
+    pub(crate) fn delivery_evidence(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "socket": self.trace.snapshot()?,
+            "native": self.selection.as_ref().and_then(|s| s.evidence()),
+        }))
+    }
     /// Abandon the entire ordered stream, including any committed partial frame.
     pub fn close(&mut self) {
         if let Some(actor) = &self.actor {
@@ -57,10 +167,17 @@ impl Lane {
 
     /// Relay retirement joins cancellation before a replacement can be started.
     pub(crate) async fn joined_close(&mut self) {
+        let _ = self.joined_close_evidence().await;
+    }
+
+    pub(crate) async fn joined_close_evidence(&mut self) -> Option<serde_json::Value> {
         self.close();
         if let Some(actor) = self.actor.take() {
             let _ = actor.await;
         }
+        let evidence = self.delivery_evidence();
+        self.selection.take();
+        evidence
     }
 }
 
@@ -71,9 +188,18 @@ impl Drop for Lane {
 }
 
 pub fn spawn(stream: TcpStream, noise: snow::TransportState) -> Result<Lane, String> {
+    spawn_traced(stream, noise, (0, 0))
+}
+
+pub(crate) fn spawn_traced(
+    stream: TcpStream,
+    noise: snow::TransportState,
+    baseline: (u64, u64),
+) -> Result<Lane, String> {
     spawn_inner(
         stream,
         noise,
+        baseline,
         #[cfg(feature = "voice-probe")]
         None,
     )
@@ -86,12 +212,13 @@ pub(crate) fn spawn_with_ingress_service(
     noise: snow::TransportState,
     service: IngressService,
 ) -> Result<Lane, String> {
-    spawn_inner(stream, noise, Some(service))
+    spawn_inner(stream, noise, (0, 0), Some(service))
 }
 
 fn spawn_inner(
     stream: TcpStream,
     noise: snow::TransportState,
+    baseline: (u64, u64),
     #[cfg(feature = "voice-probe")] service: Option<IngressService>,
 ) -> Result<Lane, String> {
     stream
@@ -99,12 +226,21 @@ fn spawn_inner(
         .map_err(|_| "probe socket configuration failed".to_string())?;
     let (outgoing, mut requests) = mpsc::channel(1);
     let (received, incoming) = mpsc::channel(1);
+    let local_port = stream
+        .local_addr()
+        .ok()
+        .filter(|a| a.ip().is_loopback())
+        .map(|a| a.port());
+    let trace = Arc::new(SocketTrace::new());
+    let worker_trace = trace.clone();
     let actor = tokio::spawn(async move {
         if let Err(error) = run(
             stream,
             noise,
             &mut requests,
             &received,
+            baseline,
+            &worker_trace,
             #[cfg(feature = "voice-probe")]
             service,
         )
@@ -122,6 +258,9 @@ fn spawn_inner(
         outgoing,
         incoming,
         actor: Some(actor),
+        trace,
+        local_port,
+        selection: None,
     })
 }
 
@@ -136,6 +275,8 @@ async fn run(
     mut noise: snow::TransportState,
     requests: &mut mpsc::Receiver<SendRequest>,
     received: &mpsc::Sender<Result<InboundFrame, String>>,
+    baseline: (u64, u64),
+    trace: &SocketTrace,
     #[cfg(feature = "voice-probe")] mut service: Option<IngressService>,
 ) -> Result<(), String> {
     let (mut reader, mut writer) = stream.into_split();
@@ -147,6 +288,20 @@ async fn run(
     let mut inbound = None;
     let mut wire = Vec::new();
     let mut written = 0;
+    let mut progress = SocketSnapshot {
+        tx_base: baseline.0,
+        rx_base: baseline.1,
+        tx_socket_written: baseline.0,
+        tx_record_start: baseline.0,
+        tx_record_end: baseline.0,
+        tx_noise_end: baseline.0,
+        rx_socket_read: baseline.1,
+        rx_record_start: baseline.1,
+        rx_record_end: baseline.1,
+        rx_authenticated_end: baseline.1,
+        ..Default::default()
+    };
+    trace.publish(progress);
 
     loop {
         tokio::select! {
@@ -163,6 +318,8 @@ async fn run(
                     return Err("probe lane closed".into());
                 }
                 filled += count;
+                progress.rx_socket_read = progress.rx_socket_read.saturating_add(count as u64);
+                trace.publish(progress);
                 if filled != wanted {
                     continue;
                 }
@@ -173,6 +330,8 @@ async fn run(
                     }
                     wanted = length + 2;
                 } else {
+                    progress.rx_record_end = progress.rx_socket_read;
+                    trace.publish(progress);
                     let body_complete = Instant::now();
                     let length = noise.read_message(&cipher[2..wanted], &mut plain)
                         .map_err(|_| "probe authentication failed".to_string())?;
@@ -182,6 +341,10 @@ async fn run(
                         return Err("probe trailing frame bytes".into());
                     }
                     let noise_done = Instant::now();
+                    progress.rx_authenticated_end = progress.rx_record_end;
+                    progress.rx_records_authenticated += 1;
+                    progress.rx_noise_srtcp_index = (opcode == OP_RTCP).then(|| super::session::srtcp_index(payload)).flatten();
+                    trace.publish(progress);
                     #[cfg(feature = "voice-probe")]
                     if let Some(service) = &mut service {
                         service.authenticated(wanted)?;
@@ -193,6 +356,7 @@ async fn run(
                     }));
                     filled = 0;
                     wanted = 2;
+                    progress.rx_record_start = progress.rx_socket_read;
                 }
             }
             permit = received.reserve(), if inbound.is_some() => {
@@ -205,10 +369,15 @@ async fn run(
                     return Err("probe write closed".into());
                 }
                 written += count;
+                progress.tx_socket_written = progress.tx_socket_written.saturating_add(count as u64);
                 if written == wire.len() {
+                    progress.tx_record_end = progress.tx_socket_written;
+                    progress.tx_records_written += 1;
+                    progress.tx_record_srtcp_index = progress.tx_noise_srtcp_index;
                     wire.clear();
                     written = 0;
                 }
+                trace.publish(progress);
             }
             request = requests.recv(), if wire.is_empty() => {
                 let request = request.ok_or_else(|| "probe producer closed".to_string())?;
@@ -228,6 +397,11 @@ async fn run(
                     .map_err(|_| "probe outgoing length rejected".to_string())?;
                 wire[..2].copy_from_slice(&prefix.to_be_bytes());
                 wire.truncate(length + 2);
+                progress.tx_record_start = progress.tx_socket_written;
+                progress.tx_noise_end = progress.tx_socket_written.saturating_add(wire.len() as u64);
+                progress.tx_records_committed += 1;
+                progress.tx_noise_srtcp_index = (request.opcode == OP_RTCP).then(|| super::session::srtcp_index(&request.payload)).flatten();
+                trace.publish(progress);
                 if let Some(notify) = request.committed {
                     let _ = notify.send(Commit::Committed { framed_bytes: wire.len(), at: Instant::now() });
                 }
@@ -249,6 +423,13 @@ mod tests {
 
     async fn paired_with_service(
         service: Option<IngressService>,
+    ) -> (Lane, TcpStream, snow::TransportState) {
+        paired_with_baseline(service, (0, 0)).await
+    }
+
+    async fn paired_with_baseline(
+        service: Option<IngressService>,
+        baseline: (u64, u64),
     ) -> (Lane, TcpStream, snow::TransportState) {
         // Public deterministic fixture keys, never application identities.
         let private = [71; 32];
@@ -282,7 +463,7 @@ mod tests {
         let noise = initiator.into_transport_mode().unwrap();
         let lane = match service {
             Some(service) => spawn_with_ingress_service(client, noise, service).unwrap(),
-            None => spawn(client, noise).unwrap(),
+            None => spawn_traced(client, noise, baseline).unwrap(),
         };
         (lane, peer, responder.into_transport_mode().unwrap())
     }
@@ -389,6 +570,13 @@ mod tests {
             }
         }
         assert!(blocked, "socket never reached transmit backpressure");
+        let progress = lane.trace.snapshot().unwrap();
+        assert!(progress.tx_socket_written < progress.tx_noise_end);
+        assert_eq!(
+            progress.tx_records_committed,
+            progress.tx_records_written + 1
+        );
+        assert!(progress.tx_record_end <= progress.tx_socket_written);
         let wire = encrypted(&mut noise, &encode_frame(OP_RTCP, &[7]).unwrap());
         peer.write_all(&wire).await.unwrap();
         assert_eq!(
@@ -400,13 +588,18 @@ mod tests {
                 .frame,
             (OP_RTCP, vec![7])
         );
+        assert_eq!(
+            lane.trace.snapshot().unwrap().rx_authenticated_end,
+            wire.len() as u64
+        );
         lane.joined_close().await;
         assert!(lane.outgoing.is_closed());
     }
 
     #[tokio::test]
     async fn partial_header_and_body_survive_other_select_branches() {
-        let (mut lane, mut peer, mut noise) = paired().await;
+        let baseline = (211, 157);
+        let (mut lane, mut peer, mut noise) = paired_with_baseline(None, baseline).await;
         let wire = encrypted(&mut noise, &encode_frame(OP_RTP, &[4; 64]).unwrap());
         peer.write_all(&wire[..1]).await.unwrap();
         send(&lane, vec![8], None).await;
@@ -419,6 +612,11 @@ mod tests {
         assert!(timeout(Duration::from_millis(20), lane.incoming.recv())
             .await
             .is_err());
+        let partial = lane.trace.snapshot().unwrap();
+        assert_eq!(partial.rx_socket_read, baseline.1 + 10);
+        assert_eq!(partial.rx_record_end, baseline.1);
+        assert_eq!(partial.rx_authenticated_end, baseline.1);
+        assert_eq!(partial.tx_record_end, baseline.0 + 23);
         send(&lane, vec![8], None).await;
         peer.read_exact(&mut reverse).await.unwrap();
         noise.read_message(&reverse[2..], &mut scratch).unwrap();
@@ -432,7 +630,77 @@ mod tests {
                 .frame,
             (OP_RTP, vec![4; 64])
         );
+        let complete = lane.trace.snapshot().unwrap();
+        assert_eq!(complete.rx_socket_read, baseline.1 + wire.len() as u64);
+        assert_eq!(complete.rx_record_end, complete.rx_socket_read);
+        assert_eq!(complete.rx_authenticated_end, complete.rx_record_end);
+        assert_eq!(complete.rx_records_authenticated, 1);
+        assert_eq!(complete.tx_record_end, baseline.0 + 46);
+        assert_eq!(complete.tx_records_written, 2);
+        assert_eq!(complete.tx_records_committed, 2);
         lane.joined_close().await;
+    }
+
+    #[test]
+    fn busy_socket_publication_has_no_previous_copy_fallback() {
+        let trace = SocketTrace::new();
+        trace.publish(SocketSnapshot {
+            tx_socket_written: 47,
+            ..Default::default()
+        });
+        assert_eq!(trace.snapshot().unwrap().tx_socket_written, 47);
+        trace.sequence.fetch_add(1, Ordering::SeqCst);
+        assert!(trace.snapshot().is_none());
+    }
+
+    #[tokio::test]
+    async fn control_record_offsets_identify_indices_across_pre_noise_drop() {
+        let (mut lane, peer, noise) = paired_with_baseline(None, (211, 157)).await;
+        let mut other = spawn_traced(peer, noise, (157, 211)).unwrap();
+        for (index, expired) in [(17u32, false), (18, true), (19, false)] {
+            // Public fixed-profile SRTCP clear-index fixture; this metadata test
+            // does not assert SRTCP authentication or ledger acknowledgement.
+            let mut payload = vec![0; 32];
+            payload[18..22].copy_from_slice(&(index | 0x8000_0000).to_be_bytes());
+            let (notify, receipt) = oneshot::channel();
+            lane.outgoing
+                .send(SendRequest {
+                    opcode: OP_RTCP,
+                    payload,
+                    committed: Some(notify),
+                    deadline: expired.then(Instant::now),
+                })
+                .await
+                .unwrap();
+            if expired {
+                assert!(matches!(receipt.await.unwrap(), Commit::Dropped));
+                continue;
+            }
+            assert!(matches!(
+                receipt.await.unwrap(),
+                Commit::Committed {
+                    framed_bytes: 54,
+                    ..
+                }
+            ));
+            assert_eq!(
+                other.incoming.recv().await.unwrap().unwrap().frame.0,
+                OP_RTCP
+            );
+            let sent = lane.trace.snapshot().unwrap();
+            let received = other.trace.snapshot().unwrap();
+            assert_eq!(sent.tx_noise_srtcp_index, Some(index));
+            assert_eq!(sent.tx_record_srtcp_index, Some(index));
+            assert_eq!(received.rx_noise_srtcp_index, Some(index));
+            assert_eq!(
+                sent.tx_record_end - sent.tx_base,
+                received.rx_authenticated_end - received.rx_base
+            );
+        }
+        assert_eq!(lane.trace.snapshot().unwrap().tx_records_written, 2);
+        assert_eq!(other.trace.snapshot().unwrap().rx_records_authenticated, 2);
+        lane.joined_close().await;
+        other.joined_close().await;
     }
 
     #[tokio::test]

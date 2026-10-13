@@ -131,5 +131,30 @@ Android messenger reachability or absence/presence of internet allowlisting.
   Exact carrierc702/config and default/probe-OFF/TCP_NODELAY-OFF target SHA0b848d0c
   were restored and hash-verified on both phones, unchanged test SHA47818d1a;
   backendb580 ID/image/data and account/Keystore identities are unchanged. Both
-  gate processes stopped. Next discriminate exact control-stream byte boundaries,
-  not an unchanged long retry or retention of the experimental seam.
+   gate processes stopped. Next discriminate exact control-stream byte boundaries,
+   not an unchanged long retry or retention of the experimental seam.
+- The selected SRTCP byte-frontier diagnostic is now implemented and host-verified:
+  absolute Rust socket counters include IK/domain/login/attach before lane handoff;
+  partial IO, completed records and Noise indices are separate markers. The native
+  owner publishes only the selected stream's submission/contiguous/flush/pending
+  offsets through a separate optional ABI. Private loopback port/generation never
+  appear in JSON; retirement clears the selection, with no stale-lane fallback.
+  Host456/2 unchanged native ignores,185 JVM tests, default ARM64/full Android and
+  real317/911-byte selected-stream loopback pass with all8 original parallel streams.
+  Target SHA112c26a9/reporter test SHA65808e1a is installed/hash-verified on both
+  preserved identities; the full optional object passes the16KiB recorder guard.
+  Native submission is not an ACK; C flush is not Rust authentication. Publication
+  age stays unknown, and `rx_noise_srtcp_index` is not SRTCP/ledger authentication.
+  Freeze the last pre-expiry observation, not later teardown progress. The genuine
+  10s call below preserved identities/default carrier; maximum recorder line6353B.
+- Actual byte-frontier10s failed both frameworks: OnePlus primary oldest60970
+  age720469us/frontier60969, incoming index27/socket read/auth3744 equals native
+  contiguous/flush3744 with pending0. Independent server final wrote29 toward it,
+  control Full/pre-Noise/route expiry0. Moto ended secondarily; its later record30
+  was fully TCP-written4160 but native-submitted4139. Neither independent final
+  marker proves timely covering feedback. Next highest received QUIC offset can
+  distinguish later bytes behind a reassembly hole, without changing recovery.
+  Formal fresh readiness is JSON `event=listener_ready, ready=true`, with no final
+  marker; checking a nonexistent boolean field caused a prior undialed timeout.
+  The first coordinated run lacked the instrumentation forwarding key; after its
+  one-key reporter fix, the optional byte-frontier object is physically observable.

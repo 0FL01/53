@@ -37,6 +37,21 @@ conditional on `DMSG_EMBEDDED` and the TCP_NODELAY option remains default-OFF.
 - `endpoint(&self) -> Option<SocketAddrV4>` exposes the bound address while
   listening/ready. `Listening` **does not imply a QUIC handshake**.
 - `request_stop(&self)` is a thread-safe, nonblocking cancellation request.
+- `transport_snapshot(&self) -> Option<TransportSnapshot>` copies the optional
+  worker-owned connection/path evidence (unchanged155-word ABI), at most8 paths
+  and64 pending packet nodes. It does not read upstream objects on the caller.
+- `select_stream(&self, Option<(u16, u64)>)` selects one accepted raw stream by
+  the Rust socket's **local** loopback ephemeral port and a fresh48-bit generation.
+  `None`/invalid selection clears it. The port/request are private selection data,
+  never diagnostic output; do not reuse a generation across lane lifetimes.
+- `stream_snapshot(&self) -> Option<StreamSnapshot>` copies a separate13-word
+  atomic snapshot for that selection, with three attempts and no previous-copy
+  fallback. The worker scans at most64 stream entries/tree nodes without splaying
+  or mutating upstream state. `tx_submitted` is QUIC sent-offset, `rx_contiguous`
+  is consumed-offset, `rx_pending` is unflushed bridge output, and `rx_flushed`
+  is their checked difference. Missing/retired/reset/inconsistent streams yield
+  `None`. Submission is not ACK coverage; C flush is not application read/auth.
+  Native capture time has no app-clock mapping or known publication age.
 - `stop(&mut self) -> Result<Status, Error>` requests cancellation, joins the
   native worker, and releases the single-instance reservation. It is idempotent.
   Drop performs the same stop/join. A terminal failed worker still owns its
@@ -100,6 +115,11 @@ the script runs it after all nine pinned Meson suites, including actual-loop
 prepared-packet submission, real ACK/Dcubic-credit, path-local ACK metadata and
 QName-minimization DNS and real PTO-anchor regressions. It covers PEM/DER readiness,
 wrong full-leaf rejection, eight exact raw streams and terminal established loss.
+Two additional317/911-byte selected-lane echoes compare the real worker offsets
+with application writes/reads and exercise selection switching/clearing before
+those original eight parallel streams. Production-C fixtures also check private
+selection, protected read-only traversal, scan/read bounds, generation/retirement,
+coherent atomic publication and C-to-Rust decoding, normally and under ASan/UBSan.
 Disposable native server fixtures receive only public test key/cert paths.
 
 The native boundary and its C dependencies were also checked with Clang

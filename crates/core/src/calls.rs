@@ -604,8 +604,9 @@ fn server_error(op: u8, p: &[u8]) -> Result<(), FfiError> {
     }
 }
 fn into_lane(t: DirectTcp) -> Result<Lane, FfiError> {
-    let (stream, noise) = t.into_lane_parts().map_err(transport_error)?;
-    lane::spawn(stream, noise).map_err(|_| FfiError::Transport("call lane unavailable".into()))
+    let (stream, noise, baseline) = t.into_traced_lane_parts().map_err(transport_error)?;
+    lane::spawn_traced(stream, noise, baseline)
+        .map_err(|_| FfiError::Transport("call lane unavailable".into()))
 }
 
 type Work<T> = Pin<Box<dyn Future<Output = Result<T, FfiError>>>>;
@@ -837,7 +838,12 @@ impl Actor {
                     match result {
                         Ok((rtp, control)) => {
                             match (into_lane(rtp), into_lane(control)) {
-                                (Ok(rtp), Ok(control)) => { if let Some(call) = &mut self.call { call.lanes = Some((rtp, control)); } }
+                                (Ok(rtp), Ok(mut control)) => {
+                                    if matches!(self.context.endpoint, Endpoint::Dns) {
+                                        control.select_native_stream(&self.context.db_path);
+                                    }
+                                    if let Some(call) = &mut self.call { call.lanes = Some((rtp, control)); }
+                                }
                                 _ => { self.local_end(Reason::ConnectionLost).await; continue; }
                             }
                             self.start_media().await;

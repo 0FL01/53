@@ -165,6 +165,34 @@ pub struct TransportPathSnapshot {
     pub tail_ack_eliciting: TailAckEliciting,
 }
 
+/// Numeric frontiers for exactly one privately selected loopback stream.
+/// All bytes include the lane's existing framing/handshake, not just SRTCP.
+/// Capture is worker-owned; native time has no app-clock mapping and publication
+/// age is unknown. This is observation only, never a delivery/recovery policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StreamSnapshot {
+    /// Internal selection match key only; core must not emit this identifier.
+    pub generation: u64,
+    pub schema_version: u32,
+    pub now_native_us: u64,
+    /// QUIC sent_offset: submitted stream bytes, not ACKed or UDP delivery.
+    pub tx_submitted: u64,
+    /// QUIC consumed_offset: contiguous bytes delivered to the native bridge.
+    pub rx_contiguous: u64,
+    /// Bytes accepted by the local TCP socket, not read/authenticated by Rust.
+    pub rx_flushed: u64,
+    /// Bytes still in the bridge output buffer (out_len - out_off).
+    pub rx_pending: u64,
+    pub stream_active: bool,
+    pub send_queue: bool,
+    /// Failed/retired streams are unavailable, so an accepted snapshot is false.
+    pub failed: bool,
+    pub local_fin: bool,
+    pub remote_fin: bool,
+    /// Remaining stream flow-control credit: maxdata_remote - sent_offset.
+    pub remote_stream_credit: u64,
+}
+
 #[derive(Debug)]
 pub enum Error {
     InvalidConfig(&'static str),
@@ -245,6 +273,63 @@ struct CTransportSnapshot {
 const _: () = assert!(std::mem::size_of::<CTransportPath>() == 18 * 8);
 const _: () = assert!(std::mem::size_of::<CTransportSnapshot>() == 155 * 8);
 
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct CStreamSnapshot {
+    generation: u64,
+    schema_version: u64,
+    now_native_us: u64,
+    tx_submitted: u64,
+    rx_contiguous: u64,
+    rx_flushed: u64,
+    rx_pending: u64,
+    stream_active: u64,
+    send_queue: u64,
+    failed: u64,
+    local_fin: u64,
+    remote_fin: u64,
+    remote_stream_credit: u64,
+}
+const _: () = assert!(std::mem::size_of::<CStreamSnapshot>() == 13 * 8);
+const STREAM_MAX_GENERATION: u64 = (1 << 48) - 1;
+
+fn stream_request(selection: Option<(u16, u64)>) -> u64 {
+    match selection {
+        Some((port, generation))
+            if port != 0 && (1..=STREAM_MAX_GENERATION).contains(&generation) =>
+        {
+            (generation << 16) | u64::from(port)
+        }
+        _ => 0,
+    }
+}
+impl CStreamSnapshot {
+    fn decode(self) -> Option<StreamSnapshot> {
+        if self.schema_version != 1
+            || !(1..=STREAM_MAX_GENERATION).contains(&self.generation)
+            || self.failed != 0
+            || self.rx_flushed.checked_add(self.rx_pending)? != self.rx_contiguous
+        {
+            return None;
+        }
+        Some(StreamSnapshot {
+            generation: self.generation,
+            schema_version: 1,
+            now_native_us: self.now_native_us,
+            tx_submitted: self.tx_submitted,
+            rx_contiguous: self.rx_contiguous,
+            rx_flushed: self.rx_flushed,
+            rx_pending: self.rx_pending,
+            stream_active: transport_bool(self.stream_active)?,
+            send_queue: transport_bool(self.send_queue)?,
+            failed: false,
+            local_fin: transport_bool(self.local_fin)?,
+            remote_fin: transport_bool(self.remote_fin)?,
+            remote_stream_credit: self.remote_stream_credit,
+        })
+    }
+}
+
 fn transport_bool(value: u64) -> Option<bool> {
     match value {
         0 => Some(false),
@@ -322,6 +407,12 @@ extern "C" {
     fn dmsg_control_transport_snapshot(
         control: *const c_void,
         out: *mut CTransportSnapshot,
+        out_size: usize,
+    ) -> c_int;
+    fn dmsg_control_select_stream(control: *mut c_void, packed_request: u64);
+    fn dmsg_control_stream_snapshot(
+        control: *const c_void,
+        out: *mut CStreamSnapshot,
         out_size: usize,
     ) -> c_int;
     fn dmsg_native_run(control: *mut c_void, config: *const CConfig) -> c_int;
@@ -406,6 +497,34 @@ impl NativeClient {
         };
         (available == 1).then(|| out.decode()).flatten()
     }
+    /// Select one lane using the Rust socket's LOCAL loopback ephemeral port,
+    /// never the native listener port. Use a fresh generation in 1..=2^48-1 on
+    /// every changed selection/lane lifetime; never reuse a packed key during
+    /// this client's lifetime. Neither port nor upstream pointers are public.
+    /// None (or invalid zero port/out-of-range generation) clears selection.
+    /// Only a private atomic request changes here; upstream traversal stays on
+    /// the existing worker. A changed request immediately hides the old lane.
+    pub fn select_stream(&self, selection: Option<(u16, u64)>) {
+        unsafe {
+            dmsg_control_select_stream(self.control.0.as_ptr(), stream_request(selection));
+        }
+    }
+    /// Latest coherent selected-lane copy after native service. Three attempts,
+    /// no stale-copy fallback. None before matching publication, on selection
+    /// change/no-match/retirement/failure, inconsistent offsets or contention.
+    /// Worker stalls can leave an old publication of the SAME lane; native
+    /// capture time does not establish its age against an application clock.
+    pub fn stream_snapshot(&self) -> Option<StreamSnapshot> {
+        let mut out = CStreamSnapshot::default();
+        let available = unsafe {
+            dmsg_control_stream_snapshot(
+                self.control.0.as_ptr(),
+                &mut out,
+                std::mem::size_of::<CStreamSnapshot>(),
+            )
+        };
+        (available == 1).then(|| out.decode()).flatten()
+    }
     /// Bound address while listening/ready; this does not imply QUIC readiness.
     pub fn endpoint(&self) -> Option<SocketAddrV4> {
         match self.status() {
@@ -477,6 +596,73 @@ fn run(control: &Control, config: Config) {
 #[cfg(test)]
 mod snapshot_decode_tests {
     use super::*;
+
+    #[test]
+    fn stream_selection_packing_and_strict_frontier_decode() {
+        assert_eq!(stream_request(None), 0);
+        for selection in [(0, 1), (1, 0), (1, 1 << 48), (1, u64::MAX)] {
+            assert_eq!(stream_request(Some(selection)), 0);
+        }
+        assert_eq!(stream_request(Some((0xbeef, 42))), (42 << 16) | 0xbeef);
+        assert_eq!(
+            stream_request(Some((u16::MAX, STREAM_MAX_GENERATION))),
+            u64::MAX
+        );
+        let valid = CStreamSnapshot {
+            generation: 42,
+            schema_version: 1,
+            now_native_us: 1042,
+            rx_contiguous: 70,
+            rx_pending: 70,
+            ..Default::default()
+        };
+        let value = valid.decode().unwrap();
+        assert_eq!(value.rx_flushed, 0); // Known zero, not unavailable.
+        assert_eq!(value.rx_pending, 70);
+        assert!(!value.failed);
+        for field in 0..11 {
+            let mut raw = valid;
+            match field {
+                0 => raw.schema_version = 0,
+                1 => raw.schema_version = 2,
+                2 => raw.generation = 0,
+                3 => raw.generation = 1 << 48,
+                4 => raw.failed = 1,
+                5 => raw.stream_active = 2,
+                6 => raw.send_queue = 2,
+                7 => raw.local_fin = 2,
+                8 => raw.remote_fin = 2,
+                9 => raw.rx_flushed = 1,
+                10 => raw.rx_flushed = u64::MAX,
+                _ => unreachable!(),
+            }
+            assert!(raw.decode().is_none(), "invalid stream field {field}");
+        }
+    }
+
+    #[test]
+    fn real_c_stream_control_clear_and_unpublished_are_unavailable() {
+        extern "C" {
+            fn dmsg_stream_publish(control: *mut c_void, conn: *const c_void, now: u64);
+        }
+        let control = Arc::new(Control(
+            NonNull::new(unsafe { dmsg_control_new() }).unwrap(),
+        ));
+        let client = NativeClient {
+            control,
+            worker: None,
+            lease: None,
+        };
+        assert!(client.stream_snapshot().is_none());
+        client.select_stream(Some((54321, 42)));
+        assert!(client.stream_snapshot().is_none());
+        unsafe { dmsg_stream_publish(client.control.0.as_ptr(), std::ptr::null(), 1042) };
+        assert!(client.stream_snapshot().is_none());
+        client.select_stream(None);
+        assert!(client.stream_snapshot().is_none());
+        client.select_stream(Some((54321, 1 << 48)));
+        assert!(client.stream_snapshot().is_none());
+    }
 
     #[test]
     fn fixed_layout_unknown_zero_and_invalid_schema() {
@@ -707,6 +893,38 @@ mod snapshot_decode_tests {
                     }
                 );
             }
+            let output = Command::new(&binary)
+                .arg("--stream-dto")
+                .env_clear()
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "C stream DTO: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(output.stdout.len(), std::mem::size_of::<CStreamSnapshot>());
+            let raw = unsafe {
+                std::ptr::read_unaligned(output.stdout.as_ptr().cast::<CStreamSnapshot>())
+            };
+            assert_eq!(
+                raw.decode().unwrap(),
+                StreamSnapshot {
+                    generation: 42,
+                    schema_version: 1,
+                    now_native_us: 1042,
+                    tx_submitted: 124,
+                    rx_contiguous: 457,
+                    rx_flushed: 387,
+                    rx_pending: 70,
+                    stream_active: false,
+                    send_queue: true,
+                    failed: false,
+                    local_fin: true,
+                    remote_fin: false,
+                    remote_stream_credit: 877,
+                }
+            );
         }
     }
 }

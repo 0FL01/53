@@ -80,6 +80,7 @@ fn native_lifecycle_errors_cancel_races_and_resource_reclamation() {
     );
     assert!(client.endpoint().is_none());
     assert!(client.transport_snapshot().is_none());
+    assert!(client.stream_snapshot().is_none());
     assert!(matches!(
         NativeClient::start(profile.clone()),
         Err(Error::AlreadyRunning)
@@ -129,11 +130,14 @@ fn native_lifecycle_errors_cancel_races_and_resource_reclamation() {
     assert_eq!(capture.latest_receive_age_us, None);
     assert!(capture.paths[0].is_some());
     let local = TcpStream::connect(endpoint).unwrap();
+    client.select_stream(Some((local.local_addr().unwrap().port(), 1)));
+    assert!(client.stream_snapshot().is_none()); // Pre-Ready TCP accept is not a selected QUIC lane.
     let started = Instant::now();
     // Cancellation after bind but before ready must not wait for the 3s
     // bootstrap timeout, require a signal, or mutate should_shutdown.
     assert_eq!(client.stop().unwrap(), Status::Stopped);
     assert!(client.transport_snapshot().is_none());
+    assert!(client.stream_snapshot().is_none());
     assert!(started.elapsed() < Duration::from_secs(1));
     drop(local);
     drop(TcpListener::bind(endpoint).expect("native listener closed after join"));

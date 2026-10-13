@@ -3,6 +3,7 @@
  * reader threads receive only dmsg_control. Link with section GC, without QUIC
  * libraries: the diagnostic must not call ACK/pacing/budget/time helpers. */
 #include "embed.h"
+#include <arpa/inet.h>
 #include <assert.h>
 #include <pthread.h>
 #include <sched.h>
@@ -24,11 +25,19 @@
  * complete attempt. This instrumentation exists only in this disposable TU. */
 static _Thread_local unsigned loads, sequence_loads;
 static _Thread_local dmsg_control *interrupt_read;
+static _Thread_local dmsg_control *interrupt_stream_read, *interrupt_selection;
+static _Thread_local unsigned request_loads;
 static uint64_t counted_u64(const volatile _Atomic uint64_t *p, memory_order order) {
     ++loads;
     if (interrupt_read && p == &interrupt_read->transport_sequence &&
         (++sequence_loads % 2) == 0)
         atomic_fetch_add_explicit(&interrupt_read->transport_sequence, 2, order);
+    if (interrupt_stream_read && p == &interrupt_stream_read->stream_sequence &&
+        (++sequence_loads % 2) == 0)
+        atomic_fetch_add_explicit(&interrupt_stream_read->stream_sequence, 2, order);
+    if (interrupt_selection && p == &interrupt_selection->stream_request &&
+        (++request_loads % 2) == 0)
+        atomic_fetch_add_explicit(&interrupt_selection->stream_request, UINT64_C(1) << 16, order);
     return atomic_load_explicit(p, order);
 }
 static bool counted_bool(const volatile atomic_bool *p, memory_order order) {
@@ -73,6 +82,19 @@ OFFSET(dmsg_transport_path, tail_pending_age_us, 14);
 OFFSET(dmsg_transport_path, highest_ack_age_us, 15);
 OFFSET(dmsg_transport_path, last_packet_receive_age_us, 16);
 OFFSET(dmsg_transport_path, tail_ack_eliciting, 17);
+OFFSET(dmsg_stream_snapshot, generation, 0);
+OFFSET(dmsg_stream_snapshot, schema_version, 1);
+OFFSET(dmsg_stream_snapshot, now_native_us, 2);
+OFFSET(dmsg_stream_snapshot, tx_submitted, 3);
+OFFSET(dmsg_stream_snapshot, rx_contiguous, 4);
+OFFSET(dmsg_stream_snapshot, rx_flushed, 5);
+OFFSET(dmsg_stream_snapshot, rx_pending, 6);
+OFFSET(dmsg_stream_snapshot, stream_active, 7);
+OFFSET(dmsg_stream_snapshot, send_queue, 8);
+OFFSET(dmsg_stream_snapshot, failed, 9);
+OFFSET(dmsg_stream_snapshot, local_fin, 10);
+OFFSET(dmsg_stream_snapshot, remote_fin, 11);
+OFFSET(dmsg_stream_snapshot, remote_stream_credit, 12);
 
 static dmsg_transport_snapshot read_snapshot(dmsg_control *c) {
     dmsg_transport_snapshot out;
@@ -397,7 +419,238 @@ static void concurrent_publication(void) {
     dmsg_control_free(f.control);
 }
 
+/* Two actual accepted TCP fds: getpeername must match the Rust-side LOCAL
+ * ephemeral port, not the listener or the accepted fd's local port. */
+typedef struct {
+    ss_conn conn;
+    picoquic_cnx_t cnx;
+    ss_stream streams[2];
+    picoquic_stream_head_t quic_streams[2];
+    int peers[2];
+    uint16_t ports[2], listener_port;
+} stream_fixture;
+static void stream_fixture_init(stream_fixture *f) {
+    memset(f, 0, sizeof(*f));
+    int listener = socket(AF_INET, SOCK_STREAM, 0); assert(listener >= 0);
+    struct sockaddr_in address = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    assert(bind(listener, (struct sockaddr *)&address, sizeof(address)) == 0);
+    assert(listen(listener, 2) == 0);
+    socklen_t size = sizeof(address);
+    assert(getsockname(listener, (struct sockaddr *)&address, &size) == 0);
+    f->listener_port = ntohs(address.sin_port);
+    f->conn = (ss_conn){.client = true, .ready = true, .count = 2,
+        .cnx = &f->cnx, .streams = &f->streams[0]};
+    for (unsigned i = 0; i < 2; ++i) {
+        f->peers[i] = socket(AF_INET, SOCK_STREAM, 0); assert(f->peers[i] >= 0);
+        assert(connect(f->peers[i], (struct sockaddr *)&address, sizeof(address)) == 0);
+        f->streams[i] = (ss_stream){.id = 4 + 4 * i, .fd = accept(listener, NULL, NULL),
+            .connected = true, .stage = 4, .out_len = 100 + i, .out_off = 30 + i,
+            .local_fin = i == 1, .remote_fin = i == 0};
+        assert(f->streams[i].fd >= 0);
+        struct sockaddr_in local = {0}; size = sizeof(local);
+        assert(getsockname(f->peers[i], (struct sockaddr *)&local, &size) == 0);
+        f->ports[i] = ntohs(local.sin_port);
+        f->quic_streams[i] = (picoquic_stream_head_t){.stream_id = f->streams[i].id,
+            .sent_offset = 123 + i, .consumed_offset = 456 + i, .maxdata_remote = 1000 + i,
+            .is_active = i == 0};
+    }
+    close(listener);
+    assert(f->ports[0] != f->ports[1] && f->ports[0] != f->listener_port && f->ports[1] != f->listener_port);
+    f->streams[0].next = &f->streams[1];
+    f->cnx.stream_tree.root = &f->quic_streams[1].stream_node;
+    f->quic_streams[1].stream_node.left = &f->quic_streams[0].stream_node;
+    f->quic_streams[0].stream_node.parent = &f->quic_streams[1].stream_node;
+    /* Presence only; never read queue nodes, output/setup or tree callbacks. */
+    f->quic_streams[1].send_queue = (void *)(uintptr_t)1;
+    f->streams[0].out = f->streams[1].out = (void *)(uintptr_t)1;
+}
+static void stream_fixture_close(stream_fixture *f) {
+    for (unsigned i = 0; i < 2; ++i) { close(f->peers[i]); close(f->streams[i].fd); }
+}
+static void select_lane(dmsg_control *c, const stream_fixture *f, unsigned lane, uint64_t generation) {
+    dmsg_control_select_stream(c, (generation << 16) | f->ports[lane]);
+}
+static dmsg_stream_snapshot stream_read(dmsg_control *c) {
+    dmsg_stream_snapshot out;
+    assert(dmsg_control_stream_snapshot(c, &out, sizeof(out)) == 1);
+    return out;
+}
+static void stream_unavailable(dmsg_control *c) {
+    dmsg_stream_snapshot out; memset(&out, 0xa5, sizeof(out));
+    assert(dmsg_control_stream_snapshot(c, &out, sizeof(out)) == 0);
+    const dmsg_stream_snapshot zero = {0}; assert(memcmp(&out, &zero, sizeof(out)) == 0);
+}
+static dmsg_stream_snapshot stream_expected(unsigned lane, uint64_t generation, uint64_t now) {
+    return (dmsg_stream_snapshot){.generation = generation, .schema_version = 1, .now_native_us = now,
+        .tx_submitted = 123 + lane, .rx_contiguous = 456 + lane, .rx_pending = 70,
+        .rx_flushed = 386 + lane, .stream_active = lane == 0, .send_queue = lane == 1,
+        .local_fin = lane == 1, .remote_fin = lane == 0, .remote_stream_credit = 877};
+}
+static void stream_selection_generation_retirement_and_read_bound(void) {
+    stream_fixture f; stream_fixture_init(&f);
+    dmsg_control *c = dmsg_control_new(); assert(c);
+    assert(atomic_is_lock_free(&c->stream_request) && atomic_is_lock_free(&c->stream_words[0]));
+    assert(atomic_is_lock_free(&c->stream_sequence) && atomic_is_lock_free(&c->stream_match));
+    loads = 0; stream_unavailable(c); assert(loads == 1); stream_unavailable(NULL);
+    select_lane(c, &f, 0, 42); stream_unavailable(c);
+    dmsg_stream_publish(c, &f.conn, 1042);
+    loads = 0; dmsg_stream_snapshot out = stream_read(c); assert(loads == DMSG_STREAM_WORDS + 5);
+    const dmsg_stream_snapshot expected = stream_expected(0, 42, 1042);
+    assert(memcmp(&out, &expected, sizeof(out)) == 0);
+    select_lane(c, &f, 1, 43); stream_unavailable(c); /* No former lane before publication. */
+    dmsg_stream_publish(c, &f.conn, 1043); out = stream_read(c);
+    const dmsg_stream_snapshot second = stream_expected(1, 43, 1043);
+    assert(memcmp(&out, &second, sizeof(out)) == 0);
+    select_lane(c, &f, 0, 43); stream_unavailable(c); /* Whole key, even if generation misused. */
+    select_lane(c, &f, 1, 44); stream_unavailable(c); /* Same port, fresh lane lifetime. */
+    /* An already-started old worker publication finishing AFTER selection
+     * changed is still unavailable; no selector ever becomes a payload writer. */
+    stream_store(c, (UINT64_C(43) << 16) | f.ports[1], &second); stream_unavailable(c);
+    dmsg_stream_publish(c, &f.conn, 1044);
+    interrupt_stream_read = c; sequence_loads = loads = 0; stream_unavailable(c);
+    assert(loads == 3 * (DMSG_STREAM_WORDS + 5)); interrupt_stream_read = NULL;
+    interrupt_selection = c; request_loads = loads = 0; stream_unavailable(c);
+    assert(request_loads == 6 && loads == 3 * (DMSG_STREAM_WORDS + 5)); interrupt_selection = NULL;
+    select_lane(c, &f, 1, 45); dmsg_stream_publish(c, &f.conn, 1045);
+    atomic_fetch_add(&c->stream_sequence, 1); loads = 0; stream_unavailable(c); assert(loads == 6);
+    atomic_fetch_add(&c->stream_sequence, 1);
+    memset(&out, 0xa5, sizeof(out)); const dmsg_stream_snapshot untouched = out;
+    assert(!dmsg_control_stream_snapshot(c, &out, sizeof(out) - 8));
+    assert(memcmp(&out, &untouched, sizeof(out)) == 0);
+    assert(!dmsg_control_stream_snapshot(c, NULL, sizeof(out)));
+    f.streams[1].failed = true; dmsg_stream_publish(c, &f.conn, 1046); stream_unavailable(c);
+    f.streams[1].failed = false;
+    f.streams[1].stage = 3; dmsg_stream_publish(c, &f.conn, 1047); stream_unavailable(c);
+    f.streams[1].stage = 4;
+    f.streams[1].out_off = f.streams[1].out_len + 1;
+    dmsg_stream_publish(c, &f.conn, 1048); stream_unavailable(c);
+    f.streams[1].out_off = 0; f.streams[1].out_len = f.quic_streams[1].consumed_offset + 1;
+    dmsg_stream_publish(c, &f.conn, 1049); stream_unavailable(c);
+    f.streams[1].out_len = f.streams[1].out_off = 0;
+    f.quic_streams[1].sent_offset = 1002; dmsg_stream_publish(c, &f.conn, 1050); stream_unavailable(c);
+    f.quic_streams[1].sent_offset = 124;
+    f.quic_streams[1].reset_received = 1; dmsg_stream_publish(c, &f.conn, 1051); stream_unavailable(c);
+    f.quic_streams[1].reset_received = 0;
+    f.cnx.stream_tree.root = NULL; dmsg_stream_publish(c, &f.conn, 1052); stream_unavailable(c);
+    f.cnx.stream_tree.root = &f.quic_streams[1].stream_node;
+    f.streams[0].next = NULL; dmsg_stream_publish(c, &f.conn, 1053); stream_unavailable(c); /* Retirement. */
+    f.streams[0].next = &f.streams[1];
+    dmsg_control_select_stream(c, (UINT64_C(45) << 16) | f.listener_port);
+    dmsg_stream_publish(c, &f.conn, 1054); stream_unavailable(c); /* Not the listener port. */
+    select_lane(c, &f, 1, (UINT64_C(1) << 48) - 1); dmsg_stream_publish(c, &f.conn, 1055);
+    assert(stream_read(c).generation == (UINT64_C(1) << 48) - 1);
+    dmsg_control_select_stream(c, 0); stream_unavailable(c);
+    dmsg_control_select_stream(c, f.ports[1]); stream_unavailable(c);
+    dmsg_control_select_stream(c, UINT64_C(1) << 16); stream_unavailable(c);
+    select_lane(c, &f, 1, 46); dmsg_stream_publish(c, &f.conn, 1056);
+    dmsg_publish(c, DMSG_STOPPED, 0, 0); stream_unavailable(c);
+    dmsg_stream_publish(c, &f.conn, 1057); dmsg_publish(c, DMSG_FAILED, 0, 1); stream_unavailable(c);
+    dmsg_stream_publish(c, NULL, 0); stream_unavailable(c);
+    f.quic_streams[1].sent_offset = f.quic_streams[1].consumed_offset = f.quic_streams[1].maxdata_remote = 0;
+    f.quic_streams[1].is_active = 0; f.quic_streams[1].send_queue = NULL;
+    f.streams[1].local_fin = f.streams[1].remote_fin = false;
+    select_lane(c, &f, 1, 47); dmsg_stream_publish(c, &f.conn, 1058); out = stream_read(c);
+    const dmsg_stream_snapshot known_zero = {.generation = 47, .schema_version = 1, .now_native_us = 1058};
+    assert(memcmp(&out, &known_zero, sizeof(out)) == 0); /* Known zero != unavailable. */
+    stream_fixture_close(&f); dmsg_control_free(c);
+}
+static void stream_readonly_and_scan_bounds(void) {
+    stream_fixture f; stream_fixture_init(&f);
+    region cr = allocate_region(sizeof(ss_conn), false);
+    region qr = allocate_region(sizeof(picoquic_cnx_t), false);
+    region sr = allocate_region(64 * sizeof(ss_stream), true);
+    region tr = allocate_region(64 * sizeof(picoquic_stream_head_t), true);
+    ss_conn *conn = cr.object; picoquic_cnx_t *cnx = qr.object;
+    ss_stream *streams = sr.object; picoquic_stream_head_t *qs = tr.object;
+    *conn = f.conn; conn->cnx = cnx; conn->streams = streams; conn->count = 999;
+    cnx->quic = qr.guard;
+    for (unsigned i = 0; i < 64; ++i) {
+        streams[i] = (ss_stream){.next = i < 63 ? &streams[i + 1] : sr.guard, .stage = 0};
+        qs[i].stream_id = 2 * i;
+        qs[i].stream_node.right = i < 63 ? &qs[i + 1].stream_node : tr.guard;
+    }
+    cnx->stream_tree.root = &qs[0].stream_node;
+    readonly(cr); readonly(qr); readonly(sr); readonly(tr);
+    dmsg_control *c = dmsg_control_new(); assert(c); select_lane(c, &f, 0, 99);
+    dmsg_stream_publish(c, conn, 1099); stream_unavailable(c); /* Never reads list node 65. */
+    assert(mprotect(sr.base, sr.accessible, PROT_READ | PROT_WRITE) == 0);
+    streams[63] = f.streams[0]; streams[63].id = 128; streams[63].next = sr.guard;
+    readonly(sr);
+    dmsg_stream_publish(c, conn, 1100); stream_unavailable(c); /* Never reads tree node 65. */
+    assert(mprotect(sr.base, sr.accessible, PROT_READ | PROT_WRITE) == 0);
+    streams[63].id = 126; readonly(sr);
+    assert(mprotect(tr.base, tr.accessible, PROT_READ | PROT_WRITE) == 0);
+    picosplay_node_t node = qs[63].stream_node;
+    qs[63] = f.quic_streams[0]; qs[63].stream_id = 126; qs[63].stream_node = node;
+    readonly(tr);
+    dmsg_stream_publish(c, conn, 1101);
+    const dmsg_stream_snapshot out = stream_read(c), expected = stream_expected(0, 99, 1101);
+    assert(memcmp(&out, &expected, sizeof(out)) == 0); /* Exactly 64 list/tree visits; no splay writes. */
+    release(cr); release(qr); release(sr); release(tr);
+    assert(memcmp(&out, &(dmsg_stream_snapshot){0}, sizeof(out)) != 0);
+    const dmsg_stream_snapshot copy = stream_read(c); assert(memcmp(&out, &copy, sizeof(out)) == 0);
+    stream_fixture_close(&f); dmsg_control_free(c);
+}
+static void *stream_writer(void *arg) {
+    concurrent_fixture *f = arg; stream_fixture source; stream_fixture_init(&source);
+    pthread_barrier_wait(&f->barrier);
+    for (uint64_t g = 1; g <= WRITES; ++g) {
+        unsigned lane = g % 2;
+        select_lane(f->control, &source, lane, g);
+        dmsg_stream_publish(f->control, &source.conn, 1000 + g);
+        if (g % 32 == 0) sched_yield();
+        if (g == WRITES / 2)
+            while (!atomic_load_explicit(&f->intermediate, memory_order_acquire)) sched_yield();
+    }
+    stream_fixture_close(&source);
+    atomic_store_explicit(&f->done, true, memory_order_release); return NULL;
+}
+static void *stream_reader(void *arg) {
+    concurrent_fixture *f = arg; pthread_barrier_wait(&f->barrier);
+    do {
+        dmsg_stream_snapshot out; loads = 0;
+        if (dmsg_control_stream_snapshot(f->control, &out, sizeof(out))) {
+            assert(out.generation >= 1 && out.generation <= WRITES);
+            const dmsg_stream_snapshot expected = stream_expected(out.generation % 2, out.generation,
+                1000 + out.generation);
+            assert(memcmp(&out, &expected, sizeof(out)) == 0);
+            atomic_fetch_add_explicit(&f->accepted, 1, memory_order_relaxed);
+            if (out.generation > 1 && out.generation < WRITES)
+                atomic_fetch_add_explicit(&f->intermediate, 1, memory_order_release);
+        } else {
+            const dmsg_stream_snapshot zero = {0}; assert(memcmp(&out, &zero, sizeof(out)) == 0);
+            atomic_fetch_add_explicit(&f->unavailable, 1, memory_order_relaxed);
+        }
+        assert(loads <= 3 * (DMSG_STREAM_WORDS + 5));
+    } while (!atomic_load_explicit(&f->done, memory_order_acquire));
+    return NULL;
+}
+static void stream_concurrent_publication(void) {
+    concurrent_fixture f = {.control = dmsg_control_new()}; assert(f.control);
+    atomic_init(&f.done, false); atomic_init(&f.accepted, 0); atomic_init(&f.unavailable, 0);
+    atomic_init(&f.intermediate, 0);
+    assert(pthread_barrier_init(&f.barrier, NULL, READERS + 1) == 0);
+    pthread_t owner, readers[READERS]; assert(pthread_create(&owner, NULL, stream_writer, &f) == 0);
+    for (unsigned i = 0; i < READERS; ++i) assert(pthread_create(&readers[i], NULL, stream_reader, &f) == 0);
+    assert(pthread_join(owner, NULL) == 0);
+    for (unsigned i = 0; i < READERS; ++i) assert(pthread_join(readers[i], NULL) == 0);
+    assert(atomic_load(&f.accepted) > 0 && atomic_load(&f.unavailable) > 0 && atomic_load(&f.intermediate) > 0);
+    printf("C selected stream: %u publications, %u readers, %llu coherent reads (%llu non-final), %llu unavailable\n",
+        WRITES, READERS, (unsigned long long)atomic_load(&f.accepted),
+        (unsigned long long)atomic_load(&f.intermediate), (unsigned long long)atomic_load(&f.unavailable));
+    assert(pthread_barrier_destroy(&f.barrier) == 0); dmsg_control_free(f.control);
+}
+
 int main(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "--stream-dto") == 0) {
+        stream_fixture f; stream_fixture_init(&f);
+        dmsg_control *c = dmsg_control_new(); assert(c); select_lane(c, &f, 1, 42);
+        dmsg_stream_publish(c, &f.conn, 1042);
+        const dmsg_stream_snapshot out = stream_read(c), expected = stream_expected(1, 42, 1042);
+        assert(memcmp(&out, &expected, sizeof(out)) == 0);
+        assert(fwrite(&out, sizeof(out), 1, stdout) == 1);
+        stream_fixture_close(&f); dmsg_control_free(c); return 0;
+    }
     if (argc == 2 && strcmp(argv[1], "--dto") == 0) {
         generation_fixture *f = calloc(1, sizeof(*f)); assert(f);
         generation(f, 42);
@@ -413,6 +666,10 @@ int main(int argc, char **argv) {
     ages_contexts_traps_and_scan_bounds();
     readonly_upstream_and_path_bound();
     concurrent_publication();
+    stream_selection_generation_retirement_and_read_bound();
+    stream_readonly_and_scan_bounds();
+    stream_concurrent_publication();
     puts("C layout/publication/unknown/zero/8 paths/64 nodes/3 attempts/traps/legacy-vs-MP/read-only PASS");
+    puts("C selected stream/13 words/private port/2 lanes/generation/retirement/underflow/64 list+tree/3 attempts/read-only PASS");
     return 0;
 }

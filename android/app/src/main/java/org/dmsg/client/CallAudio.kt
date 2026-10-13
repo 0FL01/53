@@ -70,7 +70,7 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
         private val pathFields = listOf("slot", "validated", "demoted", "pending_count", "pending_truncated",
             "tail_ack_eliciting") + pathCounters + pathAges
 
-        private fun fields(source: JSONObject, names: List<String>): MutableMap<String, Any?> =
+        internal fun fields(source: JSONObject, names: List<String>): MutableMap<String, Any?> =
             names.associateWith { name -> source.get(name).let { if (it === JSONObject.NULL) null else it } }.toMutableMap()
 
         fun fromNativeStats(source: JSONObject): JSONObject? {
@@ -89,7 +89,7 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
             } catch (_: Exception) { null }
         }
 
-        private fun number(source: Map<*, *>, field: String, max: Long = Long.MAX_VALUE,
+        internal fun number(source: Map<*, *>, field: String, max: Long = Long.MAX_VALUE,
             nullable: Boolean = false): Long? {
             require(source.containsKey(field))
             val value = source[field]
@@ -99,7 +99,7 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
             return (value as Number).toLong().also { require(it in 0L..max) }
         }
 
-        private fun boolean(source: Map<*, *>, field: String, nullable: Boolean = false): Boolean? {
+        internal fun boolean(source: Map<*, *>, field: String, nullable: Boolean = false): Boolean? {
             require(source.containsKey(field))
             val value = source[field]
             if (value == null && nullable) return null
@@ -144,6 +144,57 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
                 clean
             } catch (_: Exception) { null }
         }
+    }
+
+    /** Only the selected control lane's byte frontiers, not delivery or credit. */
+    internal object ControlDeliveryEvidence {
+        private val socketFields = listOf("tx_base", "rx_base", "tx_socket_written", "tx_record_start", "tx_record_end", "tx_noise_end",
+            "tx_records_committed", "tx_records_written", "rx_socket_read", "rx_record_start", "rx_record_end",
+            "rx_authenticated_end", "rx_records_authenticated")
+        private val socketIndices = listOf("tx_noise_srtcp_index", "tx_record_srtcp_index", "rx_noise_srtcp_index")
+        private val nativeCounters = listOf("age_since_observed_ms", "now_native_us", "tx_submitted",
+            "rx_contiguous", "rx_flushed", "rx_pending", "remote_stream_credit")
+        private val nativeFlags = listOf("stream_active", "send_queue", "failed", "local_fin", "remote_fin")
+        fun fromNativeStats(source: JSONObject): JSONObject? { return try {
+            val delivery = source.optJSONObject("control_delivery") ?: return null
+            val socket = NativeTransportEvidence.fields(delivery.getJSONObject("socket"), socketFields + socketIndices)
+            val native = if (delivery.isNull("native")) null else NativeTransportEvidence.fields(
+                delivery.getJSONObject("native"), nativeCounters + nativeFlags + listOf("schema_version", "publication_age_us"))
+            sanitize(mapOf("socket" to socket, "native" to native))?.let { JSONObject(it) }
+        } catch (_: Exception) { null } }
+
+        fun sanitize(source: Map<*, *>?): Map<String, Any?>? { return try {
+            if (source == null) return null
+            val socket = source["socket"] as? Map<*, *> ?: return null
+            val copied = socketFields.associateWith { requireNotNull(NativeTransportEvidence.number(socket, it)) }
+            require(copied.getValue("tx_base") <= copied.getValue("tx_record_start"))
+            require(copied.getValue("rx_base") <= copied.getValue("rx_record_start"))
+            require(copied.getValue("tx_record_start") <= copied.getValue("tx_record_end"))
+            require(copied.getValue("tx_record_end") <= copied.getValue("tx_socket_written"))
+            require(copied.getValue("tx_socket_written") <= copied.getValue("tx_noise_end"))
+            require(copied.getValue("tx_records_written") <= copied.getValue("tx_records_committed"))
+            require(copied.getValue("tx_records_committed") - copied.getValue("tx_records_written") <= 1)
+            require(copied.getValue("rx_record_start") <= copied.getValue("rx_authenticated_end"))
+            require(copied.getValue("rx_authenticated_end") <= copied.getValue("rx_record_end"))
+            require(copied.getValue("rx_record_end") <= copied.getValue("rx_socket_read"))
+            val cleanSocket = linkedMapOf<String, Any?>().apply { putAll(copied) }
+            socketIndices.forEach { cleanSocket[it] = NativeTransportEvidence.number(socket, it, 0x7fff_ffffL, nullable = true) }
+            require(source.containsKey("native"))
+            val native = source["native"]?.let { value ->
+                val capture = value as? Map<*, *> ?: return null
+                require(NativeTransportEvidence.number(capture, "schema_version", 1) == 1L)
+                require(capture.containsKey("publication_age_us") && capture["publication_age_us"] == null)
+                val result = linkedMapOf<String, Any?>("schema_version" to 1L, "publication_age_us" to null)
+                nativeCounters.forEach { result[it] = NativeTransportEvidence.number(capture, it) }
+                nativeFlags.forEach { result[it] = NativeTransportEvidence.boolean(capture, it) }
+                val contiguous = result.getValue("rx_contiguous") as Long
+                val flushed = result.getValue("rx_flushed") as Long
+                val pending = result.getValue("rx_pending") as Long
+                require(flushed <= contiguous && pending == contiguous - flushed)
+                result
+            }
+            linkedMapOf("socket" to cleanSocket, "native" to native)
+        } catch (_: Exception) { null } }
     }
 
     /** One renderer's read-only parse, keyed by the immutable owner's string identity. */
@@ -740,6 +791,7 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
         }
         clean.put("error", safeError)
         clean.put("native_transport", NativeTransportEvidence.fromNativeStats(source) ?: JSONObject.NULL)
+        clean.put("control_delivery", ControlDeliveryEvidence.fromNativeStats(source) ?: JSONObject.NULL)
         return clean.toString()
     }
 

@@ -41,6 +41,28 @@ typedef struct {
 _Static_assert(sizeof(dmsg_transport_path) == 18 * sizeof(uint64_t), "path ABI");
 _Static_assert(sizeof(dmsg_transport_snapshot) == DMSG_TRANSPORT_WORDS * sizeof(uint64_t), "snapshot ABI");
 
+enum {
+    DMSG_STREAM_SCHEMA = 1,
+    DMSG_STREAM_WORDS = 13,
+    DMSG_STREAM_SCAN_LIMIT = 64,
+    DMSG_STREAM_READ_ATTEMPTS = 3
+};
+/* Separate private ABI; the selected loopback port NEVER enters this copy.
+ * generation is only an internal match key. No stream IDs/addresses/payload.
+ * tx_submitted is QUIC sent_offset (not ACKed/UDP-delivered); rx_contiguous is
+ * consumed_offset delivered to the bridge, not an out-of-order high watermark.
+ * rx_flushed is local socket acceptance, not application authentication/read.
+ * remote_stream_credit is remaining maxdata_remote - sent_offset.
+ * Invalid/missing/retired/failed selections are unavailable, not zero samples.
+ * Native capture time has no app clock mapping or publication-age guarantee. */
+typedef struct {
+    uint64_t generation, schema_version, now_native_us;
+    uint64_t tx_submitted, rx_contiguous, rx_flushed, rx_pending;
+    uint64_t stream_active, send_queue, failed, local_fin, remote_fin;
+    uint64_t remote_stream_credit;
+} dmsg_stream_snapshot;
+_Static_assert(sizeof(dmsg_stream_snapshot) == DMSG_STREAM_WORDS * sizeof(uint64_t), "stream ABI");
+
 /* Only atomics cross threads. Every upstream field stays on the existing C
  * runtime's owning worker. Status packs phase:8, port:16, error:32.
  * The transport sequence AND payload are atomic: a plain-struct seqlock would
@@ -51,6 +73,13 @@ typedef struct {
     atomic_uint_fast64_t snapshot;
     _Atomic uint64_t transport_sequence;
     _Atomic uint64_t transport_words[DMSG_TRANSPORT_WORDS];
+    /* Private request: port in low 16 bits, nonzero generation in high 48.
+     * Selection writers change ONLY request. The owning worker alone writes
+     * sequence/match/payload; match also prevents old copies on port changes. */
+    _Atomic uint64_t stream_request;
+    _Atomic uint64_t stream_sequence;
+    _Atomic uint64_t stream_match;
+    _Atomic uint64_t stream_words[DMSG_STREAM_WORDS];
 } dmsg_control;
 enum { DMSG_STARTING, DMSG_LISTENING, DMSG_READY, DMSG_STOPPED, DMSG_FAILED };
 int dmsg_cancelled(dmsg_control *control);
@@ -64,6 +93,14 @@ void dmsg_transport_publish(dmsg_control *control, const struct st_picoquic_cnx_
  * out is cleared on failure (for a correctly sized output), never reused. */
 int dmsg_control_transport_snapshot(const dmsg_control *control,
     dmsg_transport_snapshot *out, size_t out_size);
+void dmsg_control_select_stream(dmsg_control *control, uint64_t packed_request);
+struct ss_conn;
+/* Worker only: bounded read-only list/tree traversal; NULL invalidates. */
+void dmsg_stream_publish(dmsg_control *control, const struct ss_conn *conn,
+    uint64_t now_native_us);
+/* Three attempts, cleared output on failure, no previous-copy fallback. */
+int dmsg_control_stream_snapshot(const dmsg_control *control,
+    dmsg_stream_snapshot *out, size_t out_size);
 
 typedef struct {
     const char *domain;

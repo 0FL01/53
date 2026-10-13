@@ -237,6 +237,8 @@ pub struct Stats {
     pub expired_render_samples: u64,
     pub last_render_expiry: Option<RenderExpiry>,
     pub last_progress_failure: Option<ProgressFailure>,
+    /// Optional control TCP/native byte-frontier evidence, never delivery credit.
+    pub control_delivery: Option<serde_json::Value>,
     pub decode_after_nominal_due_slots: u64,
     pub max_decode_us: u64,
     /// Fixed duration bins bracket only the named synchronous operation.
@@ -316,6 +318,7 @@ impl Default for Stats {
             expired_render_samples: 0,
             last_render_expiry: None,
             last_progress_failure: None,
+            control_delivery: None,
             decode_after_nominal_due_slots: 0,
             max_decode_us: 0,
             encode_duration_bins: [0; 8],
@@ -1227,7 +1230,7 @@ struct PendingControlCommit {
 
 // AES_CM_128_HMAC_SHA1_80 without MKI: clear index precedes the 10-byte tag.
 // Parsing this field is not authentication and never affects packet admission.
-fn srtcp_index(cipher: &[u8]) -> Option<u32> {
+pub(super) fn srtcp_index(cipher: &[u8]) -> Option<u32> {
     if cipher.len() < 8 + 4 + 10 {
         return None;
     }
@@ -2590,7 +2593,7 @@ async fn endpoint_owned(
 ) -> Result<(), String> {
     let outcome = endpoint_run(
         fixture,
-        port,
+        port.clone(),
         input,
         &mut media,
         &mut control,
@@ -2600,7 +2603,14 @@ async fn endpoint_owned(
     )
     .await;
     media.joined_close().await;
-    control.joined_close().await;
+    let evidence = control.joined_close_evidence().await;
+    port.stats(|stats| {
+        // Preserve the turn's diagnostic if that turn detected ledger expiry;
+        // later transport progress during joined cleanup cannot replace it.
+        if stats.last_progress_failure.is_none() {
+            stats.control_delivery = evidence;
+        }
+    });
     outcome
 }
 
@@ -2666,6 +2676,8 @@ async fn endpoint_run(
     let mut last_control_submission = Instant::now();
 
     let outcome = 'session: loop {
+        let evidence = control.delivery_evidence();
+        port.stats(|stats| stats.control_delivery = evidence);
         if *stop.borrow() {
             break Ok(());
         }

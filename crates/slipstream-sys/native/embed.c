@@ -1,5 +1,6 @@
 #include "embed.h"
 #include "slipstream.h"
+#include "slipstream_runtime.h"
 #include <picoquic_internal.h>
 #include <arpa/inet.h>
 #include <stdlib.h>
@@ -20,6 +21,11 @@ dmsg_control *dmsg_control_new(void) {
         atomic_init(&c->transport_sequence, 0);
         for (size_t i = 0; i < DMSG_TRANSPORT_WORDS; ++i)
             atomic_init(&c->transport_words[i], 0);
+        atomic_init(&c->stream_request, 0);
+        atomic_init(&c->stream_sequence, 0);
+        atomic_init(&c->stream_match, 0);
+        for (size_t i = 0; i < DMSG_STREAM_WORDS; ++i)
+            atomic_init(&c->stream_words[i], 0);
     }
     return c;
 }
@@ -34,8 +40,10 @@ uint64_t dmsg_control_status(dmsg_control *c) {
     return atomic_load_explicit(&c->snapshot, memory_order_acquire);
 }
 void dmsg_publish(dmsg_control *c, unsigned phase, uint16_t port, int error) {
-    if (phase == DMSG_STOPPED || phase == DMSG_FAILED)
+    if (phase == DMSG_STOPPED || phase == DMSG_FAILED) {
         dmsg_transport_publish(c, NULL, 0);
+        dmsg_stream_publish(c, NULL, 0);
+    }
     atomic_store_explicit(&c->snapshot,
         phase | ((uint64_t)port << 8) | ((uint64_t)(uint32_t)error << 24),
         memory_order_release);
@@ -135,6 +143,95 @@ void dmsg_transport_publish(dmsg_control *c, const picoquic_cnx_t *cnx, uint64_t
         if (!packet) out->oldest_pending_age_us = oldest;
     }
     transport_store(c, &value);
+}
+void dmsg_control_select_stream(dmsg_control *c, uint64_t request) {
+    if (!(uint16_t)request || !(request >> 16)) request = 0;
+    atomic_store_explicit(&c->stream_request, request, memory_order_seq_cst);
+}
+/* Same atomic-payload seqlock as transport, but a separate ABI/publication.
+ * Private match participates in the sequence; readers compare the WHOLE request
+ * before/after, so a selection change hides old data without another writer. */
+static void stream_store(dmsg_control *c, uint64_t request, const dmsg_stream_snapshot *value) {
+    uint64_t words[DMSG_STREAM_WORDS];
+    memcpy(words, value, sizeof(words));
+    atomic_fetch_add_explicit(&c->stream_sequence, 1, memory_order_seq_cst);
+    atomic_store_explicit(&c->stream_match, request, memory_order_seq_cst);
+    for (size_t i = 0; i < DMSG_STREAM_WORDS; ++i)
+        atomic_store_explicit(&c->stream_words[i], words[i], memory_order_seq_cst);
+    atomic_fetch_add_explicit(&c->stream_sequence, 1, memory_order_seq_cst);
+}
+int dmsg_control_stream_snapshot(const dmsg_control *c,
+    dmsg_stream_snapshot *out, size_t out_size) {
+    if (!out || out_size != sizeof(*out)) return 0;
+    memset(out, 0, sizeof(*out));
+    if (!c) return 0;
+    for (unsigned attempt = 0; attempt < DMSG_STREAM_READ_ATTEMPTS; ++attempt) {
+        uint64_t request = atomic_load_explicit(&c->stream_request, memory_order_seq_cst);
+        if (!request) return 0;
+        uint64_t before = atomic_load_explicit(&c->stream_sequence, memory_order_seq_cst);
+        if (!before || (before & 1)) continue;
+        uint64_t match = atomic_load_explicit(&c->stream_match, memory_order_seq_cst);
+        uint64_t words[DMSG_STREAM_WORDS];
+        for (size_t i = 0; i < DMSG_STREAM_WORDS; ++i)
+            words[i] = atomic_load_explicit(&c->stream_words[i], memory_order_seq_cst);
+        uint64_t after = atomic_load_explicit(&c->stream_sequence, memory_order_seq_cst);
+        uint64_t current = atomic_load_explicit(&c->stream_request, memory_order_seq_cst);
+        if (before == after && request == current && match == request &&
+            words[0] == (request >> 16) && words[1] == DMSG_STREAM_SCHEMA) {
+            memcpy(out, words, sizeof(*out));
+            return 1;
+        }
+    }
+    return 0;
+}
+static const picoquic_stream_head_t *stream_find_readonly(const picoquic_cnx_t *cnx, uint64_t id) {
+    /* picoquic_find_stream/picosplay_find splay (WRITE) the owning tree. Never
+     * invoke tree callbacks or helpers; following one search branch is bounded. */
+    const picosplay_node_t *node = cnx->stream_tree.root;
+    for (unsigned visited = 0; node && visited < DMSG_STREAM_SCAN_LIMIT; ++visited) {
+        const picoquic_stream_head_t *qs = (const picoquic_stream_head_t *)
+            ((const char *)node - offsetof(picoquic_stream_head_t, stream_node));
+        if (qs->stream_id == id) return qs;
+        node = id < qs->stream_id ? node->left : node->right;
+    }
+    return NULL;
+}
+void dmsg_stream_publish(dmsg_control *c, const ss_conn *conn, uint64_t now) {
+    dmsg_stream_snapshot value = {0};
+    uint64_t request = atomic_load_explicit(&c->stream_request, memory_order_seq_cst);
+    if (!request || !conn || !conn->client || !conn->ready || conn->closed || !conn->cnx)
+        goto publish;
+    const ss_stream *selected = NULL;
+    const ss_stream *s = conn->streams;
+    for (unsigned visited = 0; s && visited < DMSG_STREAM_SCAN_LIMIT; ++visited, s = s->next) {
+        if (s->stage != 4 || s->fd < 0) continue;
+        struct sockaddr_in peer = {0};
+        socklen_t length = sizeof(peer);
+        if (!getpeername(s->fd, (struct sockaddr *)&peer, &length) &&
+            length == sizeof(peer) && peer.sin_family == AF_INET &&
+            peer.sin_addr.s_addr == htonl(INADDR_LOOPBACK) &&
+            ntohs(peer.sin_port) == (uint16_t)request) {
+            selected = s;
+            break;
+        }
+    }
+    if (!selected || selected->failed || !selected->connected || selected->id == UINT64_MAX ||
+        selected->out_off > selected->out_len) goto publish;
+    const picoquic_stream_head_t *qs = stream_find_readonly(conn->cnx, selected->id);
+    if (!qs || qs->is_closed || qs->is_discarded || qs->reset_requested || qs->reset_received ||
+        qs->stop_sending_requested || qs->stop_sending_received) goto publish;
+    uint64_t pending = selected->out_len - selected->out_off;
+    if (pending > qs->consumed_offset || qs->sent_offset > qs->maxdata_remote) goto publish;
+    value = (dmsg_stream_snapshot){
+        .generation = request >> 16, .schema_version = DMSG_STREAM_SCHEMA, .now_native_us = now,
+        .tx_submitted = qs->sent_offset, .rx_contiguous = qs->consumed_offset,
+        .rx_flushed = qs->consumed_offset - pending, .rx_pending = pending,
+        .stream_active = qs->is_active, .send_queue = qs->send_queue != NULL,
+        .failed = selected->failed, .local_fin = selected->local_fin, .remote_fin = selected->remote_fin,
+        .remote_stream_credit = qs->maxdata_remote - qs->sent_offset
+    };
+publish:
+    stream_store(c, request, &value);
 }
 int dmsg_bound(dmsg_control *c, int fd) {
     struct sockaddr_in a;

@@ -157,6 +157,7 @@ class CallClientGatesTest {
             .put("native_failed", native?.optBoolean("failed"))
             .put("last_progress_failure", native?.opt("last_progress_failure"))
             .put("native_transport", native?.optJSONObject("native_transport") ?: JSONObject.NULL)
+            .put("control_delivery", native?.optJSONObject("control_delivery") ?: JSONObject.NULL)
         if (native != null) {
             val progress = JSONObject()
             for (key in listOf("encoded_packets", "decoded_packets", "received_rtp_packets",

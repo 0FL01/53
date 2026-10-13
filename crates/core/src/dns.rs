@@ -2,11 +2,13 @@
 //! The public profile contains no invitation or credentials.
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use slipstream_sys::{Config, NativeClient, Status, TailAckEliciting, TransportSnapshot};
+use slipstream_sys::{
+    Config, NativeClient, Status, StreamSnapshot, TailAckEliciting, TransportSnapshot,
+};
 use std::{
     net::SocketAddr,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
     },
     thread::{self, JoinHandle},
@@ -115,6 +117,7 @@ struct Run {
     profile: Profile,
     state: Arc<Mutex<State>>,
     transport: Arc<Mutex<Option<ObservedTransport>>>,
+    stream: Arc<Mutex<Option<SelectedStream>>>,
     stop: Arc<AtomicBool>,
     worker: JoinHandle<()>,
 }
@@ -124,6 +127,110 @@ struct ObservedTransport {
     snapshot: TransportSnapshot,
     observed_at: Instant,
 }
+
+struct SelectedStream {
+    port: u16,
+    generation: u64,
+    observed: Option<(StreamSnapshot, Instant)>,
+}
+
+/// Private owner/run-scoped lease, not a port in diagnostic output.
+pub(crate) struct StreamSelection {
+    generation: u64,
+    slot: Arc<Mutex<Option<SelectedStream>>>,
+}
+impl StreamSelection {
+    pub(crate) fn evidence(&self) -> Option<serde_json::Value> {
+        let slot = self.slot.try_lock().ok()?;
+        let selected = slot.as_ref().filter(|s| s.generation == self.generation)?;
+        let (s, at) = selected.observed?;
+        if s.generation != self.generation {
+            return None;
+        }
+        Some(serde_json::json!({
+            "age_since_observed_ms": u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "publication_age_us": null,
+            "schema_version": s.schema_version,
+            "now_native_us": s.now_native_us,
+            "tx_submitted": s.tx_submitted,
+            "rx_contiguous": s.rx_contiguous,
+            "rx_flushed": s.rx_flushed,
+            "rx_pending": s.rx_pending,
+            "stream_active": s.stream_active,
+            "send_queue": s.send_queue,
+            "failed": s.failed,
+            "local_fin": s.local_fin,
+            "remote_fin": s.remote_fin,
+            "remote_stream_credit": s.remote_stream_credit,
+        }))
+    }
+}
+impl Drop for StreamSelection {
+    fn drop(&mut self) {
+        if let Ok(mut slot) = self.slot.lock() {
+            if slot
+                .as_ref()
+                .is_some_and(|s| s.generation == self.generation)
+            {
+                *slot = None;
+            }
+        }
+    }
+}
+
+pub(crate) fn select_stream(owner: &str, port: u16) -> Option<StreamSelection> {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let running = manager().try_lock().ok()?;
+    let run = running
+        .as_ref()
+        .filter(|r| r.owner == owner && !r.stop.load(Ordering::Acquire))?;
+    if port == 0 {
+        return None;
+    }
+    let generation = NEXT
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |g| {
+            (g < (1 << 48) - 1).then_some(g + 1)
+        })
+        .ok()?;
+    let mut slot = run.stream.lock().ok()?;
+    // A second owner cannot silently displace a surviving lane lease.
+    if slot.is_some() {
+        return None;
+    }
+    *slot = Some(SelectedStream {
+        port,
+        generation,
+        observed: None,
+    });
+    Some(StreamSelection {
+        generation,
+        slot: run.stream.clone(),
+    })
+}
+
+fn reset_stream_observation(slot: &Mutex<Option<SelectedStream>>) {
+    if let Ok(mut slot) = slot.lock() {
+        if let Some(selected) = slot.as_mut() {
+            selected.observed = None;
+        }
+    }
+}
+
+fn observe_stream(slot: &Mutex<Option<SelectedStream>>, native: &NativeClient) {
+    let request = slot
+        .lock()
+        .ok()
+        .and_then(|s| s.as_ref().map(|s| (s.port, s.generation)));
+    native.select_stream(request);
+    let snapshot = native.stream_snapshot();
+    if let Ok(mut slot) = slot.lock() {
+        if let Some(selected) = slot.as_mut() {
+            selected.observed = snapshot
+                .filter(|s| s.generation == selected.generation)
+                .map(|s| (s, Instant::now()));
+        }
+    }
+}
 static RUN: OnceLock<Mutex<Option<Run>>> = OnceLock::new();
 fn manager() -> &'static Mutex<Option<Run>> {
     RUN.get_or_init(|| Mutex::new(None))
@@ -131,6 +238,7 @@ fn manager() -> &'static Mutex<Option<Run>> {
 fn finish(run: Run) -> Result<(), &'static str> {
     run.stop.store(true, Ordering::Release);
     observe_transport(&run.transport, None);
+    reset_stream_observation(&run.stream);
     run.worker.join().map_err(|_| "dns supervisor panicked")
 }
 
@@ -266,9 +374,11 @@ fn start_with_fallback(
     }
     let state = Arc::new(Mutex::new(State::Connecting));
     let transport = Arc::new(Mutex::new(None));
+    let stream = Arc::new(Mutex::new(None));
     let stop = Arc::new(AtomicBool::new(false));
     let worker_state = state.clone();
     let worker_transport = transport.clone();
+    let worker_stream = stream.clone();
     let worker_stop = stop.clone();
     let config = profile.config();
     let worker = thread::Builder::new()
@@ -279,6 +389,7 @@ fn start_with_fallback(
                 fallback,
                 worker_state,
                 worker_transport,
+                worker_stream,
                 worker_stop,
             )
         })
@@ -288,6 +399,7 @@ fn start_with_fallback(
         profile: profile.clone(),
         state: state.clone(),
         transport,
+        stream,
         stop,
         worker,
     });
@@ -321,6 +433,7 @@ fn supervise(
     fallback: Vec<SocketAddr>,
     state: Arc<Mutex<State>>,
     transport: Arc<Mutex<Option<ObservedTransport>>>,
+    stream: Arc<Mutex<Option<SelectedStream>>>,
     stop: Arc<AtomicBool>,
 ) {
     let mut backup = primary.clone();
@@ -329,6 +442,7 @@ fn supervise(
     let mut delay = 1u32;
     while !stop.load(Ordering::Acquire) {
         observe_transport(&transport, None);
+        reset_stream_observation(&stream);
         publish(&state, State::Connecting);
         // Separate native runs: upstream probes every resolver in a successful
         // run as an additional QUIC path. Never append backup to the primary list.
@@ -356,9 +470,11 @@ fn supervise(
                 Status::Starting | Status::Listening(_) => (),
             }
             observe_transport(&transport, native.transport_snapshot());
+            observe_stream(&stream, &native);
             thread::sleep(Duration::from_millis(25));
         };
         observe_transport(&transport, None);
+        reset_stream_observation(&stream);
         // Join and release native lease before a subsequent attempt.
         if native.stop().is_err() {
             publish(&state, State::Failed(-1));
@@ -427,6 +543,57 @@ pub fn stop(owner: &str) -> Result<(), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stream_lease_is_generation_scoped_optional_and_contains_no_selector() {
+        let snapshot = StreamSnapshot {
+            generation: 7,
+            schema_version: 1,
+            now_native_us: 123,
+            tx_submitted: 144,
+            rx_contiguous: 200,
+            rx_flushed: 190,
+            rx_pending: 10,
+            stream_active: true,
+            send_queue: false,
+            failed: false,
+            local_fin: false,
+            remote_fin: false,
+            remote_stream_credit: 65536,
+        };
+        let slot = Arc::new(Mutex::new(Some(SelectedStream {
+            port: 32123,
+            generation: 7,
+            observed: Some((snapshot, Instant::now())),
+        })));
+        let lease = StreamSelection {
+            generation: 7,
+            slot: slot.clone(),
+        };
+        let evidence = lease.evidence().unwrap();
+        assert_eq!(evidence["tx_submitted"], 144);
+        assert!(evidence.get("port").is_none() && evidence.get("generation").is_none());
+        assert!(evidence["publication_age_us"].is_null());
+        let lock = slot.lock().unwrap();
+        assert!(
+            lease.evidence().is_none(),
+            "contention cannot reuse a previous copy"
+        );
+        drop(lock);
+        reset_stream_observation(&slot);
+        assert!(lease.evidence().is_none());
+        // A stale lease must neither read nor clear a replacement generation.
+        slot.lock().unwrap().as_mut().unwrap().generation = 8;
+        assert!(lease.evidence().is_none());
+        drop(lease);
+        assert_eq!(slot.lock().unwrap().as_ref().unwrap().generation, 8);
+        let current = StreamSelection {
+            generation: 8,
+            slot: slot.clone(),
+        };
+        drop(current);
+        assert!(slot.lock().unwrap().is_none());
+    }
 
     fn transport_fixture(now_native_us: u64) -> TransportSnapshot {
         TransportSnapshot {
