@@ -79,6 +79,7 @@ fn native_lifecycle_errors_cancel_races_and_resource_reclamation() {
         Status::Failed(4)
     );
     assert!(client.endpoint().is_none());
+    assert!(client.transport_snapshot().is_none());
     assert!(matches!(
         NativeClient::start(profile.clone()),
         Err(Error::AlreadyRunning)
@@ -86,6 +87,7 @@ fn native_lifecycle_errors_cancel_races_and_resource_reclamation() {
     // A late stop never rewrites a completed setup failure as Stopped.
     assert_eq!(client.stop().unwrap(), Status::Failed(4));
     assert_eq!(client.stop().unwrap(), Status::Failed(4));
+    assert!(client.transport_snapshot().is_none());
 
     let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
     let mut bad = profile.clone();
@@ -96,6 +98,7 @@ fn native_lifecycle_errors_cancel_races_and_resource_reclamation() {
         Status::Failed(5)
     );
     assert_eq!(client.stop().unwrap(), Status::Failed(5));
+    assert!(client.transport_snapshot().is_none());
     drop(occupied);
 
     let mut client = NativeClient::start(profile.clone()).unwrap();
@@ -105,11 +108,32 @@ fn native_lifecycle_errors_cancel_races_and_resource_reclamation() {
     };
     assert!(endpoint.ip().is_loopback());
     assert_ne!(endpoint.port(), 0);
+    // The existing before-select worker hook publishes even before Ready. A
+    // foreign reader only sees the numeric copy; the UDP sink never responds.
+    let capture_deadline = Instant::now() + Duration::from_secs(1);
+    let capture = loop {
+        if let Some(capture) = client.transport_snapshot() {
+            break capture;
+        }
+        assert!(
+            Instant::now() < capture_deadline,
+            "no native worker publication"
+        );
+        thread::sleep(Duration::from_millis(2));
+    };
+    assert_eq!(capture.schema_version, 1);
+    assert_eq!(capture.path_count, 1);
+    assert_eq!(capture.captured_path_count, 1);
+    assert!(!capture.multipath);
+    assert_eq!(capture.packets_received, 0);
+    assert_eq!(capture.latest_receive_age_us, None);
+    assert!(capture.paths[0].is_some());
     let local = TcpStream::connect(endpoint).unwrap();
     let started = Instant::now();
     // Cancellation after bind but before ready must not wait for the 3s
     // bootstrap timeout, require a signal, or mutate should_shutdown.
     assert_eq!(client.stop().unwrap(), Status::Stopped);
+    assert!(client.transport_snapshot().is_none());
     assert!(started.elapsed() < Duration::from_secs(1));
     drop(local);
     drop(TcpListener::bind(endpoint).expect("native listener closed after join"));
@@ -120,6 +144,7 @@ fn native_lifecycle_errors_cancel_races_and_resource_reclamation() {
         Status::Failed(1)
     );
     assert_eq!(client.stop().unwrap(), Status::Failed(1));
+    assert!(client.transport_snapshot().is_none());
 
     // Simultaneous starts retain their handles until all competitors finish.
     let barrier = Arc::new(Barrier::new(16));
@@ -172,6 +197,7 @@ fn native_lifecycle_errors_cancel_races_and_resource_reclamation() {
                     for _ in 0..100 {
                         client.request_stop();
                         let _ = client.status();
+                        let _ = client.transport_snapshot();
                     }
                 });
             }
@@ -180,6 +206,7 @@ fn native_lifecycle_errors_cancel_races_and_resource_reclamation() {
         max_stop = max_stop.max(start.elapsed());
         assert!(start.elapsed() < Duration::from_secs(1));
         assert!(client.endpoint().is_none());
+        assert!(client.transport_snapshot().is_none());
         assert_eq!(fd_count(), baseline_fds, "FD leak in cycle {i}");
     }
     // Linux task disappearance may lag pthread_join very briefly.

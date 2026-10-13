@@ -1,7 +1,7 @@
 # Managed Slipstream native boundary
 
 Builds the production C client from Git revision
-`9f24b74303dbe5d4c676b98abc4efe4414b4e8f6` (`fix/dns-prepared-send`), its pinned submodules and the
+`7d3c9dd76a38834b472a1c01b5cd2d160eb21b60` (`fix/dns-pto-ack-anchor`), its pinned submodules and the
 upstream-pinned picotls revision. OpenSSL is built from locked `openssl-src`
 3.5.4. Git archives, patches, fetched dependencies and binaries stay in Cargo's
 `OUT_DIR` under `target/`. The build never mutates the live submodule; approved
@@ -13,6 +13,9 @@ In-zone IN-class non-TXT probes return NOERROR/NODATA instead of denying the
 subtree used by descendant TXT traffic, preserving QName-minimization continuation.
 Successfully decoded TXT with no prepared reply also returns NOERROR/NODATA;
 transport silence does not change the existence of the same valid QName.
+Recovery anchors PTO to the last ACK-eliciting packet in its existing context;
+new ACK/POLL-only packets cannot postpone outstanding STREAM recovery. RTO,
+backoff, RACK, preemptive eligibility and application bounds are unchanged.
 Existing embedding,
 SPCDNS and opt-in TCP_NODELAY overlays remain separate; embedding hooks are
 conditional on `DMSG_EMBEDDED` and the TCP_NODELAY option remains default-OFF.
@@ -93,9 +96,9 @@ errors, late-stop failure preservation, 16 simultaneous starts, 64 restart/stop
 cycles, bound-port release, stable FD/task counts and unchanged SIGINT/SIGTERM
 handlers. Its public certificate and unread loopback UDP sink require no live
 deployment. The explicit `loopback.rs` gate is ignored in ordinary Cargo runs;
-the script runs it after all eight pinned Meson suites, including actual-loop
+the script runs it after all nine pinned Meson suites, including actual-loop
 prepared-packet submission, real ACK/Dcubic-credit, path-local ACK metadata and
-QName-minimization DNS regressions. It covers PEM/DER readiness,
+QName-minimization DNS and real PTO-anchor regressions. It covers PEM/DER readiness,
 wrong full-leaf rejection, eight exact raw streams and terminal established loss.
 Disposable native server fixtures receive only public test key/cert paths.
 

@@ -49,6 +49,112 @@ class JvmRenderMetadataCacheTest {
     private fun encode(command: CallProbePlaybackClock.Output) =
         """{"hardware_calibrated":${command.calibrated},"healthy":${command.healthy},"selected_rate":${command.rate},"sink_ppb":${command.sinkPpb},"hardware_rejection_mask":${command.rejectionMask},"relative_ppm":${command.relativePpm}}"""
 
+    private fun transportFixture(): MutableMap<String, Any?> {
+        val capture = linkedMapOf<String, Any?>("schema_version" to 1L, "connection_state" to 0xffff_ffffL,
+            "multipath" to false, "path_count" to 0xffff_ffffL, "captured_path_count" to 8L)
+        for (key in listOf("now_native_us", "packets_received", "data_sent", "data_received",
+            "latest_receive_age_us", "latest_progress_age_us")) capture[key] = Long.MAX_VALUE
+        capture["paths"] = MutableList(8) { slot ->
+            val path = linkedMapOf<String, Any?>("slot" to slot.toLong(), "validated" to false, "demoted" to false,
+                "pending_count" to 64L, "pending_truncated" to false, "tail_ack_eliciting" to false)
+            for (key in listOf("smoothed_rtt_us", "base_retransmit_timer_us", "consecutive_pto", "bytes_in_transit",
+                "cwin", "pacing_bytes_per_second", "send_mtu", "oldest_pending_age_us", "tail_pending_age_us",
+                "highest_ack_age_us", "last_packet_receive_age_us")) path[key] = Long.MAX_VALUE
+            path
+        }
+        return linkedMapOf("age_since_observed_ms" to Long.MAX_VALUE, "publication_age_us" to null,
+            "native_capture" to capture)
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun transportCapture(input: Map<String, Any?>) = input.getValue("native_capture") as MutableMap<String, Any?>
+
+    @Suppress("UNCHECKED_CAST")
+    private fun transportPaths(input: Map<String, Any?>) = transportCapture(input).getValue("paths") as MutableList<Any?>
+
+    @Suppress("UNCHECKED_CAST")
+    private fun transportPath(input: Map<String, Any?>) = transportPaths(input)[0] as MutableMap<String, Any?>
+
+    // Only this diagnostic's numeric/bool/null tree; no Android JSONObject stub or new dependency.
+    private fun encodeTransport(value: Any?): String = when (value) {
+        null -> "null"
+        is Long, is Boolean -> value.toString()
+        is Map<*, *> -> value.entries.joinToString(",", "{", "}") { "\"${it.key}\":${encodeTransport(it.value)}" }
+        is List<*> -> value.joinToString(",", "[", "]") { encodeTransport(it) }
+        else -> throw AssertionError("unexpected transport diagnostic type")
+    }
+
+    @Test fun nativeTransportIsAnAtomicAllowlistWithExactCountersAndUnknownFreshness() {
+        val input = transportFixture()
+        input["identity"] = "not forwarded"
+        transportCapture(input)["address"] = "not forwarded"
+        transportPath(input)["error"] = "not forwarded"
+        transportCapture(input)["captured_path_count"] = 1L
+        transportCapture(input)["latest_progress_age_us"] = null
+        transportPath(input)["oldest_pending_age_us"] = null
+        transportPath(input)["tail_ack_eliciting"] = null
+        for (slot in 1..7) transportPaths(input)[slot] = null
+        val clean = requireNotNull(CallProbeAudio.NativeTransportEvidence.sanitize(input))
+        assertEquals(setOf("age_since_observed_ms", "publication_age_us", "native_capture"), clean.keys)
+        assertEquals(Long.MAX_VALUE, clean["age_since_observed_ms"])
+        assertNull(clean["publication_age_us"])
+        val capture = clean.getValue("native_capture") as Map<*, *>
+        assertEquals(Long.MAX_VALUE, capture["now_native_us"])
+        assertEquals(0xffff_ffffL, capture["connection_state"])
+        assertFalse(capture.containsKey("address"))
+        assertTrue(capture.containsKey("latest_progress_age_us")); assertNull(capture["latest_progress_age_us"])
+        val paths = capture["paths"] as List<*>
+        assertEquals(8, paths.size)
+        assertTrue(paths.drop(1).all { it == null })
+        val path = paths[0] as Map<*, *>
+        assertEquals(64L, path["pending_count"])
+        assertNull(path["tail_ack_eliciting"])
+        assertFalse(path.containsKey("error"))
+        // The sanitized copy cannot be changed by a later native/fixture publication.
+        transportPath(input)["pending_count"] = 0L
+        assertEquals(64L, path["pending_count"])
+    }
+
+    @Test fun invalidOptionalNativeTransportYieldsNullIncludingRoundedUnsignedOverflow() {
+        assertNull(CallProbeAudio.NativeTransportEvidence.sanitize(null))
+        val mutations: List<(MutableMap<String, Any?>) -> Unit> = listOf(
+            { it["age_since_observed_ms"] = "123" },
+            { it["age_since_observed_ms"] = -1L },
+            { it["age_since_observed_ms"] = Long.MAX_VALUE.toDouble() }, // Parsed 2^63 is already lossy.
+            { it["age_since_observed_ms"] = java.math.BigInteger("18446744073709551615").toDouble() },
+            { it["publication_age_us"] = 0L },
+            { it.remove("publication_age_us") },
+            { transportCapture(it)["schema_version"] = 2L },
+            { transportCapture(it)["connection_state"] = 0x1_0000_0000L },
+            { transportCapture(it)["captured_path_count"] = 9L },
+            { transportCapture(it)["multipath"] = "true" },
+            { transportCapture(it).remove("latest_receive_age_us") },
+            { transportPaths(it).add(null) },
+            { transportPath(it)["slot"] = 1L },
+            { transportPath(it)["pending_count"] = 65L },
+            { transportPath(it)["smoothed_rtt_us"] = 1.5 },
+            { transportPath(it)["validated"] = 1L },
+            { transportPath(it)["tail_ack_eliciting"] = "false" },
+            { transportPath(it)["tail_pending_age_us"] = -1L })
+        for (mutate in mutations) {
+            val input = transportFixture()
+            mutate(input)
+            assertNull(CallProbeAudio.NativeTransportEvidence.sanitize(input))
+            assertNotNull(CallProbeAudio.NativeTransportEvidence.sanitize(transportFixture()))
+        }
+    }
+
+    @Test fun maximumNativeTransportContributionFitsAnEightKiBStructuredStatusBudget() {
+        val clean = requireNotNull(CallProbeAudio.NativeTransportEvidence.sanitize(transportFixture()))
+        val serialized = encodeTransport(mapOf("native_transport" to clean))
+        assertTrue(serialized.contains(Long.MAX_VALUE.toString()))
+        assertEquals(8, (clean.getValue("native_capture") as Map<*, *>)["paths"].let { (it as List<*>).size })
+        // All maximum accepted integer widths, eight fully populated paths, longest bool tokens.
+        // This measures the added member, not the rest of client_call_state or Android's parser.
+        assertTrue("native_transport bytes=${serialized.toByteArray(Charsets.UTF_8).size}",
+            serialized.toByteArray(Charsets.UTF_8).size < 8 * 1024)
+    }
+
     @Test fun twoHundredReadsOfTheSameReferenceParseAndSerializeOnceInsteadOfTwoHundredTimes() {
         val oldParser = Parser(definitions)
         val parser = Parser(definitions)

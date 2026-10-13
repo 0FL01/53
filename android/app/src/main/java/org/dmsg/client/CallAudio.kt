@@ -52,6 +52,100 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
             "tx_soft_deadline_packets", "stop_ms", "native_stop_ms", "source_route_gap_samples")
     }
 
+    /** Optional, all-or-null copy of one native capture; never a media validation failure.
+     * Observed age is only a lower bound: publication freshness and app/native clock mapping
+     * remain unknown. Android's JSON parser rounds u64 values above signed Long into Double;
+     * reject those rather than publishing a wrapped, clamped or rounded counter.
+     */
+    internal object NativeTransportEvidence {
+        private val captureCounters = listOf("now_native_us", "packets_received", "data_sent", "data_received")
+        private val captureAges = listOf("latest_receive_age_us", "latest_progress_age_us")
+        private val pathCounters = listOf("smoothed_rtt_us", "base_retransmit_timer_us", "consecutive_pto",
+            "bytes_in_transit", "cwin", "pacing_bytes_per_second", "send_mtu")
+        private val pathAges = listOf("oldest_pending_age_us", "tail_pending_age_us", "highest_ack_age_us",
+            "last_packet_receive_age_us")
+        private val transportFields = listOf("age_since_observed_ms", "publication_age_us", "native_capture")
+        private val captureFields = listOf("schema_version", "connection_state", "multipath", "path_count",
+            "captured_path_count", "paths") + captureCounters + captureAges
+        private val pathFields = listOf("slot", "validated", "demoted", "pending_count", "pending_truncated",
+            "tail_ack_eliciting") + pathCounters + pathAges
+
+        private fun fields(source: JSONObject, names: List<String>): MutableMap<String, Any?> =
+            names.associateWith { name -> source.get(name).let { if (it === JSONObject.NULL) null else it } }.toMutableMap()
+
+        fun fromNativeStats(source: JSONObject): JSONObject? {
+            return try {
+                val transport = source.optJSONObject("native_transport") ?: return null
+                val capture = transport.getJSONObject("native_capture")
+                val paths = capture.getJSONArray("paths")
+                require(paths.length() <= 8)
+                val input = fields(transport, transportFields)
+                val captured = fields(capture, captureFields)
+                captured["paths"] = List(paths.length()) { index ->
+                    if (paths.isNull(index)) null else fields(paths.getJSONObject(index), pathFields)
+                }
+                input["native_capture"] = captured
+                sanitize(input)?.let { JSONObject(it) }
+            } catch (_: Exception) { null }
+        }
+
+        private fun number(source: Map<*, *>, field: String, max: Long = Long.MAX_VALUE,
+            nullable: Boolean = false): Long? {
+            require(source.containsKey(field))
+            val value = source[field]
+            if (value == null && nullable) return null
+            // No coercion of strings, booleans, floating point or lossy unsigned JSON numbers.
+            require(value is Byte || value is Short || value is Int || value is Long)
+            return (value as Number).toLong().also { require(it in 0L..max) }
+        }
+
+        private fun boolean(source: Map<*, *>, field: String, nullable: Boolean = false): Boolean? {
+            require(source.containsKey(field))
+            val value = source[field]
+            if (value == null && nullable) return null
+            require(value is Boolean)
+            return value
+        }
+
+        /** Pure seam for schema/bounds checks; output has only allowlisted numbers, bools and nulls. */
+        fun sanitize(source: Map<*, *>?): Map<String, Any?>? {
+            return try {
+                if (source == null) return null
+                require(source.containsKey("publication_age_us") && source["publication_age_us"] == null)
+                val capture = source["native_capture"] as? Map<*, *> ?: return null
+                require(number(capture, "schema_version", 1) == 1L)
+                val clean = linkedMapOf<String, Any?>("age_since_observed_ms" to number(source, "age_since_observed_ms"),
+                    "publication_age_us" to null)
+                val captured = linkedMapOf<String, Any?>("schema_version" to 1L,
+                    "connection_state" to number(capture, "connection_state", 0xffff_ffffL),
+                    "multipath" to boolean(capture, "multipath"),
+                    "path_count" to number(capture, "path_count", 0xffff_ffffL),
+                    "captured_path_count" to number(capture, "captured_path_count", 8))
+                captureCounters.forEach { captured[it] = number(capture, it) }
+                captureAges.forEach { captured[it] = number(capture, it, nullable = true) }
+                val paths = capture["paths"] as? List<*> ?: return null
+                require(paths.size <= 8)
+                // Preserve null slots and their ordinals, including a padded eight-slot array.
+                captured["paths"] = paths.mapIndexed { index, value ->
+                    if (value == null) null else {
+                        val path = value as? Map<*, *> ?: return null
+                        require(number(path, "slot", 7) == index.toLong())
+                        val copied = linkedMapOf<String, Any?>("slot" to index.toLong(),
+                            "validated" to boolean(path, "validated"), "demoted" to boolean(path, "demoted"))
+                        pathCounters.forEach { copied[it] = number(path, it) }
+                        copied["pending_count"] = number(path, "pending_count", 64)
+                        copied["pending_truncated"] = boolean(path, "pending_truncated")
+                        pathAges.forEach { copied[it] = number(path, it, nullable = true) }
+                        copied["tail_ack_eliciting"] = boolean(path, "tail_ack_eliciting", nullable = true)
+                        copied
+                    }
+                }
+                clean["native_capture"] = captured
+                clean
+            } catch (_: Exception) { null }
+        }
+    }
+
     /** One renderer's read-only parse, keyed by the immutable owner's string identity. */
     internal class RenderMetadataCache(private val parse: (String) -> JSONObject = ::JSONObject) {
         private var lastRaw: String? = null
@@ -645,6 +739,7 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
             else -> if (error.matches(Regex("[A-Za-z0-9_ -]{0,120}"))) error else "native_diagnostic_redacted"
         }
         clean.put("error", safeError)
+        clean.put("native_transport", NativeTransportEvidence.fromNativeStats(source) ?: JSONObject.NULL)
         return clean.toString()
     }
 

@@ -96,6 +96,7 @@ class CallClientGatesTest {
     }
     @After fun retire() {
         try {
+            if (::facade.isInitialized) report("before_retire")
             instrumentation.runOnMainSync {
                 val state = CallUi.state.value
                 state.call?.let { DmsgService.callOwner()?.end(it.callId, state.epoch) }
@@ -132,6 +133,7 @@ class CallClientGatesTest {
         val value = JSONObject().put("waiting", label).put("phase", state.call?.phase?.name)
             .put("reason", state.call?.reason?.name).put("preparing", state.preparing)
             .put("tearing_down", state.tearingDown).put("listener", state.incomingAvailable)
+            .put("teardown_stage", DmsgService.callOwner()?.teardownStage)
             .put("telecom_ready", state.telecomReady).put("telecom_active", state.telecomActive)
             .put("audio_failure", state.audio?.failure).put("error_resource", state.errorRes)
             .put("endpoint_type", state.endpoint?.type).put("output_route_type", state.audio?.outputRouteType)
@@ -154,6 +156,7 @@ class CallClientGatesTest {
             .put("dns_status", runCatching { facade.dnsStatus() }.getOrNull())
             .put("native_failed", native?.optBoolean("failed"))
             .put("last_progress_failure", native?.opt("last_progress_failure"))
+            .put("native_transport", native?.optJSONObject("native_transport") ?: JSONObject.NULL)
         if (native != null) {
             val progress = JSONObject()
             for (key in listOf("encoded_packets", "decoded_packets", "received_rtp_packets",

@@ -12,18 +12,56 @@ pub(crate) struct Entry {
     owner: String,
     pub(crate) audio: AudioPort,
     stop: AtomicBool,
-    final_stats: Mutex<Option<Stats>>,
+    final_stats: Mutex<Option<Completed>>,
     joined: Condvar,
+}
+struct Completed {
+    stats: Stats,
+    native_transport: Option<serde_json::Value>,
 }
 impl Entry {
     pub(crate) fn stop_requested(&self) -> bool {
         self.stop.load(Ordering::Acquire)
     }
     pub(crate) fn complete(&self, stats: Stats) {
+        // The actor has joined media, but DNS/service teardown and JNI handle
+        // retirement may follow. Freeze even an unavailable observation here.
+        self.complete_with_transport(stats, crate::dns::transport_evidence(&self.owner));
+    }
+    fn complete_with_transport(&self, stats: Stats, native_transport: Option<serde_json::Value>) {
         if let Ok(mut final_stats) = self.final_stats.lock() {
-            *final_stats = Some(stats);
+            *final_stats = Some(Completed {
+                stats,
+                native_transport,
+            });
             self.joined.notify_all();
         }
+    }
+
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    fn native_transport(&self) -> Option<serde_json::Value> {
+        {
+            let final_stats = self.final_stats.try_lock().ok()?;
+            if let Some(completed) = final_stats.as_ref() {
+                return completed.native_transport.clone();
+            }
+        }
+        crate::dns::transport_evidence(&self.owner)
+    }
+
+    // Only the existing JNI JSON is extended; Stats and the host retirement
+    // contract stay unchanged. Also used by the pure retirement tests below.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub(crate) fn stats_json(&self, stats: &Stats) -> Result<String, String> {
+        let mut value = serde_json::to_value(stats).map_err(|_| "call stats unavailable")?;
+        value
+            .as_object_mut()
+            .ok_or("call stats unavailable")?
+            .insert(
+                "native_transport".into(),
+                self.native_transport().unwrap_or(serde_json::Value::Null),
+            );
+        serde_json::to_string(&value).map_err(|_| "call stats unavailable".into())
     }
 }
 struct Handles {
@@ -77,6 +115,7 @@ pub(crate) fn retire(id: i64) -> Result<Stats, String> {
     let stats = final_stats
         .as_ref()
         .ok_or("call retirement unavailable")?
+        .stats
         .clone();
     drop(final_stats);
     handles()
@@ -85,4 +124,57 @@ pub(crate) fn retire(id: i64) -> Result<Stats, String> {
         .entries
         .remove(&id);
     Ok(stats)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transport_evidence_final_json_survives_retirement_and_owner_reuse() {
+        let owner = "diagnostic-retirement-fixture";
+        let (port, _capture) = crate::live_media::session::new_port();
+        port.finish(Ok(()));
+        let (id, entry) = register(owner, port.audio()).unwrap();
+        let stats = port.snapshot();
+        let live: serde_json::Value =
+            serde_json::from_str(&entry.stats_json(&stats).unwrap()).unwrap();
+        assert!(live["native_transport"].is_null());
+        let final_evidence = serde_json::json!({
+            "publication_age_us": null,
+            "age_since_observed_ms": 7,
+            "native_capture": {"now_native_us": 41, "paths": []},
+        });
+        entry.complete_with_transport(stats, Some(final_evidence.clone()));
+        // This retained Arc is the same lifetime pattern as JNI stop: remove
+        // the handle first, then serialize its frozen completion observation.
+        let retained = get(id).unwrap();
+        let retired = retire(id).unwrap();
+        assert!(get(id).is_none());
+        assert!(retired.stopped);
+        let mut value: serde_json::Value =
+            serde_json::from_str(&retained.stats_json(&retired).unwrap()).unwrap();
+        assert_eq!(
+            value.as_object_mut().unwrap().remove("native_transport"),
+            Some(final_evidence)
+        );
+        assert_eq!(
+            value,
+            serde_json::to_value(&retired).unwrap(),
+            "only one JNI JSON key is added"
+        );
+
+        let (next_id, next_entry) = register(owner, port.audio()).unwrap();
+        next_entry.complete(retired.clone()); // No DNS run: freeze explicit null.
+        retire(next_id).unwrap();
+        let next: serde_json::Value =
+            serde_json::from_str(&next_entry.stats_json(&retired).unwrap()).unwrap();
+        assert!(next["native_transport"].is_null());
+        let previous: serde_json::Value =
+            serde_json::from_str(&retained.stats_json(&retired).unwrap()).unwrap();
+        assert_eq!(
+            previous["native_transport"]["native_capture"]["now_native_us"],
+            41
+        );
+    }
 }

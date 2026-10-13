@@ -2,7 +2,7 @@
 //! The public profile contains no invitation or credentials.
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use slipstream_sys::{Config, NativeClient, Status};
+use slipstream_sys::{Config, NativeClient, Status, TailAckEliciting, TransportSnapshot};
 use std::{
     net::SocketAddr,
     sync::{
@@ -114,8 +114,15 @@ struct Run {
     owner: String,
     profile: Profile,
     state: Arc<Mutex<State>>,
+    transport: Arc<Mutex<Option<ObservedTransport>>>,
     stop: Arc<AtomicBool>,
     worker: JoinHandle<()>,
+}
+
+#[derive(Clone, Copy)]
+struct ObservedTransport {
+    snapshot: TransportSnapshot,
+    observed_at: Instant,
 }
 static RUN: OnceLock<Mutex<Option<Run>>> = OnceLock::new();
 fn manager() -> &'static Mutex<Option<Run>> {
@@ -123,7 +130,109 @@ fn manager() -> &'static Mutex<Option<Run>> {
 }
 fn finish(run: Run) -> Result<(), &'static str> {
     run.stop.store(true, Ordering::Release);
+    observe_transport(&run.transport, None);
     run.worker.join().map_err(|_| "dns supervisor panicked")
+}
+
+// Only the existing supervisor reads NativeClient. Readers copy this one fixed
+// snapshot without waiting on a diagnostic lock or holding it during JSON work.
+fn observe_transport(
+    current: &Mutex<Option<ObservedTransport>>,
+    snapshot: Option<TransportSnapshot>,
+) {
+    if let Ok(mut current) = current.lock() {
+        *current = snapshot.map(|snapshot| ObservedTransport {
+            snapshot,
+            observed_at: Instant::now(),
+        });
+    }
+}
+
+fn transport_observation(
+    owner: &str,
+    run_owner: &str,
+    stopped: bool,
+    current: &Mutex<Option<ObservedTransport>>,
+) -> Option<ObservedTransport> {
+    if owner != run_owner || stopped {
+        return None;
+    }
+    *current.try_lock().ok()?
+}
+
+/// Owner-scoped numeric evidence, never a native handle or upstream read.
+/// `age_since_observed_ms` is only time since our latest successful copy: a
+/// lower bound on publication age, whose actual value/freshness stays unknown.
+/// All native clocks/ages below `native_capture` describe native capture time,
+/// with no app-clock mapping. Legacy packet context is duplicated across paths
+/// when `multipath` is false; pending counts must not be summed in that mode.
+pub(crate) fn transport_evidence(owner: &str) -> Option<serde_json::Value> {
+    let observed = {
+        let running = manager().try_lock().ok()?;
+        let run = running.as_ref()?;
+        transport_observation(
+            owner,
+            &run.owner,
+            run.stop.load(Ordering::Acquire),
+            &run.transport,
+        )?
+    };
+    Some(transport_json(observed))
+}
+
+fn transport_json(observed: ObservedTransport) -> serde_json::Value {
+    let snapshot = observed.snapshot;
+    let paths: Vec<_> = snapshot
+        .paths
+        .iter()
+        .take(usize::from(snapshot.captured_path_count))
+        .map(|path| {
+            path.map(|path| {
+                serde_json::json!({
+                    "slot": path.slot,
+                    "validated": path.validated,
+                    "demoted": path.demoted,
+                    "smoothed_rtt_us": path.smoothed_rtt_us,
+                    "base_retransmit_timer_us": path.base_retransmit_timer_us,
+                    "consecutive_pto": path.consecutive_pto,
+                    "bytes_in_transit": path.bytes_in_transit,
+                    "cwin": path.cwin,
+                    "pacing_bytes_per_second": path.pacing_bytes_per_second,
+                    "send_mtu": path.send_mtu,
+                    "pending_count": path.pending_count,
+                    "pending_truncated": path.pending_truncated,
+                    "oldest_pending_age_us": path.oldest_pending_age_us,
+                    "tail_pending_age_us": path.tail_pending_age_us,
+                    "highest_ack_age_us": path.highest_ack_age_us,
+                    "last_packet_receive_age_us": path.last_packet_receive_age_us,
+                    "tail_ack_eliciting": match path.tail_ack_eliciting {
+                        TailAckEliciting::Unknown => None,
+                        TailAckEliciting::No => Some(false),
+                        TailAckEliciting::Yes => Some(true),
+                    },
+                })
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "age_since_observed_ms": u64::try_from(observed.observed_at.elapsed().as_millis())
+            .unwrap_or(u64::MAX),
+        "publication_age_us": null,
+        "native_capture": {
+            "schema_version": snapshot.schema_version,
+            "connection_state": snapshot.connection_state,
+            "multipath": snapshot.multipath,
+            "path_count": snapshot.path_count,
+            "captured_path_count": snapshot.captured_path_count,
+            "now_native_us": snapshot.now_native_us,
+            "packets_received": snapshot.packets_received,
+            "data_sent": snapshot.data_sent,
+            "data_received": snapshot.data_received,
+            "latest_receive_age_us": snapshot.latest_receive_age_us,
+            "latest_progress_age_us": snapshot.latest_progress_age_us,
+            "paths": paths,
+        },
+    })
 }
 
 /// A different store cannot silently replace another running account's carrier.
@@ -156,18 +265,29 @@ fn start_with_fallback(
         finish(run)?;
     }
     let state = Arc::new(Mutex::new(State::Connecting));
+    let transport = Arc::new(Mutex::new(None));
     let stop = Arc::new(AtomicBool::new(false));
     let worker_state = state.clone();
+    let worker_transport = transport.clone();
     let worker_stop = stop.clone();
     let config = profile.config();
     let worker = thread::Builder::new()
         .name("dmsg-dns-supervisor".into())
-        .spawn(move || supervise(config, fallback, worker_state, worker_stop))
+        .spawn(move || {
+            supervise(
+                config,
+                fallback,
+                worker_state,
+                worker_transport,
+                worker_stop,
+            )
+        })
         .map_err(|_| "spawn dns supervisor")?;
     *running = Some(Run {
         owner: owner.into(),
         profile: profile.clone(),
         state: state.clone(),
+        transport,
         stop,
         worker,
     });
@@ -200,6 +320,7 @@ fn supervise(
     primary: Config,
     fallback: Vec<SocketAddr>,
     state: Arc<Mutex<State>>,
+    transport: Arc<Mutex<Option<ObservedTransport>>>,
     stop: Arc<AtomicBool>,
 ) {
     let mut backup = primary.clone();
@@ -207,6 +328,7 @@ fn supervise(
     let mut is_primary = true;
     let mut delay = 1u32;
     while !stop.load(Ordering::Acquire) {
+        observe_transport(&transport, None);
         publish(&state, State::Connecting);
         // Separate native runs: upstream probes every resolver in a successful
         // run as an additional QUIC path. Never append backup to the primary list.
@@ -233,8 +355,10 @@ fn supervise(
                 Status::Stopped => break Some(1),
                 Status::Starting | Status::Listening(_) => (),
             }
+            observe_transport(&transport, native.transport_snapshot());
             thread::sleep(Duration::from_millis(25));
         };
+        observe_transport(&transport, None);
         // Join and release native lease before a subsequent attempt.
         if native.stop().is_err() {
             publish(&state, State::Failed(-1));
@@ -262,6 +386,7 @@ fn supervise(
         delay = (delay * 2).min(60);
         is_primary = true;
     }
+    observe_transport(&transport, None);
     publish(&state, State::Stopped);
 }
 
@@ -302,6 +427,205 @@ pub fn stop(owner: &str) -> Result<(), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn transport_fixture(now_native_us: u64) -> TransportSnapshot {
+        TransportSnapshot {
+            schema_version: 1,
+            connection_state: u32::MAX,
+            multipath: false,
+            path_count: 9,
+            captured_path_count: 8,
+            now_native_us,
+            packets_received: u64::MAX,
+            data_sent: u64::MAX,
+            data_received: u64::MAX,
+            latest_receive_age_us: None,
+            latest_progress_age_us: None,
+            paths: std::array::from_fn(|slot| {
+                Some(slipstream_sys::TransportPathSnapshot {
+                    slot: slot as u8,
+                    validated: true,
+                    demoted: false,
+                    smoothed_rtt_us: u64::MAX,
+                    base_retransmit_timer_us: u64::MAX,
+                    consecutive_pto: u64::MAX,
+                    bytes_in_transit: u64::MAX,
+                    cwin: u64::MAX,
+                    pacing_bytes_per_second: u64::MAX,
+                    send_mtu: u64::MAX,
+                    pending_count: slipstream_sys::TRANSPORT_SNAPSHOT_SCAN_LIMIT,
+                    pending_truncated: true,
+                    oldest_pending_age_us: None,
+                    tail_pending_age_us: None,
+                    highest_ack_age_us: None,
+                    last_packet_receive_age_us: None,
+                    tail_ack_eliciting: TailAckEliciting::Unknown,
+                })
+            }),
+        }
+    }
+
+    #[test]
+    fn transport_evidence_current_owner_attempt_clearing_and_contention() {
+        let current = Mutex::new(None);
+        let read = |owner, stopped| transport_observation(owner, "owner", stopped, &current);
+        assert!(read("owner", false).is_none());
+        observe_transport(&current, Some(transport_fixture(11)));
+        assert!(read("another-owner", false).is_none());
+        assert!(read("owner", true).is_none());
+        assert_eq!(read("owner", false).unwrap().snapshot.now_native_us, 11);
+        {
+            let _guard = current.lock().unwrap();
+            assert!(read("owner", false).is_none(), "diagnostics must not wait");
+        }
+        // The same clearing operation is used for a None native read, attempt
+        // transitions and stop; none of them can fall back to the previous copy.
+        observe_transport(&current, None);
+        assert!(read("owner", false).is_none());
+        observe_transport(&current, Some(transport_fixture(99)));
+        assert_eq!(read("owner", false).unwrap().snapshot.now_native_us, 99);
+        observe_transport(&current, None);
+        assert!(read("owner", false).is_none());
+        assert!(transport_evidence("nonexistent-diagnostic-owner").is_none());
+    }
+
+    #[test]
+    fn transport_evidence_json_is_bounded_numeric_native_capture_schema() {
+        use serde_json::Value;
+        fn keys(value: &Value, expected: &[&str]) {
+            let actual: std::collections::BTreeSet<_> = value
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(actual, expected.iter().copied().collect());
+        }
+        fn numeric_only(value: &Value) {
+            match value {
+                Value::Null | Value::Bool(_) | Value::Number(_) => (),
+                Value::Array(values) => values.iter().for_each(numeric_only),
+                Value::Object(values) => values.values().for_each(numeric_only),
+                Value::String(_) => panic!("transport evidence must contain no string values"),
+            }
+        }
+        let observed_at = Instant::now() - Duration::from_millis(100);
+        let mut snapshot = transport_fixture(1);
+        snapshot.latest_receive_age_us = Some(23);
+        snapshot.paths[1].as_mut().unwrap().tail_ack_eliciting = TailAckEliciting::No;
+        snapshot.paths[2].as_mut().unwrap().tail_ack_eliciting = TailAckEliciting::Yes;
+        let value = transport_json(ObservedTransport {
+            snapshot,
+            observed_at,
+        });
+        keys(
+            &value,
+            &[
+                "age_since_observed_ms",
+                "publication_age_us",
+                "native_capture",
+            ],
+        );
+        assert!(value["age_since_observed_ms"].as_u64().unwrap() >= 100);
+        assert!(value["publication_age_us"].is_null());
+        let capture = &value["native_capture"];
+        keys(
+            capture,
+            &[
+                "schema_version",
+                "connection_state",
+                "multipath",
+                "path_count",
+                "captured_path_count",
+                "now_native_us",
+                "packets_received",
+                "data_sent",
+                "data_received",
+                "latest_receive_age_us",
+                "latest_progress_age_us",
+                "paths",
+            ],
+        );
+        // Core elapsed time is never added to a native clock or native age.
+        assert_eq!(capture["now_native_us"], 1);
+        assert_eq!(capture["latest_receive_age_us"], 23);
+        assert!(capture["latest_progress_age_us"].is_null());
+        assert_eq!(capture["path_count"], 9);
+        assert_eq!(capture["captured_path_count"], 8);
+        let paths = capture["paths"].as_array().unwrap();
+        assert_eq!(paths.len(), 8);
+        for (slot, path) in paths.iter().enumerate() {
+            keys(
+                path,
+                &[
+                    "slot",
+                    "validated",
+                    "demoted",
+                    "smoothed_rtt_us",
+                    "base_retransmit_timer_us",
+                    "consecutive_pto",
+                    "bytes_in_transit",
+                    "cwin",
+                    "pacing_bytes_per_second",
+                    "send_mtu",
+                    "pending_count",
+                    "pending_truncated",
+                    "oldest_pending_age_us",
+                    "tail_pending_age_us",
+                    "highest_ack_age_us",
+                    "last_packet_receive_age_us",
+                    "tail_ack_eliciting",
+                ],
+            );
+            assert_eq!(path["slot"], slot as u64);
+            assert_eq!(path["pending_count"], 64);
+            for age in [
+                "oldest_pending_age_us",
+                "tail_pending_age_us",
+                "highest_ack_age_us",
+                "last_packet_receive_age_us",
+            ] {
+                assert!(path[age].is_null());
+            }
+        }
+        assert!(paths[0]["tail_ack_eliciting"].is_null());
+        assert_eq!(paths[1]["tail_ack_eliciting"], false);
+        assert_eq!(paths[2]["tail_ack_eliciting"], true);
+        numeric_only(&value);
+        // Worst-width numeric values remain bounded, with no aggregate of the
+        // duplicated legacy packet contexts and no extra identifying fields.
+        snapshot.now_native_us = u64::MAX;
+        snapshot.latest_receive_age_us = Some(u64::MAX);
+        snapshot.latest_progress_age_us = Some(u64::MAX);
+        for path in snapshot.paths.iter_mut().flatten() {
+            path.oldest_pending_age_us = Some(u64::MAX);
+            path.tail_pending_age_us = Some(u64::MAX);
+            path.highest_ack_age_us = Some(u64::MAX);
+            path.last_packet_receive_age_us = Some(u64::MAX);
+        }
+        let maximal = transport_json(ObservedTransport {
+            snapshot,
+            observed_at,
+        });
+        assert!(serde_json::to_vec(&maximal).unwrap().len() < 8_192);
+        snapshot.paths[0] = None;
+        let absent = transport_json(ObservedTransport {
+            snapshot,
+            observed_at,
+        });
+        assert!(absent["native_capture"]["paths"][0].is_null());
+        snapshot.captured_path_count = 0;
+        snapshot.paths = [None; slipstream_sys::TRANSPORT_SNAPSHOT_MAX_PATHS];
+        let empty = transport_json(ObservedTransport {
+            snapshot,
+            observed_at,
+        });
+        assert!(empty["native_capture"]["paths"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+
     #[test]
     fn supervisor_single_owner_cancel_and_backoff_restart() {
         use std::net::UdpSocket;
@@ -320,6 +644,7 @@ mod tests {
             &start_with_fallback("test-owner", &profile, fallback.clone()).unwrap()
         ));
         assert!(start("different-owner", &profile).is_err());
+        assert!(transport_evidence("different-owner").is_none());
         let deadline = Instant::now() + Duration::from_secs(12);
         let mut backed_off = false;
         loop {
@@ -340,6 +665,7 @@ mod tests {
         stop("test-owner").unwrap();
         assert!(began.elapsed() < Duration::from_secs(1));
         assert_eq!(status("test-owner").unwrap(), State::Stopped);
+        assert!(transport_evidence("test-owner").is_none());
         let shared = start_with_fallback("test-owner", &profile, fallback).unwrap();
         stop("test-owner").unwrap();
         assert_eq!(*shared.lock().unwrap(), State::Stopped);

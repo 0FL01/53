@@ -94,6 +94,77 @@ pub enum Status {
     Failed(i32),
 }
 
+/// Fixed diagnostic bounds; this snapshot has no packet, address or CID identity.
+pub const TRANSPORT_SNAPSHOT_MAX_PATHS: usize = 8;
+pub const TRANSPORT_SNAPSHOT_SCAN_LIMIT: u64 = 64;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TailAckEliciting {
+    /// No non-trap tail, or the worker has not already classified its frames.
+    Unknown,
+    No,
+    Yes,
+}
+
+/// Immutable numeric copy from one native worker publication (private schema 1).
+/// Times are native microseconds, with no mapping to an app/sample clock. All
+/// absent, uninitialised and invalid-time ages are `None`, not zero. Connection
+/// receive/progress and highest-ACK times seeded at connection start stay unknown.
+/// Ages describe capture time, not read time: a stalled worker can leave an old
+/// publication. Publication age is unknown; there is no freshness guarantee.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TransportSnapshot {
+    pub schema_version: u32,
+    /// Numeric `picoquic_state_enum` from the pinned C transport.
+    pub connection_state: u32,
+    pub multipath: bool,
+    /// Actual native count, which may exceed the eight captured ordinal slots.
+    pub path_count: u32,
+    pub captured_path_count: u8,
+    /// Original native capture clock; do not subtract an app/sample timestamp.
+    pub now_native_us: u64,
+    pub packets_received: u64,
+    /// Native QUIC flow-control data counters, not DNS wire byte counters.
+    pub data_sent: u64,
+    pub data_received: u64,
+    pub latest_receive_age_us: Option<u64>,
+    pub latest_progress_age_us: Option<u64>,
+    /// `None` for uncaptured/absent slots. Ordinals can change between snapshots.
+    pub paths: [Option<TransportPathSnapshot>; TRANSPORT_SNAPSHOT_MAX_PATHS],
+}
+
+/// App packet context: per-path in multipath; otherwise the connection-wide
+/// application context is duplicated in EVERY path slot, without path filtering.
+/// Do not sum legacy pending counts or treat these context ages as path-specific.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TransportPathSnapshot {
+    /// Array ordinal only: never the native unique path ID.
+    pub slot: u8,
+    pub validated: bool,
+    pub demoted: bool,
+    /// Stored values, including native defaults; no RTT/pacing helper is invoked.
+    pub smoothed_rtt_us: u64,
+    /// Base timer, without exponential PTO backoff or deadline calculation.
+    pub base_retransmit_timer_us: u64,
+    pub consecutive_pto: u64,
+    pub bytes_in_transit: u64,
+    pub cwin: u64,
+    pub pacing_bytes_per_second: u64,
+    pub send_mtu: u64,
+    /// Counts non-traps in a backwards scan of at most 64 nodes INCLUDING traps.
+    /// ACK/POLL-only packets count; unsent ACK traps do not. Lower bound if truncated.
+    pub pending_count: u64,
+    pub pending_truncated: bool,
+    /// Unknown for an empty or truncated scan (not the oldest scanned prefix).
+    pub oldest_pending_age_us: Option<u64>,
+    /// Actual last non-trap; unknown if absent, invalid, or hidden behind >64 traps.
+    pub tail_pending_age_us: Option<u64>,
+    pub highest_ack_age_us: Option<u64>,
+    pub last_packet_receive_age_us: Option<u64>,
+    /// Cached classification of that tail, not a recomputed PTO anchor.
+    pub tail_ack_eliciting: TailAckEliciting,
+}
+
 #[derive(Debug)]
 pub enum Error {
     InvalidConfig(&'static str),
@@ -130,11 +201,129 @@ struct CConfig {
     idle_keepalive_ms: usize,
     listen_port: u16,
 }
+
+// Deliberately explicit C layout, all u64 words: 11 header + 8 * 18 path = 155.
+// This plain struct is a caller-owned copy; the shared C payload is ALL atomic.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct CTransportPath {
+    slot: u64,
+    present: u64,
+    validated: u64,
+    demoted: u64,
+    smoothed_rtt_us: u64,
+    base_retransmit_timer_us: u64,
+    consecutive_pto: u64,
+    bytes_in_transit: u64,
+    cwin: u64,
+    pacing_bytes_per_second: u64,
+    send_mtu: u64,
+    pending_count: u64,
+    pending_truncated: u64,
+    oldest_pending_age_us: u64,
+    tail_pending_age_us: u64,
+    highest_ack_age_us: u64,
+    last_packet_receive_age_us: u64,
+    tail_ack_eliciting: u64,
+}
+#[repr(C)]
+#[derive(Default)]
+struct CTransportSnapshot {
+    schema_version: u64,
+    connection_state: u64,
+    multipath: u64,
+    path_count: u64,
+    captured_path_count: u64,
+    now_native_us: u64,
+    packets_received: u64,
+    data_sent: u64,
+    data_received: u64,
+    latest_receive_age_us: u64,
+    latest_progress_age_us: u64,
+    paths: [CTransportPath; TRANSPORT_SNAPSHOT_MAX_PATHS],
+}
+const _: () = assert!(std::mem::size_of::<CTransportPath>() == 18 * 8);
+const _: () = assert!(std::mem::size_of::<CTransportSnapshot>() == 155 * 8);
+
+fn transport_bool(value: u64) -> Option<bool> {
+    match value {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    }
+}
+fn transport_age(value: u64) -> Option<u64> {
+    (value != u64::MAX).then_some(value)
+}
+impl CTransportSnapshot {
+    fn decode(self) -> Option<TransportSnapshot> {
+        if self.schema_version != 1
+            || self.captured_path_count != self.path_count.min(TRANSPORT_SNAPSHOT_MAX_PATHS as u64)
+        {
+            return None;
+        }
+        let mut paths = [None; TRANSPORT_SNAPSHOT_MAX_PATHS];
+        for (i, path) in self.paths[..self.captured_path_count as usize]
+            .iter()
+            .enumerate()
+        {
+            if path.slot != i as u64 || path.pending_count > TRANSPORT_SNAPSHOT_SCAN_LIMIT {
+                return None;
+            }
+            if !transport_bool(path.present)? {
+                continue;
+            }
+            paths[i] = Some(TransportPathSnapshot {
+                slot: i as u8,
+                validated: transport_bool(path.validated)?,
+                demoted: transport_bool(path.demoted)?,
+                smoothed_rtt_us: path.smoothed_rtt_us,
+                base_retransmit_timer_us: path.base_retransmit_timer_us,
+                consecutive_pto: path.consecutive_pto,
+                bytes_in_transit: path.bytes_in_transit,
+                cwin: path.cwin,
+                pacing_bytes_per_second: path.pacing_bytes_per_second,
+                send_mtu: path.send_mtu,
+                pending_count: path.pending_count,
+                pending_truncated: transport_bool(path.pending_truncated)?,
+                oldest_pending_age_us: transport_age(path.oldest_pending_age_us),
+                tail_pending_age_us: transport_age(path.tail_pending_age_us),
+                highest_ack_age_us: transport_age(path.highest_ack_age_us),
+                last_packet_receive_age_us: transport_age(path.last_packet_receive_age_us),
+                tail_ack_eliciting: match path.tail_ack_eliciting {
+                    0 => TailAckEliciting::Unknown,
+                    1 => TailAckEliciting::No,
+                    2 => TailAckEliciting::Yes,
+                    _ => return None,
+                },
+            });
+        }
+        Some(TransportSnapshot {
+            schema_version: 1,
+            connection_state: self.connection_state.try_into().ok()?,
+            multipath: transport_bool(self.multipath)?,
+            path_count: self.path_count.try_into().ok()?,
+            captured_path_count: self.captured_path_count as u8,
+            now_native_us: self.now_native_us,
+            packets_received: self.packets_received,
+            data_sent: self.data_sent,
+            data_received: self.data_received,
+            latest_receive_age_us: transport_age(self.latest_receive_age_us),
+            latest_progress_age_us: transport_age(self.latest_progress_age_us),
+            paths,
+        })
+    }
+}
 extern "C" {
     fn dmsg_control_new() -> *mut c_void;
     fn dmsg_control_free(control: *mut c_void);
     fn dmsg_control_stop(control: *mut c_void);
     fn dmsg_control_status(control: *mut c_void) -> u64;
+    fn dmsg_control_transport_snapshot(
+        control: *const c_void,
+        out: *mut CTransportSnapshot,
+        out_size: usize,
+    ) -> c_int;
     fn dmsg_native_run(control: *mut c_void, config: *const CConfig) -> c_int;
 }
 
@@ -198,6 +387,24 @@ impl NativeClient {
             4 => Status::Failed((value >> 24) as u32 as i32),
             _ => unreachable!("private native status ABI"),
         }
+    }
+    /// Latest coherent copy from the existing worker's before-select callback,
+    /// after service when ready. At most three native read attempts. `None`
+    /// before first publication, after native termination, on contention or an
+    /// invalid schema. Never returns a cached previous attempt as current.
+    /// A successful read can still be stale; ages are relative to `now_native_us`
+    /// at capture and publication age is unknown. A concurrent stop may race the
+    /// read; terminal publication invalidates the payload on the owning worker.
+    pub fn transport_snapshot(&self) -> Option<TransportSnapshot> {
+        let mut out = CTransportSnapshot::default();
+        let available = unsafe {
+            dmsg_control_transport_snapshot(
+                self.control.0.as_ptr(),
+                &mut out,
+                std::mem::size_of::<CTransportSnapshot>(),
+            )
+        };
+        (available == 1).then(|| out.decode()).flatten()
     }
     /// Bound address while listening/ready; this does not imply QUIC readiness.
     pub fn endpoint(&self) -> Option<SocketAddrV4> {
@@ -265,4 +472,241 @@ fn run(control: &Control, config: Config) {
     // All input allocations outlive this blocking call. No upstream pointer
     // escapes the worker; Rust owns reconnection by starting a subsequent run.
     unsafe { dmsg_native_run(control.0.as_ptr(), &native) };
+}
+
+#[cfg(test)]
+mod snapshot_decode_tests {
+    use super::*;
+
+    #[test]
+    fn fixed_layout_unknown_zero_and_invalid_schema() {
+        let mut raw = CTransportSnapshot {
+            schema_version: 1,
+            path_count: 1,
+            captured_path_count: 1,
+            latest_receive_age_us: u64::MAX,
+            latest_progress_age_us: 0,
+            ..Default::default()
+        };
+        raw.paths[0].present = 1;
+        raw.paths[0].oldest_pending_age_us = u64::MAX;
+        raw.paths[0].highest_ack_age_us = u64::MAX;
+        let value = raw.decode().unwrap();
+        assert_eq!(value.latest_receive_age_us, None);
+        assert_eq!(value.latest_progress_age_us, Some(0));
+        let path = value.paths[0].unwrap();
+        assert_eq!(path.oldest_pending_age_us, None);
+        assert_eq!(path.tail_pending_age_us, Some(0));
+        assert_eq!(path.highest_ack_age_us, None);
+        assert_eq!(path.tail_ack_eliciting, TailAckEliciting::Unknown);
+        assert!(value.paths[1..].iter().all(Option::is_none));
+        for count in [9, u64::MAX] {
+            assert!(CTransportSnapshot {
+                schema_version: 1,
+                path_count: count,
+                captured_path_count: count,
+                ..Default::default()
+            }
+            .decode()
+            .is_none());
+        }
+        assert!(CTransportSnapshot::default().decode().is_none());
+        assert!(CTransportSnapshot {
+            schema_version: 2,
+            ..Default::default()
+        }
+        .decode()
+        .is_none());
+    }
+
+    #[test]
+    fn real_c_control_unpublished_and_invalidated_are_unavailable() {
+        extern "C" {
+            fn dmsg_transport_publish(control: *mut c_void, cnx: *const c_void, now: u64);
+        }
+        let control = Control(NonNull::new(unsafe { dmsg_control_new() }).unwrap());
+        let mut out = CTransportSnapshot::default();
+        let read = |out: &mut CTransportSnapshot| unsafe {
+            dmsg_control_transport_snapshot(control.0.as_ptr(), out, std::mem::size_of_val(out))
+        };
+        assert_eq!(read(&mut out), 0);
+        unsafe { dmsg_transport_publish(control.0.as_ptr(), std::ptr::null(), 0) };
+        out.schema_version = 99;
+        assert_eq!(read(&mut out), 0);
+        assert_eq!(out.schema_version, 0);
+    }
+
+    #[test]
+    fn malformed_bounds_flags_and_tail_class_are_rejected() {
+        let valid = || {
+            let mut raw = CTransportSnapshot {
+                schema_version: 1,
+                path_count: 1,
+                captured_path_count: 1,
+                ..Default::default()
+            };
+            raw.paths[0].present = 1;
+            raw
+        };
+        for field in 0..8 {
+            let mut raw = valid();
+            match field {
+                0 => raw.multipath = 2,
+                1 => raw.paths[0].present = 2,
+                2 => raw.paths[0].validated = 2,
+                3 => raw.paths[0].demoted = 2,
+                4 => raw.paths[0].pending_truncated = 2,
+                5 => raw.paths[0].tail_ack_eliciting = 3,
+                6 => raw.paths[0].pending_count = 65,
+                7 => raw.paths[0].slot = 1,
+                _ => unreachable!(),
+            }
+            assert!(raw.decode().is_none(), "malformed field {field}");
+        }
+        let mut raw = valid();
+        raw.path_count = u64::MAX;
+        raw.captured_path_count = 8;
+        for (i, path) in raw.paths.iter_mut().enumerate() {
+            path.slot = i as u64;
+        }
+        assert!(raw.decode().is_none());
+        let mut raw = valid();
+        raw.connection_state = u64::MAX;
+        assert!(raw.decode().is_none());
+    }
+
+    /// The disposable TU includes the production publisher/reader verbatim and
+    /// uses real staged, pinned Picoquic structures, not Rust-only decode mocks.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn real_c_publisher_layout_bounds_read_only_and_concurrent_payload() {
+        use std::{path::PathBuf, process::Command};
+        let package = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let out = PathBuf::from(env!("OUT_DIR"));
+        let source = out.join("source");
+        assert!(std::fs::read_to_string(source.join(".embedding-stamp"))
+            .unwrap()
+            .starts_with("7d3c9dd76a38834b472a1c01b5cd2d160eb21b60"));
+        for sanitize in [false, true] {
+            let binary = out.join(format!("transport-snapshot-{sanitize}"));
+            let mut compile = Command::new(if sanitize { "clang" } else { "cc" });
+            compile.env_clear();
+            for key in ["HOME", "PATH", "TMPDIR"] {
+                if let Some(value) = std::env::var_os(key) {
+                    compile.env(key, value);
+                }
+            }
+            compile.args([
+                "-std=gnu11",
+                "-O1",
+                "-g",
+                "-UNDEBUG",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-ffunction-sections",
+                "-fdata-sections",
+                "-Wl,--gc-sections",
+                "-pthread",
+            ]);
+            if sanitize {
+                compile.args([
+                    "-fsanitize=address,undefined",
+                    "-fno-sanitize-recover=all",
+                    "-fno-omit-frame-pointer",
+                ]);
+            }
+            for include in [
+                package.join("native"),
+                source.join("include"),
+                source.join("subprojects/picoquic/picoquic"),
+                out.join("build/_deps/picotls-src/include"),
+                out.join("openssl-build/install/include"),
+            ] {
+                compile.arg("-I").arg(include);
+            }
+            let output = compile
+                .arg(package.join("native/tests/transport_snapshot.c"))
+                .arg("-o")
+                .arg(&binary)
+                .output()
+                .expect("host C compiler");
+            assert!(
+                output.status.success(),
+                "C fixture compile sanitize={sanitize}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let output = Command::new(&binary).env_clear().output().unwrap();
+            assert!(
+                output.status.success(),
+                "C fixture sanitize={sanitize}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            eprintln!(
+                "sanitize={sanitize}: {}",
+                String::from_utf8_lossy(&output.stdout).trim()
+            );
+
+            // Decode the actual C publication through the private Rust repr(C)
+            // layout too, checking every field rather than just ABI byte size.
+            let output = Command::new(&binary)
+                .arg("--dto")
+                .env_clear()
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "C DTO: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                output.stdout.len(),
+                std::mem::size_of::<CTransportSnapshot>()
+            );
+            let raw = unsafe {
+                std::ptr::read_unaligned(output.stdout.as_ptr().cast::<CTransportSnapshot>())
+            };
+            let value = raw.decode().unwrap();
+            assert_eq!(value.schema_version, 1);
+            assert_eq!(value.connection_state, 14); // pinned picoquic_state_ready
+            assert!(value.multipath);
+            assert_eq!(value.path_count, 8);
+            assert_eq!(value.captured_path_count, 8);
+            assert_eq!(value.now_native_us, 1042);
+            assert_eq!(value.packets_received, 43);
+            assert_eq!(value.data_sent, 44);
+            assert_eq!(value.data_received, 45);
+            assert_eq!(value.latest_receive_age_us, Some(1040));
+            assert_eq!(value.latest_progress_age_us, Some(1039));
+            for (i, path) in value.paths.into_iter().enumerate() {
+                let i = i as u64;
+                assert_eq!(
+                    path.unwrap(),
+                    TransportPathSnapshot {
+                        slot: i as u8,
+                        validated: i % 2 == 0,
+                        demoted: i % 2 != 0,
+                        smoothed_rtt_us: 142 + i,
+                        base_retransmit_timer_us: 242 + i,
+                        consecutive_pto: 342 + i,
+                        bytes_in_transit: 442 + i,
+                        cwin: 542 + i,
+                        pacing_bytes_per_second: 642 + i,
+                        send_mtu: 742 + i,
+                        pending_count: 2,
+                        pending_truncated: false,
+                        oldest_pending_age_us: Some(1039 - i),
+                        tail_pending_age_us: Some(1038 - i),
+                        highest_ack_age_us: Some(1032 - i),
+                        last_packet_receive_age_us: Some(1022 - i),
+                        tail_ack_eliciting: if i % 2 == 0 {
+                            TailAckEliciting::Yes
+                        } else {
+                            TailAckEliciting::No
+                        },
+                    }
+                );
+            }
+        }
+    }
 }

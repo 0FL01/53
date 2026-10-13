@@ -75,6 +75,7 @@ internal class CallSessionOwner(private val context: Context,
     private var notesJoined = false
     private var noteJoin: Job? = null
     private var teardown: Job? = null
+    @Volatile var teardownStage = "idle"; private set
     private var proximity: PowerManager.WakeLock? = null
     private var closed = false
     private var uiState = CallUiState()
@@ -370,6 +371,7 @@ internal class CallSessionOwner(private val context: Context,
         val cancelPreparing = state.preparing && call?.busy() != true
         val handleToRetire = negotiatedHandle
         guard.beginTeardown()
+        teardownStage = "guard_set"
         afterActor = null
         audio?.requestStop("call_ended")
         // Dial can be admitted before its first callback. Cancel its generation
@@ -380,6 +382,7 @@ internal class CallSessionOwner(private val context: Context,
         update(state.copy(preparing = false, incomingAvailable = false, endedAt = SystemClock.elapsedRealtime()))
         teardown = scope.launch {
             try {
+                teardownStage = "audio_join_enter"
                 noteJoin?.join()
                 val physical = audio
                 withContext(Dispatchers.IO) {
@@ -394,11 +397,15 @@ internal class CallSessionOwner(private val context: Context,
                     CallEndReason.REMOTE_ENDED -> DisconnectCause.REMOTE
                     else -> DisconnectCause.LOCAL
                 }
+                teardownStage = "disconnect_enter"
                 telecom?.disconnect(DisconnectCause(cause))
+                teardownStage = "disconnect_return"
                 // Core-Telecom 1.0.1 leaves its endpoint/mute channels open on
                 // normal disconnect. Stop collectors without cancelling addCall's cleanup.
                 telecom?.coroutineContext?.cancelChildren()
+                teardownStage = "telecom_join_enter"
                 telecomJob?.join()
+                teardownStage = "telecom_join_return"
             } finally {
                 telecom = null; telecomJob = null; audio = null; platform = null; negotiatedHandle = 0L; dialingPeer = null
                 localMute = false; platformMute = false; accepted = false; systemAnswered = false; activationPending = false
@@ -407,6 +414,7 @@ internal class CallSessionOwner(private val context: Context,
                     telecomActive = false, telecomReady = false, muted = false, endpoint = null, endpoints = emptyList()))
                 releaseReservation()
                 if (!wantedListener || closed) shutdownActor()
+                teardownStage = "idle"
                 idle()
             }
         }

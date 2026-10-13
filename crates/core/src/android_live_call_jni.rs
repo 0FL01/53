@@ -8,9 +8,8 @@ use jni::{
 use std::time::Instant;
 use zeroize::Zeroize;
 
-fn json(env: &mut JNIEnv<'_>, value: Result<crate::live_media::Stats, String>) -> jstring {
-    match value.and_then(|s| serde_json::to_string(&s).map_err(|_| "call stats unavailable".into()))
-    {
+fn json(env: &mut JNIEnv<'_>, value: Result<String, String>) -> jstring {
+    match value {
         Ok(value) => env
             .new_string(value)
             .map(|s| s.into_raw())
@@ -154,8 +153,8 @@ pub extern "system" fn Java_org_dmsg_client_CallMediaJni_stats(
     json(
         &mut env,
         handles::get(handle)
-            .map(|e| e.audio.snapshot())
-            .ok_or_else(|| "retired call handle".into()),
+            .ok_or_else(|| "retired call handle".into())
+            .and_then(|e| e.stats_json(&e.audio.snapshot())),
     )
 }
 #[no_mangle]
@@ -164,5 +163,10 @@ pub extern "system" fn Java_org_dmsg_client_CallMediaJni_stop(
     _object: JObject<'_>,
     handle: jlong,
 ) -> jstring {
-    json(&mut env, handles::retire(handle))
+    // Retain the Entry through removal so its completion-time evidence survives
+    // both DNS teardown and handle retirement.
+    let value = handles::get(handle)
+        .ok_or_else(|| "retired call handle".into())
+        .and_then(|entry| handles::retire(handle).and_then(|stats| entry.stats_json(&stats)));
+    json(&mut env, value)
 }

@@ -278,6 +278,44 @@ class VoiceDnsGatesTest {
         assertManualProfile(f, auth())
     }
 
+    /** Pair a replacement phone without rereading credentials or resetting either account. */
+    @Test fun acceptPeerOnExistingDnsAccount() {
+        assertTrue("existing native account required", Core.dbFile(app).isFile)
+        val f = Core.facade(app)
+        assertTrue(f.isReady())
+        val own = f.account()
+        assertTrue(own.authenticated)
+        assertNotNull("existing pinned server profile required", f.dnsProfile())
+        val qr = read("gate-voice-peer.qr").trim()
+        var stage = "validate_peer"
+        try {
+            val cid = f.contactQrId(qr)
+            assertNotEquals(own.contactId, cid)
+            stage = "reconnect"
+            assertTrue("actual DNS reconnect required", f.reconnect() > 0)
+            stage = "import_peer"
+            f.inviteQr(qr)
+            stage = "sync_peer"
+            assertTrue("actual contact synchronization required", f.reconnect() > 0)
+            assertEquals(ContactCta.Chat, contactCta(f.get(cid)))
+            stage = "fetch_peer"
+            f.fetch()
+            assertEquals("account identity must remain unchanged", own.contactId, f.account().contactId)
+            write("gate-voice-phone.qr", f.myQr())
+            write("gate-voice-account.json", JSONObject().put("ownCid", own.contactId).put("registered", true))
+            write("gate-voice-peer.cid", cid)
+            write("gate-voice-peer.json", envelope(f, cid).put("accepted", true))
+            write("gate-call-client.json", JSONObject().put("peerCid", cid))
+        } catch (error: DmsgError) {
+            instrumentation.sendStatus(0, Bundle().apply {
+                putString("remote_pair_failure", JSONObject().put("stage", stage)
+                    .put("error_kind", error.kind.name)
+                    .put("dns_status", runCatching { f.dnsStatus() }.getOrNull()).toString())
+            })
+            throw error
+        } finally { f.dnsStop() }
+    }
+
     @Test fun recordAndSendTwoVoicesThroughUi() {
         val f = preset(); val cid = peer(f)
         assertTrue("fresh peer history required; never duplicate a previous send", rows(f, cid).isEmpty())

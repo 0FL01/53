@@ -24,8 +24,17 @@ diff --git a/src/slipstream_client_runtime.c b/src/slipstream_client_runtime.c
      if (should_shutdown) return -1;
 +#endif
 @@ -76,1 +90,6 @@
-     if (!c->ready) return 0;
+-    if (!c->ready) return 0;
++    if (!c->ready) {
 +#ifdef DMSG_EMBEDDED
++        dmsg_transport_publish(r->control, c->cnx, now);
++#endif
++        return 0;
++    }
+@@ -92,1 +111,6 @@
+     (void)ss_conn_poll_budget(c, 0, now);
++#ifdef DMSG_EMBEDDED
++    dmsg_transport_publish(r->control, c->cnx, now);
 +    uint64_t snapshot = atomic_load_explicit(&r->control->snapshot, memory_order_relaxed);
 +    dmsg_publish(r->control, DMSG_READY, (uint16_t)(snapshot >> 8), 0);
 +#endif
