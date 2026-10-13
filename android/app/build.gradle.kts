@@ -71,8 +71,8 @@ android {
         applicationId = "org.dmsg.client"
         minSdk = 26
         targetSdk = 37
-        versionCode = 3
-        versionName = "0.5.0-53"
+        versionCode = 4
+        versionName = "0.5.1-53"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk { abiFilters += "arm64-v8a" }
         // Budgets (ARCH/WORK_PLAN M4): release APK <= 25 MiB, idle PSS <= 100 MiB.

@@ -161,9 +161,15 @@ class CallProbePlaybackClockTest {
         assertFalse(stalled.healthy)
         assertEquals(4L, stalled.rejectionMask)
         assertFalse("a stationary hardware position is not a backwards clock", clock.backwards)
-        clock.observe(320_160, 20_200_000_001, 20_200_000_001, 16_000, 0)
-        clock.observe(320_000, 20_300_000_001, 20_300_000_001, 16_000, 0)
+        clock.observe(320_160, 20_200_000_001, 20_200_000_001, 16_000, 0, 320_320)
+        clock.observe(320_000, 20_300_000_001, 20_300_000_001, 16_000, 0, 320_480)
         assertTrue("a real reversal must still fail closed", clock.backwards)
+        val rejected = clock.choose(20_300_000_001, 48_000, 1_000_000_000, true)
+        assertFalse(rejected.healthy)
+        assertEquals(CallProbePlaybackClock.BackwardSample(320_160, 320_000, 100_000_000,
+            320_320, 320_480, 16_000, 0), rejected.backwardSample)
+        clock.resetHardwareCalibration()
+        assertNull(clock.choose(20_300_000_001, 48_000, 1_000_000_000, true).backwardSample)
     }
 
     @Test fun relativeHardwareSkewIsCorrectedAndUnsupportedRatesAreExplicit() {

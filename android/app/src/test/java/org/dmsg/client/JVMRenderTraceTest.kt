@@ -3,6 +3,7 @@ import org.dmsg.client.CallAudio as CallProbeAudio
 
 import org.junit.Assert.*
 import org.junit.Test
+import java.io.IOException
 
 class JVMRenderTraceTest {
     private fun expiry(discarded: Long = 160) = CallProbeAudio.RenderExpiry("queued", -250L,
@@ -399,5 +400,175 @@ class JVMRenderTraceTest {
             assertEquals(1, trace.cycleMinus1.writeAccepted)
             assertConservation(trace.cycleMinus1)
         }
+    }
+
+    private class SchedstatReader(var raw: String? = "100 200 3\n") {
+        var lengthOverride: Int? = null
+        var error: Exception? = null
+        var reads = 0
+        var buffer: ByteArray? = null
+            private set
+
+        fun read(bytes: ByteArray): Int {
+            assertEquals(64, bytes.size)
+            buffer?.let { assertSame(it, bytes) }
+            assertTrue("buffer must be wiped before reuse", bytes.all { it == 0.toByte() })
+            buffer = bytes; reads++
+            bytes.fill(90) // Verify the entire buffer is wiped, including bytes beyond returned length.
+            val payload = raw?.toByteArray(Charsets.UTF_8)
+            payload?.copyInto(bytes, endIndex = minOf(payload.size, bytes.size))
+            error?.let { throw it }
+            return lengthOverride ?: payload?.size ?: -1
+        }
+
+        fun assertWiped() = assertTrue(buffer!!.all { it == 0.toByte() })
+    }
+
+    private fun assertUnknown(value: CallProbeAudio.SlowWriteDiagnostic) {
+        assertFalse(value.schedstatKnown)
+        assertNull(value.cpuDeltaNs)
+        assertNull(value.runnableDelayDeltaNs)
+        assertNull(value.timeSlicesDelta)
+        assertEquals(40_000_000L, value.writeWallNs)
+        assertEquals(160, value.requestedSamples)
+        assertEquals(160, value.acceptedSamples)
+    }
+
+    @Test fun schedstatAcceptsExactlyThreeNonnegativeLongsAndReusesOneFullyWipedBuffer() {
+        val reader = SchedstatReader()
+        val probe = CallProbeAudio.SlowWriteProbe(reader::read) { 0L }
+        val valid = listOf("0 0 0", " 001\t002 003\r\n",
+            "${Long.MAX_VALUE} ${Long.MAX_VALUE} ${Long.MAX_VALUE}\n")
+        repeat(100) { index ->
+            reader.raw = valid[index % valid.size]
+            probe.beforeWrite(); reader.assertWiped()
+            probe.afterWrite(40_000_000, 160, 160); reader.assertWiped()
+            val value = probe.latest!!
+            assertTrue(value.schedstatKnown)
+            assertEquals(0L, value.cpuDeltaNs)
+            assertEquals(0L, value.runnableDelayDeltaNs)
+            assertEquals(0L, value.timeSlicesDelta)
+        }
+        assertEquals(200, reader.reads)
+    }
+
+    @Test fun malformedOverflowAndUnboundedSchedstatAreUnknownOnEitherSideAndAlwaysWiped() {
+        val invalid = listOf(null, "", " \n", "1 2", "1 2 3 4", "1 2 3 extra", "-1 2 3", "1 -2 3",
+            "1 2 -3", "+1 2 3", "1 2 3.0", "1 2 3\u0000", "1 2 ٣", "1x 2 3",
+            "9223372036854775808 2 3", "1 9223372036854775808 3", "1 2 9223372036854775808",
+            "1 2 3" + " ".repeat(59), "1 2 3" + " ".repeat(60))
+        for (raw in invalid) for (badBefore in listOf(true, false)) {
+            val reader = SchedstatReader(if (badBefore) raw else "100 200 3\n")
+            val probe = CallProbeAudio.SlowWriteProbe(reader::read) { 0L }
+            probe.beforeWrite(); reader.assertWiped()
+            reader.raw = if (badBefore) "200 300 4\n" else raw
+            probe.afterWrite(40_000_000, 160, 160); reader.assertWiped()
+            assertUnknown(probe.latest!!)
+            assertEquals("after-read must run even if before-read was unknown", 2, reader.reads)
+        }
+        for (length in listOf(-2, -1, 0, 64, 65, Int.MAX_VALUE)) {
+            val reader = SchedstatReader().apply { lengthOverride = length }
+            val probe = CallProbeAudio.SlowWriteProbe(reader::read) { 0L }
+            probe.beforeWrite(); reader.assertWiped()
+            probe.afterWrite(40_000_000, 160, 160); reader.assertWiped()
+            assertUnknown(probe.latest!!)
+        }
+    }
+
+    @Test fun deniedOrFailedReadsDoNotThrowAndDoNotReusePreviousKnownSamples() {
+        for (error in listOf(SecurityException("denied"), IOException("unavailable"))) {
+            for (badBefore in listOf(true, false)) {
+                val reader = SchedstatReader()
+                val probe = CallProbeAudio.SlowWriteProbe(reader::read) { 0L }
+                probe.beforeWrite(); reader.raw = "200 300 4\n"
+                probe.afterWrite(40_000_000, 160, 160)
+                assertTrue(probe.latest!!.schedstatKnown)
+                reader.error = if (badBefore) error else null
+                probe.beforeWrite(); reader.assertWiped()
+                reader.error = if (badBefore) null else error
+                probe.afterWrite(40_000_000, 160, 160); reader.assertWiped()
+                assertUnknown(probe.latest!!)
+                reader.error = null; reader.raw = "1 2 3\n"
+                probe.beforeWrite(); reader.raw = "4 6 8\n"
+                probe.afterWrite(40_000_000, 160, 160)
+                assertEquals(3L, probe.latest!!.cpuDeltaNs)
+                assertEquals(4L, probe.latest!!.runnableDelayDeltaNs)
+                assertEquals(5L, probe.latest!!.timeSlicesDelta)
+            }
+        }
+    }
+
+    @Test fun anyNonmonotoneSchedstatFieldMakesTheEntirePairUnknown() {
+        for (after in listOf("99 201 4", "101 199 4", "101 201 2")) {
+            val reader = SchedstatReader()
+            val probe = CallProbeAudio.SlowWriteProbe(reader::read) { 0L }
+            probe.beforeWrite(); reader.raw = after
+            probe.afterWrite(40_000_000, 160, 160)
+            assertUnknown(probe.latest!!)
+            reader.assertWiped()
+        }
+    }
+
+    @Test fun writeWallExcludesBothReadCostsButSchedstatDeltasCoverTheWiderBracket() {
+        var time = 1_000_000_000L
+        val order = mutableListOf<String>()
+        val reader = SchedstatReader("1000000 2000000 3")
+        val probe = CallProbeAudio.SlowWriteProbe(read = { bytes ->
+            order += "read"
+            val length = reader.read(bytes)
+            time += if (reader.reads == 1) 7_000_000 else 11_000_000
+            length
+        }, nanoTime = { order += "probe-clock"; time })
+        probe.beforeWrite()
+        order += "write-start"
+        val writeStart = time
+        order += "write:160:160" // Same nonblocking write/request/acceptance, not an AudioTrack JVM stub.
+        time += 105_148_000
+        val wallNs = time - writeStart
+        order += "write-end"
+        reader.raw = "108000000 22000000 5" // CPU delta can include proc overhead; do not clamp it to wall.
+        probe.afterWrite(wallNs, 160, 160)
+        val value = probe.latest!!
+        assertEquals(listOf("probe-clock", "read", "probe-clock", "write-start", "write:160:160",
+            "write-end", "probe-clock", "read", "probe-clock"), order)
+        assertEquals(105_148_000L, value.writeWallNs)
+        assertEquals(18_000_000L, value.schedstatReadOverheadNs)
+        assertEquals(123_148_000L, time - 1_000_000_000L)
+        assertTrue(value.schedstatKnown)
+        assertEquals(107_000_000L, value.cpuDeltaNs)
+        assertEquals(20_000_000L, value.runnableDelayDeltaNs)
+        assertEquals(2L, value.timeSlicesDelta)
+        reader.assertWiped()
+    }
+
+    @Test fun onlySlowWritesReplaceImmutableSnapshotDiagnosticIncludingPartialZeroAndErrorAcceptance() {
+        val reader = SchedstatReader()
+        val probe = CallProbeAudio.SlowWriteProbe(reader::read) { 0L }
+        assertNull(snapshot(null).lastSlowWriteDiagnostic) // Trailing default preserves existing constructors.
+        probe.beforeWrite(); probe.afterWrite(39_999_999, 160, 160)
+        assertNull(probe.latest)
+        probe.beforeWrite(); probe.afterWrite(40_000_000, 160, 80)
+        val first = probe.latest!!
+        val frozen = snapshot(null).copy(lastSlowWriteDiagnostic = first)
+        for (accepted in listOf(160, 0, -6)) {
+            probe.beforeWrite(); probe.afterWrite(1, 160, accepted)
+            assertSame(first, probe.latest)
+        }
+        for (accepted in listOf(0, -6, 160)) {
+            probe.beforeWrite(); probe.afterWrite(40_000_001, 160, accepted)
+            assertEquals(accepted, probe.latest!!.acceptedSamples)
+            assertNotSame(first, probe.latest)
+            assertSame(first, frozen.lastSlowWriteDiagnostic)
+            assertEquals(80, frozen.lastSlowWriteDiagnostic!!.acceptedSamples)
+        }
+        assertSame(first, frozen.copy(phase = "failed").lastSlowWriteDiagnostic)
+        // The typed publication carries only numbers/nulls and the requested known flag, no raw proc/identity/clock.
+        val fields = first.javaClass.declaredFields.filterNot { it.isSynthetic }
+        assertEquals(setOf("writeWallNs", "requestedSamples", "acceptedSamples", "cpuDeltaNs", "runnableDelayDeltaNs",
+            "schedstatKnown", "timeSlicesDelta", "schedstatReadOverheadNs"), fields.map { it.name }.toSet())
+        assertTrue(fields.all { it.type in listOf(java.lang.Long.TYPE, java.lang.Integer.TYPE,
+            java.lang.Long::class.java, java.lang.Boolean.TYPE) })
+        assertEquals(16, reader.reads)
+        reader.assertWiped()
     }
 }

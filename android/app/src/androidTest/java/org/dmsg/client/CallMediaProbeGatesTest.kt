@@ -146,7 +146,9 @@ class CallMediaProbeGatesTest {
         assertTrue("local actuator/expiry diagnostic interval is 8..16 seconds", seconds in 8..16)
         val speaker = arguments.getString(CallProbeActivity.EXTRA_LOUDSPEAKER) ?: "false"
         assertTrue("probe_loudspeaker must be true or false", speaker in listOf("true", "false"))
-        runAudio(gate(), null, seconds * 1_000L, exerciseRate = true, loudspeaker = speaker == "true")
+        val exerciseRate = arguments.getString("probe_local_exercise_rate") ?: "true"
+        assertTrue("probe_local_exercise_rate must be true or false", exerciseRate in listOf("true", "false"))
+        runAudio(gate(), null, seconds * 1_000L, exerciseRate = exerciseRate == "true", loudspeaker = speaker == "true")
     }
 
     /** Sequential input counters only. The operator's external speech stimulus is not generated here. */

@@ -70,6 +70,22 @@ pub extern "system" fn Java_org_dmsg_client_CallMediaJni_push(
     u8::from(accepted)
 }
 #[no_mangle]
+pub extern "system" fn Java_org_dmsg_client_CallMediaJni_sourceRouteChanged(
+    mut env: JNIEnv<'_>,
+    _object: JObject<'_>,
+    handle: jlong,
+    published_ns: jlong,
+) -> jboolean {
+    let Some(entry) = handles::get(handle) else {
+        return 0;
+    };
+    let observed_ns = env
+        .call_static_method("java/lang/System", "nanoTime", "()J", &[])
+        .and_then(|v| v.j())
+        .unwrap_or(-1);
+    u8::from(entry.audio.source_route_changed(published_ns, observed_ns))
+}
+#[no_mangle]
 pub extern "system" fn Java_org_dmsg_client_CallMediaJni_pull(
     env: JNIEnv<'_>,
     _object: JObject<'_>,

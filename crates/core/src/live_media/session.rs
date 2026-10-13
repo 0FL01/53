@@ -34,6 +34,14 @@ const KNOWN_PACKET_COMPUTE: Duration = Duration::from_millis(20);
 const SAMPLE_NS: u64 = 1_000_000_000 / 16_000;
 // Application backlog above the frozen observed initial hardware-age floor.
 const CAPTURE_MAX_AGE: Duration = Duration::from_millis(40);
+// Same explicit Telecom transition allowance as the platform route owner.
+#[cfg(any(target_os = "android", test))]
+const CAPTURE_ROUTE_WINDOW_NS: i64 = 3_000_000_000;
+#[cfg(any(target_os = "android", test))]
+const CAPTURE_ROUTE_BATCH_NS: i64 = 10_000_000;
+// Bound pairwise hardware timestamp quantization, not buffering or age.
+#[cfg(any(target_os = "android", test))]
+const CAPTURE_ROUTE_ROUNDING_NS: i64 = 2_000_000;
 // Inclusive upper bounds in microseconds; the final bin is unbounded.
 const TIMING_BOUNDS_US: [u64; 7] = [1_000, 2_000, 5_000, 10_000, 20_000, 40_000, 80_000];
 
@@ -180,7 +188,14 @@ pub struct Stats {
     pub last_prepared_feedback_terminal: Option<u64>,
     /// APP terminal tagged on the last received Noise Commit; not write/remote receipt progress.
     pub last_committed_feedback_terminal: Option<u64>,
+    /// Clear fixed-profile SRTCP index; diagnostic correlation, never credit or identity.
+    pub last_prepared_feedback_srtcp_index: Option<u32>,
+    pub last_committed_feedback_srtcp_index: Option<u32>,
+    pub last_authenticated_feedback_srtcp_index: Option<u32>,
     pub capture_gap_batches: u64,
+    /// Confidently missing complete 10ms capture batches at an explicit route;
+    /// included in dropped_capture, never in measured/captured hardware frames.
+    pub source_route_gap_samples: u64,
     /// Oldest batch sample age at JNI/dequeue; host synthetic pushes aren't hardware evidence.
     pub max_capture_age_us: u64,
     /// Minimum of the initial 20 valid full batches, not proven intrinsic/acoustic latency.
@@ -262,7 +277,11 @@ impl Default for Stats {
             last_validated_peer_media_index: None,
             last_prepared_feedback_terminal: None,
             last_committed_feedback_terminal: None,
+            last_prepared_feedback_srtcp_index: None,
+            last_committed_feedback_srtcp_index: None,
+            last_authenticated_feedback_srtcp_index: None,
             capture_gap_batches: 0,
+            source_route_gap_samples: 0,
             max_capture_age_us: 0,
             initial_capture_age_floor_us: 0,
             max_additional_capture_age_us: 0,
@@ -338,8 +357,26 @@ pub(crate) struct Captured {
     // Absolute physical age at handoff stays separate from application admission.
     hardware_age: Option<Duration>,
     capture_clock: Option<CaptureClockSpan>,
+    // Persistent on every physical batch, including after a ring-full drop.
+    source_generation: Option<u64>,
 }
 impl Captured {
+    fn observe_source_clock(&self, clock: &mut LocalClock) {
+        if let Some(generation) = self.source_generation {
+            clock.reset_hardware_calibration(generation);
+        }
+        if let Some(at) = self.source_time() {
+            clock.observe(
+                self.position,
+                at,
+                self.capture_clock.map(|span| Rate {
+                    ticks: span.frames * 3,
+                    ns: span.elapsed_ns,
+                }),
+            );
+        }
+    }
+
     fn source_time(&self) -> Option<Instant> {
         // SR pairs the actual sample clock, not the application-age epoch above
         // its observed floor. Native observation-bracket uncertainty remains.
@@ -443,14 +480,19 @@ struct RecordClock {
     latest: Option<(i64, i64)>,
     initial_batches: u8,
     initial_floor: Option<Duration>,
+    latest_observed_ns: Option<i64>,
+    route_started_ns: Option<i64>,
+    route_until_ns: Option<i64>,
+    source_offset: u64,
+    source_generation: u64,
 }
 
 #[cfg(any(target_os = "android", test))]
 impl RecordClock {
     fn span(&self) -> Option<CaptureClockSpan> {
-        // The first validated hardware observation is immutable, including
-        // across rejected PCM and native/transport stalls. No admission time
-        // or producer-handoff interval contributes to this measured ratio.
+        // Only an explicitly marked, qualified physical gap starts a new span.
+        // Rejected PCM, queue stalls and inferred missing samples never enter
+        // this measured ratio; the frozen age floor is independently immutable.
         let (first_frame, first_ns) = self.first?;
         let (frame, ns) = self.latest?;
         if frame <= first_frame || ns <= first_ns {
@@ -475,9 +517,21 @@ impl RecordClock {
         timestamp: CaptureTimestamp,
         position: u64,
         samples: usize,
-    ) -> Option<(Duration, Option<Duration>)> {
+    ) -> Option<(Duration, Option<Duration>, u64)> {
         let age = timestamp.age(position, samples, self.latest)?;
+        let missing = self.route_gap(&timestamp)?;
+        let offset = self.source_offset.checked_add(missing)?;
+        position.checked_add(offset)?.checked_add(samples as u64)?;
+        if missing != 0 {
+            // Check the source ratchets before committing any new clock point.
+            let generation = self.source_generation.checked_add(1)?;
+            self.source_offset = offset;
+            self.source_generation = generation;
+            self.first = Some((timestamp.frame_position, timestamp.nano_time));
+            self.route_until_ns = None; // One discontinuity per explicit event.
+        }
         self.latest = Some((timestamp.frame_position, timestamp.nano_time));
+        self.latest_observed_ns = Some(timestamp.observed_ns);
         self.first
             .get_or_insert((timestamp.frame_position, timestamp.nano_time));
         // Even observation 20 is startup loss. PCM admission begins with the
@@ -487,7 +541,72 @@ impl RecordClock {
             self.initial_floor = Some(self.initial_floor.map_or(age, |floor| floor.min(age)));
             self.initial_batches += 1;
         }
-        Some((age, floor))
+        Some((age, floor, missing))
+    }
+
+    fn route_changed(&mut self, published_ns: i64, observed_ns: i64) -> bool {
+        if published_ns <= 0
+            || observed_ns < published_ns
+            || observed_ns - published_ns > CAPTURE_ROUTE_WINDOW_NS
+            || self
+                .route_started_ns
+                .is_some_and(|last| published_ns <= last)
+        {
+            return false;
+        }
+        let Some(until) = published_ns.checked_add(CAPTURE_ROUTE_WINDOW_NS) else {
+            return false;
+        };
+        self.route_started_ns = Some(published_ns);
+        self.route_until_ns = Some(until);
+        true
+    }
+
+    fn route_gap(&mut self, timestamp: &CaptureTimestamp) -> Option<u64> {
+        let Some(until) = self.route_until_ns else {
+            return Some(0); // Unmarked input retains its original semantics.
+        };
+        if timestamp.observed_ns > until {
+            self.route_until_ns = None;
+            return Some(0);
+        }
+        let started = self.route_started_ns?;
+        let Some((frame, ns)) = self.latest else {
+            return Some(0);
+        };
+        if timestamp.observed_ns < started || timestamp.frame_position == frame {
+            return Some(0); // Publication may precede the actual HW switch.
+        }
+        let frames = timestamp.frame_position - frame; // age() checked monotonicity.
+        let elapsed = timestamp.nano_time - ns;
+        let measured_ns = frames.checked_mul(SAMPLE_NS as i64)?;
+        // age() validates each point's freshness at its own observation. A
+        // fresh pre-pause point may precede publication by the whole pause;
+        // event distance is not the hardware timestamp's observation age.
+        // Keep the original bounded pair and observation-consistency guards.
+        if elapsed > CAPTURE_ROUTE_WINDOW_NS
+            || measured_ns > CAPTURE_ROUTE_WINDOW_NS
+            || (timestamp.observed_ns - self.latest_observed_ns? - elapsed).abs()
+                > CAPTURE_MAX_AGE.as_nanos() as i64
+        {
+            return None;
+        }
+        // ±500ppm is ordinary measured drift, never source loss. Use the slow
+        // edge's exact bound, plus <=2ms pairwise timestamp quantization.
+        let rounding = CAPTURE_ROUTE_ROUNDING_NS + (measured_ns + 1998) / 1999;
+        let excess = elapsed - measured_ns;
+        if excess.abs() <= rounding {
+            return Some(0); // Keep the marker for a later real discontinuity.
+        }
+        if excess < 0 {
+            return None;
+        }
+        // Only complete missing capture batches supported even at the lower
+        // uncertainty bound advance source time. Do not round up to codec
+        // frames or turn the residual into measured hardware frames/frequency.
+        // The existing assembler discards PCM to regain its 640-sample grid.
+        let batches = (excess - rounding) / CAPTURE_ROUTE_BATCH_NS;
+        u64::try_from(batches).ok()?.checked_mul(160)
     }
 }
 
@@ -751,7 +870,20 @@ impl AudioPort {
             .position
             .fetch_add(pcm.len() as u64, Ordering::Relaxed);
         let now = Instant::now();
-        self.push_at(pcm, position, now, now, None, None)
+        self.push_at(pcm, position, now, now, None, None, None)
+    }
+
+    /// Capture worker serializes this command with physical PCM pushes. The
+    /// Java publication time bounds the existing 3s allowance, not JNI delay.
+    #[cfg(any(target_os = "android", test))]
+    pub(crate) fn source_route_changed(&self, published_ns: i64, observed_ns: i64) -> bool {
+        !self.port.closed.load(Ordering::Relaxed)
+            && self
+                .port
+                .record_clock
+                .lock()
+                .expect("probe capture clock owner")
+                .route_changed(published_ns, observed_ns)
     }
 
     #[cfg(any(target_os = "android", test))]
@@ -792,14 +924,20 @@ impl AudioPort {
             .port
             .position
             .fetch_add(pcm.len() as u64, Ordering::Relaxed);
-        let (observation, frozen_floor, capture_clock) = {
+        let (observation, frozen_floor, capture_clock, source_offset, source_generation) = {
             let mut clock = self
                 .port
                 .record_clock
                 .lock()
                 .expect("probe capture clock owner");
             let observation = clock.observe(timestamp, position, pcm.len());
-            (observation, clock.frozen_floor(), clock.span())
+            (
+                observation,
+                clock.frozen_floor(),
+                clock.span(),
+                clock.source_offset,
+                clock.source_generation,
+            )
         };
         if let Some(floor) = frozen_floor {
             self.port.stats(|stats| {
@@ -807,7 +945,7 @@ impl AudioPort {
                 stats.initial_capture_age_floor_us = floor.as_micros() as u64;
             });
         }
-        let Some((age, floor)) = observation else {
+        let Some((age, floor, missing)) = observation else {
             self.port.stats(|stats| {
                 stats.capture_age_unavailable_batches += 1;
                 stats.dropped_capture += pcm.len() as u64;
@@ -815,6 +953,8 @@ impl AudioPort {
             return false;
         };
         self.port.stats(|stats| {
+            stats.source_route_gap_samples += missing;
+            stats.dropped_capture += missing;
             stats.max_capture_age_us = stats.max_capture_age_us.max(age.as_micros() as u64);
         });
         let Some(floor) = floor else {
@@ -842,7 +982,15 @@ impl AudioPort {
             });
             return false;
         };
-        self.push_at(pcm, position, at, pushed_at, Some(age), capture_clock)
+        self.push_at(
+            pcm,
+            position + source_offset,
+            at,
+            pushed_at,
+            Some(age),
+            capture_clock,
+            Some(source_generation),
+        )
     }
 
     fn push_at(
@@ -853,6 +1001,7 @@ impl AudioPort {
         pushed_at: Instant,
         hardware_age: Option<Duration>,
         capture_clock: Option<CaptureClockSpan>,
+        source_generation: Option<u64>,
     ) -> bool {
         let mut chunk = Captured {
             pcm: [0; 160],
@@ -862,6 +1011,7 @@ impl AudioPort {
             pushed_at,
             hardware_age,
             capture_clock,
+            source_generation,
         };
         chunk.pcm[..pcm.len()].copy_from_slice(pcm);
         if self.port.input.try_send(chunk).is_err() {
@@ -1051,6 +1201,7 @@ impl Port {
             pushed_at,
             hardware_age: None,
             capture_clock: None,
+            source_generation: None,
         };
         if self.input.try_send(chunk).is_err() {
             self.stats(|stats| stats.dropped_capture += 160);
@@ -1070,7 +1221,18 @@ struct PendingCommit {
 struct PendingControlCommit {
     // Snapshot the submitted APP terminal, never the newer receive frontier.
     terminal: Option<u64>,
+    srtcp_index: Option<u32>,
     receipt: oneshot::Receiver<Commit>,
+}
+
+// AES_CM_128_HMAC_SHA1_80 without MKI: clear index precedes the 10-byte tag.
+// Parsing this field is not authentication and never affects packet admission.
+fn srtcp_index(cipher: &[u8]) -> Option<u32> {
+    if cipher.len() < 8 + 4 + 10 {
+        return None;
+    }
+    let start = cipher.len() - 14;
+    Some(u32::from_be_bytes(cipher[start..start + 4].try_into().ok()?) & 0x7fff_ffff)
 }
 
 impl PendingControlCommit {
@@ -1081,6 +1243,7 @@ impl PendingControlCommit {
         deadline: Instant,
         port: &Port,
     ) -> Result<Self, String> {
+        let srtcp_index = srtcp_index(&payload);
         let (committed, receipt) = oneshot::channel();
         outgoing
             .try_send(SendRequest {
@@ -1090,8 +1253,15 @@ impl PendingControlCommit {
                 committed: Some(committed),
             })
             .map_err(|_| "probe control admission failed")?;
-        port.stats(|stats| stats.last_prepared_feedback_terminal = terminal);
-        Ok(Self { terminal, receipt })
+        port.stats(|stats| {
+            stats.last_prepared_feedback_terminal = terminal;
+            stats.last_prepared_feedback_srtcp_index = srtcp_index;
+        });
+        Ok(Self {
+            terminal,
+            srtcp_index,
+            receipt,
+        })
     }
 }
 
@@ -1105,6 +1275,7 @@ fn reap_control_commits(
                 port.stats(|stats| {
                     stats.tx_bytes += framed_bytes as u64;
                     stats.last_committed_feedback_terminal = pending.terminal;
+                    stats.last_committed_feedback_srtcp_index = pending.srtcp_index;
                 });
                 commits.pop_front();
             }
@@ -2162,6 +2333,7 @@ fn receive_control(
     port.stats(|stats| {
         stats.ready = true;
         stats.rx_bytes += (cipher.len() + packet::FRAMING_BYTES) as u64;
+        stats.last_authenticated_feedback_srtcp_index = srtcp_index(&cipher);
     });
     sent.last_control = Some(AuthenticatedControl {
         terminal: remote.terminal,
@@ -2655,9 +2827,7 @@ async fn endpoint_run(
             // leave subsequent PCM in the ring while its source slot is owned.
             captured = input.recv(), if capture.can_ingest(profile, flight.as_ref(), &admission, &media.outgoing, commits.len()) => {
                 let Some(captured) = captured else { break Err("probe capture owner closed".into()); };
-                if let Some(source_at) = captured.source_time() {
-                    local_clock.observe(captured.position, source_at, captured.capture_clock.map(|span| Rate { ticks: span.frames * 3, ns: span.elapsed_ns }));
-                }
+                captured.observe_source_clock(&mut local_clock);
                 capture.ingest(captured, ready, Instant::now(), profile);
             }
             scheduled = timer.tick() => {
@@ -3069,6 +3239,10 @@ mod tests {
         assert_eq!(turn.ledger.bytes(), 2736);
         assert_eq!(turn.port.snapshot().terminal_feedback, 1);
         assert_eq!(turn.port.snapshot().max_feedback_cycle_ms, 721);
+        assert_eq!(
+            turn.port.snapshot().last_authenticated_feedback_srtcp_index,
+            Some(1)
+        );
         assert_eq!(turn.port.snapshot().rx_bytes, 132);
         assert_eq!(turn.ledger.bytes() + waiting.bytes(), 2880);
         assert_eq!(
@@ -4998,6 +5172,7 @@ mod tests {
                     pushed_at: Instant::now(),
                     hardware_age: None,
                     capture_clock: None,
+                    source_generation: None,
                 };
                 captured
                     .pcm
@@ -5035,6 +5210,7 @@ mod tests {
                     pushed_at: Instant::now(),
                     hardware_age: None,
                     capture_clock: None,
+                    source_generation: None,
                 })
                 .unwrap_or_else(|_| sent_all = false);
         }
@@ -5179,6 +5355,7 @@ mod tests {
                                 ns / 10_000_000 * 160,
                                 now,
                                 now,
+                                None,
                                 None,
                                 None
                             ));
@@ -6225,7 +6402,7 @@ mod tests {
                         wake = true;
                     }
                     if ns == capture_phase_ns + batch * 10_000_000 {
-                        assert!(audio.push_at(&[1; 160], batch * 160, now, now, None, None));
+                        assert!(audio.push_at(&[1; 160], batch * 160, now, now, None, None, None));
                         batch += 1;
                         wake = true;
                     }
@@ -6702,6 +6879,7 @@ mod tests {
                         pushed_at: at(50 + batch * 10),
                         hardware_age: None,
                         capture_clock: None,
+                        source_generation: None,
                     },
                     true,
                     at(50 + batch * 10),
@@ -6757,6 +6935,7 @@ mod tests {
                         pushed_at: at(90 + batch * 10),
                         hardware_age: None,
                         capture_clock: None,
+                        source_generation: None,
                     })
                     .unwrap();
             }
@@ -7138,6 +7317,9 @@ mod tests {
             "last_validated_peer_media_index",
             "last_prepared_feedback_terminal",
             "last_committed_feedback_terminal",
+            "last_prepared_feedback_srtcp_index",
+            "last_committed_feedback_srtcp_index",
+            "last_authenticated_feedback_srtcp_index",
         ];
         let old = test_port();
         let initial = serde_json::to_value(old.snapshot()).unwrap();
@@ -7148,9 +7330,12 @@ mod tests {
             stats.last_validated_peer_media_index = Some(65_537);
             stats.last_prepared_feedback_terminal = Some(65_536);
             stats.last_committed_feedback_terminal = Some(65_535);
+            stats.last_prepared_feedback_srtcp_index = Some(3);
+            stats.last_committed_feedback_srtcp_index = Some(2);
+            stats.last_authenticated_feedback_srtcp_index = Some(1);
         });
         let populated = serde_json::to_value(old.snapshot()).unwrap();
-        for (field, index) in fields.into_iter().zip([65_537u64, 65_536, 65_535]) {
+        for (field, index) in fields.into_iter().zip([65_537u64, 65_536, 65_535, 3, 2, 1]) {
             assert_eq!(populated[field].as_u64(), Some(index));
         }
         // Each fresh generation owns a new Port with Stats::default(); retiring
@@ -7176,6 +7361,9 @@ mod tests {
                 .protect_rtcp(&turn.compound(first_terminal))
                 .unwrap();
             let second_cipher = turn.sender.protect_rtcp(&turn.compound(Some(11))).unwrap();
+            let first_index = srtcp_index(&first_cipher).unwrap();
+            let second_index = srtcp_index(&second_cipher).unwrap();
+            assert_ne!(first_index, second_index);
             let port = &turn.port;
             // Constructing/protecting either compound is not lane preparation.
             assert_eq!(port.snapshot().last_prepared_feedback_terminal, None);
@@ -7192,6 +7380,10 @@ mod tests {
                 .unwrap(),
             );
             assert_eq!(outgoing.capacity(), 0);
+            assert_eq!(
+                port.snapshot().last_prepared_feedback_srtcp_index,
+                Some(first_index)
+            );
             assert_eq!(
                 port.snapshot().last_prepared_feedback_terminal,
                 first_terminal
@@ -7210,6 +7402,10 @@ mod tests {
             assert_eq!(commits.len(), 2);
             assert_eq!(port.snapshot().last_prepared_feedback_terminal, Some(11));
             assert_eq!(
+                port.snapshot().last_prepared_feedback_srtcp_index,
+                Some(second_index)
+            );
+            assert_eq!(
                 PendingControlCommit::submit(&outgoing, vec![1], Some(13), turn.at(600), port)
                     .err()
                     .as_deref(),
@@ -7220,6 +7416,7 @@ mod tests {
             reap_control_commits(&mut commits, port).unwrap();
             assert_eq!(commits.len(), 2); // No received Commit yet.
             assert_eq!(port.snapshot().last_committed_feedback_terminal, None);
+            assert_eq!(port.snapshot().last_committed_feedback_srtcp_index, None);
             assert_eq!(port.snapshot().tx_bytes, 0);
             first
                 .committed
@@ -7237,6 +7434,10 @@ mod tests {
             );
             assert_eq!(port.snapshot().last_prepared_feedback_terminal, Some(11));
             assert_eq!(port.snapshot().tx_bytes, 132);
+            assert_eq!(
+                port.snapshot().last_committed_feedback_srtcp_index,
+                Some(first_index)
+            );
             second
                 .committed
                 .unwrap()
@@ -7248,6 +7449,10 @@ mod tests {
             reap_control_commits(&mut commits, port).unwrap();
             assert!(commits.is_empty());
             assert_eq!(port.snapshot().last_committed_feedback_terminal, Some(11));
+            assert_eq!(
+                port.snapshot().last_committed_feedback_srtcp_index,
+                Some(second_index)
+            );
             assert_eq!(port.snapshot().tx_bytes, 264);
             drop(requests);
             assert!(
@@ -7536,6 +7741,937 @@ mod tests {
             stats.initial_capture_age_floor_us,
             ages_ms.iter().min().unwrap() * 1000
         );
+    }
+
+    // Real production AudioPort accounting, frame assembly, Opus, SRTP and
+    // receiver admission. Only physical AudioRecord timestamps/PCM are modeled;
+    // no source-coordinate oracle, receiver-clock injection or network is used.
+    fn route_capture_gap_model(
+        loss_ns: u64,
+        route_at_ns: Option<u64>,
+        expected_gap_samples: u64,
+    ) -> (Stats, Stats, u64) {
+        let (local, peer, _, _) = fixture::pair(PublicConfig {
+            relay_addr: "127.0.0.1:1".into(),
+            domain: "route-clock.fixture.invalid".into(),
+            profile_ms: 40,
+            healthy_cycle_ms: 600,
+            capacity_bps: 50_000,
+            carriers: [None, None],
+        })
+        .unwrap();
+        let local = local.media_config();
+        let peer = peer.media_config();
+        let profile = LiveProfile::Ms40;
+        let (source, mut input) = test_audio();
+        let sink = AudioPort {
+            port: Arc::new(test_port()),
+        };
+        let mut frame = CaptureFrame::new(profile.samples(), source.port.clone());
+        let mut encoder = LiveEncoder::new(profile).unwrap();
+        let mut decoder = LiveDecoder::new(profile).unwrap();
+        let mut sender = dmsg_srtp_sys::Sender::new(&peer.media_tx, peer.ssrc_tx).unwrap();
+        let mut receiver = dmsg_srtp_sys::Receiver::new(&local.media_rx, local.ssrc_rx).unwrap();
+        let mut received = test_received();
+        let mut source_clock = LocalClock::new(Instant::now(), 1 << 32, peer.initial_timestamp);
+        received.index = u64::from(peer.initial_sequence);
+        received.timestamp = u64::from(peer.initial_timestamp);
+        let mut feedback = packet::Feedback::default();
+        let origin = Instant::now();
+        let mut index = u64::from(peer.initial_sequence);
+        let mut batch = 0u64;
+        let mut route_published = false;
+        let mut first_playout = None;
+        let mut maximum_receive_queue = 0;
+        let mut decoded_after_switch = 0;
+
+        // Use actual receive() admission time, not a receiver-clock override.
+        // A 160-sample read arrives every 10ms with the unchanged 20ms age
+        // floor. Hardware pauses at batch 80. Publication timing is an explicit
+        // numeric fixture, not an inferred bracket from the physical snapshots.
+        // Resume on the actual non-grid nanosecond boundary, not a codec grid.
+        for step in 2..=172 + loss_ns / 10_000_000 {
+            let elapsed_ns = step * 10_000_000
+                + u64::from(step >= 82 + loss_ns / 10_000_000) * (loss_ns % 10_000_000);
+            let scheduled = origin + Duration::from_nanos(elapsed_ns);
+            std::thread::sleep(scheduled.saturating_duration_since(Instant::now()));
+            if !route_published && route_at_ns.is_some_and(|at| elapsed_ns >= at) {
+                route_published = true;
+                let published = 1_000_000_000 + route_at_ns.unwrap() as i64;
+                assert!(source.source_route_changed(published, 1_000_000_000 + elapsed_ns as i64));
+            }
+            let read_ns = batch * 10_000_000 + 20_000_000 + u64::from(batch >= 80) * loss_ns;
+            if batch < 160 && elapsed_ns == read_ns {
+                let position = batch * 160;
+                assert_eq!(source.port.position.load(Ordering::Relaxed), position);
+                let mut stamp = aged_record_timestamp(position, 20);
+                if batch >= 80 {
+                    assert!(route_at_ns.is_none() || route_published);
+                    stamp.nano_time += loss_ns as i64;
+                    stamp.observed_ns += loss_ns as i64;
+                }
+                let pushed = Instant::now();
+                assert_eq!(
+                    source.push_recorded(
+                        &crate::voice_probe::test_tone(position as usize, 160),
+                        stamp,
+                        pushed,
+                    ),
+                    batch >= 20,
+                );
+                if batch >= 20 {
+                    let captured = input.try_recv().unwrap();
+                    let corrected = expected_gap_samples != 0 && batch >= 80;
+                    assert_eq!(
+                        captured.position,
+                        position + u64::from(corrected) * expected_gap_samples
+                    );
+                    assert_eq!(captured.source_generation, Some(u64::from(corrected)));
+                    assert_eq!(captured.hardware_age, Some(Duration::from_millis(20)));
+                    assert_eq!(captured.at, pushed); // No hidden application backlog.
+                    captured.observe_source_clock(&mut source_clock);
+                    assert!(source_clock.report(pushed, index as u32, 1).is_none());
+                    frame.ingest(captured, true, pushed, profile);
+                    if frame.full(profile) {
+                        let encoded = encoder.encode(&frame.pcm).unwrap();
+                        // Isolate source coordinates from transport service
+                        // jitter: immediate delivery is the direct-authority
+                        // lower bound, not a carrier/admission acceptance gate.
+                        let timestamp = peer
+                            .initial_timestamp
+                            .wrapping_add((frame.position * 3) as u32);
+                        let cipher = sender
+                            .protect_rtp(&packet::rtp(
+                                peer.ssrc_tx,
+                                index,
+                                timestamp,
+                                &encoded.bytes,
+                            ))
+                            .unwrap();
+                        let before_receive = Instant::now();
+                        received
+                            .receive(
+                                (OP_RTP, cipher),
+                                &mut receiver,
+                                &local,
+                                &mut feedback,
+                                &sink.port,
+                            )
+                            .unwrap();
+                        assert_eq!(feedback.terminal, Some(index)); // Late still ratchets.
+                        assert_eq!(received.timestamp, u64::from(timestamp));
+                        index += 1;
+                        frame.pcm.zeroize();
+                        frame.pcm.clear();
+                        let epoch = *first_playout.get_or_insert(received.first_playout.unwrap());
+                        if index == u64::from(peer.initial_sequence) + 1 {
+                            assert!(epoch.1 >= before_receive + Duration::from_millis(80));
+                            assert!(epoch.1 <= Instant::now() + Duration::from_millis(80));
+                        }
+                        assert_eq!(received.first_playout, Some(epoch));
+                        assert_eq!(received.source_due(epoch.0), epoch.1);
+                        maximum_receive_queue = maximum_receive_queue.max(received.encoded.len());
+                        assert!(maximum_receive_queue <= 3);
+                    }
+                }
+                batch += 1;
+            }
+            let before = sink.port.snapshot().decoded_packets;
+            let source_timestamp = received.playout.as_ref().map(|clock| clock.cursor);
+            received
+                .tick(
+                    Instant::now(),
+                    profile,
+                    &mut decoder,
+                    &mut feedback,
+                    &sink.port,
+                )
+                .unwrap();
+            let switch_timestamp =
+                u64::from(peer.initial_timestamp) + (12_800 + expected_gap_samples) * 3;
+            if source_timestamp.is_some_and(|timestamp| timestamp >= switch_timestamp) {
+                decoded_after_switch += sink.port.snapshot().decoded_packets - before;
+            }
+            // Ideal bounded AudioTrack handoff: the same decoded frame is
+            // transferred in four 160-sample calls, with only its own queued
+            // lead. This excludes independent device write stalls from the
+            // source-clock regression without enlarging the native frame.
+            let now = Instant::now();
+            for queued in (0..640u64).step_by(160) {
+                sink.port.sink_queue.store(queued, Ordering::Relaxed);
+                if sink.pull_at(now, &mut [0; 160]) == 0 {
+                    break;
+                }
+            }
+            sink.port.sink_queue.store(0, Ordering::Relaxed);
+        }
+        assert_eq!(batch, 160);
+        assert_eq!(source.port.position.load(Ordering::Relaxed), 25_600);
+        let expected_packets = 35 - u64::from(expected_gap_samples % 640 != 0);
+        assert_eq!(index, u64::from(peer.initial_sequence) + expected_packets);
+        assert_eq!(sink.port.snapshot().received_rtp_packets, expected_packets);
+        assert_eq!(feedback.terminal, Some(index - 1));
+        assert!(received.encoded.is_empty());
+        {
+            let clock = source.port.record_clock.lock().unwrap();
+            assert_eq!(clock.frozen_floor(), Some(Duration::from_millis(20)));
+            // Actual measured frame progress never includes inferred loss.
+            let span = clock.span().unwrap();
+            if expected_gap_samples != 0 {
+                assert_eq!(span.frames, 25_440 - 12_800);
+                assert_eq!(span.elapsed_ns, span.frames * SAMPLE_NS);
+            } else {
+                assert_eq!(span.frames, 25_440);
+                assert_eq!(span.elapsed_ns, 25_440 * SAMPLE_NS + loss_ns);
+            }
+        }
+        frame.discard(0); // The finite fixture's incomplete tail is loss too.
+        let source_stats = source.port.snapshot();
+        let sink_stats = sink.port.snapshot();
+        assert_eq!(source_stats.capture_age_unavailable_batches, 0);
+        assert_eq!(source_stats.capture_age_rejected_batches, 0);
+        assert_eq!(source_stats.max_additional_capture_age_us, 0);
+        assert_eq!(sink_stats.future_rejected_packets, 0);
+        assert_eq!(sink_stats.skipped_playout_slots, 0);
+        assert_eq!(sink_stats.expired_render_samples, 0);
+        assert_eq!(sink_stats.plc_before_nominal_due_slots, 0);
+        (source_stats, sink_stats, decoded_after_switch)
+    }
+
+    #[test]
+    fn route_capture_dense_clock_reproduces_irrecoverably_late_fresh_audio() {
+        let (source, sink, recovered) = route_capture_gap_model(200_000_000, None, 0);
+        assert_eq!(source.dropped_capture, 3200); // Startup only; pause is unaccounted.
+        assert_eq!(sink.decoded_packets, 15);
+        assert_eq!(sink.late_packets, 20);
+        assert_eq!(sink.arrival_after_nominal_due_packets, 20);
+        assert_eq!(sink.plc_slots, 25);
+        assert_eq!(recovered, 0);
+    }
+
+    #[test]
+    fn route_capture_production_recovers_without_rebasing_or_adding_delay() {
+        let (source, sink, recovered) =
+            route_capture_gap_model(200_000_000, Some(720_000_000), 3040);
+        assert_eq!(source.dropped_capture, 6880); // Startup, known gap, alignment and finite tail.
+        assert_eq!(source.source_route_gap_samples, 3040);
+        assert_eq!(sink.decoded_packets, 34);
+        assert_eq!(sink.late_packets, 0);
+        assert_eq!(sink.plc_slots, 6);
+        assert_eq!(recovered, 19);
+    }
+
+    #[test]
+    fn route_capture_no_gap_publication_does_not_invent_source_loss() {
+        let (source, sink, recovered) = route_capture_gap_model(0, Some(720_000_000), 0);
+        assert_eq!(source.dropped_capture, 3200);
+        assert_eq!(source.source_route_gap_samples, 0);
+        assert_eq!(sink.decoded_packets, 35);
+        assert_eq!(sink.late_packets + sink.plc_slots, 0);
+        assert_eq!(recovered, 20);
+    }
+
+    #[test]
+    fn route_capture_non_grid_pause_recovers_with_marker_before_during_or_after_pause() {
+        // 24640 - 9600 frames = 940ms; 150649319353623 - 150648202394509
+        // ns = 1116.959114ms. These are same-device snapshot observations, not
+        // the unprinted physical marker/capture bracket. Each publication below
+        // is a fixed test-only bracket around the modeled 176.959114ms pause.
+        for route_at_ns in [720_000_000, 890_000_000, 990_000_000] {
+            let (source, sink, recovered) =
+                route_capture_gap_model(176_959_114, Some(route_at_ns), 2720);
+            assert_eq!(source.source_route_gap_samples, 2720); // 17 known 10ms batches.
+            assert_eq!(source.dropped_capture, 6560); // Startup, gap, 480 alignment + 160 tail.
+            assert_eq!(sink.decoded_packets, 34);
+            assert_eq!(sink.late_packets, 0);
+            assert_eq!(sink.plc_slots, 6); // Includes the finite fixture's discarded tail.
+            assert_eq!(recovered, 19);
+        }
+    }
+
+    #[test]
+    fn route_capture_original_non_grid_observation_recovers_and_unmarked_pause_stays_late() {
+        let (source, sink, recovered) =
+            route_capture_gap_model(198_123_801, Some(720_000_000), 3040);
+        assert_eq!(source.source_route_gap_samples, 3040);
+        assert_eq!(source.dropped_capture, 6880);
+        assert_eq!(sink.decoded_packets, 34);
+        assert_eq!(sink.late_packets, 0);
+        assert_eq!(sink.plc_slots, 6);
+        assert_eq!(recovered, 19);
+        let (source, sink, recovered) = route_capture_gap_model(176_959_114, None, 0);
+        assert_eq!(source.source_route_gap_samples, 0);
+        assert_eq!(source.dropped_capture, 3200);
+        assert_eq!(sink.decoded_packets, 15);
+        assert_eq!(sink.late_packets, 20);
+        assert_eq!(sink.plc_slots, 25);
+        assert_eq!(recovered, 0);
+    }
+
+    #[test]
+    fn route_capture_unmarked_gap_and_normal_drift_keep_measured_frames_honest() {
+        for ppm in [-500i64, 0, 500] {
+            let (audio, mut input) = test_audio();
+            let origin = Instant::now();
+            let hardware_ns = |frame: u64| {
+                1_000_000_000
+                    + (u128::from(frame) * u128::from(SAMPLE_NS) * 1_000_000
+                        / (1_000_000 + ppm) as u128) as i64
+            };
+            for batch in 0..=60u64 {
+                let position = batch * 160;
+                let gap_ns = u64::from(batch >= 40) * 200_000_000;
+                let nano_time = hardware_ns(position + 320) + gap_ns as i64;
+                let stamp = CaptureTimestamp {
+                    read_position: position as i64,
+                    frame_position: (position + 320) as i64,
+                    nano_time,
+                    observed_ns: nano_time,
+                };
+                let pushed = origin + Duration::from_nanos((nano_time - 1_000_000_000) as u64);
+                assert_eq!(audio.push_recorded(&[1; 160], stamp, pushed), batch >= 20);
+                assert_eq!(audio.port.position.load(Ordering::Relaxed), position + 160);
+                if batch >= 20 {
+                    let captured = input.try_recv().unwrap();
+                    assert_eq!(captured.position, position); // No unmarked time-gap masking.
+                    assert_eq!(captured.hardware_age, Some(Duration::from_millis(20)));
+                    let span = captured.capture_clock.unwrap();
+                    assert_eq!(span.frames, position); // Neither drift nor gap adds measured frames.
+                    assert_eq!(
+                        span.elapsed_ns,
+                        (hardware_ns(position + 320) - hardware_ns(320)) as u64 + gap_ns,
+                    );
+                }
+            }
+            let stats = audio.port.snapshot();
+            assert_eq!(stats.initial_capture_age_floor_us, 20_000);
+            assert_eq!(
+                stats.capture_age_unavailable_batches + stats.capture_age_rejected_batches,
+                0
+            );
+            assert_eq!(stats.dropped_capture, 3200);
+        }
+    }
+
+    #[test]
+    fn route_capture_duplicate_invalid_stale_and_reversal_preserve_raw_ratchet() {
+        let (audio, mut input) = test_audio();
+        calibrate_audio(&audio, &[20; 20]);
+        let now = Instant::now();
+        let stamp = aged_record_timestamp(3200, 20);
+        let frame_position = stamp.frame_position;
+        let nano_time = stamp.nano_time;
+        assert!(audio.push_recorded(&[1; 160], stamp, now));
+        assert_eq!(input.try_recv().unwrap().position, 3200);
+        let previous = audio.port.record_clock.lock().unwrap().latest;
+        let measured = audio.port.record_clock.lock().unwrap().span().unwrap();
+        assert!(audio.source_route_changed(nano_time, nano_time));
+        let duplicate = CaptureTimestamp {
+            read_position: 3360,
+            frame_position,
+            nano_time,
+            observed_ns: nano_time,
+        };
+        assert!(audio.push_recorded(&[1; 160], duplicate, now));
+        let captured = input.try_recv().unwrap();
+        assert_eq!(captured.position, 3360);
+        assert_eq!(captured.hardware_age, Some(Duration::from_millis(10)));
+        assert_eq!(captured.capture_clock.unwrap().frames, measured.frames);
+        assert_eq!(
+            captured.capture_clock.unwrap().elapsed_ns,
+            measured.elapsed_ns
+        );
+
+        for case in 0..6 {
+            let position = audio.port.position.load(Ordering::Relaxed);
+            let mut invalid = aged_record_timestamp(position, 20);
+            match case {
+                0 => invalid.observed_ns += 40_000_001,
+                1 => invalid.frame_position = -1,
+                2 => invalid.frame_position = frame_position - 1,
+                3 => {
+                    invalid.nano_time = nano_time - 1;
+                    invalid.observed_ns = invalid.nano_time;
+                }
+                4 => invalid.read_position += 160,
+                5 => {
+                    invalid.frame_position = frame_position;
+                    invalid.nano_time = nano_time + 1;
+                    invalid.observed_ns = invalid.nano_time;
+                }
+                _ => unreachable!(),
+            }
+            assert!(!audio.push_recorded(&[1; 160], invalid, now));
+            assert_eq!(audio.port.position.load(Ordering::Relaxed), position + 160);
+            let clock = audio.port.record_clock.lock().unwrap();
+            assert_eq!(clock.latest, previous);
+            assert_eq!(clock.frozen_floor(), Some(Duration::from_millis(20)));
+        }
+        assert!(matches!(
+            input.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert_eq!(audio.port.position.load(Ordering::Relaxed), 4480);
+        assert!(audio.push_recorded(&[1; 160], aged_record_timestamp(4480, 20), now));
+        let recovered = input.try_recv().unwrap();
+        assert_eq!(recovered.position, 4480); // Rejections are loss, never retry/rebase.
+        assert_eq!(recovered.capture_clock.unwrap().frames, 4480);
+        let stats = audio.port.snapshot();
+        assert_eq!(stats.initial_capture_age_floor_us, 20_000);
+        assert_eq!(stats.capture_age_unavailable_batches, 6);
+        assert_eq!(stats.capture_age_rejected_batches, 0);
+        assert_eq!(stats.dropped_capture, 4160);
+    }
+
+    #[test]
+    fn route_capture_hardware_span_restart_preserves_existing_local_clock() {
+        let origin = Instant::now();
+        let mut clock = LocalClock::new(origin, 1 << 32, 0);
+        clock.observe(
+            0,
+            origin,
+            Some(Rate {
+                ticks: 480,
+                ns: 10_000_000,
+            }),
+        );
+        clock.observe(
+            320_000,
+            origin + Duration::from_secs(20),
+            Some(Rate {
+                ticks: 960_000,
+                ns: 20_000_000_000,
+            }),
+        );
+        let before = clock
+            .report(origin + Duration::from_secs(20), 1, 1)
+            .unwrap();
+        clock.reset_hardware_calibration(1);
+        assert!(clock
+            .report(origin + Duration::from_secs(20), 1, 1)
+            .is_none());
+        clock.observe(
+            321_600,
+            origin + Duration::from_millis(20_100),
+            Some(Rate {
+                ticks: 4800,
+                ns: 100_000_000,
+            }),
+        );
+        assert!(clock
+            .report(origin + Duration::from_millis(20_100), 2, 2)
+            .is_none());
+        clock.observe(
+            641_584,
+            origin + Duration::from_millis(40_099),
+            Some(Rate {
+                ticks: 959_952,
+                ns: 19_999_000_000,
+            }),
+        );
+        assert!(clock
+            .report(origin + Duration::from_millis(40_099), 3, 3)
+            .is_none());
+        // Every subsequent batch carries this same generation; it cannot
+        // perpetually restart qualification or reset the published projection.
+        clock.reset_hardware_calibration(1);
+        clock.observe(
+            641_600,
+            origin + Duration::from_millis(40_100),
+            Some(Rate {
+                ticks: 960_000,
+                ns: 20_000_000_000,
+            }),
+        );
+        let after = clock
+            .report(origin + Duration::from_millis(40_100), 3, 3)
+            .unwrap();
+        assert_eq!(after.rtp.wrapping_sub(before.rtp), 20_100 * 48);
+        assert_eq!(
+            after.ntp,
+            (1 << 32) + ((40_100u128 * (1 << 32) / 1000) as u64)
+        );
+        // Epoch and phase survive another calibration restart before any span.
+        clock.reset_hardware_calibration(2);
+        clock.observe(641_760, origin + Duration::from_millis(40_110), None);
+        assert!(clock
+            .report(origin + Duration::from_millis(40_110), 4, 4)
+            .is_none());
+    }
+
+    #[test]
+    fn route_capture_commands_are_bounded_fresh_and_cannot_extend_duplicate_markers() {
+        let (audio, mut input) = test_audio();
+        let published = 1_000_000_000;
+        assert!(!audio.source_route_changed(0, published));
+        assert!(!audio.source_route_changed(-1, published));
+        assert!(!audio.source_route_changed(published + 1, published));
+        assert!(!audio.source_route_changed(published, published + CAPTURE_ROUTE_WINDOW_NS + 1));
+        assert!(!audio.source_route_changed(i64::MAX, i64::MAX));
+        assert!(audio.source_route_changed(published, published));
+        assert!(!audio.source_route_changed(published, published + 100_000_000));
+        assert!(!audio.source_route_changed(published - 1, published));
+        {
+            let clock = audio.port.record_clock.lock().unwrap();
+            assert_eq!(
+                clock.route_until_ns,
+                Some(published + CAPTURE_ROUTE_WINDOW_NS)
+            );
+            assert_eq!(clock.source_generation, 0);
+            assert_eq!(clock.source_offset, 0);
+            assert!(clock.first.is_none());
+        }
+        // The first valid hardware point establishes an actual span, never an
+        // inferred startup gap or a synthetic nominal SR.
+        calibrate_audio(&audio, &[20; 20]);
+        let pushed = Instant::now();
+        assert!(audio.push_recorded(&[1; 160], aged_record_timestamp(3200, 20), pushed));
+        let captured = input.try_recv().unwrap();
+        assert_eq!(captured.position, 3200);
+        assert_eq!(captured.source_generation, Some(0));
+        let mut local = LocalClock::new(pushed, 1 << 32, 7);
+        captured.observe_source_clock(&mut local);
+        assert!(local.report(pushed, 1, 1).is_none());
+        assert_eq!(audio.port.snapshot().source_route_gap_samples, 0);
+        audio.port.close();
+        assert!(!audio.source_route_changed(published + 1, published + 1));
+    }
+
+    #[test]
+    fn route_capture_marker_survives_normal_drift_and_expires_without_masking_a_gap() {
+        for ppm in [-500i64, 0, 500] {
+            let (audio, mut input) = test_audio();
+            let origin = Instant::now();
+            let hardware_ns = |frames: u64| {
+                1_000_000_000
+                    + (u128::from(frames) * u128::from(SAMPLE_NS) * 1_000_000
+                        / (1_000_000 + ppm) as u128) as i64
+            };
+            let published = hardware_ns(20 * 160 + 320);
+            for batch in 0..=350u64 {
+                if batch == 20 {
+                    assert!(audio.source_route_changed(published, published));
+                }
+                let position = batch * 160;
+                let gap = u64::from(batch >= 330) * 200_000_000;
+                let ns = hardware_ns(position + 320) + gap as i64;
+                assert_eq!(
+                    audio.push_recorded(
+                        &[1; 160],
+                        CaptureTimestamp {
+                            read_position: position as i64,
+                            frame_position: (position + 320) as i64,
+                            nano_time: ns,
+                            observed_ns: ns,
+                        },
+                        origin + Duration::from_nanos((ns - 1_000_000_000) as u64)
+                    ),
+                    batch >= 20
+                );
+                if batch >= 20 {
+                    let captured = input.try_recv().unwrap();
+                    assert_eq!(captured.position, position);
+                    assert_eq!(captured.source_generation, Some(0));
+                    assert_eq!(captured.capture_clock.unwrap().frames, position);
+                }
+                if batch == 30 {
+                    assert_eq!(
+                        audio.port.record_clock.lock().unwrap().route_until_ns,
+                        Some(published + CAPTURE_ROUTE_WINDOW_NS)
+                    );
+                }
+            }
+            let clock = audio.port.record_clock.lock().unwrap();
+            assert!(clock.route_until_ns.is_none());
+            assert_eq!(clock.source_offset, 0);
+            assert_eq!(clock.frozen_floor(), Some(Duration::from_millis(20)));
+            assert_eq!(
+                clock.span().unwrap().elapsed_ns,
+                (hardware_ns(350 * 160 + 320) - hardware_ns(320)) as u64 + 200_000_000
+            );
+            assert_eq!(audio.port.snapshot().source_route_gap_samples, 0);
+        }
+    }
+
+    #[test]
+    fn route_capture_rounding_accepts_measured_route_loss_not_unknown_timing() {
+        for (excess, accepted, missing) in [
+            (0i64, true, 0u64),
+            (2_000_000, true, 0),
+            (12_000_000, true, 0), // Uncertainty cannot certify a whole missing batch.
+            (12_005_003, true, 160),
+            (176_959_114, true, 2720),
+            (198_123_801, true, 3040), // Original Mi example: only 19 whole batches known.
+            (201_876_199, true, 3040),
+            (203_000_000, true, 3200),
+            (220_000_000, true, 3360),
+            (-3_000_000, false, 0),
+        ] {
+            let (audio, mut input) = test_audio();
+            calibrate_audio(&audio, &[20; 20]);
+            let previous = audio.port.record_clock.lock().unwrap().latest.unwrap();
+            assert!(audio.source_route_changed(previous.1, previous.1));
+            let mut stamp = aged_record_timestamp(3200, 20);
+            stamp.nano_time += excess;
+            stamp.observed_ns += excess;
+            assert_eq!(
+                audio.push_recorded(&[1; 160], stamp, Instant::now()),
+                accepted,
+                "route excess {excess}ns"
+            );
+            assert_eq!(audio.port.position.load(Ordering::Relaxed), 3360);
+            let clock = audio.port.record_clock.lock().unwrap();
+            assert_eq!(clock.source_offset, missing);
+            assert_eq!(clock.source_generation, u64::from(missing != 0));
+            assert_eq!(clock.frozen_floor(), Some(Duration::from_millis(20)));
+            if accepted {
+                let captured = input.try_recv().unwrap();
+                assert_eq!(captured.position, 3200 + missing);
+                if missing != 0 {
+                    assert!(captured.capture_clock.is_none());
+                    assert_eq!(clock.first, clock.latest); // Actual frame only, no fake ratio.
+                    assert!(clock.route_until_ns.is_none());
+                } else {
+                    assert!(clock.route_until_ns.is_some());
+                }
+            } else {
+                assert_eq!(clock.latest, Some(previous));
+                assert!(matches!(
+                    input.try_recv(),
+                    Err(mpsc::error::TryRecvError::Empty)
+                ));
+            }
+            let stats = audio.port.snapshot();
+            assert_eq!(stats.source_route_gap_samples, missing);
+            assert_eq!(
+                stats.dropped_capture,
+                3200 + missing + u64::from(!accepted) * 160
+            );
+        }
+        // Individually fresh observations still cannot certify a pair >3s.
+        let (audio, mut input) = test_audio();
+        calibrate_audio(&audio, &[20; 20]);
+        let previous = audio.port.record_clock.lock().unwrap().latest;
+        let mut stamp = aged_record_timestamp(3200, 20);
+        stamp.nano_time += 4_000_000_000;
+        stamp.observed_ns += 4_000_000_000;
+        assert!(audio.source_route_changed(stamp.nano_time, stamp.observed_ns));
+        assert!(!audio.push_recorded(&[1; 160], stamp, Instant::now()));
+        assert!(matches!(
+            input.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert_eq!(audio.port.record_clock.lock().unwrap().latest, previous);
+        assert_eq!(audio.port.snapshot().source_route_gap_samples, 0);
+    }
+
+    #[test]
+    fn route_capture_fixed_numeric_observations_allow_publication_inside_pair_or_after_hw_point() {
+        const BEFORE_NS: i64 = 150_648_202_394_509;
+        const AFTER_NS: i64 = 150_649_319_353_623;
+        // The physical snapshot has no exact marker/PCM bracket. Deliberately
+        // model three explicit publications, with each HW point observed 3ms
+        // after sampling. The last two publications follow the resumed point.
+        for published in [
+            BEFORE_NS + 500_000_000,
+            AFTER_NS + 1_000_000,
+            AFTER_NS + 3_000_000,
+        ] {
+            let (audio, mut input) = test_audio();
+            let origin = Instant::now();
+            for batch in 0..=58u64 {
+                let position = batch * 160;
+                let frame = position as i64 + 320;
+                let ns = BEFORE_NS + (frame - 9600) * SAMPLE_NS as i64;
+                assert_eq!(
+                    audio.push_recorded(
+                        &[1; 160],
+                        CaptureTimestamp {
+                            read_position: position as i64,
+                            frame_position: frame,
+                            nano_time: ns,
+                            observed_ns: ns + 3_000_000,
+                        },
+                        origin,
+                    ),
+                    batch >= 20,
+                );
+                if batch >= 20 {
+                    input.try_recv().unwrap();
+                }
+            }
+            // Unknown intermediary observations own their raw PCM positions,
+            // but do not replace the last fresh validated hardware point.
+            for position in (9440..24320u64).step_by(160) {
+                assert!(!audio.push_recorded(
+                    &[1; 160],
+                    CaptureTimestamp {
+                        read_position: position as i64,
+                        frame_position: -1,
+                        nano_time: -1,
+                        observed_ns: AFTER_NS,
+                    },
+                    origin,
+                ));
+            }
+            assert!(audio.source_route_changed(published, AFTER_NS + 3_000_000));
+            assert!(audio.push_recorded(
+                &[1; 160],
+                CaptureTimestamp {
+                    read_position: 24320,
+                    frame_position: 24640,
+                    nano_time: AFTER_NS,
+                    observed_ns: AFTER_NS + 3_000_000,
+                },
+                origin,
+            ));
+            let captured = input.try_recv().unwrap();
+            assert_eq!(captured.position, 27040);
+            assert_eq!(captured.source_generation, Some(1));
+            assert!(captured.capture_clock.is_none());
+            assert_eq!(captured.hardware_age, Some(Duration::from_millis(23)));
+            let clock = audio.port.record_clock.lock().unwrap();
+            assert_eq!(clock.latest, Some((24640, AFTER_NS)));
+            assert_eq!(clock.first, clock.latest);
+            assert_eq!(clock.frozen_floor(), Some(Duration::from_millis(23)));
+            assert!(clock.route_until_ns.is_none());
+            let stats = audio.port.snapshot();
+            assert_eq!(stats.source_route_gap_samples, 2720);
+            assert_eq!(stats.capture_age_unavailable_batches, 93);
+            assert_eq!(stats.dropped_capture, 20800);
+        }
+    }
+
+    #[test]
+    fn route_capture_generation_survives_the_first_restarted_batch_being_dropped() {
+        let (audio, mut input) = test_audio();
+        calibrate_audio(&audio, &[20; 20]);
+        let origin = Instant::now();
+        let mut local = LocalClock::new(origin, 1 << 32, 7);
+        let at = |position: u64| origin + Duration::from_nanos(position * SAMPLE_NS);
+        // Qualify the original LocalClock using real AudioPort measured spans,
+        // so losing the first reset notification would hit its old 20s window.
+        for position in (3200..323_840).step_by(160) {
+            assert!(audio.push_recorded(
+                &[1; 160],
+                aged_record_timestamp(position, 20),
+                at(position)
+            ));
+            input.try_recv().unwrap().observe_source_clock(&mut local);
+        }
+        assert!(local.report(at(323_840), 1, 1).is_some());
+        for position in (323_840..324_480).step_by(160) {
+            assert!(audio.push_recorded(
+                &[1; 160],
+                aged_record_timestamp(position, 20),
+                at(position)
+            ));
+        }
+        let published = aged_record_timestamp(324_320, 20).nano_time;
+        assert!(audio.source_route_changed(published, published));
+        let stamp = |position| {
+            let mut point = aged_record_timestamp(position, 20);
+            point.nano_time += 176_959_114;
+            point.observed_ns += 176_959_114;
+            point
+        };
+        let resumed = at(324_480) + Duration::from_nanos(176_959_114);
+        assert!(!audio.push_recorded(&[1; 160], stamp(324_480), resumed)); // Original four-slot ring full.
+        for _ in 0..4 {
+            let captured = input.try_recv().unwrap();
+            assert_eq!(captured.source_generation, Some(0));
+            captured.observe_source_clock(&mut local);
+        }
+        assert!(local.report(resumed, 1, 1).is_some());
+        assert!(audio.push_recorded(
+            &[1; 160],
+            stamp(324_640),
+            resumed + Duration::from_millis(10)
+        ));
+        let captured = input.try_recv().unwrap();
+        assert_eq!(captured.source_generation, Some(1));
+        assert_eq!(captured.position, 327_360); // Raw 324640 + 17 known missing capture batches.
+        assert_eq!(captured.capture_clock.unwrap().frames, 160);
+        assert_eq!(captured.capture_clock.unwrap().elapsed_ns, 10_000_000);
+        captured.observe_source_clock(&mut local);
+        assert!(local
+            .report(resumed + Duration::from_millis(10), 1, 1)
+            .is_none());
+        assert_eq!(audio.port.position.load(Ordering::Relaxed), 324_800);
+        assert_eq!(audio.port.snapshot().source_route_gap_samples, 2720);
+        assert_eq!(audio.port.snapshot().dropped_capture, 6080);
+    }
+
+    #[test]
+    fn route_capture_twenty_second_actual_span_excludes_inferred_frames() {
+        for ppm in [-500i64, 0, 500] {
+            let (audio, mut input) = test_audio();
+            let origin = Instant::now();
+            let hardware_ns = |frames: u64| {
+                1_000_000_000
+                    + (u128::from(frames) * u128::from(SAMPLE_NS) * 1_000_000
+                        / (1_000_000 + ppm) as u128) as i64
+            };
+            let mut local = LocalClock::new(origin, 1 << 32, 7);
+            let mut qualified = false;
+            for batch in 0..=2050u64 {
+                let position = batch * 160;
+                let gap = u64::from(batch >= 40) * 176_959_114;
+                let ns = hardware_ns(position + 320) + gap as i64;
+                if batch == 30 {
+                    assert!(audio.source_route_changed(ns, ns));
+                }
+                // Calibration PCM precedes the source's first usable epoch.
+                let pushed = if batch < 20 {
+                    origin
+                } else {
+                    origin + Duration::from_nanos((ns - hardware_ns(20 * 160 + 320)) as u64)
+                };
+                assert_eq!(
+                    audio.push_recorded(
+                        &[1; 160],
+                        CaptureTimestamp {
+                            read_position: position as i64,
+                            frame_position: (position + 320) as i64,
+                            nano_time: ns,
+                            observed_ns: ns,
+                        },
+                        pushed
+                    ),
+                    batch >= 20
+                );
+                if batch < 20 {
+                    continue;
+                }
+                let captured = input.try_recv().unwrap();
+                assert_eq!(captured.position, position + u64::from(batch >= 40) * 2720);
+                if batch >= 40 {
+                    assert_eq!(captured.source_generation, Some(1));
+                    if let Some(span) = captured.capture_clock {
+                        assert_eq!(span.frames, position - 40 * 160);
+                        assert_eq!(
+                            span.elapsed_ns,
+                            (hardware_ns(position + 320) - hardware_ns(40 * 160 + 320)) as u64
+                        );
+                        qualified = span.elapsed_ns >= 20_000_000_000;
+                    } else {
+                        assert_eq!(batch, 40);
+                    }
+                }
+                captured.observe_source_clock(&mut local);
+                assert_eq!(local.report(pushed, batch as u32, 1).is_some(), qualified);
+            }
+            assert!(qualified);
+            assert_eq!(audio.port.position.load(Ordering::Relaxed), 2051 * 160);
+            let clock = audio.port.record_clock.lock().unwrap();
+            assert_eq!(clock.source_offset, 2720);
+            assert_eq!(clock.span().unwrap().frames, (2050 - 40) * 160);
+            assert_eq!(clock.frozen_floor(), Some(Duration::from_millis(20)));
+            assert_eq!(audio.port.snapshot().dropped_capture, 5920);
+        }
+    }
+
+    #[test]
+    fn route_capture_source_ratchet_overflow_rejects_without_committing_clock_or_loss() {
+        for counter in 0..3 {
+            let (audio, _input) = test_audio();
+            calibrate_audio(&audio, &[20; 20]);
+            let latest = audio.port.record_clock.lock().unwrap().latest;
+            let published = latest.unwrap().1;
+            assert!(audio.source_route_changed(published, published));
+            {
+                let mut clock = audio.port.record_clock.lock().unwrap();
+                match counter {
+                    0 => clock.source_offset = u64::MAX - 2719,
+                    1 => clock.source_offset = u64::MAX - 6079,
+                    2 => clock.source_generation = u64::MAX,
+                    _ => unreachable!(),
+                }
+            }
+            let mut timestamp = aged_record_timestamp(3200, 20);
+            timestamp.nano_time += 176_959_114;
+            timestamp.observed_ns += 176_959_114;
+            assert!(!audio.push_recorded(&[1; 160], timestamp, Instant::now()));
+            assert_eq!(audio.port.position.load(Ordering::Relaxed), 3360);
+            assert_eq!(audio.port.record_clock.lock().unwrap().latest, latest);
+            assert_eq!(audio.port.snapshot().source_route_gap_samples, 0);
+            assert_eq!(audio.port.snapshot().dropped_capture, 3360);
+        }
+    }
+
+    #[test]
+    fn route_capture_source_offset_ratchets_once_per_event_and_pacing_keeps_its_epoch() {
+        let (audio, mut input) = test_audio();
+        calibrate_audio(&audio, &[20; 20]);
+        let origin = Instant::now();
+        let profile = LiveProfile::Ms40;
+        let mut frame = CaptureFrame::new(profile.samples(), audio.port.clone());
+        let mut admission = MediaAdmission::default();
+        let (outgoing, _requests) = mpsc::channel(1);
+        let mut budget = packet::Budget::new(50_000, 94, origin);
+        let mut gap = 0i64;
+        let mut missing = 0u64;
+        let mut packets = 0;
+        for batch in 20..60u64 {
+            let position = batch * 160;
+            if batch == 30 || batch == 46 {
+                let published = aged_record_timestamp(position - 160, 20).nano_time + gap;
+                assert!(audio.source_route_changed(published, published));
+            }
+            if batch == 32 {
+                gap += 176_959_114;
+                missing += 2720;
+            }
+            if batch == 48 {
+                gap += 198_123_801;
+                missing += 3040;
+            }
+            let now = origin + Duration::from_nanos((batch - 20) * 10_000_000 + gap as u64);
+            let mut timestamp = aged_record_timestamp(position, 20);
+            timestamp.nano_time += gap;
+            timestamp.observed_ns += gap;
+            assert!(audio.push_recorded(&[1; 160], timestamp, now));
+            let captured = input.try_recv().unwrap();
+            assert_eq!(captured.position, position + missing);
+            frame.ingest(captured, true, now, profile);
+            if frame.full(profile) {
+                let mut waiting = WaitingPacket::new(
+                    vec![7; 30],
+                    frame.position,
+                    frame.captured_at,
+                    frame.pushed_at,
+                    now,
+                    profile,
+                );
+                waiting.capture_clock = frame.clock;
+                admission
+                    .stage(waiting, &outgoing, 0, now, profile, &audio.port)
+                    .unwrap();
+                // Correction is missing source slots, not admission/receiver
+                // epoch movement, delayed deadlines or a growing wait queue.
+                assert!(admission.due(frame.position, profile, now) <= now);
+                let (_, permit) = admission
+                    .take_ready(&mut budget, now, profile, &audio.port)
+                    .unwrap();
+                drop(permit);
+                assert_eq!(
+                    admission.first,
+                    Some((3200, origin + Duration::from_millis(30)))
+                );
+                packets += 1;
+                frame.pcm.zeroize();
+                frame.pcm.clear();
+            }
+        }
+        assert_eq!(packets, 9);
+        assert_eq!(audio.port.position.load(Ordering::Relaxed), 9600);
+        let clock = audio.port.record_clock.lock().unwrap();
+        assert_eq!(clock.source_offset, 5760);
+        assert_eq!(clock.source_generation, 2);
+        assert_eq!(clock.span().unwrap().frames, 1760);
+        assert_eq!(clock.span().unwrap().elapsed_ns, 110_000_000);
+        assert_eq!(audio.port.snapshot().source_route_gap_samples, 5760);
+        assert_eq!(audio.port.snapshot().dropped_capture, 9600);
     }
 
     fn waiting20(position: u64, captured_at: Instant, encoded_at: Instant) -> WaitingPacket {
@@ -9944,7 +11080,7 @@ mod tests {
                     nano_time: 1_000_000_000 + elapsed_ns as i64 + error,
                     observed_ns: 1_001_000_000 + elapsed_ns as i64,
                 };
-                let (age, _) = hardware.observe(timestamp, frames, 160).unwrap();
+                let (age, _, _) = hardware.observe(timestamp, frames, 160).unwrap();
                 let span = hardware.span().unwrap();
                 let now = origin + Duration::from_millis(millis);
                 local.observe(
@@ -10033,7 +11169,7 @@ mod tests {
                 } else {
                     -800_000
                 };
-                let (age, _) = hardware
+                let (age, _, _) = hardware
                     .observe(
                         CaptureTimestamp {
                             read_position: frames as i64,

@@ -4,14 +4,18 @@
 
 ## Единая account-auth логика и fresh dev rollout
 
-**Текущий backend, 2026-10-12:** явно разрешённый fresh messenger-only reset без
+**Текущий backend, 2026-10-13:** явно разрешённый fresh messenger-only reset без
 нового backup выполнен; healthy/pong/schema7/invite_only. Удалены только
 проверенные messenger DB/WAL/SHM и blob contents, не volumes/secrets/archives.
-При fresh reset carrier container/image/PID были сохранены. Позднее один явно
-разрешённый TCP_NODELAY-контроль пересоздал только messenger carrier; после
-отрицательного результата восстановлены исходные image/config/pins. Public
-profile, topology/firewall и соседний туннель не менялись. Ниже schema5 описывает
-исторические rollout, не текущую БД.
+При fresh reset carrier container/image/PID были сохранены. Последующие
+разрешённые диагностические rollout меняли только messenger images, с проверкой
+нормализованных config/mounts/ports/network metadata и без новых data resets.
+Сейчас msgd использует проверенный relay-fairness путь (image `b5809b9e…`),
+carrier — transport `9f24b74303dbe5d4c676b98abc4efe4414b4e8f6`
+(image `0974c057…`), совпадающий с client PIN. Отрицательные policy/config
+эксперименты не включены в финальные исходники; fallback/Dcubic/probe-OFF и
+media bounds восстановлены. Public profile, pins, topology/firewall и соседний
+туннель не менялись. Ниже schema5 описывает исторические rollout, не текущую БД.
 Новый call/client acceptance — `docs/goals/2026-10-11-call-client-apk.md`;
 старый Main8 сам не мигрируется/не очищается. Это не общее разрешение wipe.
 
@@ -28,7 +32,7 @@ Keystore исключён из Docker context и передаётся read-only 
 использовала per-build `--network=host --allow network.host`, без изменения
 Docker daemon или deployment networking. Фактический artifact/evidence — в цели;
 после runtime edits его необходимо пересобрать. Текущий APK проходит static и
-minified startup gates, но устойчивый физический DNS-call ещё не принят;
+minified startup gates (version4/0.5.1-53), но устойчивый физический DNS-call ещё не принят;
 не выдавать этот checkpoint за production call acceptance.
 
 Реализованы public `dmsg://server/` profile, wire2/server schema5/core schema6, password signup/login, key-only resume, persisted `open` / `invite_only` (default) и confirmed device replacement. Приглашение отдельно требуется только для signup в invite_only. ENROL/token-replay/credential attach/admin invite-rebind удалены. Команды ниже относятся к новой ревизии; wire — `docs/protocol.md`, CLI/details — `crates/server/README.md`, Android gates — `android/AUTH_GATES.md`.

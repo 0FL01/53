@@ -16,7 +16,7 @@ env["CARGO_TARGET_DIR"] = str(target)
 meson = shutil.which("meson", path=env["PATH"])
 if meson is None:
     meson = str(pathlib.Path(env["HOME"]) / ".local/bin/meson")
-pin = "62b964998be3c3d7fd1bee2195547613d053b202"
+pin = "9f24b74303dbe5d4c676b98abc4efe4414b4e8f6"
 baseline = [root / "target/slipstream-native-gates" / name
             for name in ("slipstream-client", "slipstream-server")]
 baseline_hashes = {path: hashlib.sha256(path.read_bytes()).hexdigest()

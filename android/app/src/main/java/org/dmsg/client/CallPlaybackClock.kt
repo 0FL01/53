@@ -10,10 +10,12 @@ import kotlin.math.roundToLong
 internal class CallPlaybackClock {
     data class RejectedWindow(val frames: Long, val ns: Long, val rate: Int,
         val beforeFrames: Long?, val beforeNs: Long?, val afterFrames: Long?, val afterNs: Long?)
+    data class BackwardSample(val beforeFrames: Long, val frames: Long, val timestampDeltaNs: Long,
+        val beforeHead: Long?, val head: Long?, val rate: Int, val underruns: Int)
     data class Output(val rate: Int, val sinkPpb: Long?, val calibrated: Boolean,
         val healthy: Boolean, val relativePpm: Double?, val rejectionMask: Long,
-        val rejectedWindow: RejectedWindow? = null)
-    private data class Point(val frame: Long, val ns: Long, val rate: Int, val underruns: Int)
+        val rejectedWindow: RejectedWindow? = null, val backwardSample: BackwardSample? = null)
+    private data class Point(val frame: Long, val ns: Long, val rate: Int, val underruns: Int, val head: Long?)
     private var first: Point? = null
     private var middle: Point? = null
     private var latest: Point? = null
@@ -26,6 +28,7 @@ internal class CallPlaybackClock {
     private var relativePpm: Double? = null
     private var rejectionMask = 0L
     private var rejectedWindow: RejectedWindow? = null
+    private var backwardSample: BackwardSample? = null
     var backwards = false
         private set
 
@@ -33,10 +36,10 @@ internal class CallPlaybackClock {
     fun resetHardwareCalibration() {
         first = null; middle = null; latest = null; neutralRatio = null; healthy = false
         targetHz = 16_000.0; fraction = 0.0; nextActuationNs = 0L; selected = 16_000
-        relativePpm = null; rejectionMask = 0L; rejectedWindow = null; backwards = false
+        relativePpm = null; rejectionMask = 0L; rejectedWindow = null; backwardSample = null; backwards = false
     }
 
-    fun observe(frame: Long, timestampNs: Long, nowNs: Long, actualRate: Int, underruns: Int) {
+    fun observe(frame: Long, timestampNs: Long, nowNs: Long, actualRate: Int, underruns: Int, head: Long? = null) {
         if (frame < 0 || timestampNs <= 0 || nowNs < timestampNs) {
             rejectionMask = rejectionMask or 1L
             first = null; middle = null; healthy = false; return
@@ -48,12 +51,15 @@ internal class CallPlaybackClock {
         val previous = latest
         if (previous != null && (frame < previous.frame || timestampNs < previous.ns ||
                 ((frame == previous.frame) != (timestampNs == previous.ns)))) {
+            if (!backwards && (frame < previous.frame || timestampNs < previous.ns))
+                backwardSample = BackwardSample(previous.frame, frame, timestampNs - previous.ns,
+                    previous.head, head, actualRate, underruns)
             backwards = backwards || frame < previous.frame || timestampNs < previous.ns
             rejectionMask = rejectionMask or 4L
             first = null; middle = null; latest = null; healthy = false; return
         }
         if (previous != null && timestampNs == previous.ns) return
-        val point = Point(frame, timestampNs, actualRate, underruns)
+        val point = Point(frame, timestampNs, actualRate, underruns, head)
         latest = point
         var anchor = first
         // A rate change/underrun cannot certify a hardware-frequency sample.
@@ -131,6 +137,6 @@ internal class CallPlaybackClock {
         }
         val sink = ratio?.let { ((it * selected / 16_000.0 - 1.0) * 1e9).roundToLong() }
         return Output(selected, sink?.takeIf { it in -1_000_000L..1_000_000L }, ratio != null,
-            valid && healthy, relativePpm, rejectionMask, rejectedWindow)
+            valid && healthy, relativePpm, rejectionMask, rejectedWindow, backwardSample)
     }
 }

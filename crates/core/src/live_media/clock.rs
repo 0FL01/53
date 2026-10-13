@@ -679,6 +679,86 @@ mod tests {
     }
 
     #[test]
+    fn source_hardware_restart_preserves_projection_epoch_and_published_frontier() {
+        for ppm in [-500i64, 0, 500] {
+            let origin = Instant::now();
+            let mut local = LocalClock::new(origin, 1 << 32, 7);
+            local.reset_hardware_calibration(0);
+            local.observe(3200, origin, None); // First point has no measured span.
+            assert!(local.report(origin, 1, 1).is_none());
+            local.observe(
+                323_200,
+                origin + WINDOW,
+                Some(Rate {
+                    ticks: 960_000,
+                    ns: 20_000_000_000,
+                }),
+            );
+            let published = origin + Duration::from_secs(21);
+            let before = local.report(published, 1, 1).unwrap();
+            let source = local.source;
+            let projection = local.projection.as_ref().unwrap();
+            let preserved = (projection.at, projection.phase, projection.rate);
+            local.reset_hardware_calibration(1);
+            assert_eq!(local.source, source);
+            assert_eq!(
+                (local.epoch, local.ntp, local.initial_timestamp),
+                (origin, 1 << 32, 7)
+            );
+            assert_eq!(local.published.get(), Some(published));
+            let projection = local.projection.as_ref().unwrap();
+            assert_eq!(
+                (projection.at, projection.phase, projection.rate),
+                preserved
+            );
+            assert!(!local.hardware_qualified);
+            assert!(local.hardware.latest.is_none());
+            local.observe(326_400, published, None);
+            assert!(local.report(published, 1, 1).is_none());
+            let fresh_rate = |millis: u64| Rate {
+                ticks: (u128::from(millis) * 48 * (1_000_000 + ppm) as u128 / 1_000_000) as u64,
+                ns: millis * 1_000_000,
+            };
+            for millis in (200..20_000u64).step_by(200) {
+                local.reset_hardware_calibration(1); // Persistent metadata, not another reset.
+                local.observe(
+                    326_400 + millis * 16,
+                    published + Duration::from_millis(millis),
+                    Some(fresh_rate(millis)),
+                );
+                assert!(local
+                    .report(published + Duration::from_millis(millis), 2, 2)
+                    .is_none());
+            }
+            let qualified_at = published + WINDOW;
+            local.observe(646_400, qualified_at, Some(fresh_rate(20_000)));
+            let after = local.report(qualified_at, 2, 2).unwrap();
+            // A fresh hardware frequency is integrated forward; loss/source
+            // offset is never used to rewrite an SR or recertify old frames.
+            assert_eq!(after.rtp.wrapping_sub(before.rtp), 960_000);
+            assert_eq!(local.source, source);
+            assert!(local.hardware_qualified);
+            let frontier = local.published.get();
+            local.reset_hardware_calibration(0); // Stale generation cannot unqualify/reset.
+            assert!(local.hardware_qualified);
+            assert_eq!(local.published.get(), frontier);
+            let final_report = local.report(qualified_at + WINDOW, 3, 3).unwrap();
+            assert_eq!(
+                u64::from(final_report.rtp.wrapping_sub(after.rtp)),
+                fresh_rate(20_000).ticks
+            );
+            // A short hardware span without an explicit generation change is
+            // invalid, not an automatic rebase (and cannot underflow the fit).
+            let hardware_latest = local.hardware.latest;
+            local.observe(646_560, qualified_at, Some(fresh_rate(100)));
+            assert!(local.report(qualified_at + WINDOW, 3, 3).is_none());
+            assert_eq!(local.hardware.latest, hardware_latest);
+            assert_eq!(local.source, source);
+            assert_eq!(local.published.get(), Some(qualified_at + WINDOW));
+        }
+    }
+
+    #[test]
     fn hardware_mean_windows_cancel_anchor_error_and_ignore_duplicate_callbacks() {
         for ppm in [-500i64, -100, 100, 500] {
             let mut hardware = HardwareWindow::default();
@@ -1050,6 +1130,8 @@ pub(super) struct LocalClock {
     available: bool,
     published: Cell<Option<Instant>>,
     physical: bool,
+    hardware_generation: Option<u64>,
+    hardware_qualified: bool,
 }
 
 impl LocalClock {
@@ -1064,7 +1146,26 @@ impl LocalClock {
             available: false,
             published: Cell::new(None),
             physical: false,
+            hardware_generation: None,
+            hardware_qualified: false,
         }
+    }
+
+    /// A known source hardware epoch, persistent on every captured batch. Only
+    /// calibration is restarted: source/NTP epoch, phase projection and the
+    /// published frontier must survive. Missing samples are not rate evidence.
+    pub fn reset_hardware_calibration(&mut self, generation: u64) {
+        if self
+            .hardware_generation
+            .is_some_and(|last| generation <= last)
+        {
+            return;
+        }
+        self.hardware_generation = Some(generation);
+        self.hardware = HardwareWindow::default();
+        self.hardware_qualified = false;
+        self.available = false;
+        self.physical = true; // A new span's first point may have no ratio yet.
     }
 
     pub fn observe(&mut self, position: u64, captured_at: Instant, rate: Option<Rate>) {
@@ -1079,7 +1180,7 @@ impl LocalClock {
                 // short-span ratio can turn sub-ms timestamp quantization into
                 // discontinuous projected RTP. Keep RR/APP feedback until the
                 // source has a full long window; do not publish nominal timing.
-                if rate.ticks == 0 || rate.ns == 0 {
+                if rate.ticks == 0 || rate.ns == 0 || rate.ns < self.hardware.start_ns {
                     self.available = false;
                     return;
                 }
@@ -1091,12 +1192,15 @@ impl LocalClock {
                 // A first already-long span is usable without callback history.
                 // Subsequently apply only complete hardware-window fits, not a
                 // noisy endpoint ratio reprojected over the entire source age.
-                fitted.or_else(|| self.projection.is_none().then_some(rate))
+                fitted.or_else(|| (!self.hardware_qualified).then_some(rate))
             }
             None if !self.physical => Some(Rate::default()), // Declared synthetic input.
             None => None, // Missing physical metadata is not a nominal clock.
         };
-        self.available = !self.physical || rate.is_some();
+        if qualified.is_some() && self.physical {
+            self.hardware_qualified = true;
+        }
+        self.available = !self.physical || rate.is_some() && self.hardware_qualified;
         if let Some(rate) = qualified {
             if let Some(projection) = self.projection.as_mut() {
                 if u128::from(rate.ticks) * u128::from(projection.rate.ns)

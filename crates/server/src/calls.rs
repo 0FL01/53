@@ -21,6 +21,7 @@ struct RelayCounters {
     queued: u64,
     full: u64,
     route_expired: u64,
+    last_srtcp_full_index: Option<u32>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -481,6 +482,9 @@ impl Hub {
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
                 counters.full = counters.full.saturating_add(1);
+                if let Some(index) = call_lane::srtcp_index(opcode, payload) {
+                    counters.last_srtcp_full_index = Some(index);
+                }
                 Ok(())
             }
             Err(mpsc::error::TrySendError::Closed(_)) => Err(()),
@@ -681,14 +685,16 @@ pub async fn serve(
     )
     .await;
     if let Registration::Media(attach, index, _) = registered.registration {
-        // Fixed schema, numeric scalars only; no identity or packet material.
+        // Fixed schema, numeric/null metadata only; no identity or packet material.
         // Receive/relay describe this side's ingress; writes/expiry its egress.
         eprintln!(
             concat!(
                 "{{\"event\":\"call_lane_summary\",\"side\":{},\"lane\":{},",
                 "\"authenticated_media_rx\":{},\"complete_tcp_media_writes\":{},",
                 "\"expired_plaintext_before_noise\":{},\"relay_queued\":{},",
-                "\"relay_full\":{},\"relay_route_expired\":{}}}"
+                "\"relay_full\":{},\"relay_route_expired\":{},",
+                "\"last_srtcp_rx_index\":{},\"last_srtcp_tcp_write_index\":{},",
+                "\"last_srtcp_full_index\":{}}}"
             ),
             index / 2,
             attach.lane as u8,
@@ -698,6 +704,15 @@ pub async fn serve(
             relay_counters.queued,
             relay_counters.full,
             relay_counters.route_expired,
+            media_counters
+                .last_srtcp_rx_index
+                .map_or_else(|| "null".to_owned(), |index| index.to_string()),
+            media_counters
+                .last_srtcp_tcp_write_index
+                .map_or_else(|| "null".to_owned(), |index| index.to_string()),
+            relay_counters
+                .last_srtcp_full_index
+                .map_or_else(|| "null".to_owned(), |index| index.to_string()),
         );
     }
     // RAII also handles task cancellation before/inside the lane future.
@@ -936,6 +951,7 @@ mod tests {
         assert_eq!(rtp_counters.queued, 1);
         assert_eq!(rtp_counters.full, 1);
         assert_eq!(rtp_counters.route_expired, 1);
+        assert_eq!(rtp_counters.last_srtcp_full_index, None);
         let relayed = slots[2].1.try_recv().unwrap();
         assert_eq!(relayed.payload, vec![9; RTP_CAP]);
         assert!(relayed.deadline.is_some());
@@ -980,10 +996,49 @@ mod tests {
             &mut rtcp_counters,
         )
         .unwrap();
+        assert_eq!(rtcp_counters.last_srtcp_full_index, None);
+        // Dummy fixed-profile trailer markers, not authenticated media.
+        let mut marker = [0xa5; 22];
+        marker[8..12].copy_from_slice(&0x8000_0009_u32.to_be_bytes());
+        hub.relay(
+            rtcp,
+            3,
+            slots[3].0,
+            OP_SRTCP,
+            &marker,
+            Instant::now(),
+            &mut rtcp_counters,
+        )
+        .unwrap();
+        assert_eq!(rtcp_counters.last_srtcp_full_index, Some(9));
+        marker[8..12].copy_from_slice(&0x8000_000a_u32.to_be_bytes());
+        hub.relay(
+            rtcp,
+            3,
+            slots[3].0,
+            OP_SRTCP,
+            &marker,
+            Instant::now() - HOP,
+            &mut rtcp_counters,
+        )
+        .unwrap();
+        assert_eq!(rtcp_counters.last_srtcp_full_index, Some(9));
         assert_eq!(slots[1].1.try_recv().unwrap().payload, vec![8; SRTCP_CAP]);
-        assert_eq!(rtcp_counters.queued, 1);
-        assert_eq!(rtcp_counters.full, 0);
-        assert_eq!(rtcp_counters.route_expired, 0);
+        hub.relay(
+            rtcp,
+            3,
+            slots[3].0,
+            OP_SRTCP,
+            &marker,
+            Instant::now(),
+            &mut rtcp_counters,
+        )
+        .unwrap();
+        assert_eq!(slots[1].1.try_recv().unwrap().payload, marker);
+        assert_eq!(rtcp_counters.queued, 2);
+        assert_eq!(rtcp_counters.full, 1);
+        assert_eq!(rtcp_counters.route_expired, 1);
+        assert_eq!(rtcp_counters.last_srtcp_full_index, Some(9));
         assert_eq!(
             hub.command(&db, peers[0], a, command(Action::End, id, [0; 16]), now)
                 .reason,

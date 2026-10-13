@@ -3,6 +3,7 @@
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <application>
         <!-- Runtime additionally rejects any package other than org.dmsg.client.gate. -->
-        <activity android:name=".CallProbeActivity" android:exported="false" />
+        <activity android:name=".CallProbeActivity" android:exported="false"
+            android:showWhenLocked="true" android:turnScreenOn="true" />
     </application>
 </manifest>

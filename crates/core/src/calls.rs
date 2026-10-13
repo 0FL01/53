@@ -856,26 +856,43 @@ impl Actor {
                         heartbeat = now + Duration::from_secs(HEARTBEAT_SECS);
                         if !self.pending.iter().any(|p| p.action == Action::Heartbeat) && self.send(Action::Heartbeat, [0; 16], [0; 16], vec![]).is_err() { return Reason::ConnectionLost; }
                     }
-                    if let Some(call) = &mut self.call {
-                        if let Some((session, entry, _)) = &call.media {
-                            let stats = session.snapshot();
-                            if call.ending.is_some() { continue; }
-                            if entry.stop_requested() { self.local_end(Reason::AudioUnavailable).await; }
-                            else if stats.failed || stats.stopped {
-                                // The media worker already joined/closed its lanes.
-                                // Their server registration emits authoritative Ended;
-                                // SIG distinguishes remote hangup from actual loss.
-                                call.ending = Some(Reason::ConnectionLost);
-                                call.deadline = Some(now + Duration::from_secs(30));
-                            }
-                            else if stats.ready && call.phase != CallPhase::Active {
-                                call.phase = CallPhase::Active;
-                                notify(&self.shared, &self.observer, call.snapshot(Reason::Ok, true));
-                            }
-                        }
+                    if let Some((session, entry, _)) = self.call.as_ref().and_then(|c| c.media.as_ref()) {
+                        let stats = session.snapshot();
+                        let stop_requested = entry.stop_requested();
+                        self.media_progress(now, &stats, stop_requested).await;
                     }
                 }
             }
+        }
+    }
+    async fn media_progress(
+        &mut self,
+        now: Instant,
+        stats: &crate::live_media::Stats,
+        stop_requested: bool,
+    ) {
+        let Some(call) = &mut self.call else {
+            return;
+        };
+        if call.ending.is_some() {
+            return;
+        }
+        if stats.failed || stats.stopped {
+            // The media worker already joined/closed its lanes.
+            // Their server registration emits authoritative Ended;
+            // SIG distinguishes remote hangup from actual loss.
+            // JNI retirement after that failure must not replace its reason.
+            call.ending = Some(Reason::ConnectionLost);
+            call.deadline = Some(now + Duration::from_secs(30));
+        } else if stop_requested {
+            self.local_end(Reason::AudioUnavailable).await;
+        } else if stats.ready && call.phase != CallPhase::Active {
+            call.phase = CallPhase::Active;
+            notify(
+                &self.shared,
+                &self.observer,
+                call.snapshot(Reason::Ok, true),
+            );
         }
     }
     fn cancelled(&self) -> bool {

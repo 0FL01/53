@@ -17,6 +17,7 @@ import android.media.audiofx.NoiseSuppressor
 import android.os.Build
 import android.os.Process
 import org.json.JSONObject
+import java.io.RandomAccessFile
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
@@ -48,7 +49,7 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
         private val nativeCounters = listOf("encoded_packets", "decoded_packets", "plc_slots",
             "tx_bytes", "rx_bytes", "dropped_capture", "dropped_render", "terminal_feedback",
             "late_packets", "max_unconfirmed_bytes", "max_feedback_cycle_ms", "sink_queue_samples",
-            "tx_soft_deadline_packets", "stop_ms", "native_stop_ms")
+            "tx_soft_deadline_packets", "stop_ms", "native_stop_ms", "source_route_gap_samples")
     }
 
     /** One renderer's read-only parse, keyed by the immutable owner's string identity. */
@@ -75,6 +76,13 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
                 JSONObject().put("frames", window.frames).put("ns", window.ns).put("rate", window.rate)
                     .put("before_frames", window.beforeFrames ?: JSONObject.NULL).put("before_ns", window.beforeNs ?: JSONObject.NULL)
                     .put("after_frames", window.afterFrames ?: JSONObject.NULL).put("after_ns", window.afterNs ?: JSONObject.NULL)
+            } ?: JSONObject.NULL)
+            .put("last_backward_hardware_sample", command.backwardSample?.let { sample ->
+                JSONObject().put("before_frames", sample.beforeFrames).put("frames", sample.frames)
+                    .put("timestamp_delta_ns", sample.timestampDeltaNs)
+                    .put("before_head_frames", sample.beforeHead ?: JSONObject.NULL)
+                    .put("head_frames", sample.head ?: JSONObject.NULL)
+                    .put("rate", sample.rate).put("underruns", sample.underruns)
             } ?: JSONObject.NULL)
             .put("relative_ppm", command.relativePpm ?: JSONObject.NULL).toString()
     }) {
@@ -282,6 +290,64 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
         }
     }
 
+    /** Probe schedstat bracket includes read overhead; these deltas are not a write-only CPU budget. */
+    data class SlowWriteDiagnostic(val writeWallNs: Long, val requestedSamples: Int, val acceptedSamples: Int,
+        val cpuDeltaNs: Long?, val runnableDelayDeltaNs: Long?, val schedstatKnown: Boolean,
+        val timeSlicesDelta: Long?, val schedstatReadOverheadNs: Long) {
+        fun json() = JSONObject().put("write_wall_ns", writeWallNs).put("write_requested_samples", requestedSamples)
+            .put("write_accepted_samples", acceptedSamples).put("cpu_delta_ns", cpuDeltaNs ?: JSONObject.NULL)
+            .put("runnable_delay_delta_ns", runnableDelayDeltaNs ?: JSONObject.NULL).put("schedstat_known", schedstatKnown)
+            .put("time_slices_delta", timeSlicesDelta ?: JSONObject.NULL).put("schedstat_read_overhead_ns", schedstatReadOverheadNs)
+    }
+
+    /** Render-thread-only reader/clock seams; one wiped byte buffer and no per-write sample objects. */
+    internal class SlowWriteProbe(private val read: (ByteArray) -> Int, private val nanoTime: (() -> Long)? = null) {
+        private val bytes = ByteArray(64)
+        private val fields = LongArray(3); private val before = LongArray(3)
+        private var beforeKnown = false; private var readOverheadNs = 0L
+        @Volatile var latest: SlowWriteDiagnostic? = null
+            private set
+        private fun now(): Long = nanoTime?.invoke() ?: System.nanoTime() // No boxed clock result in the probe loop.
+
+        private fun sample(): Boolean {
+            fun space(value: Byte) = value == 32.toByte() || value == 9.toByte() || value == 10.toByte() || value == 13.toByte()
+            try {
+                val length = read(bytes)
+                if (length !in 1 until bytes.size) return false // Includes full/truncated input.
+                var cursor = 0
+                for (field in 0..2) {
+                    while (cursor < length && space(bytes[cursor])) cursor++
+                    val start = cursor; var value = 0L
+                    while (cursor < length && bytes[cursor].toInt() in 48..57) {
+                        val digit = bytes[cursor].toInt() - 48
+                        if (value > (Long.MAX_VALUE - digit) / 10) return false
+                        value = value * 10 + digit; cursor++
+                    }
+                    if (cursor == start || (cursor < length && !space(bytes[cursor]))) return false
+                    fields[field] = value
+                }
+                while (cursor < length && space(bytes[cursor])) cursor++
+                return cursor == length
+            } catch (_: Exception) { return false }
+            finally { bytes.fill(0) }
+        }
+
+        fun beforeWrite() {
+            val start = now()
+            beforeKnown = sample(); fields.copyInto(before)
+            readOverheadNs = now() - start
+        }
+
+        fun afterWrite(wallNs: Long, requested: Int, accepted: Int) {
+            val start = now(); val afterKnown = sample()
+            val overhead = readOverheadNs + (now() - start)
+            if (wallNs < 40_000_000L) return
+            val known = beforeKnown && afterKnown && fields[0] >= before[0] && fields[1] >= before[1] && fields[2] >= before[2]
+            latest = SlowWriteDiagnostic(wallNs, requested, accepted, if (known) fields[0] - before[0] else null,
+                if (known) fields[1] - before[1] else null, known, if (known) fields[2] - before[2] else null, overhead)
+        }
+    }
+
     data class Snapshot(
         val phase: String, val failure: String?, val stopReason: String?, val dns: Boolean,
         val cleanupComplete: Boolean, val ownerAlive: Boolean, val captureAlive: Boolean, val renderAlive: Boolean,
@@ -300,7 +366,8 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
         val captureClock: ClockPair, val playbackClock: ClockPair, val playbackHeadClock: ClockPair,
         val nativeStats: String, val stopResult: String?, val playbackCompensation: String,
         val lastRenderLoopTrace: RenderLoopTrace? = null, val outputMuted: Boolean = false,
-        val outputRouteRestored: Boolean = true
+        val outputRouteRestored: Boolean = true, val trackPerformanceMode: Int = -1,
+        val lastSlowWriteDiagnostic: SlowWriteDiagnostic? = null
     ) {
         fun json() = JSONObject().put("phase", phase).put("failure", failure ?: JSONObject.NULL)
             .put("stop_reason", stopReason ?: JSONObject.NULL).put("path", if (dns) "dns_fixture" else "local_memory_pair")
@@ -320,6 +387,7 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
             .put("record_min_bytes", recordMinBytes).put("track_min_bytes", trackMinBytes)
             .put("record_buffer_frames", recordBufferFrames).put("track_buffer_frames", trackBufferFrames)
             .put("track_capacity_frames", trackCapacityFrames).put("start_threshold_frames", startThresholdFrames)
+            .put("track_performance_mode", trackPerformanceMode)
             .put("input_route_id", inputRouteId).put("input_route_type", inputRouteType)
             .put("output_route_id", outputRouteId).put("output_route_type", outputRouteType)
             .put("mic_muted", micMuted).put("system_silenced", silenced).put("silencing_observable", silencingObservable)
@@ -331,6 +399,7 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
             .put("native", JSONObject(nativeStats)).put("native_stop", stopResult?.let(::JSONObject) ?: JSONObject.NULL)
             .put("playback_compensation", JSONObject(playbackCompensation))
             .put("last_render_loop_trace", lastRenderLoopTrace?.json() ?: JSONObject.NULL)
+            .put("last_slow_write_diagnostic", lastSlowWriteDiagnostic?.json() ?: JSONObject.NULL)
     }
 
     private val app = context.applicationContext
@@ -363,6 +432,7 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
     private val nativeStats = AtomicReference("{}")
     private val playbackCompensation = AtomicReference("{}")
     private val renderLoopRecorder = RenderLoopRecorder()
+    @Volatile private var slowWriteProbe: SlowWriteProbe? = null
     private val stopResult = AtomicReference<String?>(null)
     @Volatile private var captureThread: Thread? = null
     @Volatile private var renderThread: Thread? = null
@@ -372,6 +442,7 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
     @Volatile private var trackFrames = 0
     @Volatile private var trackCapacity = 0
     @Volatile private var startThreshold = -1
+    @Volatile private var trackPerformanceMode = -1
     @Volatile private var inputId = 0
     @Volatile private var inputType = 0
     @Volatile private var outputId = 0
@@ -393,10 +464,14 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
     private val owner = Thread(::run, "dmsg-call-audio")
     private val localMuted = AtomicBoolean(false)
     private val hardwareGeneration = AtomicLong(0)
+    private val captureRoutePublishedNs = AtomicLong(0)
 
     fun start() { owner.start() }
     fun setMuted(value: Boolean) { localMuted.set(value) }
-    internal fun hardwareRouteChanged() { hardwareGeneration.incrementAndGet() }
+    internal fun hardwareRouteChanged() {
+        captureRoutePublishedNs.set(System.nanoTime())
+        hardwareGeneration.incrementAndGet()
+    }
     /** Only the service cleanup coroutine / debug gate may wait, never UI callbacks. */
     internal fun join() { owner.join() }
 
@@ -422,7 +497,7 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
         inputId, inputType, outputId, outputType, micMuted, silenced, silencingObservable, focusGranted, focusAbandoned,
         previousMode, communicationMode, restoredMode, aecState, nsState, playbackRate.get(), requestedRate.get(), underruns,
         captureClock.get(), playbackClock.get(), headClock.get(), nativeStats.get(), stopResult.get(), playbackCompensation.get(),
-        renderLoopRecorder.latest, outputMuted, outputRouteRestored)
+        renderLoopRecorder.latest, outputMuted, outputRouteRestored, trackPerformanceMode, slowWriteProbe?.latest)
 
     private class ProbeFailure(val diagnostic: String) : RuntimeException()
     private fun check(condition: Boolean, diagnostic: String) { if (!condition) throw ProbeFailure(diagnostic) }
@@ -436,6 +511,9 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
             check(value >= 0, "invalid_native_counter")
             clean.put(field, value)
         }
+        val routeGap = source.getLong("source_route_gap_samples")
+        check(routeGap % BATCH_SAMPLES == 0L && routeGap <= source.getLong("dropped_capture"),
+            "invalid_native_route_gap")
         listOf("received_rtp_packets", "capture_gap_batches", "fixture_peer_encoded_packets",
             "fixture_peer_dropped_capture", "fixture_peer_capture_gap_batches", "tiny_non_dtx_packets",
             "arrival_after_nominal_due_packets", "late_before_nominal_due_packets", "plc_before_nominal_due_slots",
@@ -545,6 +623,12 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
             check(source.has(field), "invalid_native_feedback_frontier")
             val value = if (source.isNull(field)) null else source.getLong(field)
             check(value == null || value >= 0, "invalid_native_feedback_frontier")
+            clean.put(field, value ?: JSONObject.NULL)
+        }
+        listOf("last_prepared_feedback_srtcp_index", "last_committed_feedback_srtcp_index",
+            "last_authenticated_feedback_srtcp_index").forEach { field ->
+            val value = if (!source.has(field) || source.isNull(field)) null else source.getLong(field)
+            check(value == null || value in 0L..0x7fff_ffffL, "invalid_native_feedback_frontier")
             clean.put(field, value ?: JSONObject.NULL)
         }
         clean.put("ready", source.getBoolean("ready")).put("dns_carrier", source.getBoolean("dns_carrier"))
@@ -658,6 +742,12 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
                 check(activeRecord.recordingState == AudioRecord.RECORDSTATE_RECORDING, "microphone_stopped_early")
                 check(activeTrack.playState == AudioTrack.PLAYSTATE_PLAYING, "playback_stopped_early")
                 observeRoutes(activeRecord, activeTrack)
+                // Native restoration may replace the startup proxy. Observe its
+                // current configuration; requested LOW_LATENCY is not a grant.
+                trackFrames = activeTrack.bufferSizeInFrames
+                trackCapacity = activeTrack.bufferCapacityInFrames
+                trackPerformanceMode = activeTrack.performanceMode
+                if (Build.VERSION.SDK_INT >= 31) startThreshold = activeTrack.startThresholdInFrames
                 aecState = observeEffect(aecState, aec, "aec")
                 nsState = observeEffect(nsState, ns, "ns")
                 check((captureThread?.isAlive == true && renderThread?.isAlive == true) || stopping.get(), "audio_worker_ended")
@@ -792,6 +882,11 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
                 captureClipped.addAndGet(clipped); captureZero.addAndGet(zeros)
                 captured.addAndGet(count.toLong()); readPosition += count; valid += count
                 if (valid == pcm.size) {
+                    // Only the existing service's Telecom endpoint publication
+                    // sets this marker. Serialize the JNI command with pushes;
+                    // preserve publication time even when read() was blocked.
+                    val publishedNs = captureRoutePublishedNs.getAndSet(0)
+                    if (publishedNs != 0L) port.sourceRouteChanged(nativeHandle, publishedNs)
                     // The documented frame epoch resets at startRecording, not
                     // at the first successful timestamp or complete JNI batch.
                     // Poll before each handoff: old/unavailable anchors cannot
@@ -847,6 +942,22 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
         var routeGeneration = hardwareGeneration.get()
         val metadataCache = RenderMetadataCache()
         val compensationCache = RenderCompensationCache()
+        // Open on this existing render thread only. Unsupported/denied proc access stays unknown, without retry.
+        val schedstat = if (platform.probeMode) try { RandomAccessFile("/proc/thread-self/schedstat", "r") }
+            catch (_: Exception) { null } else null
+        val writeProbe = if (platform.probeMode) SlowWriteProbe(read = read@{ bytes ->
+            if (schedstat == null) return@read -1
+            schedstat.seek(0)
+            var length = 0
+            while (length < bytes.size) {
+                val count = schedstat.read(bytes, length, bytes.size - length)
+                if (count < 0) break
+                if (count == 0) return@read -1
+                length += count
+            }
+            length
+        }) else null
+        slowWriteProbe = writeProbe
         try {
             Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
             while (!stopping.get()) {
@@ -924,7 +1035,7 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
                         val ok = track.getTimestamp(timestamp)
                         val observed = System.nanoTime() // timestamp retrieval can advance beyond pre-call now
                         if (ok) compensation.observe(timestamp.framePosition, timestamp.nanoTime, observed,
-                            track.playbackRate, track.underrunCount)
+                            track.playbackRate, track.underrunCount, hardware)
                         else compensation.observe(-1, -1, observed, track.playbackRate, track.underrunCount)
                         observeClock(playbackClock, if (ok && timestamp.nanoTime > 0 && timestamp.framePosition >= 0)
                             Clock(timestamp.framePosition, timestamp.nanoTime) else null)
@@ -959,9 +1070,11 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
                         }
                     }
                     writeRequested = valid - offset
+                    writeProbe?.beforeWrite()
                     val writeStart = System.nanoTime()
                     val count = track.write(pcm, offset, valid - offset, AudioTrack.WRITE_NON_BLOCKING)
                     writeNs = System.nanoTime() - writeStart
+                    writeProbe?.afterWrite(writeNs, writeRequested, count)
                     writeAccepted = count
                     check(count >= 0, "render_write_failed")
                     var peak = 0; var clipped = 0L
@@ -988,6 +1101,9 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
             }
         } catch (e: ProbeFailure) { if (!stopping.get()) fail(e.diagnostic) }
         catch (_: Throwable) { if (!stopping.get()) fail("render_worker_failed") }
-        finally { pcm.fill(0) }
+        finally {
+            pcm.fill(0)
+            try { schedstat?.close() } catch (_: Exception) { /* Diagnostic only. */ }
+        }
     }
 }

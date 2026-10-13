@@ -1,6 +1,7 @@
 package org.dmsg.client
 
 import uniffi.dmsg_core.CallDirection
+import uniffi.dmsg_core.CallEndReason
 import uniffi.dmsg_core.CallPhase
 import uniffi.dmsg_core.CallSnapshot
 
@@ -26,6 +27,16 @@ internal class CallStateGuard {
     }
     fun matches(id: String, token: Long) = current?.callId == id && token == epoch &&
         current?.busy() == true && !tearingDown
+    fun audioCompletionReason(token: Long, result: CallAudio.Snapshot): CallEndReason? {
+        if (token != epoch || tearingDown || current?.busy() != true) return null
+        // Native joins/retirement precede Ended, whose callback may still be queued
+        // on Main. Only these native-owned failures defer to the actor's reason;
+        // final failed/stopped stats never excuse a physical/Java audio failure.
+        return when (result.failure) {
+            "native_probe_failed", "native_stopped_early" -> null
+            else -> CallEndReason.AUDIO_UNAVAILABLE
+        }
+    }
     fun beginTeardown() { tearingDown = true }
     fun finishTeardown() { tearingDown = false }
     fun mayCapture(telecomActive: Boolean, permission: Boolean): Boolean {

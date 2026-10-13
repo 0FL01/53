@@ -381,9 +381,22 @@ async fn calls_host_real_offer_accept_media_end_redial_and_transport_loss() {
             assert!(!stats.failed, "host media failed: {}", stats.error);
         }
         if round == 0 {
+            let terminal_gate = b.pause(CallPhase::Ended);
             a.calls.end(outgoing.call_id).unwrap();
-            assert_eq!(a.wait(CallPhase::Ended).reason, CallEndReason::LocalEnded);
-            assert_eq!(b.wait(CallPhase::Ended).reason, CallEndReason::RemoteEnded);
+            let local = a.wait(CallPhase::Ended);
+            let remote = b.wait(CallPhase::Ended);
+            // The observer is still blocked, but native stop/handle completion
+            // must already be joined. Android may consume Ended later still.
+            let stopped_before_retirement = ports[1].snapshot().stopped;
+            let joined = crate::call_media_handles::retire(bm.media_handle).unwrap();
+            terminal_gate.wait();
+            assert_eq!(local.reason, CallEndReason::LocalEnded);
+            assert_eq!(remote.reason, CallEndReason::RemoteEnded);
+            assert_eq!(remote.media_handle, 0);
+            assert!(stopped_before_retirement);
+            assert!(joined.stopped);
+            assert!(!ports[1].push(&[300; 160]));
+            assert_eq!(ports[1].pull(&mut [0; 160]), 0);
         } else {
             server.restart();
             assert_eq!(
@@ -397,7 +410,9 @@ async fn calls_host_real_offer_accept_media_end_redial_and_transport_loss() {
         }
         assert!(!busy(&alice.0) && !busy(&bobby.0));
         retire(am.media_handle);
-        retire(bm.media_handle);
+        if round != 0 {
+            retire(bm.media_handle);
+        }
         a.wait(CallPhase::Listening);
         b.wait(CallPhase::Listening);
     }
@@ -423,6 +438,95 @@ async fn calls_host_real_offer_accept_media_end_redial_and_transport_loss() {
     b.calls.shutdown().unwrap();
     assert!(!busy(&a.owner));
     assert!(matches!(a.calls.dial(bobby.1), Err(FfiError::Transport(_))));
+
+    // Drive the same production media-progress and authenticated-event handlers
+    // with both failure and JNI retirement present before the authoritative END.
+    // The fixture port has no media worker; the real joined contract is above.
+    let context = Context::load(
+        alice.0.clone(),
+        Some(Zeroizing::new(STORE_KEY.to_vec())),
+        Endpoint::Local {
+            address: server.addr.clone(),
+            offers: Arc::new(Mutex::new(vec![])),
+        },
+    )
+    .unwrap();
+    let (events, receiver) = std_mpsc::channel();
+    let observer = Arc::new(Observer {
+        events,
+        pause: Mutex::new(None),
+    });
+    let (_commands, requests) = mpsc::channel(4);
+    let shared = a.calls.shared.clone();
+    let mut actor = Actor::new(
+        Arc::new(context),
+        shared.clone(),
+        observer,
+        requests,
+        shared.urgent.subscribe(),
+    );
+    let id = [91; 16];
+    actor.call = Some(Call {
+        id,
+        generation: shared.admission.lock().unwrap().generation,
+        contact: "peer".into(),
+        direction: CallDirection::Incoming,
+        phase: CallPhase::Active,
+        peer_user: [92; 16],
+        peer_device: [93; 32],
+        local: None,
+        remote: None,
+        deadline: None,
+        submitted: true,
+        accepted: true,
+        ready: true,
+        ending: None,
+        lanes: None,
+        media: None,
+    });
+    let (port, _capture) = crate::live_media::session::new_port();
+    port.finish(Err("controlled native failure before END".into()));
+    let stats = port.snapshot();
+    assert!(stats.failed && stats.stopped);
+    let (handle, entry) = crate::call_media_handles::register(&alice.0, port.audio()).unwrap();
+    let retirement = thread::spawn(move || crate::call_media_handles::retire(handle).unwrap());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !entry.stop_requested() {
+        assert!(Instant::now() < deadline, "JNI retirement did not start");
+        thread::yield_now();
+    }
+    let now = Instant::now();
+    actor
+        .media_progress(now, &stats, entry.stop_requested())
+        .await;
+    let ending = actor.call.as_ref().unwrap().ending;
+    let resolution_deadline = actor.call.as_ref().unwrap().deadline;
+    let local_end_sent = !actor.pending.is_empty();
+    let remote_end = Event {
+        kind: EventKind::Ended,
+        call_id: id,
+        epoch: 1,
+        peer_user: [92; 16],
+        peer_device: [93; 32],
+        remaining_ms: 0,
+        reason: Reason::RemoteEnded,
+        ciphertext: vec![],
+    };
+    let ended = actor
+        .frame(OP_CALL_EVENT, &remote_end.encode().unwrap())
+        .await;
+    entry.complete(stats);
+    assert!(retirement.join().unwrap().stopped);
+    ended.unwrap();
+    let terminal = receiver.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(terminal.phase, CallPhase::Ended);
+    assert_eq!(terminal.reason, CallEndReason::RemoteEnded);
+    assert_eq!(ending, Some(Reason::ConnectionLost));
+    assert_eq!(resolution_deadline, Some(now + Duration::from_secs(30)));
+    assert!(
+        !local_end_sent,
+        "native failure must await authoritative END"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -326,7 +326,7 @@ internal class CallSessionOwner(private val context: Context,
             scope.launch {
                 if (guard.epoch == token) {
                     update(state.copy(audio = result))
-                    if (!guard.tearingDown && guard.current?.busy() == true) finish(CallEndReason.AUDIO_UNAVAILABLE, signal = true)
+                    guard.audioCompletionReason(token, result)?.let { finish(it, signal = true) }
                 }
             }
         }).also { it.setMuted(localMute || platformMute); it.start() }

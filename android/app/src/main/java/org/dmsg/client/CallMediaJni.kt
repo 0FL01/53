@@ -8,6 +8,7 @@ object CallMediaJni {
     init { System.loadLibrary("dmsg_core") }
     external fun push(handle: Long, pcm: ShortArray, valid: Int, readPosition: Long,
         timestampFrame: Long, timestampNs: Long): Boolean
+    external fun sourceRouteChanged(handle: Long, publishedNs: Long): Boolean
     external fun pull(handle: Long, pcm: ShortArray, valid: Int): Int
     external fun sinkQueued(handle: Long, samples: Int)
     external fun sinkRate(handle: Long, ppb: Long): Boolean
@@ -22,6 +23,8 @@ internal interface CallAudioPort {
     val initialHandle: Long get() = 0
     fun acquire(): Long
     fun push(handle: Long, pcm: ShortArray, valid: Int, readPosition: Long, frame: Long, ns: Long): Boolean
+    /** Probe input has no production route-source clock API. */
+    fun sourceRouteChanged(handle: Long, publishedNs: Long): Boolean = true
     fun pull(handle: Long, pcm: ShortArray, valid: Int): Int
     fun sinkQueued(handle: Long, samples: Int)
     fun sinkRate(handle: Long, ppb: Long): Boolean
@@ -36,6 +39,8 @@ internal class NativeCallAudioPort(override val initialHandle: Long) : CallAudio
     override fun acquire() = initialHandle
     override fun push(handle: Long, pcm: ShortArray, valid: Int, readPosition: Long, frame: Long, ns: Long) =
         CallMediaJni.push(handle, pcm, valid, readPosition, frame, ns)
+    override fun sourceRouteChanged(handle: Long, publishedNs: Long) =
+        CallMediaJni.sourceRouteChanged(handle, publishedNs)
     override fun pull(handle: Long, pcm: ShortArray, valid: Int) = CallMediaJni.pull(handle, pcm, valid)
     override fun sinkQueued(handle: Long, samples: Int) = CallMediaJni.sinkQueued(handle, samples)
     override fun sinkRate(handle: Long, ppb: Long) = CallMediaJni.sinkRate(handle, ppb)

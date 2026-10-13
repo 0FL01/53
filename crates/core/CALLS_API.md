@@ -40,12 +40,16 @@ including while ordinary contact synchronization is paused.
 `org.dmsg.client.CallMediaJni` consumes a core-issued handle; it has no public
 fixture/codec startup. Bounded PCM stays on JNI, not UniFFI:
 push≤160 samples with AudioRecord frame/timestamp; pull≤160; sinkQueued≤640;
-sinkRate, renderExpiredSamples, stats and stop.
+sourceRouteChanged, sinkRate, renderExpiredSamples, stats and stop.
 
 The call actor owns `MediaSession`; the Android driver owns AudioRecord/Track
 and capture/render threads. Android stops/joins both PCM workers before JNI
 retirement. Native stop closes/joins endpoint, codec and lanes, zeroizes PCM and
 notifies handle retirement. Calls ending without audio still retire Telecom.
+Failed/stopped native media resolves through the actor's existing terminal path;
+Android does not replace that reason with AudioUnavailable merely because JNI
+retirement finished first. Physical capture/playback/route failures still end
+with AudioUnavailable, including real hardware frame/time reversal.
 
 `DmsgService` owns `CallSessionOwner`, one Core-Telecom call and the audio driver.
 Activity pause/recreation only detaches UI observation. Telecom owns focus/mode
@@ -59,7 +63,22 @@ call teardown finishes. Message/bulk owners pause without `dnsStop`; TEXT with
 an existing Olm session remains queued. End wakes normal message/bulk processing.
 Microphone permission is requested only from visible UI; no capture during ring.
 Mute zeros outgoing PCM without changing positions/global mute/volume. A permitted
-Telecom route change resets only local hardware calibration, not RTP/key epochs.
+Telecom route change resets local hardware calibration, not RTP/key epochs.
+Its explicit monotonic publication marker is serialized with capture pushes.
+Qualified fresh hardware timestamps may account complete missing 160-sample
+batches across the sampling pause in RTP source position; raw AudioRecord read
+positions and capture-age/reversal checks stay unchanged. The conservative
+gap excludes existing 2ms/±500ppm uncertainty and is included in capture loss
+(`source_route_gap_samples <= dropped_capture`). Missing samples never enter
+measured frequency: a new actual 20s span must qualify, while the source/NTP
+epoch and published SR frontier remain intact. Unmarked/invalid gaps are not
+rebased, and receiver deadlines/queues are unchanged.
+
+Last numeric SRTCP indices identify preparation, Noise commitment, server
+ingress/whole TCP writes/Full drops and authenticated client receipt. They are
+diagnostics, not credit or proof of timely peer delivery. The server yields
+after successful media ingress so a ready peer can drain its existing one-slot
+queue; capacity, 20ms hop deadline and Noise ordering remain unchanged.
 
 ## Fixed media and acceptance
 

@@ -12,7 +12,8 @@
 - `.local/dns-delegation.md` — gitignored детали делегирования поддомена мессенджера; фактические имена/IP только там, в трекаемые файлы не вносить
 
 ## Rules
-- Не трогать соседний интернет-туннель. Messenger client/carrier используют одну закреплённую Git-ревизию транспорта; pins/secrets/data сохранять
+- Не трогать соседний интернет-туннель. Финальные messenger client/carrier используют одну закреплённую Git-ревизию транспорта; secrets не раскрывать, crypto/pin validation не ослаблять
+- Пользователь разрешил любые необходимые эксперименты в 53 (2026-10-12): все тестовые устройства и удалённое messenger-развёртывание тестовые; rebuild/recreate/config/data reset допустимы без повторного запроса. Фиксировать гипотезу/результат и scope, проверять device identity/targets; ошибки эксперимента не выдавать за PASS. Тестовые resets не становятся автоматическим wipe в клиентском APK
 - Пользователь разрешил редактировать исходники Slipstream, включая DNS/QUIC/congestion/scheduler, для исправления DNS-связи (2026-10-12); прежние запреты в исторических целях сняты для этой работы. План — `docs/goals/2026-10-11-call-client-apk.md`; embedding и messenger logic остаются разделены
 - Держать границы v1: 1 authoritative endpoint, 1 устройство на аккаунт, только лички, пилот ≤16 устройств; без федерации/HA/групп/мультиустройства/видео/ботов по ARCHITECTURE.md §1
 - Секреты только read-only файлами, не в Git/образ/логи/argv; данные — в volumes (ARCHITECTURE.md §4)
@@ -21,7 +22,7 @@
 - Единая auth: `dmsg://server/`, wire2, deployed fresh server7/core10, strict E2Ev2; одна `core_messages` для TEXT/VOICE/Reply/операций, encrypted chunks внутри core.db. Main8 не мигрируется/не очищается автоматически; old-schema/plain→sealed/legacy decode запрещены, несовместимый rollout только по явному разрешению
 - Calls: один NativeClient, отдельные Noise owners signal/RTP/SRTCP; keys через ephemeral Olm, без call rows/history/outbox. Audio и Telecom принадлежат DmsgService, не Activity; routing через Telecom, не параллельные AudioManager setters
 - Build/diagnostic tools — clean allowlist environment без credentials; не печатать env. Внешнему disposable Rust harness свой `CARGO_TARGET_DIR`, не перезаписывать workspace host-cdylib/rlib
-- `connectedDebugAndroidTest` удаляет target package/Keystore: только `-PgateInstall=true` (отдельный `.gate`). Main dev reset допустим по явному разрешению; остальные identity сохранять. Device gates вручную по методам `am instrument`, не считать label-only install application acceptance.
+- `connectedDebugAndroidTest` удаляет target package/Keystore: только `-PgateInstall=true` (отдельный `.gate`). Предпочитать install-r/сохранение identity; reset только как намеренный документированный тестовый эксперимент. Device gates вручную по методам `am instrument`, не считать label-only install application acceptance.
 - Kotlin UniFFI bindings не править вручную; генерировать host-cdylib тестом ниже. USB/SSH DirectTCP smoke не выдавать за Android DNS acceptance.
 
 ## Verify
