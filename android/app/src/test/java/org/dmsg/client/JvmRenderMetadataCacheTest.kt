@@ -161,9 +161,10 @@ class JvmRenderMetadataCacheTest {
             "tx_records_written" to 8L, "rx_socket_read" to 1530L, "rx_record_start" to 1400L,
             "rx_record_end" to 1500L, "rx_authenticated_end" to 1500L, "rx_records_authenticated" to 9L,
             "tx_noise_srtcp_index" to 8L, "tx_record_srtcp_index" to 8L, "rx_noise_srtcp_index" to null)
-        val native = linkedMapOf<String, Any?>("schema_version" to 1L, "publication_age_us" to null,
+        val native = linkedMapOf<String, Any?>("schema_version" to 2L, "publication_age_us" to null,
             "age_since_observed_ms" to 25L, "now_native_us" to 50L, "tx_submitted" to 1100L,
             "rx_contiguous" to 1600L, "rx_flushed" to 1540L, "rx_pending" to 60L,
+            "rx_highest" to 1700L,
             "remote_stream_credit" to 65536L, "stream_active" to true, "send_queue" to false,
             "failed" to false, "local_fin" to false, "remote_fin" to false)
         return linkedMapOf("socket" to socket, "native" to native)
@@ -183,6 +184,7 @@ class JvmRenderMetadataCacheTest {
         assertFalse(native.containsKey("port")); assertFalse(native.containsKey("generation"))
         assertNull(native["publication_age_us"])
         assertEquals(1100L, native["tx_submitted"])
+        assertEquals(1700L, native["rx_highest"])
         assertFalse((clean.getValue("socket") as Map<*, *>).containsKey("payload"))
         input["native"] = null
         assertNull(requireNotNull(CallProbeAudio.ControlDeliveryEvidence.sanitize(input))["native"])
@@ -201,7 +203,8 @@ class JvmRenderMetadataCacheTest {
             { deliveryPart(it, "socket")["rx_base"] = 1401L },
             { deliveryPart(it, "native")["rx_pending"] = 59L },
             { deliveryPart(it, "native")["publication_age_us"] = 1L },
-            { deliveryPart(it, "native")["schema_version"] = 2L },
+            { deliveryPart(it, "native")["schema_version"] = 1L },
+            { deliveryPart(it, "native")["rx_highest"] = 1599L },
             { deliveryPart(it, "native")["stream_active"] = 1L },
             { deliveryPart(it, "native")["tx_submitted"] = -1L },
             { it.remove("native") })

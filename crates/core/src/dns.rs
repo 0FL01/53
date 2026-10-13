@@ -154,6 +154,7 @@ impl StreamSelection {
             "now_native_us": s.now_native_us,
             "tx_submitted": s.tx_submitted,
             "rx_contiguous": s.rx_contiguous,
+            "rx_highest": s.rx_highest,
             "rx_flushed": s.rx_flushed,
             "rx_pending": s.rx_pending,
             "stream_active": s.stream_active,
@@ -548,10 +549,11 @@ mod tests {
     fn stream_lease_is_generation_scoped_optional_and_contains_no_selector() {
         let snapshot = StreamSnapshot {
             generation: 7,
-            schema_version: 1,
+            schema_version: 2,
             now_native_us: 123,
             tx_submitted: 144,
             rx_contiguous: 200,
+            rx_highest: 250,
             rx_flushed: 190,
             rx_pending: 10,
             stream_active: true,

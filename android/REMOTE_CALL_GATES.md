@@ -147,6 +147,22 @@ Android messenger reachability or absence/presence of internet allowlisting.
   age stays unknown, and `rx_noise_srtcp_index` is not SRTCP/ledger authentication.
   Freeze the last pre-expiry observation, not later teardown progress. The genuine
   10s call below preserved identities/default carrier; maximum recorder line6353B.
+- The schema2 selected-stream diagnostic adds `rx_highest` from the accepted
+   STREAM end offset (`fin_offset`), including zero-length ranges/FIN. A difference
+   from contiguous is an end-offset gap, not buffered suffix-byte count. Real
+   pinned decode/bridge flush verifies12/0→12/4→12/12, duplicate suppression and
+   zero-length16/12. The C worker remains the only reader; the separate ABI is14
+   words, connection/path155 unchanged, with the same64 visits/3 read attempts.
+   Actual coordinated10s fails both frameworks: Moto oldest14281 age720538us,
+   OnePlus oldest58206 age720719us. Frozen receive highest/contiguous/flush/read/auth
+   equals972/index6 on Moto and840/index5 on OnePlus. OnePlus fully wrote control7
+   through1124, while its native capture submitted992; freshness is unknown.
+   Independent server final received/wrote SRTCP7 each way, with control Full/expiry0.
+   Target SHAa25dc7ed/test65808e1a is hash-verified on both preserved identities;
+   complete forwarding passes the16KiB guard (maximum6339B), not call acceptance.
+   Both gates joined/stopped; carrier/backend/data/default policy are unchanged.
+   Next bind the existing private generation publication to a completed TCP record,
+   without adding clock mapping, queues, workers or media/recovery-policy changes.
 - Actual byte-frontier10s failed both frameworks: OnePlus primary oldest60970
   age720469us/frontier60969, incoming index27/socket read/auth3744 equals native
   contiguous/flush3744 with pending0. Independent server final wrote29 toward it,

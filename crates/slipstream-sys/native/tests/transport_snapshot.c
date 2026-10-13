@@ -95,6 +95,7 @@ OFFSET(dmsg_stream_snapshot, failed, 9);
 OFFSET(dmsg_stream_snapshot, local_fin, 10);
 OFFSET(dmsg_stream_snapshot, remote_fin, 11);
 OFFSET(dmsg_stream_snapshot, remote_stream_credit, 12);
+OFFSET(dmsg_stream_snapshot, rx_highest, 13);
 
 static dmsg_transport_snapshot read_snapshot(dmsg_control *c) {
     dmsg_transport_snapshot out;
@@ -452,6 +453,7 @@ static void stream_fixture_init(stream_fixture *f) {
         f->ports[i] = ntohs(local.sin_port);
         f->quic_streams[i] = (picoquic_stream_head_t){.stream_id = f->streams[i].id,
             .sent_offset = 123 + i, .consumed_offset = 456 + i, .maxdata_remote = 1000 + i,
+            .fin_offset = 600 + i,
             .is_active = i == 0};
     }
     close(listener);
@@ -481,10 +483,11 @@ static void stream_unavailable(dmsg_control *c) {
     const dmsg_stream_snapshot zero = {0}; assert(memcmp(&out, &zero, sizeof(out)) == 0);
 }
 static dmsg_stream_snapshot stream_expected(unsigned lane, uint64_t generation, uint64_t now) {
-    return (dmsg_stream_snapshot){.generation = generation, .schema_version = 1, .now_native_us = now,
+    return (dmsg_stream_snapshot){.generation = generation, .schema_version = DMSG_STREAM_SCHEMA, .now_native_us = now,
         .tx_submitted = 123 + lane, .rx_contiguous = 456 + lane, .rx_pending = 70,
         .rx_flushed = 386 + lane, .stream_active = lane == 0, .send_queue = lane == 1,
-        .local_fin = lane == 1, .remote_fin = lane == 0, .remote_stream_credit = 877};
+        .local_fin = lane == 1, .remote_fin = lane == 0, .remote_stream_credit = 877,
+        .rx_highest = 600 + lane};
 }
 static void stream_selection_generation_retirement_and_read_bound(void) {
     stream_fixture f; stream_fixture_init(&f);
@@ -531,6 +534,9 @@ static void stream_selection_generation_retirement_and_read_bound(void) {
     f.quic_streams[1].sent_offset = 124;
     f.quic_streams[1].reset_received = 1; dmsg_stream_publish(c, &f.conn, 1051); stream_unavailable(c);
     f.quic_streams[1].reset_received = 0;
+    f.quic_streams[1].fin_offset = f.quic_streams[1].consumed_offset - 1;
+    dmsg_stream_publish(c, &f.conn, 1051); stream_unavailable(c);
+    f.quic_streams[1].fin_offset = 601;
     f.cnx.stream_tree.root = NULL; dmsg_stream_publish(c, &f.conn, 1052); stream_unavailable(c);
     f.cnx.stream_tree.root = &f.quic_streams[1].stream_node;
     f.streams[0].next = NULL; dmsg_stream_publish(c, &f.conn, 1053); stream_unavailable(c); /* Retirement. */
@@ -547,10 +553,11 @@ static void stream_selection_generation_retirement_and_read_bound(void) {
     dmsg_stream_publish(c, &f.conn, 1057); dmsg_publish(c, DMSG_FAILED, 0, 1); stream_unavailable(c);
     dmsg_stream_publish(c, NULL, 0); stream_unavailable(c);
     f.quic_streams[1].sent_offset = f.quic_streams[1].consumed_offset = f.quic_streams[1].maxdata_remote = 0;
+    f.quic_streams[1].fin_offset = 0;
     f.quic_streams[1].is_active = 0; f.quic_streams[1].send_queue = NULL;
     f.streams[1].local_fin = f.streams[1].remote_fin = false;
     select_lane(c, &f, 1, 47); dmsg_stream_publish(c, &f.conn, 1058); out = stream_read(c);
-    const dmsg_stream_snapshot known_zero = {.generation = 47, .schema_version = 1, .now_native_us = 1058};
+    const dmsg_stream_snapshot known_zero = {.generation = 47, .schema_version = DMSG_STREAM_SCHEMA, .now_native_us = 1058};
     assert(memcmp(&out, &known_zero, sizeof(out)) == 0); /* Known zero != unavailable. */
     stream_fixture_close(&f); dmsg_control_free(c);
 }
@@ -670,6 +677,6 @@ int main(int argc, char **argv) {
     stream_readonly_and_scan_bounds();
     stream_concurrent_publication();
     puts("C layout/publication/unknown/zero/8 paths/64 nodes/3 attempts/traps/legacy-vs-MP/read-only PASS");
-    puts("C selected stream/13 words/private port/2 lanes/generation/retirement/underflow/64 list+tree/3 attempts/read-only PASS");
+    puts("C selected stream/14 words/highest+contiguous/private port/2 lanes/generation/retirement/underflow/64 list+tree/3 attempts/read-only PASS");
     return 0;
 }

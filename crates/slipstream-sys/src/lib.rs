@@ -191,6 +191,10 @@ pub struct StreamSnapshot {
     pub remote_fin: bool,
     /// Remaining stream flow-control credit: maxdata_remote - sent_offset.
     pub remote_stream_credit: u64,
+    /// Highest accepted STREAM end offset (fin_offset), including zero-length
+    /// ranges/FIN. Excess over contiguous is an end-offset gap, not a count of
+    /// buffered suffix bytes or ACK/delivery proof.
+    pub rx_highest: u64,
 }
 
 #[derive(Debug)]
@@ -289,8 +293,9 @@ struct CStreamSnapshot {
     local_fin: u64,
     remote_fin: u64,
     remote_stream_credit: u64,
+    rx_highest: u64,
 }
-const _: () = assert!(std::mem::size_of::<CStreamSnapshot>() == 13 * 8);
+const _: () = assert!(std::mem::size_of::<CStreamSnapshot>() == 14 * 8);
 const STREAM_MAX_GENERATION: u64 = (1 << 48) - 1;
 
 fn stream_request(selection: Option<(u16, u64)>) -> u64 {
@@ -305,16 +310,17 @@ fn stream_request(selection: Option<(u16, u64)>) -> u64 {
 }
 impl CStreamSnapshot {
     fn decode(self) -> Option<StreamSnapshot> {
-        if self.schema_version != 1
+        if self.schema_version != 2
             || !(1..=STREAM_MAX_GENERATION).contains(&self.generation)
             || self.failed != 0
             || self.rx_flushed.checked_add(self.rx_pending)? != self.rx_contiguous
+            || self.rx_highest < self.rx_contiguous
         {
             return None;
         }
         Some(StreamSnapshot {
             generation: self.generation,
-            schema_version: 1,
+            schema_version: 2,
             now_native_us: self.now_native_us,
             tx_submitted: self.tx_submitted,
             rx_contiguous: self.rx_contiguous,
@@ -326,6 +332,7 @@ impl CStreamSnapshot {
             local_fin: transport_bool(self.local_fin)?,
             remote_fin: transport_bool(self.remote_fin)?,
             remote_stream_credit: self.remote_stream_credit,
+            rx_highest: self.rx_highest,
         })
     }
 }
@@ -610,21 +617,23 @@ mod snapshot_decode_tests {
         );
         let valid = CStreamSnapshot {
             generation: 42,
-            schema_version: 1,
+            schema_version: 2,
             now_native_us: 1042,
             rx_contiguous: 70,
             rx_pending: 70,
+            rx_highest: 90,
             ..Default::default()
         };
         let value = valid.decode().unwrap();
         assert_eq!(value.rx_flushed, 0); // Known zero, not unavailable.
         assert_eq!(value.rx_pending, 70);
         assert!(!value.failed);
-        for field in 0..11 {
+        assert_eq!(value.rx_highest, 90); // Gap is distinct from bridge pending.
+        for field in 0..12 {
             let mut raw = valid;
             match field {
                 0 => raw.schema_version = 0,
-                1 => raw.schema_version = 2,
+                1 => raw.schema_version = 1,
                 2 => raw.generation = 0,
                 3 => raw.generation = 1 << 48,
                 4 => raw.failed = 1,
@@ -634,10 +643,74 @@ mod snapshot_decode_tests {
                 8 => raw.remote_fin = 2,
                 9 => raw.rx_flushed = 1,
                 10 => raw.rx_flushed = u64::MAX,
+                11 => raw.rx_highest = 69,
                 _ => unreachable!(),
             }
             assert!(raw.decode().is_none(), "invalid stream field {field}");
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn real_stream_input_highest_offset_distinguishes_reassembly_holes() {
+        use std::{path::PathBuf, process::Command};
+        let package = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let out = PathBuf::from(env!("OUT_DIR"));
+        let source = out.join("source");
+        let binary = out.join("stream-received-frontier");
+        let mut compile = Command::new("cc");
+        compile.env_clear().env("PATH", "/usr/bin:/bin").args([
+            "-std=c11",
+            "-D_GNU_SOURCE",
+            "-O1",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+        ]);
+        for include in [
+            package.join("native"),
+            source.join("include"),
+            source.join("subprojects/picoquic/picoquic"),
+            out.join("build/_deps/picotls-src/include"),
+            out.join("openssl-build/install/include"),
+        ] {
+            compile.arg("-I").arg(include);
+        }
+        compile
+            .arg(package.join("native/tests/stream_received_frontier.c"))
+            .arg("-Wl,--start-group");
+        for lib in [
+            "dmsg_slipstream",
+            "picoquic-core",
+            "picotls-openssl",
+            "picotls-minicrypto",
+            "picotls-core",
+        ] {
+            compile.arg(out.join("lib").join(format!("lib{lib}.a")));
+        }
+        for lib in ["ssl", "crypto"] {
+            compile.arg(
+                out.join("openssl-build/install/lib")
+                    .join(format!("lib{lib}.a")),
+            );
+        }
+        let output = compile
+            .args(["-Wl,--end-group", "-lm", "-lpthread", "-ldl", "-o"])
+            .arg(&binary)
+            .output()
+            .expect("host C compiler");
+        assert!(
+            output.status.success(),
+            "real STREAM fixture compile: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = Command::new(&binary).env_clear().output().unwrap();
+        assert!(
+            output.status.success(),
+            "real STREAM fixture: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        eprintln!("{}", String::from_utf8_lossy(&output.stdout).trim());
     }
 
     #[test]
@@ -911,7 +984,7 @@ mod snapshot_decode_tests {
                 raw.decode().unwrap(),
                 StreamSnapshot {
                     generation: 42,
-                    schema_version: 1,
+                    schema_version: 2,
                     now_native_us: 1042,
                     tx_submitted: 124,
                     rx_contiguous: 457,
@@ -923,6 +996,7 @@ mod snapshot_decode_tests {
                     local_fin: true,
                     remote_fin: false,
                     remote_stream_credit: 877,
+                    rx_highest: 601,
                 }
             );
         }

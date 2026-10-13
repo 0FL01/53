@@ -221,14 +221,16 @@ void dmsg_stream_publish(dmsg_control *c, const ss_conn *conn, uint64_t now) {
     if (!qs || qs->is_closed || qs->is_discarded || qs->reset_requested || qs->reset_received ||
         qs->stop_sending_requested || qs->stop_sending_received) goto publish;
     uint64_t pending = selected->out_len - selected->out_off;
-    if (pending > qs->consumed_offset || qs->sent_offset > qs->maxdata_remote) goto publish;
+    if (pending > qs->consumed_offset || qs->sent_offset > qs->maxdata_remote ||
+        qs->fin_offset < qs->consumed_offset) goto publish;
     value = (dmsg_stream_snapshot){
         .generation = request >> 16, .schema_version = DMSG_STREAM_SCHEMA, .now_native_us = now,
         .tx_submitted = qs->sent_offset, .rx_contiguous = qs->consumed_offset,
         .rx_flushed = qs->consumed_offset - pending, .rx_pending = pending,
         .stream_active = qs->is_active, .send_queue = qs->send_queue != NULL,
         .failed = selected->failed, .local_fin = selected->local_fin, .remote_fin = selected->remote_fin,
-        .remote_stream_credit = qs->maxdata_remote - qs->sent_offset
+        .remote_stream_credit = qs->maxdata_remote - qs->sent_offset,
+        .rx_highest = qs->fin_offset
     };
 publish:
     stream_store(c, request, &value);

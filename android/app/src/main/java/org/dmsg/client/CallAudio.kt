@@ -153,7 +153,7 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
             "rx_authenticated_end", "rx_records_authenticated")
         private val socketIndices = listOf("tx_noise_srtcp_index", "tx_record_srtcp_index", "rx_noise_srtcp_index")
         private val nativeCounters = listOf("age_since_observed_ms", "now_native_us", "tx_submitted",
-            "rx_contiguous", "rx_flushed", "rx_pending", "remote_stream_credit")
+            "rx_contiguous", "rx_highest", "rx_flushed", "rx_pending", "remote_stream_credit")
         private val nativeFlags = listOf("stream_active", "send_queue", "failed", "local_fin", "remote_fin")
         fun fromNativeStats(source: JSONObject): JSONObject? { return try {
             val delivery = source.optJSONObject("control_delivery") ?: return null
@@ -182,12 +182,13 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
             require(source.containsKey("native"))
             val native = source["native"]?.let { value ->
                 val capture = value as? Map<*, *> ?: return null
-                require(NativeTransportEvidence.number(capture, "schema_version", 1) == 1L)
+                require(NativeTransportEvidence.number(capture, "schema_version", 2) == 2L)
                 require(capture.containsKey("publication_age_us") && capture["publication_age_us"] == null)
-                val result = linkedMapOf<String, Any?>("schema_version" to 1L, "publication_age_us" to null)
+                val result = linkedMapOf<String, Any?>("schema_version" to 2L, "publication_age_us" to null)
                 nativeCounters.forEach { result[it] = NativeTransportEvidence.number(capture, it) }
                 nativeFlags.forEach { result[it] = NativeTransportEvidence.boolean(capture, it) }
                 val contiguous = result.getValue("rx_contiguous") as Long
+                require(result.getValue("rx_highest") as Long >= contiguous)
                 val flushed = result.getValue("rx_flushed") as Long
                 val pending = result.getValue("rx_pending") as Long
                 require(flushed <= contiguous && pending == contiguous - flushed)
