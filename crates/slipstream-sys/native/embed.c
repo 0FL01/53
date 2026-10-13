@@ -196,6 +196,38 @@ static const picoquic_stream_head_t *stream_find_readonly(const picoquic_cnx_t *
     }
     return NULL;
 }
+static uint64_t stream_ack_prefix_readonly(const picoquic_stream_head_t *qs) {
+    const uint64_t extent = qs->sent_offset;
+    const uint64_t offset_limit = (UINT64_C(1) << 62) - 1;
+    if (extent > offset_limit) return UINT64_MAX;
+    /* Inclusive merged ranges, read without splaying or calling tree helpers.
+     * Charge each descent before dereferencing a node; even cyclic/overdeep
+     * fixtures cannot exceed 64 node entries. No upstream state is modified. */
+    const picosplay_node_t *stack[DMSG_STREAM_SCAN_LIMIT];
+    const picosplay_node_t *node = qs->sack_list.ack_tree.root;
+    unsigned depth = 0, visited = 0;
+    uint64_t prefix = 0;
+    while (node || depth) {
+        while (node) {
+            if (visited == DMSG_STREAM_SCAN_LIMIT) return UINT64_MAX;
+            ++visited;
+            stack[depth++] = node;
+            node = node->left;
+        }
+        node = stack[--depth];
+        const picoquic_sack_item_t *range = (const picoquic_sack_item_t *)
+            ((const char *)node - offsetof(picoquic_sack_item_t, node));
+        uint64_t start = range->start_of_sack_range, end = range->end_of_sack_range;
+        if (start > end || end == UINT64_MAX || end > extent ||
+            (end == extent && !qs->fin_sent)) return UINT64_MAX;
+        if (start > prefix) return prefix;
+        uint64_t exclusive = end == extent ? extent : end + 1;
+        if (exclusive > prefix) prefix = exclusive;
+        if (prefix == extent) return prefix;
+        node = node->right;
+    }
+    return prefix;
+}
 void dmsg_stream_publish(dmsg_control *c, const ss_conn *conn, uint64_t now) {
     dmsg_stream_snapshot value = {0};
     uint64_t request = atomic_load_explicit(&c->stream_request, memory_order_seq_cst);
@@ -230,7 +262,8 @@ void dmsg_stream_publish(dmsg_control *c, const ss_conn *conn, uint64_t now) {
         .stream_active = qs->is_active, .send_queue = qs->send_queue != NULL,
         .failed = selected->failed, .local_fin = selected->local_fin, .remote_fin = selected->remote_fin,
         .remote_stream_credit = qs->maxdata_remote - qs->sent_offset,
-        .rx_highest = qs->fin_offset
+        .rx_highest = qs->fin_offset,
+        .tx_ack_prefix_end = stream_ack_prefix_readonly(qs)
     };
 publish:
     stream_store(c, request, &value);

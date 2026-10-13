@@ -161,9 +161,10 @@ class JvmRenderMetadataCacheTest {
             "tx_records_written" to 8L, "rx_socket_read" to 1530L, "rx_record_start" to 1400L,
             "rx_record_end" to 1500L, "rx_authenticated_end" to 1500L, "rx_records_authenticated" to 9L,
             "tx_noise_srtcp_index" to 8L, "tx_record_srtcp_index" to 8L, "rx_noise_srtcp_index" to null)
-        val native = linkedMapOf<String, Any?>("schema_version" to 2L, "publication_age_us" to null,
+        val native = linkedMapOf<String, Any?>("schema_version" to 3L, "publication_age_us" to null,
             "publication_after_tx_record_end" to 1220L,
             "age_since_observed_ms" to 25L, "now_native_us" to 50L, "tx_submitted" to 1100L,
+            "tx_ack_prefix_end" to 1000L,
             "rx_contiguous" to 1600L, "rx_flushed" to 1540L, "rx_pending" to 60L,
             "rx_highest" to 1700L,
             "remote_stream_credit" to 65536L, "stream_active" to true, "send_queue" to false,
@@ -186,8 +187,11 @@ class JvmRenderMetadataCacheTest {
         assertNull(native["publication_age_us"])
         assertEquals(1220L, native["publication_after_tx_record_end"])
         assertEquals(1100L, native["tx_submitted"])
+        assertEquals(1000L, native["tx_ack_prefix_end"])
         assertEquals(1700L, native["rx_highest"])
         assertFalse((clean.getValue("socket") as Map<*, *>).containsKey("payload"))
+        deliveryPart(input, "native")["tx_ack_prefix_end"] = null
+        assertNull((requireNotNull(CallProbeAudio.ControlDeliveryEvidence.sanitize(input))["native"] as Map<*, *>)["tx_ack_prefix_end"])
         input["native"] = null
         assertNull(requireNotNull(CallProbeAudio.ControlDeliveryEvidence.sanitize(input))["native"])
         assertTrue(encodeTransport(clean).toByteArray(Charsets.UTF_8).size < 2 * 1024)
@@ -209,6 +213,12 @@ class JvmRenderMetadataCacheTest {
             { deliveryPart(it, "native")["publication_after_tx_record_end"] = 1221L },
             { deliveryPart(it, "native").remove("publication_after_tx_record_end") },
             { deliveryPart(it, "native")["schema_version"] = 1L },
+            { deliveryPart(it, "native")["schema_version"] = 2L },
+            { deliveryPart(it, "native").remove("tx_ack_prefix_end") },
+            { deliveryPart(it, "native")["tx_ack_prefix_end"] = 1101L },
+            { deliveryPart(it, "native")["tx_ack_prefix_end"] = -1L },
+            { deliveryPart(it, "native")["tx_ack_prefix_end"] = (1L shl 62) },
+            { deliveryPart(it, "native")["tx_ack_prefix_end"] = 1000.0 },
             { deliveryPart(it, "native")["rx_highest"] = 1599L },
             { deliveryPart(it, "native")["stream_active"] = 1L },
             { deliveryPart(it, "native")["tx_submitted"] = -1L },

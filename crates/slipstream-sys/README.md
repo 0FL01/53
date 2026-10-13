@@ -1,7 +1,7 @@
 # Managed Slipstream native boundary
 
 Builds the production C client from Git revision
-`7d3c9dd76a38834b472a1c01b5cd2d160eb21b60` (`fix/dns-pto-ack-anchor`), its pinned submodules and the
+`c3e20dd89464023cf33a022c90131d2dddca286d` (`fix/dns-pto-ack-anchor`), its pinned submodules and the
 upstream-pinned picotls revision. OpenSSL is built from locked `openssl-src`
 3.5.4. Git archives, patches, fetched dependencies and binaries stay in Cargo's
 `OUT_DIR` under `target/`. The build never mutates the live submodule; approved
@@ -44,14 +44,18 @@ conditional on `DMSG_EMBEDDED` and the TCP_NODELAY option remains default-OFF.
   the Rust socket's **local** loopback ephemeral port and a fresh48-bit generation.
   `None`/invalid selection clears it. The port/request are private selection data,
   never diagnostic output; do not reuse a generation across lane lifetimes.
-- `stream_snapshot(&self) -> Option<StreamSnapshot>` copies a separate14-word
-  schema2 atomic snapshot for that selection, with three attempts and no previous-copy
+- `stream_snapshot(&self) -> Option<StreamSnapshot>` copies a separate15-word
+  schema3 atomic snapshot for that selection, with three attempts and no previous-copy
   fallback. The worker scans at most64 stream entries/tree nodes without splaying
   or mutating upstream state. `tx_submitted` is QUIC sent-offset, `rx_contiguous`
   is consumed-offset, `rx_pending` is unflushed bridge output, and `rx_flushed`
   is their checked difference. `rx_highest` is the accepted STREAM end offset
   (`fin_offset`), including zero-length ranges/FIN; an excess over contiguous
-  denotes an end-offset gap, not the amount of buffered suffix data. Missing,
+  denotes an end-offset gap, not the amount of buffered suffix data.
+  `tx_ack_prefix_end` is optional sender STREAM byte coverage `[0,E)`, clamped to
+  submitted bytes; FIN markers do not count as bytes. Invalid/unresolved bounded
+  SACK traversal yields `None`, while zero is known empty coverage. It depends on
+  the pinned empty non-FIN/end-offset ACK-range correction. Missing,
   retired/reset/inconsistent streams yield
   `None`. Submission is not ACK coverage; C flush is not application read/auth.
   Native capture time has no app-clock mapping or known publication age. The
@@ -115,7 +119,7 @@ errors, late-stop failure preservation, 16 simultaneous starts, 64 restart/stop
 cycles, bound-port release, stable FD/task counts and unchanged SIGINT/SIGTERM
 handlers. Its public certificate and unread loopback UDP sink require no live
 deployment. The explicit `loopback.rs` gate is ignored in ordinary Cargo runs;
-the script runs it after all nine pinned Meson suites, including actual-loop
+the script runs it after all ten pinned Meson suites, including actual-loop
 prepared-packet submission, real ACK/Dcubic-credit, path-local ACK metadata and
 QName-minimization DNS and real PTO-anchor regressions. It covers PEM/DER readiness,
 wrong full-leaf rejection, eight exact raw streams and terminal established loss.

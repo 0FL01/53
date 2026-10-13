@@ -42,7 +42,10 @@ fn wait_frontier(client: &NativeClient, generation: u64, bytes: u64) -> StreamSn
                 assert_eq!(value.rx_pending, 0);
                 assert_eq!(value.rx_highest, bytes);
                 assert!(!value.failed);
-                assert_eq!(value.schema_version, 2);
+                assert_eq!(value.schema_version, 3);
+                assert!(value
+                    .tx_ack_prefix_end
+                    .is_none_or(|end| end <= value.tx_submitted));
                 assert!(value.now_native_us > 0);
                 return value;
             }

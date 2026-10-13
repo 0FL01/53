@@ -96,6 +96,7 @@ OFFSET(dmsg_stream_snapshot, local_fin, 10);
 OFFSET(dmsg_stream_snapshot, remote_fin, 11);
 OFFSET(dmsg_stream_snapshot, remote_stream_credit, 12);
 OFFSET(dmsg_stream_snapshot, rx_highest, 13);
+OFFSET(dmsg_stream_snapshot, tx_ack_prefix_end, 14);
 
 static dmsg_transport_snapshot read_snapshot(dmsg_control *c) {
     dmsg_transport_snapshot out;
@@ -504,6 +505,10 @@ static void stream_selection_generation_retirement_and_read_bound(void) {
     dmsg_stream_publish(c, &f.conn, 1043); out = stream_read(c);
     const dmsg_stream_snapshot second = stream_expected(1, 43, 1043);
     assert(memcmp(&out, &second, sizeof(out)) == 0);
+    out.schema_version = 2; /* Reject the former 14-word schema, not a zero sample. */
+    stream_store(c, (UINT64_C(43) << 16) | f.ports[1], &out);
+    loads = 0; stream_unavailable(c); assert(loads == 3 * (DMSG_STREAM_WORDS + 5));
+    dmsg_stream_publish(c, &f.conn, 1043);
     select_lane(c, &f, 0, 43); stream_unavailable(c); /* Whole key, even if generation misused. */
     select_lane(c, &f, 1, 44); stream_unavailable(c); /* Same port, fresh lane lifetime. */
     /* An already-started old worker publication finishing AFTER selection
@@ -598,11 +603,144 @@ static void stream_readonly_and_scan_bounds(void) {
     const dmsg_stream_snapshot copy = stream_read(c); assert(memcmp(&out, &copy, sizeof(out)) == 0);
     stream_fixture_close(&f); dmsg_control_free(c);
 }
+
+/* Real SACK nodes, assembled by hand: sacks.c orders inclusive ranges by start
+ * and merges touching/overlapping ACKs. FIN occupies sent_offset itself. Never
+ * initialize/find/update/iterate the tree through upstream splay/SACK helpers. */
+static int64_t forbidden_sack_compare(void *left, void *right) {
+    (void)left; (void)right; abort();
+}
+static picosplay_node_t *forbidden_sack_create(void *value) { (void)value; abort(); }
+static void forbidden_sack_delete(void *tree, picosplay_node_t *node) {
+    (void)tree; (void)node; abort();
+}
+static void *forbidden_sack_value(picosplay_node_t *node) { (void)node; abort(); }
+static unsigned sack_cases;
+static void stream_ack_case(stream_fixture *f, dmsg_control *c, region qr, region ar,
+    uint64_t expected_prefix) {
+    picoquic_stream_head_t *qs = qr.object;
+    qs->maxdata_remote = qs->sent_offset;
+    const picoquic_stream_head_t before = *qs;
+    const size_t size = DMSG_STREAM_SCAN_LIMIT * sizeof(picoquic_sack_item_t);
+    void *before_ranges = malloc(size); assert(before_ranges);
+    memcpy(before_ranges, ar.object, size);
+    readonly(qr); readonly(ar);
+    assert(stream_ack_prefix_readonly(qs) == expected_prefix);
+    dmsg_stream_publish(c, &f->conn, 1200);
+    const dmsg_stream_snapshot out = stream_read(c);
+    dmsg_stream_snapshot expected = stream_expected(0, 100, 1200);
+    expected.tx_submitted = qs->sent_offset; expected.remote_stream_credit = 0;
+    expected.tx_ack_prefix_end = expected_prefix;
+    assert(memcmp(&out, &expected, sizeof(out)) == 0); /* Unknown scalar != unavailable DTO. */
+    assert(memcmp(qs, &before, sizeof(before)) == 0);
+    assert(memcmp(ar.object, before_ranges, size) == 0);
+    free(before_ranges); ++sack_cases;
+    assert(mprotect(qr.base, qr.accessible, PROT_READ | PROT_WRITE) == 0);
+    assert(mprotect(ar.base, ar.accessible, PROT_READ | PROT_WRITE) == 0);
+}
+static void stream_ack_prefix_readonly_fixtures(void) {
+    stream_fixture f; stream_fixture_init(&f);
+    region qr = allocate_region(sizeof(picoquic_stream_head_t), false);
+    region ar = allocate_region(DMSG_STREAM_SCAN_LIMIT * sizeof(picoquic_sack_item_t), true);
+    picoquic_stream_head_t *qs = qr.object; picoquic_sack_item_t *ranges = ar.object;
+    *qs = f.quic_streams[0];
+    f.cnx.stream_tree.root = &qs->stream_node;
+    qs->sack_list.ack_tree = (picosplay_tree_t){.comp = forbidden_sack_compare,
+        .create = forbidden_sack_create, .delete_node = forbidden_sack_delete,
+        .node_value = forbidden_sack_value};
+    dmsg_control *c = dmsg_control_new(); assert(c); select_lane(c, &f, 0, 100);
+
+    stream_ack_case(&f, c, qr, ar, 0); /* Empty tree, positive sent extent. */
+    qs->sent_offset = 0; stream_ack_case(&f, c, qr, ar, 0);
+    qs->sent_offset = 10;
+    ranges[0] = (picoquic_sack_item_t){.start_of_sack_range = 0, .end_of_sack_range = 3};
+    qs->sack_list.ack_tree.root = &ranges[0].node;
+    stream_ack_case(&f, c, qr, ar, 4); /* Inclusive normal prefix. */
+    ranges[0].start_of_sack_range = 1; stream_ack_case(&f, c, qr, ar, 0);
+    ranges[0].start_of_sack_range = 0; ranges[0].end_of_sack_range = 9;
+    stream_ack_case(&f, c, qr, ar, 10); /* Full bytes, no FIN. */
+    ranges[0].end_of_sack_range = 8; stream_ack_case(&f, c, qr, ar, 9);
+
+    /* Merged production shape, and hand-made adjacency/overlap controls. The
+     * latter are not emitted by update_sack_list, but exercise prefix extension. */
+    ranges[0].end_of_sack_range = 7; stream_ack_case(&f, c, qr, ar, 8);
+    ranges[0].end_of_sack_range = 3;
+    ranges[1] = (picoquic_sack_item_t){.node.left = &ranges[0].node,
+        .start_of_sack_range = 4, .end_of_sack_range = 7};
+    ranges[0].node.parent = &ranges[1].node;
+    qs->sack_list.ack_tree.root = &ranges[1].node;
+    stream_ack_case(&f, c, qr, ar, 8);
+    ranges[1].start_of_sack_range = 2; stream_ack_case(&f, c, qr, ar, 8);
+    ranges[1].start_of_sack_range = 5; stream_ack_case(&f, c, qr, ar, 4); /* Real byte-4 hole. */
+    qs->fin_sent = 1; ranges[1].end_of_sack_range = 10;
+    stream_ack_case(&f, c, qr, ar, 4); /* ACKed FIN/suffix cannot bridge the hole. */
+
+    qs->sack_list.ack_tree.root = &ranges[0].node;
+    ranges[0].node = (picosplay_node_t){.parent = ar.guard}; /* Never follow parent. */
+    ranges[0].end_of_sack_range = 10;
+    stream_ack_case(&f, c, qr, ar, 10); /* Merged data+FIN is clamped to bytes. */
+    ranges[0].start_of_sack_range = 10; stream_ack_case(&f, c, qr, ar, 0); /* FIN only. */
+    qs->sent_offset = 0; ranges[0].start_of_sack_range = ranges[0].end_of_sack_range = 0;
+    stream_ack_case(&f, c, qr, ar, 0); /* Zero-byte FIN is known zero, not one byte. */
+    qs->fin_sent = 0; stream_ack_case(&f, c, qr, ar, UINT64_MAX); /* FIN marker without sent FIN. */
+    qs->sent_offset = 10; ranges[0].end_of_sack_range = 10;
+    stream_ack_case(&f, c, qr, ar, UINT64_MAX);
+    qs->fin_sent = 1; ranges[0].end_of_sack_range = 11;
+    stream_ack_case(&f, c, qr, ar, UINT64_MAX); /* Beyond sent extent even with FIN. */
+    ranges[0].end_of_sack_range = UINT64_MAX;
+    stream_ack_case(&f, c, qr, ar, UINT64_MAX); /* Historical zero-offset underflow. */
+    ranges[0].start_of_sack_range = 5; ranges[0].end_of_sack_range = 4;
+    stream_ack_case(&f, c, qr, ar, UINT64_MAX); /* Historical positive-offset empty frame. */
+    qs->sent_offset = (UINT64_C(1) << 62) - 1;
+    ranges[0].start_of_sack_range = 0; ranges[0].end_of_sack_range = qs->sent_offset;
+    stream_ack_case(&f, c, qr, ar, qs->sent_offset); /* Maximum valid data+FIN end. */
+    qs->fin_sent = 0; --ranges[0].end_of_sack_range;
+    stream_ack_case(&f, c, qr, ar, qs->sent_offset); /* Maximum valid data end. */
+    ++qs->sent_offset; qs->sack_list.ack_tree.root = ar.guard;
+    stream_ack_case(&f, c, qr, ar, UINT64_MAX); /* Invalid extent rejected before tree access. */
+
+    qs->sent_offset = 65;
+    for (unsigned i = 0; i < DMSG_STREAM_SCAN_LIMIT; ++i)
+        ranges[i] = (picoquic_sack_item_t){.node.parent = ar.guard,
+            .node.left = i ? &ranges[i - 1].node : NULL,
+            .start_of_sack_range = i, .end_of_sack_range = i};
+    qs->sack_list.ack_tree.root = &ranges[62].node;
+    stream_ack_case(&f, c, qr, ar, 63); /* 63 entries, finite tree. */
+    qs->sack_list.ack_tree.root = &ranges[63].node;
+    stream_ack_case(&f, c, qr, ar, 64); /* 64 descents/stack slots, finite tree. */
+    ranges[0].node.left = ar.guard;
+    stream_ack_case(&f, c, qr, ar, UINT64_MAX); /* Unreadable 65th left node. */
+    for (unsigned i = 0; i < DMSG_STREAM_SCAN_LIMIT; ++i)
+        ranges[i].node = (picosplay_node_t){.parent = ar.guard,
+            .right = i < DMSG_STREAM_SCAN_LIMIT - 1 ? &ranges[i + 1].node : ar.guard};
+    qs->sack_list.ack_tree.root = &ranges[0].node;
+    stream_ack_case(&f, c, qr, ar, UINT64_MAX); /* Unreadable 65th right node. */
+    qs->sent_offset = 64; stream_ack_case(&f, c, qr, ar, 64); /* Fully proved prefix needs no node 65. */
+    ranges[1].start_of_sack_range = ranges[1].end_of_sack_range = 2;
+    stream_ack_case(&f, c, qr, ar, 1); /* First hole resolves before unknown suffix. */
+
+    qs->sent_offset = 10;
+    ranges[0] = (picoquic_sack_item_t){.node.left = &ranges[0].node,
+        .start_of_sack_range = 0, .end_of_sack_range = 3};
+    stream_ack_case(&f, c, qr, ar, UINT64_MAX); /* Left self-cycle fills only bounded stack. */
+    ranges[0].node.left = NULL; ranges[0].node.right = &ranges[0].node;
+    stream_ack_case(&f, c, qr, ar, UINT64_MAX); /* Right self-cycle cannot resolve prefix. */
+    ranges[0].node.right = &ranges[1].node;
+    ranges[1] = (picoquic_sack_item_t){.node.left = &ranges[0].node,
+        .start_of_sack_range = 4, .end_of_sack_range = 7};
+    stream_ack_case(&f, c, qr, ar, UINT64_MAX); /* Two-node left/right cycle. */
+    printf("C sender ACK prefix: %u protected manual SACK cases/FIN byte clamp/invalid/64 entries/guarded node65/cycles/no mutation PASS\n", sack_cases);
+    release(qr); release(ar); stream_fixture_close(&f); dmsg_control_free(c);
+}
 static void *stream_writer(void *arg) {
     concurrent_fixture *f = arg; stream_fixture source; stream_fixture_init(&source);
+    picoquic_sack_item_t ranges[2] = {0};
+    for (unsigned lane = 0; lane < 2; ++lane)
+        source.quic_streams[lane].sack_list.ack_tree.root = &ranges[lane].node;
     pthread_barrier_wait(&f->barrier);
     for (uint64_t g = 1; g <= WRITES; ++g) {
         unsigned lane = g % 2;
+        ranges[lane].end_of_sack_range = g % source.quic_streams[lane].sent_offset;
         select_lane(f->control, &source, lane, g);
         dmsg_stream_publish(f->control, &source.conn, 1000 + g);
         if (g % 32 == 0) sched_yield();
@@ -618,8 +756,9 @@ static void *stream_reader(void *arg) {
         dmsg_stream_snapshot out; loads = 0;
         if (dmsg_control_stream_snapshot(f->control, &out, sizeof(out))) {
             assert(out.generation >= 1 && out.generation <= WRITES);
-            const dmsg_stream_snapshot expected = stream_expected(out.generation % 2, out.generation,
+            dmsg_stream_snapshot expected = stream_expected(out.generation % 2, out.generation,
                 1000 + out.generation);
+            expected.tx_ack_prefix_end = out.generation % expected.tx_submitted + 1;
             assert(memcmp(&out, &expected, sizeof(out)) == 0);
             atomic_fetch_add_explicit(&f->accepted, 1, memory_order_relaxed);
             if (out.generation > 1 && out.generation < WRITES)
@@ -675,8 +814,9 @@ int main(int argc, char **argv) {
     concurrent_publication();
     stream_selection_generation_retirement_and_read_bound();
     stream_readonly_and_scan_bounds();
+    stream_ack_prefix_readonly_fixtures();
     stream_concurrent_publication();
     puts("C layout/publication/unknown/zero/8 paths/64 nodes/3 attempts/traps/legacy-vs-MP/read-only PASS");
-    puts("C selected stream/14 words/highest+contiguous/private port/2 lanes/generation/retirement/underflow/64 list+tree/3 attempts/read-only PASS");
+    puts("C selected stream/15 words/highest+contiguous+ACK prefix/private port/2 lanes/generation/retirement/underflow/64 list+tree/3 attempts/read-only PASS");
     return 0;
 }

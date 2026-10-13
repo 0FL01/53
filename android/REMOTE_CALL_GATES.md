@@ -178,6 +178,25 @@ Android messenger reachability or absence/presence of internet allowlisting.
     final SRTCP10 received/written each direction, Full/expiry0, is not timely credit
     proof. Target SHA3268e29b/test65808e1a is hash-verified on both preserved identities;
     remote recorder maximum5702B. Both gates joined/stopped; no180s run followed.
+- Schema3 ACK-prefix transportc3e20dd is now matched on clients/carrier, with
+  unchanged nested pins and defaultDcubic/probe-OFF/TCP_NODELAY-OFF/fallback.
+  Workspace458/2 unchanged ignores, JVM185, Meson10/10, explicit loopback,
+  ARM64/debug/test/release and31 protected normal/ASan/UBSan prefix cases pass.
+  Target SHA9097fd77 (22135805B), unchanged test65808e1a, install-r/hash-verified
+  on both preserved identities. Fresh formal readiness preceded immediate dial.
+  Both actual10s frameworks FAIL: ADB0/final-1 but framework not OK/status-2.
+  Moto oldest35151 age720317us/frontier35150,90encoded/75decoded/88RTP;
+  outgoing record21/write/submission/ACK-prefix2972, incoming highest/contiguous/
+  flush/read/auth2820/index20, pending0. OnePlus95encoded/68decoded/90RTP,
+  secondaryConnectionLost/nativefailed=false; final write22/end3104, native=null,
+  incoming2952/index21. Its terminal35167 was prepared/committed in22; server
+  final accepted/wrote only21 SRTCP each way, Full/pre-Noise/route expiry0.
+  These are independent endpoint/final markers, not shared-clock delivery timing.
+  Recorder maximum5362B; optional forwarding passes, not R2. Matching carrier
+  imagef5cb11ff/config metadata verified, backendb580 ID/image/data unchanged,
+  rollbackc702 retained. Gate processes stopped, no reset or180s run. Next add
+  finite receiver checkpoints inside the unchanged3s background interval because
+  the final native=null cannot distinguish submission from ACKed prefix.
 - Actual byte-frontier10s failed both frameworks: OnePlus primary oldest60970
   age720469us/frontier60969, incoming index27/socket read/auth3744 equals native
   contiguous/flush3744 with pending0. Independent server final wrote29 toward it,

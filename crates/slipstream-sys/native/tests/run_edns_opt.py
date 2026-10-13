@@ -11,7 +11,7 @@ import tarfile
 ROOT = pathlib.Path(__file__).resolve().parents[4]
 NATIVE = pathlib.Path(__file__).resolve().parents[1]
 VENDOR = ROOT / "vendor/slipstream"
-PIN = "7d3c9dd76a38834b472a1c01b5cd2d160eb21b60"
+PIN = "c3e20dd89464023cf33a022c90131d2dddca286d"
 OUT = ROOT / ".local/edns-opt-regression"
 ENV = {"HOME": os.environ["HOME"], "PATH": "/usr/local/bin:/usr/bin:/bin"}
 resource.setrlimit(resource.RLIMIT_CORE, (0, 0))

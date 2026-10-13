@@ -195,6 +195,10 @@ pub struct StreamSnapshot {
     /// ranges/FIN. Excess over contiguous is an end-offset gap, not a count of
     /// buffered suffix bytes or ACK/delivery proof.
     pub rx_highest: u64,
+    /// Sender STREAM byte coverage [0,E), not path ACKs or app authentication.
+    /// None means invalid ranges or an unresolved bounded scan; zero is known
+    /// empty coverage. The pinned transport preserves empty-frame ACK semantics.
+    pub tx_ack_prefix_end: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -294,8 +298,9 @@ struct CStreamSnapshot {
     remote_fin: u64,
     remote_stream_credit: u64,
     rx_highest: u64,
+    tx_ack_prefix_end: u64,
 }
-const _: () = assert!(std::mem::size_of::<CStreamSnapshot>() == 14 * 8);
+const _: () = assert!(std::mem::size_of::<CStreamSnapshot>() == 15 * 8);
 const STREAM_MAX_GENERATION: u64 = (1 << 48) - 1;
 
 fn stream_request(selection: Option<(u16, u64)>) -> u64 {
@@ -310,17 +315,20 @@ fn stream_request(selection: Option<(u16, u64)>) -> u64 {
 }
 impl CStreamSnapshot {
     fn decode(self) -> Option<StreamSnapshot> {
-        if self.schema_version != 2
+        if self.schema_version != 3
             || !(1..=STREAM_MAX_GENERATION).contains(&self.generation)
             || self.failed != 0
             || self.rx_flushed.checked_add(self.rx_pending)? != self.rx_contiguous
             || self.rx_highest < self.rx_contiguous
+            || (self.tx_ack_prefix_end != u64::MAX
+                && (self.tx_ack_prefix_end > self.tx_submitted
+                    || self.tx_ack_prefix_end > (1 << 62) - 1))
         {
             return None;
         }
         Some(StreamSnapshot {
             generation: self.generation,
-            schema_version: 2,
+            schema_version: 3,
             now_native_us: self.now_native_us,
             tx_submitted: self.tx_submitted,
             rx_contiguous: self.rx_contiguous,
@@ -333,6 +341,8 @@ impl CStreamSnapshot {
             remote_fin: transport_bool(self.remote_fin)?,
             remote_stream_credit: self.remote_stream_credit,
             rx_highest: self.rx_highest,
+            tx_ack_prefix_end: (self.tx_ack_prefix_end != u64::MAX)
+                .then_some(self.tx_ack_prefix_end),
         })
     }
 }
@@ -617,7 +627,7 @@ mod snapshot_decode_tests {
         );
         let valid = CStreamSnapshot {
             generation: 42,
-            schema_version: 2,
+            schema_version: 3,
             now_native_us: 1042,
             rx_contiguous: 70,
             rx_pending: 70,
@@ -629,7 +639,38 @@ mod snapshot_decode_tests {
         assert_eq!(value.rx_pending, 70);
         assert!(!value.failed);
         assert_eq!(value.rx_highest, 90); // Gap is distinct from bridge pending.
-        for field in 0..12 {
+        assert_eq!(value.tx_ack_prefix_end, Some(0));
+        assert_eq!(
+            CStreamSnapshot {
+                tx_ack_prefix_end: u64::MAX,
+                ..valid
+            }
+            .decode()
+            .unwrap()
+            .tx_ack_prefix_end,
+            None
+        );
+        for prefix in [0, 100, (1 << 62) - 1] {
+            assert_eq!(
+                CStreamSnapshot {
+                    tx_submitted: (1 << 62) - 1,
+                    tx_ack_prefix_end: prefix,
+                    ..valid
+                }
+                .decode()
+                .unwrap()
+                .tx_ack_prefix_end,
+                Some(prefix)
+            );
+        }
+        assert!(CStreamSnapshot {
+            tx_submitted: 1 << 62,
+            tx_ack_prefix_end: 1 << 62,
+            ..valid
+        }
+        .decode()
+        .is_none());
+        for field in 0..14 {
             let mut raw = valid;
             match field {
                 0 => raw.schema_version = 0,
@@ -644,6 +685,8 @@ mod snapshot_decode_tests {
                 9 => raw.rx_flushed = 1,
                 10 => raw.rx_flushed = u64::MAX,
                 11 => raw.rx_highest = 69,
+                12 => raw.schema_version = 2,
+                13 => raw.tx_ack_prefix_end = 1,
                 _ => unreachable!(),
             }
             assert!(raw.decode().is_none(), "invalid stream field {field}");
@@ -845,7 +888,7 @@ mod snapshot_decode_tests {
         let source = out.join("source");
         assert!(std::fs::read_to_string(source.join(".embedding-stamp"))
             .unwrap()
-            .starts_with("7d3c9dd76a38834b472a1c01b5cd2d160eb21b60"));
+            .starts_with("c3e20dd89464023cf33a022c90131d2dddca286d"));
         for sanitize in [false, true] {
             let binary = out.join(format!("transport-snapshot-{sanitize}"));
             let mut compile = Command::new(if sanitize { "clang" } else { "cc" });
@@ -984,7 +1027,7 @@ mod snapshot_decode_tests {
                 raw.decode().unwrap(),
                 StreamSnapshot {
                     generation: 42,
-                    schema_version: 2,
+                    schema_version: 3,
                     now_native_us: 1042,
                     tx_submitted: 124,
                     rx_contiguous: 457,
@@ -997,6 +1040,7 @@ mod snapshot_decode_tests {
                     remote_fin: false,
                     remote_stream_credit: 877,
                     rx_highest: 601,
+                    tx_ack_prefix_end: Some(0),
                 }
             );
         }

@@ -42,8 +42,8 @@ _Static_assert(sizeof(dmsg_transport_path) == 18 * sizeof(uint64_t), "path ABI")
 _Static_assert(sizeof(dmsg_transport_snapshot) == DMSG_TRANSPORT_WORDS * sizeof(uint64_t), "snapshot ABI");
 
 enum {
-    DMSG_STREAM_SCHEMA = 2,
-    DMSG_STREAM_WORDS = 14,
+    DMSG_STREAM_SCHEMA = 3,
+    DMSG_STREAM_WORDS = 15,
     DMSG_STREAM_SCAN_LIMIT = 64,
     DMSG_STREAM_READ_ATTEMPTS = 3
 };
@@ -56,6 +56,11 @@ enum {
  * FIN (including zero-length ranges). Excess over contiguous is an end-offset
  * gap, not a count of buffered suffix bytes or proof of ACK/delivery timing.
  * remote_stream_credit is remaining maxdata_remote - sent_offset.
+ * tx_ack_prefix_end covers [0,E) in the merged sender STREAM SACK tree, not
+ * path packet ACKs or application authentication. UINT64_MAX is unknown after
+ * an invalid range or an unresolved 64-node read-only traversal. Zero is known
+ * empty coverage. FIN markers do not count as bytes. Requires the tracked
+ * empty-STREAM/end-offset ACK-range correction in the pinned transport.
  * Invalid/missing/retired/failed selections are unavailable, not zero samples.
  * Native capture time has no app clock mapping or publication-age guarantee. */
 typedef struct {
@@ -64,6 +69,7 @@ typedef struct {
     uint64_t stream_active, send_queue, failed, local_fin, remote_fin;
     uint64_t remote_stream_credit;
     uint64_t rx_highest;
+    uint64_t tx_ack_prefix_end;
 } dmsg_stream_snapshot;
 _Static_assert(sizeof(dmsg_stream_snapshot) == DMSG_STREAM_WORDS * sizeof(uint64_t), "stream ABI");
 

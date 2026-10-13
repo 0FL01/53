@@ -159,7 +159,7 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
             val delivery = source.optJSONObject("control_delivery") ?: return null
             val socket = NativeTransportEvidence.fields(delivery.getJSONObject("socket"), socketFields + socketIndices)
             val native = if (delivery.isNull("native")) null else NativeTransportEvidence.fields(
-                delivery.getJSONObject("native"), nativeCounters + nativeFlags + listOf("schema_version", "publication_age_us"))
+                delivery.getJSONObject("native"), nativeCounters + nativeFlags + listOf("schema_version", "publication_age_us", "tx_ack_prefix_end"))
             sanitize(mapOf("socket" to socket, "native" to native))?.let { JSONObject(it) }
         } catch (_: Exception) { null } }
 
@@ -182,10 +182,13 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
             require(source.containsKey("native"))
             val native = source["native"]?.let { value ->
                 val capture = value as? Map<*, *> ?: return null
-                require(NativeTransportEvidence.number(capture, "schema_version", 2) == 2L)
+                require(NativeTransportEvidence.number(capture, "schema_version", 3) == 3L)
                 require(capture.containsKey("publication_age_us") && capture["publication_age_us"] == null)
-                val result = linkedMapOf<String, Any?>("schema_version" to 2L, "publication_age_us" to null)
+                val result = linkedMapOf<String, Any?>("schema_version" to 3L, "publication_age_us" to null)
                 nativeCounters.forEach { result[it] = NativeTransportEvidence.number(capture, it) }
+                val prefix = NativeTransportEvidence.number(capture, "tx_ack_prefix_end", (1L shl 62) - 1, nullable = true)
+                require(prefix == null || prefix <= result.getValue("tx_submitted") as Long)
+                result["tx_ack_prefix_end"] = prefix
                 nativeFlags.forEach { result[it] = NativeTransportEvidence.boolean(capture, it) }
                 require(result.getValue("publication_after_tx_record_end") == copied.getValue("tx_record_end"))
                 val contiguous = result.getValue("rx_contiguous") as Long

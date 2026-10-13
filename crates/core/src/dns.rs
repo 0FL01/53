@@ -167,6 +167,7 @@ impl StreamSelection {
             "schema_version": s.schema_version,
             "now_native_us": s.now_native_us,
             "tx_submitted": s.tx_submitted,
+            "tx_ack_prefix_end": s.tx_ack_prefix_end,
             "rx_contiguous": s.rx_contiguous,
             "rx_highest": s.rx_highest,
             "rx_flushed": s.rx_flushed,
@@ -567,11 +568,12 @@ mod tests {
     fn stream_fixture(generation: u64) -> StreamSnapshot {
         StreamSnapshot {
             generation,
-            schema_version: 2,
+            schema_version: 3,
             now_native_us: 123,
             tx_submitted: 144,
             rx_contiguous: 200,
             rx_highest: 250,
+            tx_ack_prefix_end: Some(100),
             rx_flushed: 190,
             rx_pending: 10,
             stream_active: true,
@@ -600,6 +602,7 @@ mod tests {
         };
         let evidence = lease.evidence(0).unwrap();
         assert_eq!(evidence["tx_submitted"], 144);
+        assert_eq!(evidence["tx_ack_prefix_end"], 100);
         assert!(evidence.get("port").is_none() && evidence.get("generation").is_none());
         assert!(evidence["publication_age_us"].is_null());
         let lock = slot.lock().unwrap();

@@ -23,7 +23,7 @@ static dmsg_stream_snapshot capture(dmsg_control *control, ss_conn *conn, uint64
     dmsg_stream_publish(control, conn, now);
     dmsg_stream_snapshot out;
     assert(dmsg_control_stream_snapshot(control, &out, sizeof(out)) == 1);
-    assert(out.schema_version == 2 && out.rx_pending == 0);
+    assert(out.schema_version == 3 && out.rx_pending == 0);
     assert(out.rx_contiguous == out.rx_flushed && !out.remote_fin);
     return out;
 }
