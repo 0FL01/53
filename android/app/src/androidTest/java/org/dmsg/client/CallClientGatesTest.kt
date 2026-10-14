@@ -321,12 +321,25 @@ class CallClientGatesTest {
             assertEquals(id, CallUi.state.value.call!!.callId)
             assertEquals(CallPhase.ACTIVE, CallUi.state.value.call!!.phase)
             val deadline = SystemClock.elapsedRealtime() + seconds * 1_000
+            val controlObservationEnd = minOf(deadline, SystemClock.elapsedRealtime() + 3_000)
             var lastCapture = requireNotNull(CallUi.state.value.audio).capturedSamples
             var lastDecoded = JSONObject(requireNotNull(CallUi.state.value.audio).nativeStats).getLong("decoded_packets")
             val reportInterval = if (seconds <= 10) 1_000L else 10_000L
             var nextReport = SystemClock.elapsedRealtime() + reportInterval
             while (SystemClock.elapsedRealtime() < deadline) {
-                SystemClock.sleep(1_000)
+                val intervalStart = SystemClock.elapsedRealtime()
+                if (seconds <= 10 && intervalStart < controlObservationEnd) {
+                    // Finite test-only observations; keep the original1s media
+                    // assertions and include reporting time in that interval.
+                    for (offset in listOf(250L, 500L, 750L)) {
+                        val at = intervalStart + offset
+                        if (at < controlObservationEnd) {
+                            SystemClock.sleep((at - SystemClock.elapsedRealtime()).coerceAtLeast(0))
+                            report("control_checkpoint")
+                        }
+                    }
+                }
+                SystemClock.sleep((intervalStart + 1_000 - SystemClock.elapsedRealtime()).coerceAtLeast(0))
                 healthy()
                 assertEquals(id, CallUi.state.value.call!!.callId)
                 val audio = requireNotNull(CallUi.state.value.audio)
@@ -366,9 +379,10 @@ class CallClientGatesTest {
                 val backgroundStart = SystemClock.elapsedRealtime()
                 // Finite reporter-only checkpoints: preserve the absolute3s pause,
                 // including reporting time, and never touch the media owner.
-                for (second in 1L..2L) {
-                    SystemClock.sleep((backgroundStart + second * 1_000 - SystemClock.elapsedRealtime()).coerceAtLeast(0))
-                    report("background_${second}s")
+                val checkpoints = if (seconds <= 10) 250L..2_750L step 250L else 1_000L..2_000L step 1_000L
+                for (offset in checkpoints) {
+                    SystemClock.sleep((backgroundStart + offset - SystemClock.elapsedRealtime()).coerceAtLeast(0))
+                    report("background_${offset}ms")
                 }
                 SystemClock.sleep((backgroundStart + 3_000 - SystemClock.elapsedRealtime()).coerceAtLeast(0))
                 report("background_observed")
