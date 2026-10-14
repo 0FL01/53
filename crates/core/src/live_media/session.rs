@@ -1268,6 +1268,26 @@ impl PendingControlCommit {
     }
 }
 
+fn admit_feedback(
+    now: Instant,
+    report_due: &mut Instant,
+    pending_commits: usize,
+    outgoing: &mpsc::Sender<SendRequest>,
+    budget: &mut packet::Budget,
+) -> bool {
+    if now < *report_due
+        || pending_commits >= 2
+        || outgoing.capacity() == 0
+        || !budget.admit_feedback(now)
+    {
+        return false;
+    }
+    // A blocked attempt sent nothing: retain its deadline for the existing
+    // 10ms tick. Only an admitted report coalesces the next 200ms interval.
+    *report_due = now + Duration::from_millis(200);
+    true
+}
+
 fn reap_control_commits(
     commits: &mut VecDeque<PendingControlCommit>,
     port: &Port,
@@ -2850,17 +2870,14 @@ async fn endpoint_run(
                 if let Err(error) = received.drain_queued(&mut media.incoming, &mut receiver, &fixture, &mut feedback, &port) { break Err(error); }
                 #[cfg(test)]
                 if let Some(hold) = &hold { hold.admitted.fetch_add(port.snapshot().received_rtp_packets - before_drain, Ordering::Relaxed); }
-                if now >= report_due {
-                    if control_commits.len() < 2 && control.outgoing.capacity() > 0 && budget.admit_feedback(now) {
-                        let compound = packet::compound(packet::Report { sender_ssrc: fixture.ssrc_tx, peer_ssrc: fixture.ssrc_rx, cname: &fixture.cname,
-                            sender: sent.since_report.then(|| local_clock.report(now, sent.packets, sent.octets)).flatten().map(|report| (report.ntp, report.rtp, report.packets, report.octets)), feedback });
-                        let cipher = sender.protect_rtcp(&compound)?;
-                        control_commits.push_back(PendingControlCommit::submit(&control.outgoing, cipher,
-                            feedback.terminal, now + Duration::from_millis(200), &port)?);
-                        last_control_submission = now;
-                        sent.since_report = false;
-                    }
-                    report_due = now + Duration::from_millis(200); // coalesce missed ticks
+                if admit_feedback(now, &mut report_due, control_commits.len(), &control.outgoing, &mut budget) {
+                    let compound = packet::compound(packet::Report { sender_ssrc: fixture.ssrc_tx, peer_ssrc: fixture.ssrc_rx, cname: &fixture.cname,
+                        sender: sent.since_report.then(|| local_clock.report(now, sent.packets, sent.octets)).flatten().map(|report| (report.ntp, report.rtp, report.packets, report.octets)), feedback });
+                    let cipher = sender.protect_rtcp(&compound)?;
+                    control_commits.push_back(PendingControlCommit::submit(&control.outgoing, cipher,
+                        feedback.terminal, now + Duration::from_millis(200), &port)?);
+                    last_control_submission = now;
+                    sent.since_report = false;
                 }
             }
         }
@@ -7362,6 +7379,71 @@ mod tests {
             old.snapshot().last_committed_feedback_terminal,
             Some(65_535)
         );
+    }
+
+    #[test]
+    fn feedback_backpressure_keeps_the_report_due_without_bursting() {
+        for blocked_by_commits in [false, true] {
+            let origin = Instant::now();
+            let at = |ms| origin + Duration::from_millis(ms);
+            let (outgoing, _requests) = mpsc::channel(1);
+            let mut budget = packet::Budget::new(50_000, 144, origin);
+            let mut due = origin;
+            assert!(admit_feedback(origin, &mut due, 0, &outgoing, &mut budget));
+            assert_eq!(due, at(200));
+            // Hold the real capacity-one channel, or the existing two receipts,
+            // across several producer ticks. Neither failure sent a report.
+            let held = (!blocked_by_commits).then(|| outgoing.try_reserve().unwrap());
+            for ms in [200, 210, 220] {
+                assert!(!admit_feedback(
+                    at(ms),
+                    &mut due,
+                    if blocked_by_commits { 2 } else { 0 },
+                    &outgoing,
+                    &mut budget,
+                ));
+                assert_eq!(due, at(200), "backpressure postponed an unsent report");
+            }
+            drop(held);
+            assert!(admit_feedback(at(230), &mut due, 0, &outgoing, &mut budget));
+            assert_eq!(due, at(430));
+            for ms in [230, 240, 400, 420, 429] {
+                assert!(!admit_feedback(at(ms), &mut due, 0, &outgoing, &mut budget));
+            }
+            assert!(admit_feedback(at(430), &mut due, 0, &outgoing, &mut budget));
+            // Late service coalesces, never catches up with a burst of reports.
+            assert!(admit_feedback(
+                at(1000),
+                &mut due,
+                0,
+                &outgoing,
+                &mut budget
+            ));
+            assert_eq!(due, at(1200));
+            assert!(!admit_feedback(
+                at(1000),
+                &mut due,
+                0,
+                &outgoing,
+                &mut budget
+            ));
+        }
+    }
+
+    #[test]
+    fn feedback_credit_shortage_keeps_the_unsent_report_due() {
+        let origin = Instant::now();
+        let at = |ms| origin + Duration::from_millis(ms);
+        let (outgoing, _requests) = mpsc::channel(1);
+        let mut budget = packet::Budget::new(50_000, 144, origin);
+        assert!(budget.admit_feedback(origin));
+        let mut due = origin;
+        for ms in [0, 10, 190, 199] {
+            assert!(!admit_feedback(at(ms), &mut due, 0, &outgoing, &mut budget));
+            assert_eq!(due, origin);
+        }
+        assert!(admit_feedback(at(200), &mut due, 0, &outgoing, &mut budget));
+        assert_eq!(due, at(400));
     }
 
     #[test]

@@ -171,7 +171,7 @@ static void run(enum fault active) {
         picoquic_callback_stream_data, c, NULL) == 0);
 #endif
     assert(observed_fd >= 0);
-    if (injected == NONE) {
+    if (active == NONE) {
         assert(c->count == 1 && create_calls == 1 && close_calls == 0);
 #ifdef DMSG_PROBE_TCP_NODELAY
         assert(nodelay(observed_fd) == 1 && set_calls == 1 && get_calls == 1);
@@ -182,10 +182,10 @@ static void run(enum fault active) {
     } else {
         assert(c->count == 0 && close_calls == 1);
         assert(fcntl(observed_fd, F_GETFD) == -1 && errno == EBADF);
-        if (injected <= SHORT_READ) assert(nonblock_calls == 0 && create_calls == 0);
-        if (injected == NONBLOCK_FAIL) assert(create_calls == 0);
+        if (active <= SHORT_READ) assert(nonblock_calls == 0 && create_calls == 0);
+        if (active == NONBLOCK_FAIL) assert(create_calls == 0);
 #ifndef TEST_CLIENT
-        if (injected == CTX_FAIL || injected == CONNECT_FAIL)
+        if (active == CTX_FAIL || active == CONNECT_FAIL)
             assert(abort_calls == 1);
         else assert(reset_calls == 1 && stop_calls == 1 && abort_calls == 0);
         assert(event_calls == 0);

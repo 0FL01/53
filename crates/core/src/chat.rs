@@ -1350,9 +1350,8 @@ impl Core {
         let opcode = if kind == "voice" {
             let (blob, device) = crate::voice::send_media_binding(&self.conn, message_id)
                 .map_err(OlmError::Store)?;
-            body =
-                dmsg_protocol::blob::build_send_media(user_id, &device, message_id, &blob, wire)
-                    .ok_or(OlmError::Protocol("invalid send media"))?;
+            body = dmsg_protocol::blob::build_send_media(user_id, &device, message_id, &blob, wire)
+                .ok_or(OlmError::Protocol("invalid send media"))?;
             dmsg_protocol::OP_SEND_MEDIA
         } else {
             OP_SEND
