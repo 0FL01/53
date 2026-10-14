@@ -207,6 +207,7 @@ class SelfServiceInvitationGatesTest {
     }
     private fun uiNodes(root: android.view.accessibility.AccessibilityNodeInfo?): List<android.view.accessibility.AccessibilityNodeInfo> =
         if (root == null) emptyList() else listOf(root) + (0 until root.childCount).flatMap { uiNodes(root.getChild(it)) }
+    // Simulated user tap on our own test UI via the official UiAutomation framework API.
     private fun uiTap(automation: android.app.UiAutomation, node: android.view.accessibility.AccessibilityNodeInfo): Boolean {
             if (!node.isEnabled || !node.isVisibleToUser) return false
             val bounds = android.graphics.Rect().also { node.getBoundsInScreen(it) }
@@ -277,6 +278,7 @@ class SelfServiceInvitationGatesTest {
                     "dmsg-self-invite-gate.png") }
                 enteredSearch = it.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT, args)
                 if (enteredSearch) {
+                // Simulated Enter key on our own test UI via the official UiAutomation framework API.
                     automation.injectInputEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_ENTER), true)
                     automation.injectInputEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_UP, android.view.KeyEvent.KEYCODE_ENTER), true)
                 }

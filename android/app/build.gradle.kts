@@ -36,13 +36,13 @@ abstract class GenerateTrustedServerProfile : DefaultTask() {
         val code = bytes.toString(Charsets.US_ASCII).filterNot { it == ' ' || it == '\t' || it == '\r' || it == '\n' }
         val prefix = "dmsg://server/"
         check(code.startsWith(prefix) && code.length <= 13 + (4096 * 4 + 2) / 3) { "Expected a bounded public server profile" }
-        val payload = code.removePrefix(prefix)
-        check(payload.isNotEmpty() && payload.all { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' || it == '-' || it == '_' }) {
+        val codeBody = code.removePrefix(prefix)
+        check(codeBody.isNotEmpty() && codeBody.all { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' || it == '-' || it == '_' }) {
             "Expected canonical public server profile encoding"
         }
-        val decoded = try { Base64.getUrlDecoder().decode(payload) }
+        val decoded = try { Base64.getUrlDecoder().decode(codeBody) }
             catch (_: IllegalArgumentException) { throw GradleException("Invalid public server profile encoding") }
-        check(decoded.size <= 4096 && Base64.getUrlEncoder().withoutPadding().encodeToString(decoded) == payload) {
+        check(decoded.size <= 4096 && Base64.getUrlEncoder().withoutPadding().encodeToString(decoded) == codeBody) {
             "Expected canonical bounded public server profile encoding"
         }
         output.resolve("server-profile.txt").writeText(code, Charsets.US_ASCII)

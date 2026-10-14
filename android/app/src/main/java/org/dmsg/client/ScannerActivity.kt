@@ -148,7 +148,7 @@ class ScannerActivity : DmsgActivity() {
                     return@runOnUiThread
                 }
                 returningInvitation = true
-                // Expire an undelivered result; the Intent contains no payload.
+                // Expire an undelivered result; the Intent carries no extra data.
                 val ticket = invitationTicket
                 Handler(Looper.getMainLooper()).postDelayed({ InvitationScanTransfer.cancel(ticket) }, 5_000)
                 setResult(RESULT_OK)

@@ -155,7 +155,7 @@ with sync_playwright() as playwright:
     page.wait_for_function("A.policyState==='ready'")
     check('Policy retry is explicit and succeeds in fixture', "A.requests.filter(r=>r.operation==='registration-policy').length===2")
     evaluate("finishPolicyDemo('PinMismatch')")
-    check('Pin mismatch blocks auth rather than offering bypass', "A.pinBlocked && document.querySelector('#app button[onclick^=authScreen]').disabled")
+    check('Pin mismatch blocks auth with no alternative path', "A.pinBlocked && document.querySelector('#app button[onclick^=authScreen]').disabled")
 
     reset()
     evaluate("authScenario('login');A.outcome='challenge'")

@@ -10,13 +10,13 @@ dmsg://server/<base64url_nopad(binary)>
 [cert_len:u16 BE][full_cert_der:cert_len][noise_pubkey:32]
 ```
 
-Raw cap 4 KiB, LDH domain 1–253, точное потребление payload; длина base64 ограничена до allocation/decode, padding/noncanonical tail/trailing secret отвергаются. Полный сертификат обязателен для DER pinning. Код **не содержит** invitation/password/private key и ничего не авторизует; импорт/offline preview не создают аккаунт. Contact QR остаётся отдельным `dmsg://contact/` типом.
+Raw cap 4 KiB, LDH domain 1–253, точное потребление поля данных (в коде `payload`); длина base64 ограничена до allocation/decode, padding/noncanonical tail/trailing secret отвергаются. Полный сертификат обязателен для DER pinning. Код **не содержит** invitation/password/private key и ничего не авторизует; импорт/offline preview не создают аккаунт. Contact QR остаётся отдельным `dmsg://contact/` типом.
 
 ## Framing и auth
 
-Внутри завершённого pinned carrier + Noise IK: `[version:u8=2][opcode:u8][length:u16 BE][payload]`, полный кадр ≤16 KiB. Каждому stream свой Noise state; device key берётся из authenticated initiator static, никогда из auth payload. Первое сообщение — `AUTH_DOMAIN(3)` с точным доменом → `WELCOME(2)`. До account-auth нет mailbox/blob доступа.
+Внутри завершённого pinned carrier + Noise IK: `[version:u8=2][opcode:u8][length:u16 BE][data]`, полный кадр ≤16 KiB. Каждому stream свой Noise state; device key берётся из authenticated initiator static, никогда из поля данных auth (в коде `payload`). Первое сообщение — `AUTH_DOMAIN(3)` с точным доменом → `WELCOME(2)`. До account-auth нет mailbox/blob доступа.
 
-| Request | Payload | Response |
+| Request | Data | Response |
 |---|---|---|
 | POLICY `7` | empty | POLICY_RESP `8`: mode u8 (`0` invite_only, `1` open) |
 | SIGNUP `9` | credentials + optional invitation | AUTHENTICATED `12` или ERROR `6` |
@@ -31,7 +31,7 @@ AUTHENTICATED — user_id16 + contact_id12 Crockford; REPLACE_REQUIRED — те�
 
 ## Error codes
 
-ERROR payload — один byte: BAD1, EXPIRED2, REVOKED3, BOUND_OTHER4, NO_PREKEY5, QUOTA6, BUSY7, CREDENTIALS8, CONFLICT9, INVITE_REQUIRED10, INVALID_INPUT11, THROTTLED12, INVITE_USED13, INVITE_LIMIT14. Opcode и error code — разные пространства: INVITE_LIMIT не REPLACE_REQUIRED и не mailbox QUOTA. Missing account/wrong password имеют одинаковый CREDENTIALS и same-cost verification; приглашение имеет отдельные lifecycle ошибки. Клиент показывает статические typed сообщения, unknown error остаётся retryable.
+Поле данных ERROR — один byte: BAD1, EXPIRED2, REVOKED3, BOUND_OTHER4, NO_PREKEY5, QUOTA6, BUSY7, CREDENTIALS8, CONFLICT9, INVITE_REQUIRED10, INVALID_INPUT11, THROTTLED12, INVITE_USED13, INVITE_LIMIT14. Opcode и error code — разные пространства: INVITE_LIMIT не REPLACE_REQUIRED и не mailbox QUOTA. Missing account/wrong password имеют одинаковый CREDENTIALS и same-cost verification; приглашение имеет отдельные lifecycle ошибки. Клиент показывает статические typed сообщения, unknown error остаётся retryable.
 
 Argon2id v19: 19 MiB, t=2, p=1, random16 salt; максимум два nonqueued hash workers вне DB mutex/Tokio executor. Attempts: 32 global и 8 на canonical login/device за 60 s, bounded counters; без IP/resolver ban. Invitation — отдельная canonical base64url строка 43 символа/raw32, только signup; issue пишет новый файл0600, stdout только `ok`.
 
@@ -116,7 +116,7 @@ Overflow, revoke/replacement/block, disconnect и End убирают все rout
 account sessions. MediaReady выдаётся после всех четырёх attach. RTP242≤122B,
 SRTCP243≤130B, queues capacity1, relay hop20ms. Deadline/full drops только до
 Noise commitment; committed encrypted frame дописывается либо lane уничтожается.
-Сервер пересылает opaque payload, без media keys/PCM. Bulk/SEND/FETCH во время
+Сервер пересылает непрозрачные данные (opaque bytes), без media keys/PCM. Bulk/SEND/FETCH во время
 call получают Busy; persistent mailbox/outbox остаются сохранёнными.
 
 Ключевой plaintext — отдельный strict173B E2Ev2 kind5/no-Reply parser:
@@ -132,7 +132,7 @@ keys/SSRC/counters. API/lifetime — `crates/core/CALLS_API.md`; фактиче�
 
 ## Mailbox и peer binding
 
-Opcodes16–27: SEND16/ACK17, FETCH18/RESP19, DELIVERY_ACK20, UPLOAD_PREKEYS21, CLAIM22, COUNT23, PREKEY24, COUNT_RESP25, BLOB_RESERVE26/RESERVED27. SEND_ACK: accepted1/delivered2/error3, не read receipt. Payloads/builders/test vectors — `crates/protocol/src/mailbox.rs`.
+Opcodes16–27: SEND16/ACK17, FETCH18/RESP19, DELIVERY_ACK20, UPLOAD_PREKEYS21, CLAIM22, COUNT23, PREKEY24, COUNT_RESP25, BLOB_RESERVE26/RESERVED27. SEND_ACK: accepted1/delivered2/error3, не read receipt. Описания полей/билдеры/тест-векторы — `crates/protocol/src/mailbox.rs`.
 
 - SEND: recipient16 + message_id16 + ciphertext ≤16,304 bytes; bound гарантирует помещение события в FETCH_RESP. Durable dedup по sender_device/message_id **до quota**, retry сохраняет ciphertext/status даже на полной quota.
 - FETCH_RESP: count:u16 BE, ≤32 records; каждый `seq8 + sender_device32 + sender_user16 + message_id16 + ciphertext_len2 + ciphertext`. Recipient берётся из authenticated session.
@@ -235,7 +235,7 @@ plain length. Plain chunk8176bytes + tag16 = ciphertext≤8192; last-size точ
 retry bytes неизменны. Manifest/key E2E; server codec/audio не читает.
 Дополнительного digest/checksum registry нет.
 
-| Request | Payload | Response |
+| Request | Data | Response |
 |---|---|---|
 | RESERVE26 | blob16 + ciphertext size:u32 BE | RESERVED27 blob16 |
 | STATUS37 | blob16 | RESP38 blob16 + size:u32 + state:u8 + receipt bitmap:u64 |

@@ -196,7 +196,7 @@ async fn durable_resume_exact_device_acl_and_retry_never_reroutes() {
     ack.extend_from_slice(&seq.to_be_bytes());
     assert_eq!(b.exchange(OP_DELIVERY_ACK, &ack).await.0, OP_DELIVERY_ACK);
     assert_eq!(a.exchange(OP_SEND_MEDIA, &send).await.1[16], ST_DELIVERED);
-    // A plain SEND collision must not bypass the stricter media dedup contract.
+    // A plain SEND collision must still respect the stricter media dedup contract.
     error(
         &mut a,
         OP_SEND,

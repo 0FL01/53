@@ -210,7 +210,7 @@ pub fn decode_frame(buf: &[u8]) -> Result<(u8, u8, &[u8], usize), FrameError> {
     Ok((ver, buf[1], &buf[HEADER_LEN..total], total))
 }
 
-/// Закодировать кадр. Ошибка — если payload не влезает в MAX_FRAME.
+/// Закодировать кадр. Ошибка — если body не влезает в MAX_FRAME.
 /// Длина в заголовок — через u16::try_from (без as; после проверки всегда Ok,
 /// т.к. MAX_PAYLOAD < u16::MAX).
 pub fn encode_frame(opcode: u8, payload: &[u8]) -> Result<Vec<u8>, FrameError> {

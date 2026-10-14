@@ -415,10 +415,10 @@ class JVMRenderTraceTest {
             assertTrue("buffer must be wiped before reuse", bytes.all { it == 0.toByte() })
             buffer = bytes; reads++
             bytes.fill(90) // Verify the entire buffer is wiped, including bytes beyond returned length.
-            val payload = raw?.toByteArray(Charsets.UTF_8)
-            payload?.copyInto(bytes, endIndex = minOf(payload.size, bytes.size))
+            val content = raw?.toByteArray(Charsets.UTF_8)
+            content?.copyInto(bytes, endIndex = minOf(content.size, bytes.size))
             error?.let { throw it }
-            return lengthOverride ?: payload?.size ?: -1
+            return lengthOverride ?: content?.size ?: -1
         }
 
         fun assertWiped() = assertTrue(buffer!!.all { it == 0.toByte() })

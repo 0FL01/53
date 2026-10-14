@@ -109,7 +109,7 @@ class VoiceNotesTest {
         assertEquals(DeliveryState.QUEUED, f.messageStatus(original.messageIdHex))
     }
 
-    @Test fun staleRowsCannotRestoreDeletedVoicePayloadOrReviveItsStableViewKey() {
+    @Test fun staleRowsCannotRestoreDeletedVoiceContentOrReviveItsStableViewKey() {
         val original = row()
         val key = VoiceKey(original)
         val window = HistoryWindow().apply { latest(uniffi.dmsg_core.HistoryPage(listOf(original), null)) }

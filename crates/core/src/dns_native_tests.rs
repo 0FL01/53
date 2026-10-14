@@ -1,4 +1,4 @@
-//! Explicit local native gate. The UDP relays count DNS payload bytes, excluding
+//! Explicit local native gate. The UDP relays count DNS message bytes, excluding
 //! IP/UDP/link overhead. No production resolver is contacted by this fixture.
 use super::*;
 use std::{
@@ -77,7 +77,7 @@ impl Relay {
         self.traffic.tx_packets.load(Ordering::Relaxed)
     }
     fn report(&self, scenario: &str) {
-        eprintln!("DNS payload {scenario}: {:?}", self.traffic);
+        eprintln!("DNS traffic {scenario}: {:?}", self.traffic);
     }
 }
 impl Drop for Relay {

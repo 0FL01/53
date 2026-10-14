@@ -45,7 +45,7 @@ class JvmRenderMetadataCacheTest {
         fun fields(token: JSONObject) = values.getValue(token)
     }
 
-    // Exact legacy diagnostic fields, with a pure JVM encoder injected at the serialization seam.
+    // Exact legacy diagnostic fields, with a pure JVM encoder provided at the serialization seam.
     private fun encode(command: CallProbePlaybackClock.Output) =
         """{"hardware_calibrated":${command.calibrated},"healthy":${command.healthy},"selected_rate":${command.rate},"sink_ppb":${command.sinkPpb},"hardware_rejection_mask":${command.rejectionMask},"relative_ppm":${command.relativePpm}}"""
 
@@ -179,7 +179,7 @@ class JvmRenderMetadataCacheTest {
         val input = deliveryFixture()
         deliveryPart(input, "native")["port"] = 45678L
         deliveryPart(input, "native")["generation"] = 21L
-        deliveryPart(input, "socket")["payload"] = "never forwarded"
+        deliveryPart(input, "socket")["content"] = "never forwarded"
         val clean = requireNotNull(CallProbeAudio.ControlDeliveryEvidence.sanitize(input))
         assertEquals(setOf("socket", "native"), clean.keys)
         val native = clean.getValue("native") as Map<*, *>
@@ -189,7 +189,7 @@ class JvmRenderMetadataCacheTest {
         assertEquals(1100L, native["tx_submitted"])
         assertEquals(1000L, native["tx_ack_prefix_end"])
         assertEquals(1700L, native["rx_highest"])
-        assertFalse((clean.getValue("socket") as Map<*, *>).containsKey("payload"))
+        assertFalse((clean.getValue("socket") as Map<*, *>).containsKey("content"))
         deliveryPart(input, "native")["tx_ack_prefix_end"] = null
         assertNull((requireNotNull(CallProbeAudio.ControlDeliveryEvidence.sanitize(input))["native"] as Map<*, *>)["tx_ack_prefix_end"])
         input["native"] = null

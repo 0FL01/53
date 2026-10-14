@@ -4795,7 +4795,7 @@ mod tests {
     }
 
     #[test]
-    fn queued_control_rejects_tampering_and_unexpected_ssrc_without_credit() {
+    fn queued_control_rejects_corruption_and_unexpected_ssrc_without_credit() {
         for unknown_author in [false, true] {
             let mut turn = ControlTurn::new();
             turn.commit(7, 0);
@@ -5027,7 +5027,7 @@ mod tests {
         })
         .unwrap();
         let (stop, stopped) = watch::channel(false);
-        let (inject, mut injection) = mpsc::channel(1);
+        let (signal, mut signal_rx) = mpsc::channel(1);
         let peer_stop = stopped.clone();
         let peer = thread::spawn(move || {
             tokio::runtime::Builder::new_current_thread()
@@ -5043,7 +5043,7 @@ mod tests {
                     let mut control = relay::connect(&addr, &b, false).await.unwrap();
                     let mut sender = dmsg_srtp_sys::Sender::new(&b.media_tx, b.ssrc_tx).unwrap();
                     for index in 0..2u64 {
-                        injection.recv().await.unwrap();
+                        signal_rx.recv().await.unwrap();
                         let plain = packet::compound(packet::Report {
                             sender_ssrc: b.ssrc_tx,
                             peer_ssrc: b.ssrc_rx,
@@ -5169,7 +5169,7 @@ mod tests {
         // This supervisor is outside the endpoint's runtime. Even an inline C
         // operation cannot suppress its release/deadlock guard.
         connection.recv_timeout(Duration::from_secs(3)).unwrap();
-        inject.blocking_send(()).unwrap();
+        signal.blocking_send(()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(3);
         while !port.snapshot().ready && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(1));
@@ -5195,7 +5195,7 @@ mod tests {
         let held = entry.recv_timeout(Duration::from_secs(3)).is_ok();
         let before_media = hold.admitted.load(Ordering::Relaxed);
         let before_control = hold.controlled.load(Ordering::Relaxed);
-        inject.blocking_send(()).unwrap();
+        signal.blocking_send(()).unwrap();
         let deadline = Instant::now() + Duration::from_millis(300);
         while Instant::now() < deadline
             && (hold.admitted.load(Ordering::Relaxed) <= before_media
@@ -6482,7 +6482,7 @@ mod tests {
                         .unwrap();
                         assert!(!decode_ready || matches!(flight.as_ref().and_then(|flight| flight.source.as_ref()),
                             Some(CodecSource::Decode(_))),
-                            "ready decode left idle or bypassed: ns={ns} timer={timer} decode_us={decode_us} capture_phase_ns={capture_phase_ns} operations={operations:?}");
+                            "ready decode left idle or skipped: ns={ns} timer={timer} decode_us={decode_us} capture_phase_ns={capture_phase_ns} operations={operations:?}");
                         while capture.can_ingest(profile, flight.as_ref(), &admission, &outgoing, 0)
                         {
                             let Ok(chunk) = incoming.try_recv() else {
@@ -7757,7 +7757,7 @@ mod tests {
 
     // Real production AudioPort accounting, frame assembly, Opus, SRTP and
     // receiver admission. Only physical AudioRecord timestamps/PCM are modeled;
-    // no source-coordinate oracle, receiver-clock injection or network is used.
+    // no source-coordinate oracle, artificial receiver timestamps or network is used.
     fn route_capture_gap_model(
         loss_ns: u64,
         route_at_ns: Option<u64>,

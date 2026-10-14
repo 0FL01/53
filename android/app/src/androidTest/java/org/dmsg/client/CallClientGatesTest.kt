@@ -437,7 +437,7 @@ class CallClientGatesTest {
         assertTrue(keyguard.isDeviceLocked)
         report("locked_screen_off_observed")
         screenKey(224)
-        assertTrue("waking must not bypass keyguard", keyguard.isDeviceLocked)
+        assertTrue("waking must keep keyguard locked", keyguard.isDeviceLocked)
         retired(CallEndReason.REMOTE_ENDED, (seconds + 90) * 1_000)
     }
     @Test fun client05SendTextAfterCall() {

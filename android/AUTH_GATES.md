@@ -377,7 +377,7 @@ adb -s "$GATE_SERIAL" shell am instrument -w -r -e class \
 | Method | Input / order | Evidence |
 |---|---|---|
 | `canonicalParserOnlyInGatePackage` | Synthetic data | Canonical token and bounded file parser |
-| `scannerResultLifecycleOnlyInGatePackage` | Fresh gate with trusted profile | Real ScannerActivity launch/result using **injected synthetic decoder text**, Signup/memory/cancel; not optics |
+| `scannerResultLifecycleOnlyInGatePackage` | Fresh gate with trusted profile | Real ScannerActivity launch/result using **provided synthetic decoder text**, Signup/memory/cancel; not optics |
 | `privateFileImportSignupThroughRecursiveDns` | Fresh gate; owner0600 `files/gate-invite-auth.json`, exactly `login/password`, and `files/gate-invitation.txt` | Exact importer downstream of SAF, malformed/cancel/background/recreate clearing, explicit DNS signup/dialogs; consumes secrets and emits private account proof |
 | `reopenImportedAccountWithSavedDeviceKey` | New process, previous proof; auth/token fixtures absent | Same profile/account, actual recursive-DNS key resume/fetch; consumes proof |
 
@@ -692,7 +692,7 @@ No USB/radio toggle or TCP message bridge was used.
   `verifyFreshAfterClearDataOnlyInGatePackage`,
   `verifySealedSnapshotCannotRestoreAfterClearDataOnlyInGatePackage`,
   `verifyLostKeyUiOnlyInGatePackage`: only disposable storage. Clear `.gate`
-  again after the fresh-key gate **before** injecting the original sealed DB for
+  again after the fresh-key gate **before** restoring the original sealed DB for
   the lost-key check; otherwise the fixture no longer represents a missing key.
 - `scannerErrorsAndProfileConfirmUiOnlyInGatePackage` uses denied CAMERA and
   actual paste controls; malformed codes, key-change confirm and retained draft
@@ -913,7 +913,7 @@ env -i HOME="$HOME" PATH="$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin" \
 
 Passed explicitly, alongside `slipstream-sys` native loopback gate. Primary Ready
 backup0 packets; silent attempt10/2720 bytes TX,0 RX; failed cycle (1+1)
-20/5440 TX,0 RX (DNS payload, no UDP/IP overhead). On production suffix the
+20/5440 TX,0 RX (DNS message bytes, no UDP/IP overhead). On production suffix the
 phone's silent primary was10/2740 bytes. UID totals/refill/Noise are distinct and
 documented in the goal; numbers are a single scenario, not a universal quota.
 Clean workspace, generated host bindings, NDK r28c, JVM43, debug/release/test/main

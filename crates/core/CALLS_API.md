@@ -84,7 +84,7 @@ queue; capacity, 20ms hop deadline and Noise ordering remain unchanged.
 
 Mono16k/12kbit/40ms/cap100, encoder10/decoder7, DTX/PLC, jitter80ms, sink640,
 F0=600ms/ledger720ms/window2880B and75% admission remain unchanged. Production
-declares50k useful capacity; it injects no synthetic service and does not claim
+declares50k useful capacity; it introduces no synthetic service and does not claim
 measured DNS C_safe. No automatic BBR/TCP_NODELAY experiment promotion.
 
 Current physical results and remaining gates live in

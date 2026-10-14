@@ -94,7 +94,7 @@ Paste и server scan открывают один offline preview. До явно�
 
 При запрете камеры primary fallback — «Вставить код сервера». HTML использует только точный сентинел `dmsg://server/DEMO-PUBLIC-PROFILE`, заведомо невалидный реальный wire-профиль. Никакие реальные QR, сертификаты и secrets не читаются.
 
-Offline preview не доказывает pinning сетевого сеанса. PinMismatch в policy/auth останавливает вход; обхода проверки нет. LOGIN replacement — два запроса с explicit confirm между ними. Пароль, invitation и challenge очищаются при отмене/успехе; устаревший callback не заменяет устройство и не открывает закрытый экран.
+Offline preview не доказывает pinning сетевого сеанса. PinMismatch в policy/auth останавливает вход; проверка обязательна, дополнительного пути нет. LOGIN replacement — два запроса с explicit confirm между ними. Пароль, invitation и challenge очищаются при отмене/успехе; устаревший callback не заменяет устройство и не открывает закрытый экран.
 
 ### 7. Операции и ошибки
 

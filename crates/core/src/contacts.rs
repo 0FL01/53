@@ -724,10 +724,10 @@ mod tests {
         assert_eq!(sendable(&c), Err(OlmError::IdentityMismatch));
         // Голого approve нет: confirm без seen — ошибка tested below; здесь seen есть.
         confirm_identity(&conn, "ABCD1234EFGH").expect("confirm");
-        let c2 = get(&conn, "ABCD1234EFGH").expect("get").expect("row");
-        assert_eq!(c2.ed_identity, Some([9u8; 32]));
-        assert_eq!(c2.seen_ed, None);
-        assert!(sendable(&c2).is_ok());
+        let peer2 = get(&conn, "ABCD1234EFGH").expect("get").expect("row");
+        assert_eq!(peer2.ed_identity, Some([9u8; 32]));
+        assert_eq!(peer2.seen_ed, None);
+        assert!(sendable(&peer2).is_ok());
         std::fs::remove_dir_all(&dir).ok();
     }
 

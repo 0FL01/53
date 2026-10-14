@@ -84,7 +84,7 @@ internal class MessageMarkdown(context: Context) {
         .usePlugin(StrikethroughPlugin.create())
         .usePlugin(object : AbstractMarkwonPlugin() {
             override fun configureConfiguration(builder: MarkwonConfiguration.Builder) {
-                // Span clicks (including accessibility clicks) cannot bypass selection actions.
+                // Span clicks (including accessibility clicks) follow selection actions; they cannot take precedence over them.
                 // Replaces LinkResolverDef, which accepts other schemes and logs destinations.
                 builder.linkResolver(LinkResolver { _, _ -> })
             }

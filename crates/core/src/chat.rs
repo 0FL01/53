@@ -892,12 +892,12 @@ impl Core {
     pub async fn ack(&mut self, t: &mut impl Transport, seqs: &[u64]) -> Result<u64, OlmError> {
         // A zero-count ACK is an existing, idempotent protocol request: it
         // observes the durable server cursor without acknowledging any event.
-        let mut payload = Vec::with_capacity(2 + 8 * seqs.len());
-        payload.extend_from_slice(&(seqs.len() as u16).to_be_bytes());
+        let mut body = Vec::with_capacity(2 + 8 * seqs.len());
+        body.extend_from_slice(&(seqs.len() as u16).to_be_bytes());
         for s in seqs {
-            payload.extend_from_slice(&s.to_be_bytes());
+            body.extend_from_slice(&s.to_be_bytes());
         }
-        t.send_frame(OP_DELIVERY_ACK, &payload)
+        t.send_frame(OP_DELIVERY_ACK, &body)
             .await
             .map_err(|e| OlmError::Transport(e.to_string()))?;
         let (op, p) = t
@@ -1343,21 +1343,21 @@ impl Core {
             }
             kind
         };
-        let mut payload = Vec::with_capacity(32 + wire.len());
-        payload.extend_from_slice(user_id);
-        payload.extend_from_slice(message_id);
-        payload.extend_from_slice(wire);
+        let mut body = Vec::with_capacity(32 + wire.len());
+        body.extend_from_slice(user_id);
+        body.extend_from_slice(message_id);
+        body.extend_from_slice(wire);
         let opcode = if kind == "voice" {
             let (blob, device) = crate::voice::send_media_binding(&self.conn, message_id)
                 .map_err(OlmError::Store)?;
-            payload =
+            body =
                 dmsg_protocol::blob::build_send_media(user_id, &device, message_id, &blob, wire)
                     .ok_or(OlmError::Protocol("invalid send media"))?;
             dmsg_protocol::OP_SEND_MEDIA
         } else {
             OP_SEND
         };
-        t.send_frame(opcode, &payload)
+        t.send_frame(opcode, &body)
             .await
             .map_err(|e| OlmError::Transport(e.to_string()))?;
         let (op, p) = t
@@ -2653,7 +2653,7 @@ mod tests {
         );
         assert_eq!(incoming.rows[0].delivery_state, None);
         assert_eq!(b.dialogs_page(None, 100).unwrap().rows[0].local_unread, 1);
-        // The dedup key includes the sender; new/tampered events still fail.
+        // The dedup key includes the sender; new/corrupted events still fail.
         let mut event = RawEvent {
             seq: 2,
             sender: a_dev,
@@ -3002,7 +3002,7 @@ mod tests {
             let history = b.history_page("ALICE0000001", None, 100).unwrap();
             for kind in [1, 2] {
                 let mid = [40 + kind; 16];
-                // Bypass the new encoder: valid header/control/UTF-8, but an
+                // Build directly without the new encoder: valid header/control/UTF-8, but an
                 // authenticated TEXT/EDIT with 4001 scalars inside the byte cap.
                 let mut plain = vec![2, kind];
                 plain.extend_from_slice(&mid);

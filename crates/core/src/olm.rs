@@ -388,17 +388,17 @@ pub async fn upload_batch(
     }
     persist(conn, acc, *next_key_id)?;
     let identity = ed_identity(acc);
-    let mut payload = Vec::with_capacity(66 + entries.len() * 101);
-    payload.extend_from_slice(&identity);
-    payload.extend_from_slice(&curve_identity(acc));
-    payload.extend_from_slice(&(entries.len() as u16).to_be_bytes());
+    let mut body = Vec::with_capacity(66 + entries.len() * 101);
+    body.extend_from_slice(&identity);
+    body.extend_from_slice(&curve_identity(acc));
+    body.extend_from_slice(&(entries.len() as u16).to_be_bytes());
     for (kid, pubkey, sig) in &entries {
-        payload.extend_from_slice(&kid.to_be_bytes());
-        payload.push(1u8);
-        payload.extend_from_slice(pubkey);
-        payload.extend_from_slice(sig);
+        body.extend_from_slice(&kid.to_be_bytes());
+        body.push(1u8);
+        body.extend_from_slice(pubkey);
+        body.extend_from_slice(sig);
     }
-    t.send_frame(OP_UPLOAD_PREKEYS, &payload)
+    t.send_frame(OP_UPLOAD_PREKEYS, &body)
         .await
         .map_err(|e| OlmError::Transport(e.to_string()))?;
     let (op, p) = t

@@ -143,8 +143,8 @@ static int checked_event(ss_conn *c, uint64_t id, uint8_t *bytes, size_t length,
 #undef ss_nonblock
 #undef ss_stream_create
 
-static void run(enum fault injected) {
-    fault = injected;
+static void run(enum fault active) {
+    fault = active;
     observed_fd = -1;
     set_calls = get_calls = close_calls = nonblock_calls = create_calls = 0;
     abort_calls = reset_calls = stop_calls = event_calls = 0;

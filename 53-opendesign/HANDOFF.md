@@ -83,6 +83,6 @@ R18 реализован и проверен: `history_page`, `message_status`, 
 
 `DEMO-PUBLIC-PROFILE`, `demo-server.invalid`, `DEMO-CERTIFICATE-FINGERPRINT`, `DEMO-OLD-DEVICE-KEY` и `DEMO-INVITATION` — обозначения, не валидные wire-профили/ключи/приглашения. Макет принимает только точный демо-сентинел и не вызывает сеть. `A.requests` хранит только названия операций/булевы флаги, без пароля, invitation value и profile payload. `A.mutations` — счётчик синтетического завершения, не запись в БД.
 
-`ReplacementChanged` — UX-сценарий CAS-конфликта, **не заявленный новый FfiError enum**. Нативный adapter должен сопоставить фактический ответ подтверждённого API; неизвестная ошибка → безопасный Protocol/failure. PinMismatch останавливает auth; кнопки обхода нет. AuthRateLimited без server retry-after не получает выдуманный countdown. Invite-errors относятся к signup, не к публичному профилю и не к login.
+`ReplacementChanged` — UX-сценарий CAS-конфликта, **не заявленный новый FfiError enum**. Нативный adapter должен сопоставить фактический ответ подтверждённого API; неизвестная ошибка → безопасный Protocol/failure. PinMismatch останавливает auth; дополнительного пути нет. AuthRateLimited без server retry-after не получает выдуманный countdown. Invite-errors относятся к signup, не к публичному профилю и не к login.
 
 Проверки/скриншоты в `QA.md`: paste/scan/preview, policy, login/signup, typed errors, replacement/cancel/CAS, stale replies, key-resume, 48 dp-референс и 200% текста. Android acceptance остаётся отдельной нативной проверкой.

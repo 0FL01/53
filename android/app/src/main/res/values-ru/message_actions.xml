@@ -12,9 +12,9 @@
     <string name="delete_everyone">У всех</string>
     <string name="delete_confirm">Удалить</string>
     <string name="delete_warning">«Только у меня» скрывает сообщение здесь. «У всех» также сохраняет удаление в очереди; у собеседника оно применится после получения.</string>
-    <string name="self_hide_warning">Скрытие сообщения в очереди не отменяет отправку. Оно остаётся в очереди.</string>
-    <string name="self_hidden">Сообщение скрыто на этом устройстве.</string>
-    <string name="self_hidden_queued">Сообщение скрыто на этом устройстве. Его отправка из очереди не отменена.</string>
+    <string name="self_hide_warning">Убирание сообщения с экрана не отменяет отправку. Оно остаётся в очереди.</string>
+    <string name="self_hidden">Сообщение убрано с экрана на этом устройстве.</string>
+    <string name="self_hidden_queued">Сообщение убрано с экрана на этом устройстве. Его отправка из очереди не отменена.</string>
     <string name="edit_saved">Правка сохранена локально · %1$s</string>
     <string name="edit_unchanged">Сообщение не изменено. Текущая ревизия проверена; новая правка не добавлена в очередь.</string>
     <string name="delete_saved">Сообщение удалено здесь. Удаление у всех сохранено · %1$s</string>

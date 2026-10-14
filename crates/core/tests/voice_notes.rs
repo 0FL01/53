@@ -852,7 +852,7 @@ fn pending_upload_does_not_block_text_delete_and_hidden_queue_still_sends() {
             p.srv.server_pub.to_vec(),
             p.srv.domain.clone(),
             p.bid.clone(),
-            "text bypasses bulk".into(),
+            "text takes the priority lane".into(),
             None,
         )
         .unwrap();
@@ -868,7 +868,7 @@ fn pending_upload_does_not_block_text_delete_and_hidden_queue_still_sends() {
     );
     let report = p.fetch();
     assert_eq!(report.received.len(), 1);
-    assert_eq!(report.received[0].text, "text bypasses bulk");
+    assert_eq!(report.received[0].text, "text takes the priority lane");
     let tombstone =
         p.b.history_message_by_mid(p.aid.clone(), first.message_id_hex.clone())
             .unwrap()

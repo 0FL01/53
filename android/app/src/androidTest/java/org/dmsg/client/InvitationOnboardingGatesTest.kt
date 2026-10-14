@@ -123,7 +123,7 @@ class InvitationOnboardingGatesTest {
         } finally { f.dnsStop() }
     }
 
-    /** Real activity-result lifecycle, injected synthetic decoder text; NOT optical evidence. */
+    /** Real activity-result lifecycle, provided synthetic decoder text; NOT optical evidence. */
     @Test fun scannerResultLifecycleOnlyInGatePackage() {
         val app = gate()
         val f = Core.facade(app)
@@ -168,7 +168,7 @@ class InvitationOnboardingGatesTest {
         val f = Core.facade(app)
         try {
             val fixture = JSONObject(credentials.readText())
-            assertEquals("credentials only, no profile/resolver injection", setOf("login", "password"), fixture.keys().asSequence().toSet())
+            assertEquals("credentials only, no extra profile/resolver data", setOf("login", "password"), fixture.keys().asSequence().toSet())
             assertTrue(f.isReady())
             assertFalse("fresh disposable account required", f.account().authenticated)
             assertNull("fresh disposable profile required", f.dnsProfile())

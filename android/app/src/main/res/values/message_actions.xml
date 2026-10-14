@@ -14,9 +14,9 @@
     <string name="delete_everyone">For everyone</string>
     <string name="delete_confirm">Delete</string>
     <string name="delete_warning">Only for me hides the message here. For everyone also saves a deletion to the outbox; the other side changes when it receives it.</string>
-    <string name="self_hide_warning">Hiding a queued message does not cancel its send. It remains in the outbox.</string>
-    <string name="self_hidden">Message hidden on this device.</string>
-    <string name="self_hidden_queued">Message hidden on this device. Its queued send is not cancelled.</string>
+    <string name="self_hide_warning">Removing this message from view does not cancel its send. It remains in the outbox.</string>
+    <string name="self_hidden">Message removed from view on this device.</string>
+    <string name="self_hidden_queued">Message removed from view on this device. Its queued send is not cancelled.</string>
     <string name="edit_saved">Edit saved locally · %1$s</string>
     <string name="edit_unchanged">Message unchanged. Current revision checked; no new edit queued.</string>
     <string name="delete_saved">Message removed here. Deletion for everyone saved · %1$s</string>

@@ -759,9 +759,9 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn fresh_file_is_0600_and_ciphertext_tamper_fails() {
+    fn fresh_file_is_0600_and_ciphertext_corruption_fails() {
         use std::os::unix::fs::PermissionsExt;
-        let p = path("tamper");
+        let p = path("corrupt");
         let c = open_encrypted(&p, &KEY).unwrap();
         assert_eq!(
             std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,

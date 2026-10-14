@@ -69,6 +69,7 @@ class VoiceWaveformView @JvmOverloads constructor(context: Context, attrs: Attri
         }
     }
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        // Official nested-scroll touch API; no traffic interception.
         if (!isEnabled || onSeek == null || totalSamples <= 0) return false
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> { parent?.requestDisallowInterceptTouchEvent(true); return true }

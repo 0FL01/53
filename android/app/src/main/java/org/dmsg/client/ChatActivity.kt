@@ -264,7 +264,7 @@ class ChatActivity : DmsgActivity() {
         if (!active) return
         val visible = memory.history.visibleRows
         if (!sameHistoryRows(adapter.visibleRows, visible)) {
-            if (adapter.replaceVoicePayloads(visible)) {
+            if (adapter.refreshVoiceViews(visible)) {
                 visible.filter { it.kind == uniffi.dmsg_core.MessageKind.VOICE }.forEach { row -> visibleVoice(VoiceKey(row))?.let { bindVoice(it, row) } }
             } else {
                 val anchor = captureAnchor()
@@ -400,7 +400,7 @@ class ChatActivity : DmsgActivity() {
                     // A no-op ticker must not destroy the system text-selection action mode.
                     val visible = memory.history.visibleRows
                     val changed = !sameHistoryRows(adapter.visibleRows, visible)
-                    val voiceOnly = changed && !contactChanged && adapter.replaceVoicePayloads(visible)
+                    val voiceOnly = changed && !contactChanged && adapter.refreshVoiceViews(visible)
                     if (voiceOnly) visible.filter { it.kind == uniffi.dmsg_core.MessageKind.VOICE }.forEach { row ->
                         visibleVoice(VoiceKey(row))?.let { bindVoice(it, row) }
                     }
@@ -1067,7 +1067,7 @@ class ChatActivity : DmsgActivity() {
                     if (!active || stamp != lifecycleStamp || memory.history.rows.none(key::matches)) return@runOnUiThread
                     result.onSuccess { updated ->
                         memory.history.replace(updated); stopDeletedVoice()
-                        if (key.matches(updated) && adapter.replaceVoicePayload(updated)) visibleVoice(key)?.let { bindVoice(it, updated) } else render()
+                        if (key.matches(updated) && adapter.refreshVoiceView(updated)) visibleVoice(key)?.let { bindVoice(it, updated) } else render()
                     }
                 }
             }

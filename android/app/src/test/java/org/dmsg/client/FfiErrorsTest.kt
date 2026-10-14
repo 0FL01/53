@@ -24,7 +24,7 @@ class FfiErrorsTest {
         assertEquals(errors.size, errors.map { humanErrorRes(ffiError(it.first)) }.distinct().size)
         assertEquals(R.string.error_identity_changed, humanErrorRes(ffiError(FfiException.IdentityMismatch())))
     }
-    @Test fun nativeAndUnexpectedPayloadsNeverReachUi() {
+    @Test fun nativeAndUnexpectedDetailsNeverReachUi() {
         val secret = "example-password-invitation"
         for (e in listOf(FfiException.Transport(secret), FfiException.BadQr(secret), FfiException.Store(secret),
             FfiException.Protocol(secret), FfiException.Server(secret))) {
@@ -36,7 +36,7 @@ class FfiErrorsTest {
         assertEquals(R.string.error_operation, humanErrorRes(DmsgError(secret)))
     }
     @Test fun storageOutcomesUseTypedSafeMessages() {
-        val fixture = "untrusted diagnostic payload"
+        val fixture = "untrusted diagnostic details"
         listOf(ErrorKind.StorageKeyLost to R.string.error_storage_key_lost,
             ErrorKind.Store to R.string.error_store,
             ErrorKind.LiveDatabaseExists to R.string.error_live_db_exists,

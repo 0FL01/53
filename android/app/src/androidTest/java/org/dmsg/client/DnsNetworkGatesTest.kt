@@ -104,7 +104,7 @@ class DnsNetworkGatesTest {
             assertEquals(before, f.account())
             assertEquals("ready", f.dnsStatus())
             write(app, "gate-yandex-proof.json", JSONObject()
-                .put("primaryPackets", packets.get()).put("primaryDnsPayloadTxBytes", bytes.get())
+                .put("primaryPackets", packets.get()).put("primaryDnsDataTxBytes", bytes.get())
                 .put("uidTxBytes", if (tx >= 0) TrafficStats.getUidTxBytes(uid) - tx else -1)
                 .put("uidRxBytes", if (rx >= 0) TrafficStats.getUidRxBytes(uid) - rx else -1)
                 .put("elapsedMs", (System.nanoTime() - started) / 1_000_000)
@@ -175,7 +175,7 @@ class DnsNetworkGatesTest {
                 shell(command)
                 await("new default network") { on(transport) }
                 val start = System.nanoTime()
-                await("network wake must bypass 5-minute interval", 60) {
+                await("network wake uses its own short schedule within the 5-minute interval", 60) {
                     val state = DmsgService.connectionState()
                     state.revision > old && state.lastFailure == null && !state.pollInFlight && f.dnsStatus() == "ready"
                 }
@@ -215,7 +215,7 @@ class DnsNetworkGatesTest {
             val revision = DmsgService.connectionState().revision
             val start = System.nanoTime()
             DmsgService.wakeAfterNetworkApplied()
-            await("wake bypasses 5-minute sleep", 30) {
+            await("wake occurs before the 5-minute sleep ends", 30) {
                 val state = DmsgService.connectionState()
                 state.revision > revision && !state.pollInFlight && state.lastFailure == null
             }

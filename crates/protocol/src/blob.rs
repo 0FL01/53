@@ -1,4 +1,4 @@
-//! Wire2 opaque blob payloads. All integers are big endian. Builders return
+//! Wire2 opaque blob bodies. All integers are big endian. Builders return
 //! payloads (use `encode_frame` separately); parsers reject trailing bytes.
 //! STATUS_RESP = id16 + byte_len4 + state1 + received_bitmap8 (bit index).
 //! PUT/DATA = id16 + index2 + length2 + bytes; PUT_ACK = id16 + index2.

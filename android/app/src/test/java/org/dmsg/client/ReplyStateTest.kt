@@ -117,7 +117,7 @@ class ReplyStateTest {
         assertEquals(deleted, mergeReplyInfo(deleted, unavailableOlder))
     }
 
-    @Test fun missingCanResolveAndEqualTargetRefreshKeepsSelectionPayloadEqual() {
+    @Test fun missingCanResolveAndEqualTargetRefreshKeepsSelectionContentEqual() {
         val missing = info(null, null, ReplyTargetState.MISSING)
         assertEquals(info(), mergeReplyInfo(missing, info()))
         val message = row().copy(reply = info())

@@ -183,12 +183,12 @@ DNS capacity/calibration**. No common-clock mouth-to-ear or listening pass exist
 |40ms, fresh epoch with unchanged Noise trust identities |497 |192 |192 |Protected DNS/lifecycle PASS; poor delivery |
 |20ms |845 at early stop |519 |524 |Bounded generation retired before completion |
 |60ms |330 |172 |172 |Protected DNS/lifecycle PASS; poor delivery |
-|40ms, injected20ms DNS response delay |496 |35 |36 |Protected DNS/lifecycle PASS; not quality acceptance |
+|40ms, artificial 20ms DNS response delay |496 |35 |36 |Protected DNS/lifecycle PASS; not quality acceptance |
 
 These are packet/slot counters, **not source-active loss percentages**. The first
 40ms run was materially better; the variation does not qualify any profile.
 Unmodified LAN fixtures emitted hundreds of thousands of queries during short
-scripts, including startup/tail. The injected-delay comparison also dropped16676
+scripts, including startup/tail. The artificial-delay comparison also dropped16676
 responses at its bounded256-entry fixture queue, so it is a labelled impairment,
 not a clean attribution of improved delivery solely to pacing. No scheduler,
 congestion control, jitter target or progress window was changed to hide failure.
@@ -527,7 +527,7 @@ uses actual consumption rate. Cursors never rewind. The protected-report model
 covers45min ×20/40/60ms ×±100/500ppm:990000 source frames decode once with zero
 late/PLC/future rejection/skipped slots/render loss. Encoded, native and sink queues
 retain their original caps. Delay/burst/HOL100/300/1000ms, stale timing, transitions,
-rollover, authentication tamper and retirement regressions remain passing.
+rollover, authentication corruption and retirement regressions remain passing.
 
 Android separately calibrates actual AudioTrack frame/time progression over a
 steady20-second window, rejecting underrun/rate-discontinuity samples. The platform

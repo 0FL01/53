@@ -149,7 +149,7 @@
       "ok": true
     },
     {
-      "name": "Pin mismatch blocks auth rather than offering bypass",
+      "name": "Pin mismatch blocks auth with no alternative path",
       "ok": true
     },
     {

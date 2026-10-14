@@ -278,7 +278,7 @@ class VoiceGatesTest {
                     try { assertEquals(320, pcm.size) } finally { pcm.fill(0) }
                 } finally { VoiceCodecJni.nativeDecoderClose(decoder) }
                 try { VoiceCodecJni.nativeNoteSamples(byteArrayOf(1)); fail("malformed note accepted") }
-                catch (_: IllegalArgumentException) { /* Static JNI error, no payload reflection. */ }
+                catch (_: IllegalArgumentException) { /* Static JNI error, no content reflection. */ }
             } finally { note.fill(0) }
         } finally { if (encoder != 0L) VoiceCodecJni.nativeEncoderCancel(encoder) }
     }

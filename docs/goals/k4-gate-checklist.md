@@ -47,15 +47,15 @@ Auth/text outcomes проверены local и теперь на fresh remote ч
 - UI Queued→Accepted→Delivered, double submit→1 durable row; process death/reopen/retry сохраняют account/inbox/exact ciphertext. Delivered history переживает outbox removal/recreate, native reopened history incoming1/outgoing1. Actual replacement отзывает старый key; phone STOP/cancel/confirm сохраняет сообщение до receive1 then0.
 - Alias/summary/unread/my QR/queue-empty disclosure, actual manual DNS check при FGS off, economy intervals/FGS stop/native cancellation; 551 synthetic rows/paging/read anchors, draft/scroll/recreate, same-key restore и loss после clear-data. 200% font + portrait/landscape IME; coordinator viewed private screenshots, send выше клавиатуры. Synthetic storage/scanner/history fixtures отделены от DNS evidence.
 - 7 диагностированных попыток разрешены; два production RED→GREEN: поздний poll после FGS stop и landscape-IME overlap. Остальное — fixture precondition/IPv4 selection/assertion label/settled-layout/camera-denial timing; final gates не suppressed/skipped.
-- Backup `snap-1790845865` schema4/integrity ok + protected independent backup/old image; authorised loss16 dev users/devices. Только dmsg53 DB/WAL/SHM и empty blobs wiped, joint recreate 09:18:15–16 UTC: healthy/schema5/invite_only. Pins/env/topology/nft/original tunnel unchanged; deployment — `docs/deploy.md`. После smoke3 disposable accounts/5 devices/2 retired, send_fail/mbox_err0.
+- Backup `snap-1790845865` schema4/integrity ok + protected independent backup/old image; authorised loss16 dev users/devices. Только dmsg53 DB/WAL/SHM и empty blobs wiped, joint recreate 09:18:15–16 UTC: healthy/schema5/invite_only. Pins/env/topology/nft/original adjacent link unchanged; deployment — `docs/deploy.md`. После smoke3 disposable accounts/5 devices/2 retired, send_fail/mbox_err0.
 - Cleanup: `.gate` cleared/force-stopped, 66 local private fixture/log/key/DB files removed, peer stopped, font restored; main UID/version/install/update unchanged. 16 private screenshots вне Git. Не заявлены long Doze/second physical/no-GMS/16KB runtime/optical QR/permanent signing/media. Прежний credential-log incident требует внешней rotation; новых dumps в этой итерации нет.
 
 ### Main dev rollout correction, 2026-10-01 (R22)
 
 - RED: branding install retained nonempty main schema0; actual Store screen. Label/icon PASS did not establish working app.
-- Explicit user-approved main `pm clear` removed old DB/history/Keystore identity; no schema spoof/migration/automatic wipe. `dev-install.py` rejects this known startup failure without reset, GREEN after explicit reset and again without reset after auth.
+- Explicit user-approved main `pm clear` removed old DB/history/Keystore identity; no schema misrepresentation/migration/automatic wipe. `dev-install.py` rejects this known startup failure without reset, GREEN after explicit reset and again without reset after auth.
 - Main `org.dmsg.client`, current `53.apk`, actual UI onboarding/code/preview/signup and fresh6, production recursive DNS peer both directions receive1 then0/all skips0/equality; exact Accepted→Delivered, no duplicate send/history, new-process reopen/account/history retained. **4 selected main methods/5 passes/0 skips**, `android/AUTH_GATES.md`.
-- JVM35/release/test/export green, current launcher check; one main53, test package/private fixtures/invites/peer keys cleaned, dev owner0400 credentials retained outside Git. Main screenshot viewed: Dialogs/«Проверка DNS»/reply preview, no Store. FGS remains explicitly off, not a network failure. Server healthy5/pins/tunnel unchanged. Earlier main-unchanged statements are historical pre-R22 evidence.
+- JVM35/release/test/export green, current launcher check; one main53, test package/private fixtures/invites/peer keys cleaned, dev owner0400 credentials retained outside Git. Main screenshot viewed: Dialogs/«Проверка DNS»/reply preview, no Store. FGS remains explicitly off, not a network failure. Server healthy5/pins/adjacent link unchanged. Earlier main-unchanged statements are historical pre-R22 evidence.
 
 ### Physical Android pair, 2026-10-05 (R8)
 
@@ -104,7 +104,7 @@ Auth/text outcomes проверены local и теперь на fresh remote ч
   byte-identical ciphertext, peer receive1 then0/skips0, persistent Delivered.
   **17/17 device-method PASS, 0 skips** в этой итерации.
 - Backup `snap-1791287385` до rollout; healthy/schema5 после; secrets/volumes/
-  pins/nft/tunnel unchanged; gate-пакеты удалены, main identities unchanged.
+  pins/nft/adjacent link unchanged; gate-пакеты удалены, main identities unchanged.
   R9 остаётся **deferred**; Wi-Fi/mobile и restricted egress не проверены.
 
 ### Прежнее evidence: unified auth, 2026-09-30

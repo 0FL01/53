@@ -16,7 +16,7 @@ After Noise IK, send `AUTH_DOMAIN(3)` with the configured domain and receive
 | `RESUME(11)` | empty | `AUTHENTICATED(12)` or `ERROR(6)` |
 
 `AUTHENTICATED` is `user_id[16] + contact_id[12]`; `REPLACE_REQUIRED` is the
-current device key `[32]`. Credential payloads contain canonical login and
+current device key `[32]`. Credential fields contain canonical login and
 password fields followed by the optional invitation/expected-old-key flag and
 value. They contain no new device key. Login names are lowercase ASCII, 3–32
 bytes, allowing letters, digits, `_`, `.`, and `-`; passwords are UTF-8,
@@ -165,7 +165,7 @@ cargo test -p msgd
 
 `auth_probe` covers policy, invite lifecycle, signup/confirmation response
 loss, restart/resume, occupied-login signup and races, replacement CAS/wakeup/no-history,
-immutable bindings, full-quota persisted retries, and expanded FETCH bounds. Unit tests inject transaction
+immutable bindings, full-quota persisted retries, and expanded FETCH bounds. Unit tests simulate transaction
 failures to prove signup/replacement rollback, and verify Argon slot and
 attempt bounds. `mailbox_probe`, `backup_probe`, `msgctl_probe`, and
 `noise_probe` retain the durable mailbox/GC/backup and transport/control gates.
@@ -173,7 +173,7 @@ These are local server probes; DNS/Android acceptance is separate.
 
 ## Opaque voice blobs (wire2, fresh server7)
 
-`dmsg_protocol::blob` owns bounded payload builders/parsers and exact DTOs.
+`dmsg_protocol::blob` owns bounded field builders/parsers and exact DTOs.
 RESERVE/RESERVED retain opcodes26/27; STATUS/RESP37/38, PUT/ACK39/40,
 FINISH/ACK41/42, GET/DATA43/44, SEND_MEDIA45 (existing SEND_ACK17).
 Chunk indices and lengths are `u16 BE`, status is blob16 + size4 + state1

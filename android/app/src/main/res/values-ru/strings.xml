@@ -24,7 +24,7 @@
     <string name="auth_password">Пароль</string>
     <string name="signup_example">Например, marina53</string>
     <string name="show_password">Показать пароль</string>
-    <string name="hide_password">Скрыть пароль</string>
+    <string name="hide_password">Не показывать пароль</string>
     <string name="invitation_imported">Приглашение считано</string>
     <string name="invitation_empty">Приглашение не считано</string>
     <string name="invitation_server_check">Срок действия и доступ проверит сервер при создании аккаунта.</string>

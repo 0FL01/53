@@ -60,7 +60,7 @@ pub trait Transport: Send {
     /// Установить канал: TCP + Noise IK + AUTH_DOMAIN→WELCOME.
     /// Повторный вызов на живом канале — Ok (no-op).
     async fn connect(&mut self) -> Result<(), TransportError>;
-    /// Отправить один app-кадр (opcode + payload) внутрь канала.
+    /// Отправить один app-кадр (opcode + body) внутрь канала.
     async fn send_frame(&mut self, opcode: u8, payload: &[u8]) -> Result<(), TransportError>;
     /// Принять один app-кадр из канала.
     async fn recv_frame(&mut self) -> Result<(u8, Vec<u8>), TransportError>;

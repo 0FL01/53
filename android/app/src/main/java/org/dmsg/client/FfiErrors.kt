@@ -4,7 +4,7 @@ import uniffi.dmsg_core.FfiException
 import android.content.res.Resources
 import androidx.annotation.StringRes
 
-/** Typed errors, static human messages: never reflect native payloads or credentials. */
+/** Typed errors, static human messages: never reflect native error details or credentials. */
 internal fun ffiError(error: FfiException): DmsgError = when (error) {
     is FfiException.InvalidCredentials -> DmsgError(R.string.error_credentials, ErrorKind.InvalidCredentials)
     is FfiException.LoginTaken -> DmsgError(R.string.error_login_taken, ErrorKind.LoginTaken)

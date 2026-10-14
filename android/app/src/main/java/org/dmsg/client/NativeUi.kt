@@ -74,14 +74,14 @@ internal class HistoryAdapter(private val context: Context, private val rows: Li
         private set
     override fun notifyDataSetChanged() { visibleRows = rows.filter(::messageVisible); super.notifyDataSetChanged() }
     /** Cache/download metadata doesn't reorder a row: leave neighbouring text selection intact. */
-    fun replaceVoicePayload(row: HistoryMessage): Boolean {
+    fun refreshVoiceView(row: HistoryMessage): Boolean {
         val index = visibleRows.indexOfFirst { it.localId == row.localId && it.messageIdHex == row.messageIdHex }
         if (index < 0 || row.kind != uniffi.dmsg_core.MessageKind.VOICE || !messageVisible(row)) return false
         if (visibleRows[index].copy(voice = row.voice) != row) return false
         visibleRows = visibleRows.toMutableList().also { it[index] = row }
         return true
     }
-    fun replaceVoicePayloads(updated: List<HistoryMessage>): Boolean {
+    fun refreshVoiceViews(updated: List<HistoryMessage>): Boolean {
         if (visibleRows.size != updated.size || visibleRows.indices.any {
                 visibleRows[it].copy(voice = null) != updated[it].copy(voice = null)
             }) return false

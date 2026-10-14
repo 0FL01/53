@@ -239,7 +239,7 @@ struct CConfig {
 }
 
 // Deliberately explicit C layout, all u64 words: 11 header + 8 * 18 path = 155.
-// This plain struct is a caller-owned copy; the shared C payload is ALL atomic.
+// This plain struct is a caller-owned copy; the shared C bytes are ALL atomic.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct CTransportPath {
@@ -502,7 +502,7 @@ impl NativeClient {
     /// invalid schema. Never returns a cached previous attempt as current.
     /// A successful read can still be stale; ages are relative to `now_native_us`
     /// at capture and publication age is unknown. A concurrent stop may race the
-    /// read; terminal publication invalidates the payload on the owning worker.
+    /// read; terminal publication invalidates the bytes on the owning worker.
     pub fn transport_snapshot(&self) -> Option<TransportSnapshot> {
         let mut out = CTransportSnapshot::default();
         let available = unsafe {

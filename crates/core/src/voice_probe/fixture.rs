@@ -54,7 +54,7 @@ pub struct EndpointFixture {
     pub peer_initial_timestamp: u32,
     /// Measured healthy commit-to-terminal-feedback cycle; frozen per run.
     pub healthy_cycle_ms: u32,
-    /// Independently measured useful tunnel capacity, not local write rate.
+    /// Independently measured useful channel capacity, not local write rate.
     pub capacity_bps: u32,
     pub carrier: Option<CarrierFixture>,
 }

@@ -271,7 +271,7 @@ class VoiceDnsGatesTest {
         assertTrue(f.reconnect() > 0)
         assertEquals(ContactCta.Chat, contactCta(f.get(cid)))
         val fetched = f.fetch() // Processes/accepts the fresh host's reciprocal public contact request.
-        assertTrue("voice payloads belong to later methods", fetched.received.isEmpty())
+        assertTrue("voice contents belong to later methods", fetched.received.isEmpty())
         assertTrue(fetched.skipped.all { it == 0L })
         write("gate-voice-peer.cid", cid)
         write("gate-voice-peer.json", envelope(f, cid).put("accepted", true))
