@@ -1,7 +1,7 @@
 # Managed Slipstream native boundary
 
 Builds the production C client from Git revision
-`9d3f93ca19ab792dff11c711f1a6428ef201bcf6` (`fix/early-repeat-ack-slots`), its pinned submodules and the
+`cbf7fd5e5c6e5c9c2e5dbf8892a6b3cfe5ce8cb4` (`fix/bounded-early-repair`), its pinned submodules and the
 upstream-pinned picotls revision. OpenSSL is built from locked `openssl-src`
 3.5.4. Git archives, patches, fetched dependencies and binaries stay in Cargo's
 `OUT_DIR` under `target/`. The build never mutates the live submodule; approved
@@ -13,15 +13,22 @@ In-zone IN-class non-TXT probes return NOERROR/NODATA instead of denying the
 subtree used by descendant TXT traffic, preserving QName-minimization continuation.
 Successfully decoded TXT with no prepared reply also returns NOERROR/NODATA;
 transport silence does not change the existence of the same valid QName.
+The receiver requests normal ACK scheduling for decoded POLLs, allowing the
+response slot to acknowledge reception without changing sender/PTO classification.
+Speculative POLLs leave up to two MTUs of congestion credit for fresh data and
+an early repair; small windows still admit one pull whose ACK releases credit.
 Recovery anchors PTO to the last ACK-eliciting packet in its existing context;
 new ACK/POLL-only packets cannot postpone outstanding STREAM recovery. RTO,
 backoff, RACK and application bounds are unchanged. This revision also enables
 the existing early-repeat mechanism for unacknowledged open-STREAM data. Its
-low-RTT delay stays before the existing half-RTT exclusion boundary; higher-RTT
-timings and congestion admission are unchanged. Due copies may share remaining
+delay leaves at least a quarter-RTT selection interval before the existing half-RTT
+exclusion boundary; timing at RTTs of 400ms and above and congestion admission
+are unchanged. Unknown/tiny RTTs retain the ACK-delay floor. Due copies may share remaining
 ACK-only packet space after fresh data, without mislabeling failed fits or
 extending forced-probe PING fallback to nonempty packets. Insufficient ACK space
 retains the earliest deferred packet cursor without blocking later fitting copies.
+An early-copy packet is not itself early-copied; normal loss recovery of its
+STREAM bytes is unchanged.
 Multipath RTT periods use the
 per-path packet context only for 1-RTT, not handshake/path-validation epochs.
 The TCP bridge clears optimistic producer readiness after the socket is drained,
