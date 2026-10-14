@@ -1,7 +1,7 @@
 # Managed Slipstream native boundary
 
 Builds the production C client from Git revision
-`cbf7fd5e5c6e5c9c2e5dbf8892a6b3cfe5ce8cb4` (`fix/bounded-early-repair`), its pinned submodules and the
+`b362bc1505cb2e78d59fc2130d0af0cc9564da72` (`fix/early-copy-fresh-credit`), its pinned submodules and the
 upstream-pinned picotls revision. OpenSSL is built from locked `openssl-src`
 3.5.4. Git archives, patches, fetched dependencies and binaries stay in Cargo's
 `OUT_DIR` under `target/`. The build never mutates the live submodule; approved
@@ -22,13 +22,15 @@ new ACK/POLL-only packets cannot postpone outstanding STREAM recovery. RTO,
 backoff, RACK and application bounds are unchanged. This revision also enables
 the existing early-repeat mechanism for unacknowledged open-STREAM data. Its
 delay leaves at least a quarter-RTT selection interval before the existing half-RTT
-exclusion boundary; timing at RTTs of 400ms and above and congestion admission
-are unchanged. Unknown/tiny RTTs retain the ACK-delay floor. Due copies may share remaining
+exclusion boundary; timing at RTTs of 400ms and above is unchanged.
+Unknown/tiny RTTs retain the ACK-delay floor. Due copies may share remaining
 ACK-only packet space after fresh data, without mislabeling failed fits or
 extending forced-probe PING fallback to nonempty packets. Insufficient ACK space
 retains the earliest deferred packet cursor without blocking later fitting copies.
 An early-copy packet is not itself early-copied; normal loss recovery of its
 STREAM bytes is unchanged.
+Optional copies require credit for their packet and the next fresh packet;
+insufficient credit leaves the original/cursor untouched until ACK progress.
 Multipath RTT periods use the
 per-path packet context only for 1-RTT, not handshake/path-validation epochs.
 The TCP bridge clears optimistic producer readiness after the socket is drained,
