@@ -398,15 +398,21 @@ class CallClientGatesTest {
         reportDns("locked_listener_ready")
         instrumentation.sendStatus(0, android.os.Bundle().apply { putString("client_call_listener_ready", "true") })
         incoming()
+        report("locked_ring_observed")
         assertTrue("ringing must not unlock the device", keyguard.isDeviceLocked)
         waitFor("incoming Telecom registration unavailable") { CallUi.state.value.telecomReady }
+        report("locked_telecom_ready")
         val manager = app.getSystemService(android.app.NotificationManager::class.java)
         val notification = manager.activeNotifications.single { it.id == DmsgService.ID }.notification
+        report("locked_notification_read")
         assertEquals(android.app.Notification.CATEGORY_CALL, notification.category)
+        report("locked_call_category")
         val answerTitle = app.getString(androidx.core.R.string.call_notification_answer_action)
         val answer = requireNotNull(notification.actions).single { it.title.toString() == answerTitle }
+        report("locked_answer_action")
         // Exercise the production notification PendingIntent; never dismiss keyguard or enter a PIN.
         answer.actionIntent.send()
+        report("locked_answer_dispatched")
         healthy()
         assertTrue("answer must not remove the secure keyguard", keyguard.isDeviceSecure && keyguard.isDeviceLocked)
         report("notification_answer_while_locked")

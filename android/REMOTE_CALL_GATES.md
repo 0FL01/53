@@ -231,3 +231,68 @@ Android messenger reachability or absence/presence of internet allowlisting.
   Independent final markers do not supply timely covering-feedback proof.
   Both gate processes stopped; identities/config/data/pins/defaults preserved.
   This short PASS permits the next180s gate; it is not full R2 acceptance.
+
+### Conditional180s result (2026-10-14)
+
+- The permitted fresh180s attempt **FAILS both actual frameworks early**:
+  framework not OK/status-2 despite ADB0/final-1. Moto52encoded/46decoded/51RTP,
+  oldest7403 age720043us/frontier7402, last authenticated control185416us old;
+  OnePlus58encoded/38decoded/46RTP, secondaryConnectionLost/nativefailed=false.
+- Moto complete write/submission2048, ACK-prefix1916; incoming highest/contiguous/
+  flush/read/auth1896/index13. OnePlus later complete write/submission2180,
+  ACK-prefix2048, incoming2028/index14, committed index15/terminal7415.
+  Its first1s background report is already ENDED, not a pre-expiry observation.
+- Server accepted/wrote SRTCP14 each direction, Full/pre-Noise/route expiry0.
+  A covering terminal for index14 is unknown; independent final markers are not
+  timely covering-feedback proof. Default matchedc3e artifacts/config/data/pins
+  and both identities are unchanged; gates joined/stopped after collection.
+- No long acceptance or causal reporter fix. Next test the concrete stale native
+  send-batch-time hypothesis locally, before selecting a policy-neutral correction.
+  An independent locked-notification control uses secure Moto as receiver and
+   OnePlus as genuine caller; do not provision/bypass OnePlus's absent keyguard.
+
+### Current-pair locked diagnostic (2026-10-14)
+
+- Six finite test-only notification checkpoints, JVM185/instrumentation build PASS.
+  Test SHA df3aabaebf955ffeb5a25f2690e4166221a10bd734efee2cde83ecfced1cb606,
+  962502B, installed-r/hash-verified on both; matchedc3e product/carrier unchanged.
+- Moto observes CallStyle and Answer, sends the production notification PendingIntent
+  and reaches ACTIVE while secure=true/locked=true. No PIN/keyguard dismissal,
+  volume, identity or microphone-before-answer guard change. The first attempt
+  failed before media without a precise assertion witness; added reporting is not
+  a diagnosed product fix.
+- The complete short reverse call **FAILS both actual frameworks**, status-2:
+  OnePlus oldest3043 age721050us, terminal=null,19encoded/9decoded/15RTP,
+  own write/submission1124/ACK-prefix1103, incoming840/index5. Moto later commits
+  feedback8/terminal3057, own1256/submitted1256/ACK-prefix1124, incoming1104/index7,
+  secondary control-lane failure. No entire lifecycle/screen-off interval PASS.
+- Server SRTCP accepted/wrote7 each way, Full/pre-Noise/route expiry0; covering8
+  timing is unknown. Both gates joined/stopped, identities/config/data/pins/defaults
+  preserved. No180s retry. A disposable real-pacing reproduction independently
+   supports a policy-neutral per-prepare native-clock comparison, not live causality.
+
+### Matched per-prepare native-clock result (2026-10-14)
+
+- Transport5ac8135614be47fedb1b7c25495e487829e20bc4 samples the same existing
+  clock before packet preparation, retaining batch-time budgets/deadlines.
+  Advancing-time pre/post regression,10 Meson suites, poll-submit ASan/UBSan,
+  host458/2 unchanged ignores/fmt,185 JVM, default ARM64/full Android and explicit
+  selected/post-write/original8-stream loopback pass.
+- Target SHA0e0acaf91a8770457908cf36b71d4df2e664604652390df92fb107ec0c70e6fa,
+  22136065B, and unchanged df3 test962502B are installed-r/hash-verified on both.
+  Matching diagnostic carrier8655005b preserves normalized config/mounts/ports/
+  network/IPAM and backendb580 exact ID/image/data/pins; rollbackc702 is retained.
+- Fresh formal readiness/immediate dial10s **FAILS both actual frameworks**:
+  ADB0/final-1 but framework not OK/status-2. OnePlus37encoded/30decoded/33RTP,
+  oldest25588 age726005us/frontier25587; authenticated control188370us old.
+  Its write/submitted1520/ACK-prefix1488, incoming highest/contiguous/flush/read/
+  auth1500/index10, pending0. Moto later40encoded/23decoded/37RTP, commits
+  feedback12/terminal25604, write/submitted1784/ACK-prefix1652 and incoming1500/
+  index10, secondaryConnectionLost without a ledger witness.
+- Server final SRTCP ingress/egress11/10 and10/11, RTP37/37 each way, all Full/
+  pre-Noise/route expiry0. Covering-record timing remains unknown; final markers
+  are not a common clock. OnePlus startup render expiry480/39.925ms accepted
+  160-sample write is an association, not the ledger cause. Recorder maximum6413B.
+- Typed Wi-Fi false/true and profiles match platform2/1; actual primary/fallback
+  tier remains unknown. Both gates joined/stopped, identities and defaults remain.
+  No180s. Next trace feedback/downlink scheduling before another source candidate.

@@ -1,7 +1,7 @@
 # Managed Slipstream native boundary
 
 Builds the production C client from Git revision
-`c3e20dd89464023cf33a022c90131d2dddca286d` (`fix/dns-pto-ack-anchor`), its pinned submodules and the
+`5ac8135614be47fedb1b7c25495e487829e20bc4` (`fix/dns-pto-ack-anchor`), its pinned submodules and the
 upstream-pinned picotls revision. OpenSSL is built from locked `openssl-src`
 3.5.4. Git archives, patches, fetched dependencies and binaries stay in Cargo's
 `OUT_DIR` under `target/`. The build never mutates the live submodule; approved
