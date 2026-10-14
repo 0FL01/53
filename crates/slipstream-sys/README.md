@@ -1,7 +1,7 @@
 # Managed Slipstream native boundary
 
 Builds the production C client from Git revision
-`6550d52314e18a5e1f087d2fb54f016f0268a06b` (`fix/dns-backend-readiness`), its pinned submodules and the
+`9d3f93ca19ab792dff11c711f1a6428ef201bcf6` (`fix/early-repeat-ack-slots`), its pinned submodules and the
 upstream-pinned picotls revision. OpenSSL is built from locked `openssl-src`
 3.5.4. Git archives, patches, fetched dependencies and binaries stay in Cargo's
 `OUT_DIR` under `target/`. The build never mutates the live submodule; approved
@@ -16,8 +16,13 @@ transport silence does not change the existence of the same valid QName.
 Recovery anchors PTO to the last ACK-eliciting packet in its existing context;
 new ACK/POLL-only packets cannot postpone outstanding STREAM recovery. RTO,
 backoff, RACK and application bounds are unchanged. This revision also enables
-the existing early-repeat mechanism for unacknowledged open-STREAM data, without
-changing its timing or congestion admission. Multipath RTT periods use the
+the existing early-repeat mechanism for unacknowledged open-STREAM data. Its
+low-RTT delay stays before the existing half-RTT exclusion boundary; higher-RTT
+timings and congestion admission are unchanged. Due copies may share remaining
+ACK-only packet space after fresh data, without mislabeling failed fits or
+extending forced-probe PING fallback to nonempty packets. Insufficient ACK space
+retains the earliest deferred packet cursor without blocking later fitting copies.
+Multipath RTT periods use the
 per-path packet context only for 1-RTT, not handshake/path-validation epochs.
 The TCP bridge clears optimistic producer readiness after the socket is drained,
 preserving queued QUIC bytes, EOF handling and readiness for the next socket write.
