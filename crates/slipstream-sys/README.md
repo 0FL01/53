@@ -1,7 +1,7 @@
 # Managed Slipstream native boundary
 
 Builds the production C client from Git revision
-`5ac8135614be47fedb1b7c25495e487829e20bc4` (`fix/dns-pto-ack-anchor`), its pinned submodules and the
+`6550d52314e18a5e1f087d2fb54f016f0268a06b` (`fix/dns-backend-readiness`), its pinned submodules and the
 upstream-pinned picotls revision. OpenSSL is built from locked `openssl-src`
 3.5.4. Git archives, patches, fetched dependencies and binaries stay in Cargo's
 `OUT_DIR` under `target/`. The build never mutates the live submodule; approved
@@ -15,7 +15,14 @@ Successfully decoded TXT with no prepared reply also returns NOERROR/NODATA;
 transport silence does not change the existence of the same valid QName.
 Recovery anchors PTO to the last ACK-eliciting packet in its existing context;
 new ACK/POLL-only packets cannot postpone outstanding STREAM recovery. RTO,
-backoff, RACK, preemptive eligibility and application bounds are unchanged.
+backoff, RACK and application bounds are unchanged. This revision also enables
+the existing early-repeat mechanism for unacknowledged open-STREAM data, without
+changing its timing or congestion admission. Multipath RTT periods use the
+per-path packet context only for 1-RTT, not handshake/path-validation epochs.
+The TCP bridge clears optimistic producer readiness after the socket is drained,
+preserving queued QUIC bytes, EOF handling and readiness for the next socket write.
+The server refreshes the bound backend owner's readiness before each DNS reply,
+including data that arrives while earlier slots in the batch are being answered.
 Existing embedding,
 SPCDNS and opt-in TCP_NODELAY overlays remain separate; embedding hooks are
 conditional on `DMSG_EMBEDDED` and the TCP_NODELAY option remains default-OFF.
