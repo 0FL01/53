@@ -253,8 +253,10 @@ internal class CallSessionOwner(private val context: Context,
                     onSetInactive = {
                         // No hold support: stop audio immediately, complete teardown off UI.
                         withContext(Dispatchers.Main.immediate) {
-                            audio?.requestStop("telecom_interruption")
-                            if (guard.matches(id, token)) finish(CallEndReason.LOCAL_ENDED, signal = true)
+                            if (guard.matches(id, token)) {
+                                audio?.requestStop("telecom_interruption")
+                                finish(CallEndReason.LOCAL_ENDED, signal = true)
+                            }
                         }
                     }) {
                     val control = this

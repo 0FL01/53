@@ -104,6 +104,8 @@ class CallStateTest {
         assertFalse(guard.receive(snapshot(id = "second")))
         guard.finishTeardown()
         assertTrue(guard.receive(snapshot(id = "second")))
+        assertFalse(guard.matches("first", old))
+        assertFalse(guard.matches("first", guard.epoch))
         assertFalse(guard.matches("second", old))
         assertTrue(guard.matches("second", guard.epoch))
     }
