@@ -2,7 +2,7 @@
 name = "dmsg-core"
 version = "0.1.0"
 edition = "2021"
-description = "dmsg client core: pinned DNS transport, unified auth, sealed local store, Olm E2E, contacts and durable outbox"
+description = "dmsg client core: personal messaging client with pinned messaging connection, unified login, encrypted local store, standard end-to-end encryption, contacts and durable outbox"
 
 [features]
 voice-probe = []

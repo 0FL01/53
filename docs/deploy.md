@@ -14,8 +14,7 @@
 carrier — transport `9f24b74303dbe5d4c676b98abc4efe4414b4e8f6`
 (image `0974c057…`), совпадающий с client PIN. Отрицательные policy/config
 эксперименты не включены в финальные исходники; fallback/Dcubic/probe-OFF и
-media bounds восстановлены. Public profile, pins, topology/firewall и соседний
-туннель не менялись. Ниже schema5 описывает исторические rollout, не текущую БД.
+media bounds восстановлены. Public profile, pins, topology/firewall и соседнее подключение не менялись. Ниже schema5 описывает исторические rollout, не текущую БД.
 Новый call/client acceptance — `docs/goals/2026-10-11-call-client-apk.md`;
 старый Main8 сам не мигрируется/не очищается. Это не общее разрешение wipe.
 
@@ -45,11 +44,11 @@ main `pm clear` → fresh6/новая identity → actual UI signup/reopen/recur
 и persistent Delivered verified, один main53 оставлен рабочим. Не менять PRAGMA и
 не добавлять migration/automatic wipe ради несовместимого dev state. Проверяемый
 installer — `android/dev-install.py`, main opt-in gates — `android/AUTH_GATES.md`;
-server schema5/pins/tunnel при этой коррекции не менялись.
+server schema5/pins/connectivity при этой коррекции не менялись.
 
 - Backup `snap-1790845865`: schema4, DB118784 bytes, blobs0, integrity ok; independent protected DB/source/Compose/env/secrets archive и rollback image `dmsg53-msgd:pre-r21-schema4-1790845865` вне wipe targets.
 - Source export `7f3fcaa0136a4dbfb6af904c3d9c0f969d50a5f0`, locked Docker workspace fix `a6d21e3`; new msgd image `sha256:e69dfe5b59b7ef7d5510076a5ed35f8ed4f4f686adde08b525e666e226c28ec4`, promoted `dmsg53-msgd:s1`.
-- Carrier reused unchanged: `sha256:bb6243409d1909f3250e289052ade0b2f6d5912961c3d2c87f52afdef0152e73`. Joint recreate 09:18:15–16 UTC; secret bytes/ro mounts, pins, env/topology/static IP/volumes/nft/original tunnel unchanged.
+- Carrier reused unchanged: `sha256:bb6243409d1909f3250e289052ade0b2f6d5912961c3d2c87f52afdef0152e73`. Joint recreate 09:18:15–16 UTC; secret bytes/ro mounts, pins, env/topology/static IP/volumes/nft/original connectivity unchanged.
 - Only verified project dmsg53 DB/WAL/SHM and already-empty blob volume cleared; not `down -v`, global prune/firewall reset or automatic migration. Private exact records — `.local/frontend-rollout/`; no domains/IPs/secrets in this runbook.
 
 Новый binary отклоняет старую БД read-only без migration/wipe. Для нового несовместимого reset нужны явное разрешение, backup и scoped targets; текущее разрешение не является общим production-wipe регламентом. Schema4 snapshot требует retained old image, не schema5 binary.
@@ -61,7 +60,7 @@ docker compose -f /opt/srv/53/deploy/compose.yml --env-file /opt/srv/53/.env up 
 docker compose -f /opt/srv/53/deploy/compose.yml --env-file /opt/srv/53/.env ps
 ```
 
-Ожидается: `slipstream` Up с маппингом `${DNS_BIND_IP}:53->5353/udp`, backend `53-1` `healthy`, `53ctl dbversion` = `5`. Не менять endpoint/topology/ключи исходного туннеля.
+Ожидается: `slipstream` Up с маппингом `${DNS_BIND_IP}:53->5353/udp`, backend `53-1` `healthy`, `53ctl dbversion` = `5`. Не менять endpoint/topology/ключи исходного подключения.
 
 ### Совместимый rollout 2026-10-06: 53 / 53ctl / 53-1
 
@@ -185,7 +184,7 @@ docker exec 53-1 53ctl backup
 
 ### Password-confirmed replacement
 
-Новый key получает challenge после проверки credentials, **без мутации**. Пользовательский confirm и второй LOGIN с expected-old-key атомарно сохраняют account/contact IDs, отзывают прежний доступ/закрывают sessions, создают fresh device с cursor на high-water mark. Потеря ответа retry-safe, concurrent challenge требует нового подтверждения. Старый ciphertext не выдаётся новому аппарату и не считается доставленным, quota/dedup/TTL сохраняются. Peer binding Noise/Ed/Curve меняется явно: STOP до confirm, pending новое сообщение не ACK/discard. Пароль не восстанавливает историю; admin invite-rebind/password-bypass отсутствует. Проверять только disposable account, не рабочую identity.
+Новый key получает challenge после проверки credentials, **без мутации**. Пользовательский confirm и второй LOGIN с expected-old-key атомарно сохраняют account/contact IDs, отзывают прежний доступ/закрывают sessions, создают fresh device с cursor на high-water mark. Потеря ответа retry-safe, concurrent challenge требует нового подтверждения. Старый ciphertext не выдаётся новому аппарату и не считается доставленным, quota/dedup/TTL сохраняются. Peer binding Noise/Ed/Curve меняется явно: STOP до confirm, pending новое сообщение не ACK/discard. Пароль не восстанавливает историю; admin invite-rebind/password-less путь захвата отсутствует (такого пути нет). Проверять только disposable account, не рабочую identity.
 
 ## Backup / restore
 
@@ -196,7 +195,7 @@ docker exec 53-1 53ctl backup
 
 ## Ротация carrier-серта / noise-ключа (меняет пины)
 
-Отдельный согласованный rollout с backup/rollback: новые readonly secret files (noise_key0400, owner65532), joint restart, health/Noise-DNS smoke, новый `server-code`. Existing core pins immutable: импорт другого сертификата/Noise key отклонён. Seamless pin rotation сейчас не реализована, не обходить её wipe/silent device replacement. `invite-issue` не обновляет trust и не восстанавливает историю.
+Отдельный согласованный rollout с backup/rollback: новые readonly secret files (noise_key0400, owner65532), joint restart, health/Noise-DNS smoke, новый `server-code`. Existing core pins immutable: импорт другого сертификата/Noise key отклонён. Seamless pin rotation сейчас не реализована; wipe/silent device replacement как её замена запрещены. `invite-issue` не обновляет trust и не восстанавливает историю.
 
 ## Диск, логи, перезапуск
 
@@ -225,4 +224,4 @@ docker exec 53-1 53ctl backup
 - 1 endpoint, пилот ≤16, transport max-connections32; msgd slots не защищают QUIC admission.
 - Kill ≠ power loss: WAL+FULL probes проверяют commit→ACK, не обесточивание.
 - Старые P4/P5 DNS и schema4 rebind результаты исторические, не доказательство wire2 rollout.
-- Звонки/HA/федерации/группы не обещаны; исходный tunnel не менять.
+- Звонки/HA/федерации/группы не обещаны; исходное подключение не менять.

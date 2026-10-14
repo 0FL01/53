@@ -52,7 +52,7 @@ explicitly signs up. Supply the matching private PNG fixture and remove only tha
 owned Downloads copy after the method; no media/storage permission is granted.
 Publish an ADB-supplied fixture with MediaStore `scan_file` before selection:
 the owned row must have its actual size and `is_pending=0`. A pending MediaStore
-row is not a selectable recipient image. Gesture injection uses a FINGER pointer,
+row is not a selectable recipient image. Simulated gesture input uses a FINGER pointer,
 not just SOURCE_TOUCHSCREEN; DocumentsUI distinguishes the tool type.
 
 `reopenAccountAndOwnInvitationsThroughDns` runs in a new instrumentation process
@@ -92,4 +92,4 @@ an isolated LAN UDP authoritative carrier from the pinned C revision, not an
 application TCP forward. Public delegation/default-network recursive acceptance,
 a third-party messenger target, two physical phones and camera optics are not claimed.
 Main UID/version/install timestamps and private DB/preferences hashes are checked
-unchanged; the live deployment, transport pins and unrelated tunnel are not changed.
+unchanged; the live deployment, transport pins and unrelated connectivity are not changed.

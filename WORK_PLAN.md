@@ -13,7 +13,7 @@
 
 Эксперимент со звонками выполняется рано, параллельно с инфраструктурой. Продуктовую реализацию звонков не ставим раньше достоверной доставки сообщений.
 
-## M0. Зафиксировать основу и не затронуть текущий туннель
+## M0. Зафиксировать основу и не затронуть существующее подключение
 
 **Задачи.** Создать отдельный проект, закрепить выбранную ревизию `feat/rust-parity-ab` средствами Git, добавить transport dependency, Git-историю небольших адаптаций, базовую CI-сборку. Разделить изменения на embedding/platform adapter и messenger logic. Не переносить в приложение временные benchmark shims и production secrets.
 
@@ -25,13 +25,13 @@
 
 ## M1. Вертикальная интеграция сервера и Android
 
-**Transport scope 2026-10-12.** Пользователь разрешил редактировать исходники Slipstream (DNS/QUIC/congestion/scheduler) для исправления DNS-связи; прежние запреты в завершённых целях не применяются к этой работе. Реализация начинается с prepared-packet discard, затем real-client gates и новая общая Git-ревизия client/carrier по `docs/goals/2026-10-11-call-client-apk.md`. Соседний интернет-туннель и pins/data сохраняются.
+**Transport scope 2026-10-12.** Пользователь разрешил редактировать исходники Slipstream (DNS/QUIC/congestion/scheduler) для исправления DNS-связи; прежние запреты в завершённых целях не применяются к этой работе. Реализация начинается с prepared-packet discard, затем real-client gates и новая общая Git-ревизия client/carrier по `docs/goals/2026-10-11-call-client-apk.md`. Существующее интернет-подключение (adjacent link, out of scope) и pins/data сохраняются.
 
 **Сервер.** Multistage Dockerfile для C-транспорта и Rust msgd, Compose из двух сервисов, фиксированный loopback target через общий network namespace, только UDP DNS наружу. Persistent data/secrets, non-root, healthchecks, restart policy, совместное пересоздание сервисов. Не зависеть от локального образа из benchmark build environment.
 
 **Android.** Kotlin-оболочка, UniFFI, Rust core, C transport library. Реализовать start/stop/status без захвата глобальных process signals. Rust supervisor управляет reconnect/backoff и сетевыми переходами. Один native transport instance; очистка handles/buffers проверяется. При необходимости TCP-DNS добавляется bounded Rust adapter по модели проверенного пути, не Python runtime.
 
-**Проверки.** arm64 release на реальном аппарате; загрузка `.so`, 16 KB compatibility; start/stop многократно; экран on/off; смена Wi-Fi/mobile; перезапуск msgd и Slipstream; запрет внешнего HTTPS/UDP кроме используемого DNS-пути. Проверить соседство с существующим системным туннелем, не вводить новый VpnService.
+**Проверки.** arm64 release на реальном аппарате; загрузка `.so`, 16 KB compatibility; start/stop многократно; экран on/off; смена Wi-Fi/mobile; перезапуск msgd и Slipstream; запрет внешнего HTTPS/UDP кроме используемого DNS-пути. Проверить соседство с существующим системным подключением, не вводить новый VpnService.
 
 **Готово, когда.** Два native клиента через рекурсивный DNS обмениваются ограниченными тестовыми данными с msgd. Повторные connect/disconnect не требуют перезапуска телефона и не дают роста RSS/FD. Это диагностический transport test, ещё не защищённый пользовательский чат.
 
@@ -55,7 +55,7 @@ R5 не verified: отрицательные результаты/unknown metric
 
 **Задачи.** Один готовый публичный код/QR сервера: bounded versioned parser, offline preview, полный certificate pin и Noise server key; без bearer-token, пароля и приватных ключей в профиле. После проверки сервера — «Войти» / «Создать аккаунт» с логином/паролем. На сервере уникальный логин, Argon2id password hash, ограничение попыток и два сохраняемых режима регистрации `open` / `invite_only` (default), управление через msgctl. Приглашение — отдельное дополнительное условие создания аккаунта в `invite_only`, с одноразовостью/TTL/revocation. Локальные device/E2E keys создаются приложением; регистрация/привязка идемпотентны и атомарны. Устройство запоминается, последующие reconnect не требуют пароля.
 
-**Безопасность.** Учётные данные отправляются только после pinned carrier + Noise handshake через DNS. Неизвестный key получает лишь ограниченный account-auth API, не mailbox/blob. Режим регистрации проверяется на сервере; существующие пользователи входят в обоих режимах, revoked device и legacy API не обходят ограничения. Пароль/приглашение/приватные ключи не попадают в публичный код, URI, argv, crash logs и аналитику. Сохранить revocation с закрытием открытых streams, bounded frames/pending sessions и доверенный offline bootstrap без скачивания pin с непроверенного URL.
+**Безопасность.** Учётные данные отправляются только после pinned carrier + Noise handshake через DNS. Неизвестный key получает лишь ограниченный account-auth API, не mailbox/blob. Режим регистрации проверяется на сервере; существующие пользователи входят в обоих режимах, revoked device и legacy API остаются под ограничениями. Пароль/приглашение/приватные ключи не попадают в публичный код, URI, argv, crash logs и аналитику. Сохранить revocation с закрытием открытых streams, bounded frames/pending sessions и доверенный offline bootstrap без скачивания pin с непроверенного URL.
 
 **Готово, когда.** Телефон импортирует один код/QR без внешнего HTTPS, регистрируется/входит через DNS и далее открывает диалоги без повторного ввода пароля. Проверены оба режима, неверный пароль, занятый логин, expired/revoked/used invitation, регистрационные гонки и потеря ответа. Единый новый wire/schema, без ENROL/token-replay/credential attach и compatibility fallback; старые версии отклоняются без мутации. Вход с нового аппарата меняет активное устройство только после подтверждения/CAS; прежний доступ отозван, E2E keys свежие, peer STOP до confirm без потери сообщения, старая история не обещана. Неверный pin/server key и отозванное устройство отклоняются. Fresh dev rollout теперь выполнен R21; будущие несовместимые wipe требуют отдельного разрешения.
 

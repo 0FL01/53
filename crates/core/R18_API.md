@@ -151,8 +151,8 @@ DialogsPage {
   `seen_*` value sets `identity_mismatch`. `state` is a string: legacy
   `requested`/`accepted`/`blocked`, plus one-QR `inviting` (durable outgoing
   request), `incoming` (awaiting local consent) and `accepted_server` (explicit
-  consent to server-sourced keys, not personally QR-verified). Metadata never
-  bypasses block/pin gates. Native UI and backend must be updated for one-QR
+  consent to server-sourced keys, not personally QR-verified). Metadata is always
+  subject to block/pin gates. Native UI and backend must be updated for one-QR
   requests; this does not make an old client understand incoming consent.
   `contact_qr_id` parses without mutation; `invite_contact_qr` persists the
   QR-approved request for existing reconnect/fetch retry. Legacy local-only

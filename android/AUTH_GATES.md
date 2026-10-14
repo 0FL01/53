@@ -93,7 +93,7 @@ adb -s ZY22JFJ5LP shell am instrument -w -r -e class \
 
 | Exact method | Verified evidence |
 |---|---|
-| `rendererLinksAndRawFallbackOnlyInGatePackage` | Native formatting spans/newlines, literal HTML/alt images, unsafe-link rejection, full raw depth fallback including4096-scalar durable history; incoming/outgoing selection menu and intercepted HTTP(S) Open link/no-handler |
+| `rendererLinksAndRawFallbackOnlyInGatePackage` | Native formatting spans/newlines, literal HTML/alt images, unsafe-link rejection, full raw depth fallback including4096-scalar durable history; incoming/outgoing selection menu and handled HTTP(S) Open link/no-handler |
 | `freshComposerMarkdownCopyAndActionsOnlyInGatePackage` | Fresh keyed schema9, mixed TEXT/VOICE; real4001-scalar paste retained/blocked and4000 allowed, raw Edit/Cancel/recreation, actual touchscreen selection and Copy clipboard after ticker, Delete Cancel no-op,200% font/landscape IME and48dp controls |
 
 The composer method requires **no existing core.db before native open/key setup**;
@@ -308,7 +308,7 @@ Run in order, each as a new instrumentation process:
 | Phone | Method | Fixture/evidence |
 |---|---|---|
 | A and B | `bootstrapDisposableAccountThroughDns` | Owner0600 `files/one-qr-auth.json`: login/password/invitation. Explicit DNS signup/prekey publish; wipes auth, emits own public `one-qr-public.txt` |
-| A | `senderOneQrPreviewAddAndFirstText` | Copy **only B's public QR** to A `files/one-qr-peer.txt`. Real ScannerActivity decoder injection; preview/cancel no mutation; Add opens Chat without second Accept; first text accepted |
+| A | `senderOneQrPreviewAddAndFirstText` | Copy **only B's public QR** to A `files/one-qr-peer.txt`. Real ScannerActivity decoder simulation via framework input; preview/cancel no mutation; Add opens Chat without second Accept; first text accepted |
 | B | `receiverRequestAndFirstTextRemainPendingAcrossProcess` | Incoming/server provenance, no reverse QR; received0/pending1/cursor0, no history before consent |
 | B | `receiverAcceptFromDialogsAndReplyWithoutReverseQr` | Main incoming dialog → visible Profile Accept → Chat; deferred text once, server-sourced trust label; reply via composer/button |
 | A | `senderReceivesReplyAndOriginalCiphertextBecomesDelivered` | Exactly one stored reply/new receive or durable replay after host interruption, original MID/cipher hash unchanged, Delivered, next fetch0 |
@@ -568,7 +568,7 @@ real encrypted UniFFI facade without active-network resolver refresh so the
 synthetic fixture suffix reaches its local C carrier. Without this field they
 use the normal active-network resolvers. Production now has a sequential Yandex
 backup group after primary carrier failure (see the DNS section below); there is
-no pin bypass or credential argument. Local authoritative DNS/QUIC +
+pin verification is mandatory; no credential arguments exist. Local authoritative DNS/QUIC +
 pin + Noise account-auth evidence is not recursive-DNS/deployment acceptance.
 
 `unifiedAuthUiOnlyInGatePackage` uses `ActivityScenario`, actual view clicks and
@@ -836,7 +836,7 @@ Per cycle (c1 carrier crash, c2 msgd crash, c3 msgd-only recreate):
 Evidence: three fault cycles, **17/17 device-method PASS, 0 skips**; peer
 container untouched in every cycle (PID proof); both directions delivered exactly
 once with persistent Delivered. Backup `snap-1791287385` before rollout;
-healthy/schema5 after; secrets/volumes/pins/nft/tunnel unchanged. Cleanup: gate
+healthy/schema5 after; secrets/volumes/pins/nft/connectivity unchanged. Cleanup: gate
 packages uninstalled, remote invitation files removed, local credentials/DBs
 deleted, main metadata unchanged. R9 remains deferred; mobile/restricted egress
 not covered here.
@@ -883,7 +883,7 @@ wake poll completed in4729ms; no late poll after Stop. Fresh accounts/invites ar
 disposable; main account not reset. Main `53.apk` compatible update on Moto kept
 schema6, wrapped key/device/account/history2/contacts bytes and opened Dialogs;
 real UI DNS check used the same saved device key. Backend healthy5/invite_only,
-no backend/pin/tunnel rollout. Private evidence: `.local/dns-handoff/`.
+no backend/pin/connectivity rollout. Private evidence: `.local/dns-handoff/`.
 USB follow-up with only one phone used a disposable native peer over actual
 recursive DNS, isolated `CARGO_TARGET_DIR`, not DirectTCP. The same queued
 ciphertext from the aborted cellular-prerequisite gate subsequently passed actual

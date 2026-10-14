@@ -249,7 +249,7 @@ Android messenger reachability or absence/presence of internet allowlisting.
 - No long acceptance or causal reporter fix. Next test the concrete stale native
   send-batch-time hypothesis locally, before selecting a policy-neutral correction.
   An independent locked-notification control uses secure Moto as receiver and
-   OnePlus as genuine caller; do not provision/bypass OnePlus's absent keyguard.
+   OnePlus as genuine caller; do not dismiss or work around OnePlus's absent keyguard; keyguard remains enforced.
 
 ### Current-pair locked diagnostic (2026-10-14)
 

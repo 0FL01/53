@@ -49,7 +49,7 @@ actual deployment addresses):
 
 `healthy_cycle_ms` is the frozen healthy commit-to-terminal-feedback cycle, not
 an RTT/2 estimate. Calibration runs must identify unqualified starting values.
-`capacity_bps` is the declared safe useful-tunnel budget (50,000–80,000 bit/s),
+`capacity_bps` is the declared safe usable-channel budget (50,000–80,000 bit/s),
 not a measurement produced by successful local TCP writes. An offered-rate
 limit does not emulate the carrier's service rate. Direct-authoritative, controlled
 stub, recursive DNS, and any application service model must be labelled separately.
@@ -126,7 +126,7 @@ Noise16, length2). Full protected SR-compound feedback is152 framed bytes,
 RR132. Continuous mean media plus SR feedback is26.88kbit/s; the codec-cap
 envelope is34.88kbit/s per uplink. No guaranteed TEXT reservation is implemented.
 DTX, actual VBR rates, handshake bursts and competing traffic are measured.
-Do not subtract outer DNS/IP overhead again from useful in-tunnel throughput.
+Do not subtract outer DNS/IP overhead again from usable in-channel throughput.
 
 ## Android evidence boundaries
 
@@ -220,7 +220,7 @@ Measurement emits the authenticated-ready baseline so startup and retirement are
 not silently included in, or removed from, active loss accounting.
 
 Both physical phones then ran the40ms profile for20seconds through real C carriers,
-Noise/SRTP/SRTCP and the private relay. The direct-authoritative LAN control bypassed
+Noise/SRTP/SRTCP and the private relay. The direct-authoritative LAN control used a direct path instead of
 the Python DNS forwarder after its nonblocking send failed with EAGAIN; that is a
 fixture infrastructure failure, not a phone or Slipstream quality verdict.
 
@@ -232,7 +232,7 @@ fixture infrastructure failure, not a phone or Slipstream quality verdict.
 All87 Moto late arrivals were after their nominal due, not the corrected early-PLC
 race. Both authenticated topology/lifecycle gates passed and native owners joined;
 render expiry is counted, not disabled. No common-clock acoustic latency, listening
-pass, measured narrow DNS capacity or poll-query count is claimed for this bypass
+pass, measured narrow DNS capacity or poll-query count is claimed for this direct-path reference
 run. The declared50kbit/s admission/F0=600ms remain uncalibrated fixture inputs.
 Continue isolating the asymmetric transport/CPU timing before profile selection;
 absence of an acoustic measurement does not stop available engineering diagnosis.
@@ -279,7 +279,7 @@ progress with no active capture/render drop or PLC/late; calibration remains vis
 These are packet counters, not source-active loss percentages. Host final counters
 include the expected shutdown tail and are not the healthy-interval loss rate.
 Declared50k/F0=600ms are still not measured useful DNS capacity or healthy calibration.
-There is no observer/query-count claim in the direct bypass, no common-clock acoustic
+There is no observer/query-count claim in the direct reference run, no common-clock acoustic
 latency/listening pass, and no replacement of two-physical acceptance with this host.
 The40ms engineering candidate now enters a45-minute bounded-queue/drift measurement.
 
@@ -389,7 +389,7 @@ this is not causal proof that the meter fixes drift or latency.
 The50k model finished at2701153ms: role read/authenticated/retired-partial bytes
 were5478168/5478168/0 and9008966/9008869/97, with live partial0. The partial tail
 remains charged. Declared50k/F0=600ms is not a measured DNS safe-capacity or feedback
-calibration, and observer bypass provides no query-rate claim.
+calibration, and the observer direct path provides no query-rate claim.
 
 Actual DNS30s modelled50/80 baselines and a50k→20k300ms collapse also completed:
 phone late/PLC19/19,1/1 and4/4, native render expiry0. They remain small counter
@@ -927,7 +927,7 @@ at0 can already have authenticated ACK7 queued at719ms, yet a later receipt8 at
 After full SRTCP authentication and exact compound parsing, a terminal at or below
 the currently known committed frontier now goes through the original strict
 `acknowledge` once before receipt reaping. Higher/unknown frontiers still require
-actual receipts first. The redundant top reap no longer bypasses the bounded
+actual receipts first. The redundant top reap no longer skips the bounded
 one-control-frame helper. No speculative future credit is introduced.
 
 Selected-control, top-turn and media-helper cases at actor times721/999ms release
