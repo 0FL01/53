@@ -439,7 +439,16 @@ class CallClientGatesTest {
         waitFor("incoming Telecom registration unavailable") { CallUi.state.value.telecomReady }
         report("locked_telecom_ready")
         val manager = app.getSystemService(android.app.NotificationManager::class.java)
-        val notification = manager.activeNotifications.single { it.id == DmsgService.ID }.notification
+        // Telecom readiness and NotificationManager publication are independent.
+        // Wait for the actual CallStyle notification, not merely the owner state.
+        var published: android.app.Notification? = null
+        waitFor("incoming call notification unavailable", 15_000) {
+            published = manager.activeNotifications.singleOrNull {
+                it.id == DmsgService.ID && it.notification.category == android.app.Notification.CATEGORY_CALL
+            }?.notification
+            published != null
+        }
+        val notification = requireNotNull(published)
         report("locked_notification_read")
         assertEquals(android.app.Notification.CATEGORY_CALL, notification.category)
         report("locked_call_category")
