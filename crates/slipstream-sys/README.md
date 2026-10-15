@@ -1,7 +1,7 @@
 # Managed Slipstream native boundary
 
 Builds the production C client from Git revision
-`83d2bba00355d0eb8e4bcaa77121608acf74e4c7` (`fix/preemptive-copy-padding`), its pinned submodules and the
+`21ae19c7fc6f65285a1319415c33a711aae7eb7d` (`fix/preemptive-copy-padding`), its pinned submodules and the
 upstream-pinned picotls revision. OpenSSL is built from locked `openssl-src`
 3.5.4. Git archives, patches, fetched dependencies and binaries stay in Cargo's
 `OUT_DIR` under `target/`. The build never mutates the live submodule; approved
@@ -29,8 +29,10 @@ extending forced-probe PING fallback to nonempty packets. Insufficient ACK space
 retains the earliest deferred packet cursor without blocking later fitting copies.
 An early-copy packet is not itself early-copied; normal loss recovery of its
 STREAM bytes is unchanged.
-Optional copies require credit for their packet and the next fresh packet;
-insufficient credit leaves the original/cursor untouched until ACK progress.
+Optional copies charge the prospective protected wire size, including the existing
+header/ACK prefix, tag and minimum padding, while reserving one full output-path
+MTU under both path and global credit limits. Insufficient credit leaves the
+original/cursor untouched until ACK progress; unlimited/forced padding stays full.
 Marked early copies retain the configured/reset minimum padding without ordinary
 bucket rounding; original data, ordinary repair and forced padding are unchanged.
 Multipath RTT periods use the

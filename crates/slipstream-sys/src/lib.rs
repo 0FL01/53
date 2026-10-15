@@ -888,7 +888,7 @@ mod snapshot_decode_tests {
         let source = out.join("source");
         assert!(std::fs::read_to_string(source.join(".embedding-stamp"))
             .unwrap()
-            .starts_with("83d2bba00355d0eb8e4bcaa77121608acf74e4c7"));
+            .starts_with("21ae19c7fc6f65285a1319415c33a711aae7eb7d"));
         for sanitize in [false, true] {
             let binary = out.join(format!("transport-snapshot-{sanitize}"));
             let mut compile = Command::new(if sanitize { "clang" } else { "cc" });
