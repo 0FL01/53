@@ -1,7 +1,7 @@
 # Managed Slipstream native boundary
 
 Builds the production C client from Git revision
-`b362bc1505cb2e78d59fc2130d0af0cc9564da72` (`fix/early-copy-fresh-credit`), its pinned submodules and the
+`83d2bba00355d0eb8e4bcaa77121608acf74e4c7` (`fix/preemptive-copy-padding`), its pinned submodules and the
 upstream-pinned picotls revision. OpenSSL is built from locked `openssl-src`
 3.5.4. Git archives, patches, fetched dependencies and binaries stay in Cargo's
 `OUT_DIR` under `target/`. The build never mutates the live submodule; approved
@@ -31,6 +31,8 @@ An early-copy packet is not itself early-copied; normal loss recovery of its
 STREAM bytes is unchanged.
 Optional copies require credit for their packet and the next fresh packet;
 insufficient credit leaves the original/cursor untouched until ACK progress.
+Marked early copies retain the configured/reset minimum padding without ordinary
+bucket rounding; original data, ordinary repair and forced padding are unchanged.
 Multipath RTT periods use the
 per-path packet context only for 1-RTT, not handshake/path-validation epochs.
 The TCP bridge clears optimistic producer readiness after the socket is drained,
