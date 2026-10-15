@@ -214,8 +214,9 @@ internal class CallSessionOwner(private val context: Context,
             if (next.phase == CallPhase.ACTIVE && state.activeSince == null)
                 update(state.copy(activeSince = SystemClock.elapsedRealtime()))
         } else if (next.phase == CallPhase.ENDED) {
-            update(state.copy(preparing = false))
-            finish(next.reason, signal = false)
+            // Publish the terminal callback only after finish installs its guard.
+            // The core has already ended this call; it is not a pending dial to cancel.
+            finish(next.reason, signal = false, cancelPreparing = false)
         }
     }
     private fun addTelecom() {
@@ -367,10 +368,10 @@ internal class CallSessionOwner(private val context: Context,
                 update(state.copy(errorRes = R.string.call_route_failed))
         }
     }
-    private fun finish(reason: CallEndReason, signal: Boolean) {
+    private fun finish(reason: CallEndReason, signal: Boolean,
+        cancelPreparing: Boolean = state.preparing && guard.current?.busy() != true) {
         if (teardown?.isActive == true || guard.tearingDown) return
         val call = guard.current
-        val cancelPreparing = state.preparing && call?.busy() != true
         val handleToRetire = negotiatedHandle
         guard.beginTeardown()
         teardownStage = "guard_set"
@@ -411,10 +412,12 @@ internal class CallSessionOwner(private val context: Context,
             } finally {
                 telecom = null; telecomJob = null; audio = null; platform = null; negotiatedHandle = 0L; dialingPeer = null
                 localMute = false; platformMute = false; accepted = false; systemAnswered = false; activationPending = false
+                // ENDED/not-tearing-down is the joined-retirement publication.
+                // Release the audio reservation before observers can act on it.
+                releaseReservation()
                 guard.finishTeardown()
                 update(state.copy(incomingAvailable = wantedListener && actorAvailable && !closed,
                     telecomActive = false, telecomReady = false, muted = false, endpoint = null, endpoints = emptyList()))
-                releaseReservation()
                 if (!wantedListener || closed) shutdownActor()
                 teardownStage = "idle"
                 idle()

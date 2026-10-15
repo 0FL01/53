@@ -13,6 +13,10 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.*
@@ -24,6 +28,7 @@ import org.junit.runner.RunWith
 import uniffi.dmsg_core.CallEndReason
 import uniffi.dmsg_core.CallPhase
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Operator selects ONE method on .gate with a fresh authenticated core10/server7 account and an
@@ -397,6 +402,23 @@ class CallClientGatesTest {
             retired(CallEndReason.REJECTED) // The genuine peer selects Decline.
             assertNull("unanswered outgoing call must not capture", CallUi.state.value.audio)
         }
+    }
+    @Test fun client08OutgoingRejectionPublishesJoinedRetirement() {
+        val premature = AtomicBoolean(false)
+        // Observe inline with each Main publication: a StateFlow collector dispatched
+        // later could conflate away the false ENDED/not-tearing-down window.
+        val observer = CoroutineScope(Dispatchers.Unconfined).launch(start = CoroutineStart.UNDISPATCHED) {
+            CallUi.state.collect { state ->
+                if (state.call?.phase == CallPhase.ENDED && !state.tearingDown &&
+                    (state.telecomReady || state.telecomActive || VoiceNoteAudio.callClaim.callBusy)) {
+                    premature.set(true)
+                }
+            }
+        }
+        try {
+            client04OutgoingRealRejectionNoMicrophone()
+            assertFalse("ENDED must not advertise joined retirement before resource release", premature.get())
+        } finally { observer.cancel() }
     }
     @Test fun client07IncomingNotificationAnswerWhileLockedRemoteEnd() {
         val seconds = activeSeconds()
