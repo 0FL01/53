@@ -219,7 +219,7 @@ class DmsgService : Service() {
         if (!::calls.isInitialized || stoppingLink) return
         val state = calls.state
         val phone = state.call != null && (state.call.busy() || state.tearingDown)
-        val microphone = state.telecomActive && (state.tearingDown || state.call?.phase in setOf(CallPhase.CONNECTING, CallPhase.ACTIVE))
+        val microphone = state.microphoneForeground
         var types = 0
         if (Build.VERSION.SDK_INT >= 34 && (connectivityWanted || !phone)) types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
         if (Build.VERSION.SDK_INT >= 29 && phone) types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL

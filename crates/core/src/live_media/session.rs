@@ -121,6 +121,33 @@ pub enum ProgressCheckSite {
     ReceiptCommit,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaFailureKind {
+    ProgressExpired,
+    LaneLost,
+    FeedbackStalled,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ControlFailure {
+    Invalid(String),
+    Progress(packet::LedgerFailure),
+}
+impl From<String> for ControlFailure {
+    fn from(message: String) -> Self {
+        Self::Invalid(message)
+    }
+}
+impl ControlFailure {
+    fn message(&self) -> &str {
+        match self {
+            Self::Invalid(message) => message,
+            Self::Progress(failure) => failure.reason.message(),
+        }
+    }
+}
+
 /// One replaced-on-failure observation, not a new credit/deadline decision.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ProgressFailure {
@@ -156,6 +183,9 @@ struct AuthenticatedControl {
     body_complete: Instant,
     noise_done: Instant,
     processed: Instant,
+    cycle: Duration,
+    late: u32,
+    plc: u32,
 }
 
 fn elapsed_micros(at: Instant, reference: Instant) -> Option<u64> {
@@ -237,6 +267,11 @@ pub struct Stats {
     pub expired_render_samples: u64,
     pub last_render_expiry: Option<RenderExpiry>,
     pub last_progress_failure: Option<ProgressFailure>,
+    pub failure_kind: Option<MediaFailureKind>,
+    /// PCM port closed; unlike `stopped`, this does not assert worker join.
+    pub closed: bool,
+    pub window_blocked_packets: u64,
+    pub target_bitrate_bps: u32,
     /// Optional control TCP/native byte-frontier evidence, never delivery credit.
     pub control_delivery: Option<serde_json::Value>,
     pub decode_after_nominal_due_slots: u64,
@@ -318,6 +353,10 @@ impl Default for Stats {
             expired_render_samples: 0,
             last_render_expiry: None,
             last_progress_failure: None,
+            failure_kind: None,
+            closed: false,
+            window_blocked_packets: 0,
+            target_bitrate_bps: 12_000,
             control_delivery: None,
             decode_after_nominal_due_slots: 0,
             max_decode_us: 0,
@@ -815,6 +854,7 @@ impl Port {
             .lock()
             .expect("probe clock health owner");
         let mut stats = self.stats.lock().expect("probe stats owner").clone();
+        stats.closed = self.closed.load(Ordering::Acquire);
         stats.remote_clock_valid &= !stats.stopped
             && !self.closed.load(Ordering::Relaxed)
             && fresh_until.is_some_and(|until| Instant::now() <= until);
@@ -2248,7 +2288,12 @@ fn reap_commits(
                             counters,
                             framed_bytes,
                         );
-                        port.stats(|stats| stats.last_progress_failure = Some(observation));
+                        port.stats(|stats| {
+                            stats.last_progress_failure = Some(observation);
+                            if failure.reason == packet::ProgressFailureReason::Expired {
+                                stats.failure_kind = Some(MediaFailureKind::ProgressExpired);
+                            }
+                        });
                     }
                     return Err(error.message().into());
                 }
@@ -2325,8 +2370,10 @@ fn receive_control(
             .highest_committed()
             .is_some_and(|highest| *index <= highest)
     });
-    let acknowledge = |ledger: &mut packet::Ledger, index| -> Result<(), String> {
+    let mut observed_cycle = Duration::ZERO;
+    let mut acknowledge = |ledger: &mut packet::Ledger, index| -> Result<(), String> {
         let cycle = ledger.acknowledge(index, now())?;
+        observed_cycle = observed_cycle.max(cycle);
         port.stats(|stats| {
             stats.terminal_feedback += 1;
             stats.max_feedback_cycle_ms = stats.max_feedback_cycle_ms.max(cycle.as_millis() as u64);
@@ -2364,6 +2411,9 @@ fn receive_control(
         body_complete,
         noise_done,
         processed,
+        cycle: observed_cycle,
+        late: remote.late,
+        plc: remote.plc,
     });
     Ok(())
 }
@@ -2381,7 +2431,7 @@ fn control_progress(
     port: &Port,
     waiting_bytes: Option<usize>,
     now: impl Fn() -> Instant,
-) -> Result<bool, String> {
+) -> Result<bool, ControlFailure> {
     // The capacity-one inbox may already contain authoritative progress when
     // either progress decision runs, including a media wake selected after the
     // top-of-turn check. Authenticate/process at most one item, then retain the
@@ -2405,7 +2455,7 @@ fn control_progress(
             true
         }
         Err(mpsc::error::TryRecvError::Empty) => false,
-        Err(_) => return Err("probe control lane failed".into()),
+        Err(_) => return Err(ControlFailure::Invalid("probe control lane failed".into())),
     };
     // Receipts can become ready while select waits even without a control frame.
     // Reap before charging so each frame is in the ledger OR still pending, and
@@ -2455,8 +2505,13 @@ fn control_progress(
                 sent,
                 extra_bytes,
             );
-            port.stats(|stats| stats.last_progress_failure = Some(observation));
-            return Err(failure.reason.message().into());
+            port.stats(|stats| {
+                stats.last_progress_failure = Some(observation);
+                if failure.reason == packet::ProgressFailureReason::Expired {
+                    stats.failure_kind = Some(MediaFailureKind::ProgressExpired);
+                }
+            });
+            return Err(ControlFailure::Progress(failure));
         }
     }
     Ok(handled)
@@ -2576,9 +2631,15 @@ fn dispatch_codec(
         port: port.clone(),
         samples: profile.samples(),
     });
-    codec.submit(codec::Operation::Encode(Zeroizing::new(std::mem::take(
-        &mut *capture.pcm,
-    ))))
+    let bitrate = port
+        .stats
+        .lock()
+        .expect("probe stats owner")
+        .target_bitrate_bps;
+    codec.submit(codec::Operation::EncodeAt {
+        pcm: Zeroizing::new(std::mem::take(&mut *capture.pcm)),
+        bitrate,
+    })
 }
 
 pub(crate) async fn endpoint(
@@ -2622,6 +2683,18 @@ async fn endpoint_owned(
         hold,
     )
     .await;
+    if outcome.is_err() {
+        let exits = [media.termination(), control.termination()];
+        port.stats(|stats| {
+            if exits.contains(&Some(super::lane::Termination::Invalid)) {
+                stats.failure_kind = None;
+            } else if stats.failure_kind.is_none()
+                && exits.contains(&Some(super::lane::Termination::ConnectionLost))
+            {
+                stats.failure_kind = Some(MediaFailureKind::LaneLost);
+            }
+        });
+    }
     media.joined_close().await;
     let evidence = control.joined_close_evidence().await;
     port.stats(|stats| {
@@ -2664,6 +2737,8 @@ async fn endpoint_run(
         profile.packet_cap() + packet::MEDIA_OVERHEAD,
         Instant::now(),
     );
+    let mut rate = super::rate::RateControl::new(fixture.rate_policy);
+    port.stats(|stats| stats.target_bitrate_bps = rate.bitrate());
     let mut commits: VecDeque<PendingCommit> = VecDeque::with_capacity(2);
     let mut admission = MediaAdmission::default();
     let mut control_commits: VecDeque<PendingControlCommit> = VecDeque::with_capacity(2);
@@ -2752,14 +2827,22 @@ async fn endpoint_run(
                 #[cfg(not(test))]
                 let _ = handled;
             }
-            Err(error) => break Err(error),
+            Err(error) => break Err(error.message().to_owned()),
         }
         if ready {
             if now.saturating_duration_since(last_control_submission) >= Duration::from_millis(400)
             {
+                port.stats(|stats| stats.failure_kind = Some(MediaFailureKind::FeedbackStalled));
                 break Err("control submission expired; retire generation".into());
             }
         }
+        let bitrate = rate.observe(
+            now,
+            &ledger.observe(now),
+            sent.last_control
+                .map(|control| (control.processed, control.cycle, control.late, control.plc)),
+        );
+        port.stats(|stats| stats.target_bitrate_bps = bitrate);
         if flight.is_none() {
             #[cfg(test)]
             let before_drain = port.snapshot().received_rtp_packets;
@@ -2833,9 +2916,18 @@ async fn endpoint_run(
                         #[cfg(not(test))]
                         let _ = handled;
                     }
+                    Err(ControlFailure::Progress(failure)) if failure.reason == packet::ProgressFailureReason::WindowExhausted => {
+                        // This frame has not advanced SRTP/Noise. Keep the real
+                        // outstanding ledger and feedback path, drop only its PCM.
+                        port.stats(|stats| {
+                            stats.dropped_capture += profile.samples() as u64;
+                            stats.window_blocked_packets += 1;
+                        });
+                        continue;
+                    }
                     Err(error) => {
                         port.stats(|stats| stats.dropped_capture += profile.samples() as u64);
-                        break Err(error);
+                        break Err(error.message().to_owned());
                     }
                 }
                 let timestamp = fixture.initial_timestamp.wrapping_add((waiting.position * 3) as u32);
@@ -2897,6 +2989,7 @@ mod lifecycle_tests {
     fn config(reverse: bool) -> MediaConfig {
         let (tx, rx) = if reverse { (2, 1) } else { (1, 2) };
         MediaConfig {
+            rate_policy: super::super::RatePolicy::Fixed,
             profile_ms: 40,
             media_tx: [tx; 30],
             media_rx: [rx; 30],
@@ -3202,6 +3295,7 @@ mod tests {
                 waiting_bytes,
                 || now,
             )
+            .map_err(|error| error.message().to_owned())
         }
     }
 
@@ -3953,7 +4047,8 @@ mod tests {
                         reads.set(reads.get() + 1);
                         actor_at
                     },
-                ),
+                )
+                .map_err(|error| error.message().to_owned()),
                 Err("remote media progress expired; retire generation".into())
             );
             assert_eq!(
@@ -4089,6 +4184,7 @@ mod tests {
                     || actor_at,
                 )
                 .map(|_| ())
+                .map_err(|error| error.message().to_owned())
             };
             assert_eq!(
                 result,
@@ -4154,7 +4250,8 @@ mod tests {
                 &turn.port,
                 None,
                 || actor_at,
-            );
+            )
+            .map_err(|error| error.message().to_owned());
             assert!(turn.commits.is_empty());
             assert_eq!(turn.sent.packets, 2);
             if queued_ack {
@@ -4398,7 +4495,8 @@ mod tests {
                         later
                     }
                 },
-            ),
+            )
+            .map_err(|error| error.message().to_owned()),
             Err("remote media progress expired; retire generation".into())
         );
         assert_eq!(
@@ -4652,6 +4750,9 @@ mod tests {
             body_complete: turn.at(10),
             noise_done: turn.at(9),
             processed: turn.at(8),
+            cycle: Duration::ZERO,
+            late: 0,
+            plc: 0,
         }
         .observe(turn.at(7));
         assert_eq!(
@@ -5018,7 +5119,8 @@ mod tests {
                 }
                 at
             },
-        );
+        )
+        .map_err(|error| error.message().to_owned());
         assert_eq!(
             result,
             Err("remote media progress expired; retire generation".into())
@@ -7117,7 +7219,10 @@ mod tests {
         let mut owner = codec::Owner::start(LiveProfile::Ms40, None).await.unwrap();
         assert!(owner.try_completed().unwrap().is_none());
         owner
-            .submit(codec::Operation::Encode(Zeroizing::new(vec![1; 640])))
+            .submit(codec::Operation::EncodeAt {
+                pcm: Zeroizing::new(vec![1; 640]),
+                bitrate: 12_000,
+            })
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(3);
         let completed = loop {
@@ -7148,9 +7253,10 @@ mod tests {
             .await
             .unwrap();
         owner
-            .submit(codec::Operation::Encode(Zeroizing::new(
-                crate::voice_probe::test_tone(0, 640),
-            )))
+            .submit(codec::Operation::EncodeAt {
+                pcm: Zeroizing::new(crate::voice_probe::test_tone(0, 640)),
+                bitrate: 12_000,
+            })
             .unwrap();
         entry.recv_timeout(Duration::from_secs(3)).unwrap();
         assert!(owner.busy());
@@ -7191,7 +7297,10 @@ mod tests {
         assert_eq!(pcm.len(), 640);
         owner.close().unwrap();
         assert!(owner
-            .submit(codec::Operation::Encode(Zeroizing::new(vec![0; 640])))
+            .submit(codec::Operation::EncodeAt {
+                pcm: Zeroizing::new(vec![0; 640]),
+                bitrate: 12_000
+            })
             .is_err());
     }
 
@@ -7216,7 +7325,10 @@ mod tests {
                 .block_on(codec::Owner::start(LiveProfile::Ms40, Some(worker_hold)))
                 .unwrap();
             owner
-                .submit(codec::Operation::Encode(Zeroizing::new(vec![0; 640])))
+                .submit(codec::Operation::EncodeAt {
+                    pcm: Zeroizing::new(vec![0; 640]),
+                    bitrate: 12_000,
+                })
                 .unwrap();
             cancelled.recv().unwrap();
             drop(owner); // The endpoint future's cancellation path; no receipt poll.
@@ -7818,6 +7930,40 @@ mod tests {
             nano_time: nano_time as i64,
             observed_ns: nano_time as i64,
         }
+    }
+
+    #[test]
+    fn unqualified_record_startup_keeps_positions_without_freezing_a_floor() {
+        let (audio, mut input) = test_audio();
+        for batch in 0..100 {
+            assert!(!audio.push_recorded(
+                &[1; 160],
+                CaptureTimestamp {
+                    read_position: batch * 160,
+                    frame_position: -1,
+                    nano_time: -1,
+                    observed_ns: 1_000_000_000,
+                },
+                Instant::now()
+            ));
+        }
+        assert!(!audio.snapshot().capture_clock_calibrated);
+        assert_eq!(audio.port.position.load(Ordering::Relaxed), 16_000);
+        assert_eq!(audio.snapshot().dropped_capture, 16_000);
+        assert_eq!(audio.snapshot().capture_age_unavailable_batches, 100);
+        assert!(input.try_recv().is_err());
+        calibrate_audio(&audio, &[80; 20]);
+        let position = audio.port.position.load(Ordering::Relaxed);
+        assert_eq!(position, 19_200);
+        assert!(audio.push_recorded(
+            &[2; 160],
+            aged_record_timestamp(position, 80),
+            Instant::now()
+        ));
+        let captured = input.try_recv().unwrap();
+        assert_eq!(captured.position, position);
+        assert_eq!(captured.hardware_age, Some(Duration::from_millis(80)));
+        assert_eq!(audio.snapshot().capture_age_rejected_batches, 0);
     }
 
     fn calibrate_audio(audio: &AudioPort, ages_ms: &[u64; 20]) {
@@ -10634,6 +10780,15 @@ mod tests {
             } else {
                 vec![0; profile.samples()]
             };
+            // Product adaptation must keep transmitting legal silence/DTX too;
+            // change rate while muted and restore it with the next active span.
+            encoder
+                .set_bitrate(if (20..110).contains(&slot) {
+                    8_000
+                } else {
+                    12_000
+                })
+                .unwrap();
             let encoded = encoder.encode(&pcm).unwrap(); // Continuous, including the drop.
             if encoded.in_dtx && encoded.bytes.len() <= 2 {
                 assert!(!active);

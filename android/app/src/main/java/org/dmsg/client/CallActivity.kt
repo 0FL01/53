@@ -178,7 +178,8 @@ class CallActivity : DmsgActivity() {
             visibility = if (state.preparing || call?.busy() == true && !ringing) View.VISIBLE else View.GONE
             isEnabled = !state.tearingDown
         }
-        val active = matches && state.telecomActive && call?.phase in setOf(CallPhase.CONNECTING, CallPhase.ACTIVE) && !state.tearingDown
+        val active = matches && state.telecomActive &&
+            call?.phase in setOf(CallPhase.CONNECTING, CallPhase.ACTIVE, CallPhase.RECONNECTING) && !state.tearingDown
         findViewById<View>(R.id.call_audio_controls).visibility = if (active) View.VISIBLE else View.GONE
         findViewById<Button>(R.id.call_mute).apply { setText(if (state.muted) R.string.call_unmute else R.string.call_mute); isSelected = state.muted }
         findViewById<Button>(R.id.call_speaker).apply { isSelected = state.endpoint?.type == CallEndpointCompat.TYPE_SPEAKER; isEnabled = state.endpoints.any { it.type == CallEndpointCompat.TYPE_SPEAKER } }
@@ -201,8 +202,9 @@ internal fun callPhaseRes(call: CallSnapshot): Int = when (call.phase) {
     CallPhase.STOPPED, CallPhase.LISTENING -> R.string.call_ready
     CallPhase.DIALING -> R.string.call_dialing
     CallPhase.RINGING -> R.string.call_ringing
-    CallPhase.CONNECTING -> R.string.call_connecting
-    CallPhase.ACTIVE -> R.string.call_active
+    CallPhase.CONNECTING -> if (call.mediaEpoch > 1uL) R.string.call_reconnecting else R.string.call_connecting
+    CallPhase.RECONNECTING -> R.string.call_reconnecting
+    CallPhase.ACTIVE -> if (call.bitrateBps == 8_000u) R.string.call_reduced_quality else R.string.call_active
     CallPhase.ENDED -> when (call.reason) {
         CallEndReason.NONE, CallEndReason.LOCAL_ENDED -> R.string.call_ended
         CallEndReason.REMOTE_ENDED -> R.string.call_remote_ended

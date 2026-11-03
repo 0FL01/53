@@ -3561,6 +3561,8 @@ data class CallSnapshot (
     var `direction`: CallDirection,
     var `reason`: CallEndReason,
     var `mediaHandle`: kotlin.Long,
+    var `mediaEpoch`: kotlin.ULong,
+    var `bitrateBps`: kotlin.UInt,
     var `available`: kotlin.Boolean
 ) {
 
@@ -3579,6 +3581,8 @@ public object FfiConverterTypeCallSnapshot: FfiConverterRustBuffer<CallSnapshot>
             FfiConverterTypeCallDirection.read(buf),
             FfiConverterTypeCallEndReason.read(buf),
             FfiConverterLong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterUInt.read(buf),
             FfiConverterBoolean.read(buf),
         )
     }
@@ -3590,6 +3594,8 @@ public object FfiConverterTypeCallSnapshot: FfiConverterRustBuffer<CallSnapshot>
             FfiConverterTypeCallDirection.allocationSize(value.`direction`) +
             FfiConverterTypeCallEndReason.allocationSize(value.`reason`) +
             FfiConverterLong.allocationSize(value.`mediaHandle`) +
+            FfiConverterULong.allocationSize(value.`mediaEpoch`) +
+            FfiConverterUInt.allocationSize(value.`bitrateBps`) +
             FfiConverterBoolean.allocationSize(value.`available`)
     )
 
@@ -3600,6 +3606,8 @@ public object FfiConverterTypeCallSnapshot: FfiConverterRustBuffer<CallSnapshot>
             FfiConverterTypeCallDirection.write(value.`direction`, buf)
             FfiConverterTypeCallEndReason.write(value.`reason`, buf)
             FfiConverterLong.write(value.`mediaHandle`, buf)
+            FfiConverterULong.write(value.`mediaEpoch`, buf)
+            FfiConverterUInt.write(value.`bitrateBps`, buf)
             FfiConverterBoolean.write(value.`available`, buf)
     }
 }
@@ -4667,6 +4675,7 @@ enum class CallPhase {
     RINGING,
     CONNECTING,
     ACTIVE,
+    RECONNECTING,
     ENDED;
     companion object
 }

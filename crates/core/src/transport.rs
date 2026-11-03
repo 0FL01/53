@@ -31,6 +31,8 @@ pub enum TransportError {
     Auth(String),
     /// Битый app-кадр внутри канала.
     Frame(String),
+    /// A received cryptographic message failed validation, not network EOF.
+    Invalid,
     /// Канал закрыт (не подключён или сервер закрыл).
     Closed,
 }
@@ -42,6 +44,7 @@ impl std::fmt::Display for TransportError {
             Self::Handshake(e) => write!(f, "handshake: {e}"),
             Self::Auth(e) => write!(f, "auth: {e}"),
             Self::Frame(e) => write!(f, "frame: {e:?}"),
+            Self::Invalid => write!(f, "invalid encrypted frame"),
             Self::Closed => write!(f, "closed"),
         }
     }
@@ -153,7 +156,7 @@ impl Transport for DirectTcp {
         let mut buf = Zeroizing::new(vec![0u8; HS_BUF_LEN]);
         let n = self.noise_mut().and_then(|t| {
             t.write_message(&inner, &mut buf)
-                .map_err(|e| TransportError::Io(format!("encrypt: {e}")))
+                .map_err(|_| TransportError::Invalid)
         })?;
         wlen_counted(
             self.stream.as_mut().ok_or(TransportError::Closed)?,
@@ -172,7 +175,7 @@ impl Transport for DirectTcp {
         let mut buf = Zeroizing::new(vec![0u8; HS_BUF_LEN]);
         let n = self.noise_mut().and_then(|t| {
             t.read_message(&cipher, &mut buf)
-                .map_err(|_| TransportError::Closed)
+                .map_err(|_| TransportError::Invalid)
         })?;
         let (_, op, payload, consumed) =
             decode_frame(&buf[..n]).map_err(|e| TransportError::Frame(format!("{e:?}")))?;
@@ -251,37 +254,43 @@ pub async fn initiate_with_key(
     let (mut tx_bytes, mut rx_bytes) = (0, 0);
     let n = hs
         .write_message(&[], &mut buf)
-        .map_err(|_| TransportError::Closed)?;
+        .map_err(|_| TransportError::Invalid)?;
     wlen_counted(&mut s, &buf[..n], &mut tx_bytes).await?;
     // До WELCOME живого канала нет: любой обрыв здесь — handshake (чужой pinned
     // key — сервер молча рвёт без msg2; переполнение pre-auth; сброс), а не
     // Transport живого канала.
     let m2 = rlen_counted(&mut s, &mut rx_bytes)
         .await
-        .map_err(|e| TransportError::Handshake(format!("msg2: {e}")))?;
+        .map_err(|e| match e {
+            TransportError::Frame(_) => TransportError::Invalid,
+            other => TransportError::Handshake(format!("msg2: {other}")),
+        })?;
     hs.read_message(&m2, &mut buf)
-        .map_err(|_| TransportError::Handshake("msg2".into()))?;
+        .map_err(|_| TransportError::Invalid)?;
     let mut t = hs
         .into_transport_mode()
-        .map_err(|_| TransportError::Handshake("transport".into()))?;
+        .map_err(|_| TransportError::Invalid)?;
     let inner = Zeroizing::new(
         encode_frame(OP_AUTH_DOMAIN, domain)
             .map_err(|e| TransportError::Frame(format!("{e:?}")))?,
     );
     let n = t
         .write_message(&inner, &mut buf)
-        .map_err(|_| TransportError::Closed)?;
+        .map_err(|_| TransportError::Invalid)?;
     wlen_counted(&mut s, &buf[..n], &mut tx_bytes).await?;
     let c = rlen_counted(&mut s, &mut rx_bytes)
         .await
-        .map_err(|_| TransportError::Auth("no welcome".into()))?;
+        .map_err(|e| match e {
+            TransportError::Frame(_) => TransportError::Invalid,
+            _ => TransportError::Auth("no welcome".into()),
+        })?;
     let n = t
         .read_message(&c, &mut buf)
-        .map_err(|_| TransportError::Auth("no welcome".into()))?;
+        .map_err(|_| TransportError::Invalid)?;
     let (_, op, payload, consumed) =
         decode_frame(&buf[..n]).map_err(|e| TransportError::Frame(format!("{e:?}")))?;
     if consumed != n || op != OP_WELCOME || payload != domain {
-        return Err(TransportError::Auth("domain mismatch".into()));
+        return Err(TransportError::Invalid);
     }
     Ok(DirectTcp {
         addr: addr.to_string(),
@@ -520,16 +529,19 @@ mod tests {
         plain.extend_from_slice(
             &encode_frame(dmsg_protocol::OP_ERROR, &[dmsg_protocol::ERR_BAD]).unwrap(),
         );
-        let n = responder
-            .into_transport_mode()
-            .unwrap()
-            .write_message(&plain, &mut buf)
-            .unwrap();
+        let mut peer = responder.into_transport_mode().unwrap();
+        let n = peer.write_message(&plain, &mut buf).unwrap();
         wlen(&mut server, &buf[..n]).await.unwrap();
         assert_eq!(
             transport.recv_frame().await,
             Err(TransportError::Frame("trailing application bytes".into()))
         );
+        let n = peer
+            .write_message(&encode_frame(OP_WELCOME, b"fixture").unwrap(), &mut buf)
+            .unwrap();
+        buf[n - 1] ^= 1;
+        wlen(&mut server, &buf[..n]).await.unwrap();
+        assert_eq!(transport.recv_frame().await, Err(TransportError::Invalid));
         transport.close().await;
     }
 }

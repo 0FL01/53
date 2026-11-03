@@ -72,6 +72,12 @@ pub(super) fn srtcp_index(opcode: u8, payload: &[u8]) -> Option<u32> {
     Some(u32::from_be_bytes(payload[start..start + 4].try_into().ok()?) & 0x7fff_ffff)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Error {
+    Lost,
+    Invalid,
+}
+
 /// The callback never awaits: ACKs and pushed events share this Noise owner.
 /// The request channel is the sole queued plaintext slot for media (capacity 1).
 pub(super) async fn run(
@@ -83,8 +89,8 @@ pub(super) async fn run(
     inbound_cap: usize,
     initial: Frame,
     counters: &mut MediaCounters,
-    mut receive: impl FnMut(u8, &[u8], Instant) -> Result<Option<Frame>, ()>,
-) -> Result<(), ()> {
+    mut receive: impl FnMut(u8, &[u8], Instant) -> Result<Option<Frame>, Error>,
+) -> Result<(), Error> {
     let (mut reader, mut writer) = stream.into_split();
     let bound = inbound_cap + HEADER_LEN + 16;
     let mut cipher = vec![0; bound + 2];
@@ -99,16 +105,17 @@ pub(super) async fn run(
 
     loop {
         if stop.is_closed() {
-            return Err(());
+            return Err(Error::Lost);
         }
         // Commitment is a synchronous operation, never a cancellable future.
         if wire.is_empty() {
             if let Some(frame) = reply.take() {
                 if !frame.deadline.is_some_and(|d| d <= Instant::now()) {
-                    let inner =
-                        Zeroizing::new(encode_frame(frame.opcode, &frame.payload).map_err(|_| ())?);
+                    let inner = Zeroizing::new(
+                        encode_frame(frame.opcode, &frame.payload).map_err(|_| Error::Invalid)?,
+                    );
                     if inner.len() > MAX_FRAME {
-                        return Err(());
+                        return Err(Error::Invalid);
                     }
                     wire.resize(inner.len() + 18, 0);
                     // Last deadline check before advancing Noise, not after it.
@@ -121,7 +128,7 @@ pub(super) async fn run(
                     writing_srtcp_index = srtcp_index(frame.opcode, &frame.payload);
                     let length = noise
                         .write_message(&inner, &mut wire[2..])
-                        .map_err(|_| ())?;
+                        .map_err(|_| Error::Invalid)?;
                     wire[..2].copy_from_slice(&(length as u16).to_be_bytes());
                     wire.truncate(length + 2);
                     writing_media = matches!(frame.opcode, OP_RTP | OP_SRTCP);
@@ -132,22 +139,22 @@ pub(super) async fn run(
             }
         }
         tokio::select! {
-            _ = stop.cancelled() => return Err(()),
-            _ = revoked.notified() => return Err(()),
+            _ = stop.cancelled() => return Err(Error::Lost),
+            _ = revoked.notified() => return Err(Error::Lost),
             read = reader.read(&mut cipher[filled..wanted]), if reply.is_none() => {
-                let count = read.map_err(|_| ())?;
-                if count == 0 { return Err(()); }
+                let count = read.map_err(|_| Error::Lost)?;
+                if count == 0 { return Err(Error::Lost); }
                 filled += count;
                 if filled != wanted { continue; }
                 if wanted == 2 {
                     let length = usize::from(u16::from_be_bytes([cipher[0], cipher[1]]));
-                    if !(HEADER_LEN + 16..=bound).contains(&length) { return Err(()); }
+                    if !(HEADER_LEN + 16..=bound).contains(&length) { return Err(Error::Invalid); }
                     wanted = length + 2;
                 } else {
                     let completed = Instant::now();
-                    let length = noise.read_message(&cipher[2..wanted], &mut plain).map_err(|_| ())?;
-                    let (_, opcode, payload, consumed) = decode_frame(&plain[..length]).map_err(|_| ())?;
-                    if consumed != length || payload.len() > inbound_cap { return Err(()); }
+                    let length = noise.read_message(&cipher[2..wanted], &mut plain).map_err(|_| Error::Invalid)?;
+                    let (_, opcode, payload, consumed) = decode_frame(&plain[..length]).map_err(|_| Error::Invalid)?;
+                    if consumed != length || payload.len() > inbound_cap { return Err(Error::Invalid); }
                     if matches!(opcode, OP_RTP | OP_SRTCP) {
                         counters.authenticated_media_rx = counters.authenticated_media_rx.saturating_add(1);
                     }
@@ -166,8 +173,8 @@ pub(super) async fn run(
                 }
             }
             write = writer.write(&wire[written..]), if !wire.is_empty() => {
-                let count = write.map_err(|_| ())?;
-                if count == 0 { return Err(()); }
+                let count = write.map_err(|_| Error::Lost)?;
+                if count == 0 { return Err(Error::Lost); }
                 written += count;
                 if written == wire.len() {
                     // Complete framed TCP write, not a Noise commitment or peer delivery.
@@ -182,7 +189,7 @@ pub(super) async fn run(
                 }
             }
             request = requests.recv(), if wire.is_empty() && reply.is_none() => {
-                reply = Some(request.ok_or(())?);
+                reply = Some(request.ok_or(Error::Lost)?);
             }
         }
     }
@@ -266,6 +273,89 @@ mod tests {
         p.to_vec()
     }
 
+    #[tokio::test]
+    async fn calls_lane_loss_is_distinct_from_invalid_noise_frame_and_callback() {
+        for case in 0..10 {
+            let (server, server_noise, mut peer, mut peer_noise) = paired().await;
+            let (tx, requests) = mpsc::channel(1);
+            let stop = Arc::new(Stop::default());
+            let revoked = Arc::new(Notify::new());
+            let actor_stop = stop.clone();
+            let actor_revoked = revoked.clone();
+            let actor = tokio::spawn(async move {
+                run(
+                    server,
+                    server_noise,
+                    requests,
+                    actor_stop,
+                    actor_revoked,
+                    RTP_CAP,
+                    Frame::control(OP_RTP, vec![1]),
+                    &mut MediaCounters::default(),
+                    |_, _, _| Err(Error::Invalid),
+                )
+                .await
+            });
+            assert_eq!(packet(&mut peer, &mut peer_noise).await, vec![1]);
+            let expected = match case {
+                0 => {
+                    drop(peer);
+                    Error::Lost
+                }
+                1 => {
+                    drop(tx);
+                    Error::Lost
+                }
+                2 => {
+                    stop.close();
+                    Error::Lost
+                }
+                3..=7 => {
+                    // Bad Noise tag, outer length, frame header, trailing byte,
+                    // then a valid frame rejected by the callback.
+                    if case == 4 {
+                        peer.write_all(&[0, 0]).await.unwrap();
+                    } else {
+                        let mut inner = if case == 5 {
+                            vec![0; HEADER_LEN]
+                        } else {
+                            encode_frame(OP_RTP, &[1]).unwrap()
+                        };
+                        if case == 6 {
+                            inner.push(0);
+                        }
+                        let mut wire = vec![0; inner.len() + 18];
+                        let length = peer_noise.write_message(&inner, &mut wire[2..]).unwrap();
+                        wire[..2].copy_from_slice(&(length as u16).to_be_bytes());
+                        if case == 3 {
+                            wire[length + 1] ^= 1;
+                        }
+                        peer.write_all(&wire[..length + 2]).await.unwrap();
+                    }
+                    Error::Invalid
+                }
+                8 => {
+                    revoked.notify_one();
+                    Error::Lost
+                }
+                9 => {
+                    peer.write_all(&[0]).await.unwrap();
+                    drop(peer);
+                    Error::Lost
+                }
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                timeout(Duration::from_secs(1), actor)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                Err(expected),
+                "lane case {case}"
+            );
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn calls_lane_ready_burst_reaches_writable_peer_without_full() {
         const BURST: usize = 4;
@@ -291,7 +381,7 @@ mod tests {
                     RTP_CAP,
                     Frame::control(OP_RTP, vec![0]),
                     &mut counters,
-                    |_, _, _| Err(()),
+                    |_, _, _| Err(Error::Invalid),
                 )
                 .await;
                 (result, counters)
@@ -312,7 +402,7 @@ mod tests {
                     &mut counters,
                     |op, payload, completed| {
                         if op != opcode || payload.is_empty() || payload.len() > RTP_CAP {
-                            return Err(());
+                            return Err(Error::Invalid);
                         }
                         if completed + hop <= Instant::now() {
                             route_expired += 1;
@@ -325,7 +415,7 @@ mod tests {
                         }) {
                             Ok(()) => queued += 1,
                             Err(mpsc::error::TrySendError::Full(_)) => full += 1,
-                            Err(mpsc::error::TrySendError::Closed(_)) => return Err(()),
+                            Err(mpsc::error::TrySendError::Closed(_)) => return Err(Error::Lost),
                         }
                         Ok(None)
                     },
@@ -512,7 +602,9 @@ mod tests {
                 Frame::control(OP_RTP, vec![1]),
                 &mut counters,
                 move |op, p, _| {
-                    received.try_send((op, p.to_vec())).map_err(|_| ())?;
+                    received
+                        .try_send((op, p.to_vec()))
+                        .map_err(|_| Error::Lost)?;
                     Ok(None)
                 },
             )

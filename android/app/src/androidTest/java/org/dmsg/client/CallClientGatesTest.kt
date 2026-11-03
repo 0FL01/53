@@ -140,12 +140,18 @@ class CallClientGatesTest {
             .put("tearing_down", state.tearingDown).put("listener", state.incomingAvailable)
             .put("teardown_stage", DmsgService.callOwner()?.teardownStage)
             .put("telecom_ready", state.telecomReady).put("telecom_active", state.telecomActive)
+            .put("media_epoch", state.call?.mediaEpoch?.toString()?.toLongOrNull())
+            .put("bitrate_bps", state.call?.bitrateBps?.toLong())
+            .put("microphone_foreground", state.microphoneForeground)
             .put("audio_failure", state.audio?.failure).put("error_resource", state.errorRes)
             .put("endpoint_type", state.endpoint?.type).put("output_route_type", state.audio?.outputRouteType)
             .put("playback_rate", state.audio?.playbackRate).put("underruns", state.audio?.underruns)
             .put("capture_clock", state.audio?.captureClock?.json())
+            .put("capture_clock_step", state.audio?.captureClockStep?.json())
+            .put("unqualified_startup_batches", state.audio?.unqualifiedStartupBatches)
             .put("captured_samples", state.audio?.capturedSamples)
             .put("submitted_samples", state.audio?.submittedSamples)
+            .put("rejected_capture_batches", state.audio?.rejectedCaptureBatches)
             .put("last_render_loop_trace", state.audio?.lastRenderLoopTrace?.json())
             .put("track_configuration", state.audio?.let { audio -> JSONObject()
                 .put("buffer_frames", audio.trackBufferFrames).put("capacity_frames", audio.trackCapacityFrames)
@@ -176,7 +182,7 @@ class CallClientGatesTest {
                 "max_capture_age_us", "max_additional_capture_age_us", "max_source_ready_to_commit_us",
                 "arrival_after_nominal_due_packets", "late_before_nominal_due_packets",
                 "max_playout_tick_lateness_ms", "max_decode_us", "encode_duration_bins", "last_render_expiry",
-                "capture_age_unavailable_batches", "max_feedback_cycle_ms", "error")) {
+                "capture_age_unavailable_batches", "capture_age_rejected_batches", "max_feedback_cycle_ms", "error")) {
                 progress.put(key, native.opt(key))
             }
             value.put("media_progress", progress)
@@ -259,7 +265,7 @@ class CallClientGatesTest {
     private fun selectSpeaker(ui: ActivityScenario<CallActivity>) {
         if (!speakerInput) return
         report("before_speaker")
-        waitFor("Telecom speaker endpoint unavailable") {
+        waitFor("Telecom speaker endpoint unavailable", 90_000) {
             CallUi.state.value.endpoints.any { it.type == androidx.core.telecom.CallEndpointCompat.TYPE_SPEAKER }
         }
         if (CallUi.state.value.endpoint?.type != androidx.core.telecom.CallEndpointCompat.TYPE_SPEAKER) {
@@ -471,6 +477,269 @@ class CallClientGatesTest {
         assertTrue("waking must keep keyguard locked", keyguard.isDeviceLocked)
         retired(CallEndReason.REMOTE_ENDED, (seconds + 90) * 1_000)
     }
+    private fun recoveryMarker(stage: String, epoch: ULong, episodes: Int, activeMs: Long = 0,
+        afterLastMs: Long = 0, maxEpisodeMs: Long = 0, stalledMs: Long = 0) {
+        val value = JSONObject().put("stage", stage).put("media_epoch", epoch.toString().toLongOrNull())
+            .put("recoveries", episodes).put("active_media_ms", activeMs)
+            .put("after_last_recovery_media_ms", afterLastMs).put("max_recovery_ms", maxEpisodeMs)
+            .put("observed_no_progress_ms", stalledMs)
+        instrumentation.sendStatus(0, android.os.Bundle().apply { putString("client_call_recovery", value.toString()) })
+    }
+
+    /** Inline observations retain short joined/media-less publications; polling alone can conflate them. */
+    private inner class RecoveryTrace : AutoCloseable {
+        private val initial = CallUi.state.value
+        private val id = requireNotNull(initial.call).callId
+        private val token = initial.epoch
+        private val telecomId = requireNotNull(initial.telecomCallId)
+        private val endpointId = initial.endpoint?.identifier
+        private val outputRouteType = requireNotNull(initial.audio).outputRouteType
+        private val handles = mutableMapOf<Long, ULong>()
+        private var problem: String? = null
+        private var episodeStart: Long? = null
+        private var episodeEpoch = 0uL
+        private var retiringHandle = 0L
+        private var joined = false
+        private var highestEpoch = initial.call!!.mediaEpoch
+        private var lastActiveEpoch = highestEpoch
+        private var lastHandle = initial.call!!.mediaHandle
+        @Volatile var recovered = 0; private set
+        @Volatile var maxEpisodeMs = 0L; private set
+        private var sampleEpoch = highestEpoch
+        private var lastCapture = requireNotNull(initial.audio).capturedSamples
+        private var lastDecoded = JSONObject(initial.audio!!.nativeStats).getLong("decoded_packets")
+        private var lastReceived = JSONObject(initial.audio!!.nativeStats).getLong("received_rtp_packets")
+        private var lastAt = SystemClock.elapsedRealtime()
+        private var wasActive = true
+        private var countedRecoveries = 0
+        var activeMs = 0L; private set
+        var afterLastMs = 0L; private set
+        var stalledMs = 0L; private set
+        private var qualifiedEpoch = 0uL
+        private val observer = CoroutineScope(Dispatchers.Unconfined).launch(start = CoroutineStart.UNDISPATCHED) {
+            CallUi.state.collect { observe(it) }
+        }
+
+        private fun fact(condition: Boolean, message: String) { if (!condition && problem == null) problem = message }
+        @Synchronized private fun observe(state: CallUiState) {
+            val call = state.call ?: return
+            fact(call.callId == id && state.epoch == token, "recovery must retain logical call ID and action token")
+            if (!call.busy() || state.tearingDown) return
+            fact(state.telecomReady && state.telecomActive && state.telecomCallId == telecomId,
+                "recovery must retain the same active Telecom call")
+            fact(state.endpoint?.identifier == endpointId, "recovery must preserve the selected Telecom route")
+            fact(call.mediaEpoch >= highestEpoch, "media epoch regressed")
+            highestEpoch = maxOf(highestEpoch, call.mediaEpoch)
+            if (call.mediaHandle != 0L) {
+                val previousEpoch = handles.putIfAbsent(call.mediaHandle, call.mediaEpoch)
+                fact(previousEpoch == null || previousEpoch == call.mediaEpoch, "new epoch reused an old media handle")
+            }
+            if (call.phase == CallPhase.RECONNECTING) {
+                fact(call.mediaHandle == 0L, "reconnecting must not expose a capture handle")
+                if (episodeStart == null) {
+                    episodeStart = SystemClock.elapsedRealtime(); episodeEpoch = lastActiveEpoch
+                    retiringHandle = lastHandle; joined = false
+                    recoveryMarker("recovery_started", call.mediaEpoch, recovered)
+                }
+            }
+            if (episodeStart != null && !state.microphoneForeground && state.audio?.cleanupComplete == true) {
+                val audio = state.audio!!
+                fact(!audio.microphoneActive && !audio.recordOpen && !audio.trackOpen && !audio.effectsOpen &&
+                    !audio.captureAlive && !audio.renderAlive && !audio.ownerAlive && audio.activeHandle == 0L,
+                    "old audio must join completely before replacement")
+                fact(app.getSystemService(android.media.AudioManager::class.java).activeRecordingConfigurations.isEmpty(),
+                    "media-less recovery must not leave an actual recorder")
+                if (!joined) recoveryMarker("recovery_joined_no_microphone", call.mediaEpoch, recovered)
+                joined = true
+            }
+            val audio = state.audio
+            val progressing = call.phase == CallPhase.ACTIVE && audio != null && audio.activeHandle == call.mediaHandle &&
+                audio.failure == null && audio.microphoneActive && audio.capturedSamples > 0 &&
+                JSONObject(audio.nativeStats).let { it.optLong("decoded_packets") > 0 && !it.optBoolean("failed") }
+            if (progressing) {
+                val started = episodeStart
+                if (started != null) {
+                    val duration = SystemClock.elapsedRealtime() - started
+                    fact(joined, "replacement started without an observed joined/media-less interval")
+                    fact(call.mediaEpoch > episodeEpoch && call.mediaHandle != retiringHandle,
+                        "recovery must use a fresh media epoch and handle")
+                    fact(duration <= 30_000, "recovery episode exceeded 30 seconds")
+                    maxEpisodeMs = maxOf(maxEpisodeMs, duration)
+                    recovered++; episodeStart = null
+                    recoveryMarker("recovery_fresh_media", call.mediaEpoch, recovered, maxEpisodeMs = maxEpisodeMs)
+                }
+                lastHandle = call.mediaHandle; lastActiveEpoch = call.mediaEpoch
+            }
+        }
+
+        @Synchronized fun sample(expectedMuted: Boolean? = null) {
+            val now = SystemClock.elapsedRealtime()
+            episodeStart?.let { fact(now - it <= 30_000, "recovery episode exceeded 30 seconds") }
+            assertNull(problem, problem)
+            val state = CallUi.state.value
+            val call = requireNotNull(state.call)
+            assertEquals(id, call.callId); assertEquals(token, state.epoch)
+            if (call.phase == CallPhase.ENDED) return
+            assertTrue(state.telecomActive); assertEquals(telecomId, state.telecomCallId)
+            expectedMuted?.let { assertEquals("mute must survive media replacement/recreation", it, state.muted) }
+            val audio = state.audio
+            audio?.failure?.let {
+                assertTrue("real hardware failure cannot be excused by recovery: $it",
+                    it == "native_probe_failed" || it == "native_stopped_early")
+            }
+            val stats = audio?.let { JSONObject(it.nativeStats) }
+            val active = call.phase == CallPhase.ACTIVE && audio != null && audio.microphoneActive &&
+                audio.activeHandle != 0L && audio.activeHandle == call.mediaHandle && audio.failure == null &&
+                stats?.optBoolean("ready") == true && !stats.optBoolean("failed") && !stats.optBoolean("stopped")
+            if (call.mediaEpoch > sampleEpoch) {
+                sampleEpoch = call.mediaEpoch; lastCapture = 0; lastDecoded = 0; lastReceived = 0; wasActive = false
+            }
+            if (recovered != countedRecoveries) { countedRecoveries = recovered; afterLastMs = 0 }
+            if (active) {
+                val a = requireNotNull(audio)
+                assertNull(a.failure)
+                assertEquals("recovery must preserve the actual selected audio route", outputRouteType, a.outputRouteType)
+                assertTrue(a.maxQueueSamples <= 640)
+                val native = requireNotNull(stats)
+                assertEquals(0L, native.getLong("fixture_peer_encoded_packets"))
+                val decoded = native.getLong("decoded_packets")
+                val received = native.getLong("received_rtp_packets")
+                assertTrue("same-epoch capture counter must not reset", a.capturedSamples >= lastCapture)
+                assertTrue("same-epoch decode counter must not reset", decoded >= lastDecoded)
+                val credit = if (wasActive && received > lastReceived) minOf(now - lastAt,
+                    (a.capturedSamples - lastCapture) * 1_000 / CallAudio.SAMPLE_RATE,
+                    (decoded - lastDecoded) * 40) else 0L
+                activeMs += credit
+                if (recovered > 0) afterLastMs += credit
+                if (credit == 0L) stalledMs += now - lastAt
+                lastCapture = a.capturedSamples; lastDecoded = decoded; lastReceived = received
+                // Qualification is required again using this generation's actual >=20s capture, never wall age.
+                if (a.capturedSamples >= 20L * CallAudio.SAMPLE_RATE) {
+                    val clock = JSONObject(a.playbackCompensation)
+                    qualifiedEpoch = if (native.getBoolean("capture_clock_calibrated") && native.getBoolean("remote_clock_calibrated") &&
+                        native.getBoolean("remote_clock_valid") &&
+                        clock.optBoolean("hardware_calibrated") && clock.optBoolean("healthy")) call.mediaEpoch else 0uL
+                }
+            } else stalledMs += now - lastAt
+            wasActive = active; lastAt = now
+        }
+
+        @Synchronized fun progress(stage: String) = recoveryMarker(stage, highestEpoch, recovered,
+            activeMs, afterLastMs, maxEpisodeMs, stalledMs)
+        @Synchronized fun verify(requiredActiveMs: Long) {
+            assertNull(problem, problem)
+            assertTrue("two actual recovery episodes required", recovered >= 2)
+            assertNull("last recovery must have completed", episodeStart)
+            assertTrue("insufficient real ACTIVE capture/decode time", activeMs >= requiredActiveMs)
+            assertTrue("at least 30s of real media required after last recovery", afterLastMs >= 30_000)
+            assertEquals("fresh generation must recalibrate healthy hardware clocks", highestEpoch, qualifiedEpoch)
+            progress("recovery_interval_complete")
+        }
+        override fun close() { observer.cancel() }
+    }
+
+    @Test fun client09OutgoingRecoveringLongCall() {
+        val seconds = InstrumentationRegistry.getArguments().getString("call_active_seconds")?.toLong() ?: 180L
+        require(seconds in 3L..300L) // Short operator smoke is not the >=180s long-call acceptance.
+        microphonePermission()
+        val wallEnd = SystemClock.elapsedRealtime() + 300_000
+        ActivityScenario.launch<CallActivity>(Intent(app, CallActivity::class.java).putExtra("peer", peer)).use { ui ->
+            healthy()
+            selectSpeaker(ui)
+            val initial = CallUi.state.value
+            ui.onActivity { it.findViewById<Button>(R.id.call_mute).performClick() }
+            waitFor("recovery caller did not mute", 5_000) { CallUi.state.value.muted }
+            ui.recreate()
+            assertEquals(initial.call!!.callId, CallUi.state.value.call!!.callId)
+            assertEquals(initial.epoch, CallUi.state.value.epoch)
+            assertTrue(CallUi.state.value.muted)
+            assertEquals(initial.endpoint?.identifier, CallUi.state.value.endpoint?.identifier)
+            RecoveryTrace().use { trace ->
+                var muted = true
+                var nextReport = SystemClock.elapsedRealtime() + 5_000
+                trace.progress("recovery_gate_ready") // External orchestrator causes two genuine interruptions.
+                while (SystemClock.elapsedRealtime() < wallEnd &&
+                    (trace.activeMs < seconds * 1_000 || trace.recovered < 2 || trace.afterLastMs < 30_000 || muted)) {
+                    SystemClock.sleep(500)
+                    trace.sample(muted)
+                    assertTrue("logical call ended before long recovery acceptance", CallUi.state.value.call!!.busy())
+                    if (muted && trace.recovered >= 2 && CallUi.state.value.call?.phase == CallPhase.ACTIVE) {
+                        ui.onActivity { it.findViewById<Button>(R.id.call_mute).performClick() }
+                        waitFor("recovered caller did not unmute", minOf(5_000, wallEnd - SystemClock.elapsedRealtime()).coerceAtLeast(1)) {
+                            !CallUi.state.value.muted
+                        }
+                        muted = false
+                        trace.progress("recovery_controls_preserved_unmuted")
+                    }
+                    if (SystemClock.elapsedRealtime() >= nextReport) {
+                        trace.progress("recovering_long_interval"); report("recovering_long_interval")
+                        nextReport += 5_000
+                    }
+                }
+                assertTrue("long call exceeded hard 300s wall bound", SystemClock.elapsedRealtime() < wallEnd)
+                trace.verify(seconds * 1_000)
+                ui.onActivity { it.findViewById<Button>(R.id.call_hangup).performClick() }
+                retired(CallEndReason.LOCAL_ENDED, (wallEnd - SystemClock.elapsedRealtime()).coerceAtLeast(1))
+                assertTrue("joined retirement exceeded hard 300s wall bound", SystemClock.elapsedRealtime() <= wallEnd)
+                trace.progress("recovery_local_end_joined")
+            }
+        }
+    }
+
+    @Test fun client10IncomingRecoveringCall() {
+        microphonePermission()
+        listen().use {
+            incoming()
+            val wallEnd = SystemClock.elapsedRealtime() + 300_000
+            activity().use { ui ->
+                ui.onActivity { it.findViewById<Button>(R.id.call_accept).performClick() }
+                healthy(); selectSpeaker(ui)
+                RecoveryTrace().use { trace ->
+                    ui.moveToState(androidx.lifecycle.Lifecycle.State.CREATED)
+                    val backgroundEnd = SystemClock.elapsedRealtime() + 3_000
+                    while (SystemClock.elapsedRealtime() < backgroundEnd) {
+                        SystemClock.sleep(500); trace.sample()
+                    }
+                    trace.progress("recovery_callee_background_observed")
+                    var nextReport = SystemClock.elapsedRealtime() + 5_000
+                    while (SystemClock.elapsedRealtime() < wallEnd && CallUi.state.value.call?.phase != CallPhase.ENDED) {
+                        SystemClock.sleep(500); trace.sample()
+                        if (SystemClock.elapsedRealtime() >= nextReport) {
+                            trace.progress("recovering_incoming_interval"); report("recovering_incoming_interval")
+                            nextReport += 5_000
+                        }
+                    }
+                    assertTrue("remote End exceeded hard 300s wall bound", SystemClock.elapsedRealtime() < wallEnd)
+                    trace.verify(0) // Caller owns >=180s aggregate; callee proves fresh progress and >=30s tail.
+                    retired(CallEndReason.REMOTE_ENDED, (wallEnd - SystemClock.elapsedRealtime()).coerceAtLeast(1))
+                    assertTrue("joined retirement exceeded hard 300s wall bound", SystemClock.elapsedRealtime() <= wallEnd)
+                    trace.progress("recovery_remote_end_joined")
+                }
+            }
+        }
+    }
+
+    @Test fun client11OutgoingCancelDuringRecovery() {
+        microphonePermission()
+        ActivityScenario.launch<CallActivity>(Intent(app, CallActivity::class.java).putExtra("peer", peer)).use { ui ->
+            healthy()
+            val initial = CallUi.state.value
+            recoveryMarker("cancel_recovery_ready", initial.call!!.mediaEpoch, 0)
+            waitFor("external interruption did not enter recovery", 60_000) {
+                CallUi.state.value.call?.phase == CallPhase.RECONNECTING
+            }
+            ui.onActivity { it.findViewById<Button>(R.id.call_hangup).performClick() }
+            retired(CallEndReason.LOCAL_ENDED, 30_000)
+            SystemClock.sleep(1_000)
+            assertEquals(initial.call.callId, CallUi.state.value.call!!.callId)
+            assertEquals(initial.epoch, CallUi.state.value.epoch)
+            assertEquals(CallPhase.ENDED, CallUi.state.value.call!!.phase)
+            assertFalse(CallUi.state.value.busy); assertFalse(CallUi.state.value.microphoneForeground)
+            assertTrue(app.getSystemService(android.media.AudioManager::class.java).activeRecordingConfigurations.isEmpty())
+            recoveryMarker("cancel_recovery_joined_no_resurrection", CallUi.state.value.call!!.mediaEpoch, 0)
+        }
+    }
+
     @Test fun client05SendTextAfterCall() {
         facade.reconnect()
         val mid = facade.send(peer, "53 client post-call text smoke")

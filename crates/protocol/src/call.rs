@@ -1,8 +1,8 @@
 //! Volatile account-authenticated calls. Keys exist only inside an Olm envelope.
 use zeroize::Zeroize;
 
-pub const VERSION: u8 = 1;
-pub const PROFILE: u8 = 1; // mono16k,12kbit,40ms,100B Opus cap
+pub const VERSION: u8 = 2;
+pub const PROFILE: u8 = 2; // mono16k, adaptive8/12kbit,40ms,100B Opus cap
 pub const CIPHERTEXT_MAX: usize = 2048;
 pub const RTP_CAP: usize = 122;
 pub const SRTCP_CAP: usize = 130;
@@ -10,11 +10,45 @@ pub const OP_RTP: u8 = 242;
 pub const OP_SRTCP: u8 = 243;
 pub const RING_SECS: u64 = 30;
 pub const ATTACH_SECS: u64 = 10;
+pub const RECOVERY_SECS: u64 = 30;
+pub const RECOVERY_STABLE_SECS: u64 = 5;
 pub const HEARTBEAT_SECS: u64 = 10;
 pub const LIVENESS_SECS: u64 = 30;
 pub const MAX_CALLS: usize = 2;
 pub const MAX_LISTENERS: usize = 16;
 pub const EVENT_CAP: usize = 4;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Open {
+    pub resume: Option<([u8; 16], u64)>,
+}
+impl Open {
+    pub fn encode(&self) -> Result<Vec<u8>, &'static str> {
+        let mut p = vec![VERSION];
+        if let Some((id, epoch)) = self.resume {
+            identity(&id, epoch)?;
+            p.extend_from_slice(&id);
+            p.extend_from_slice(&epoch.to_be_bytes());
+        }
+        Ok(p)
+    }
+    pub fn decode(p: &[u8]) -> Result<Self, &'static str> {
+        let mut r = Reader(p);
+        if r.byte()? != VERSION {
+            return Err("unsupported call version");
+        }
+        let resume = if r.0.is_empty() {
+            None
+        } else {
+            let id = r.array()?;
+            let epoch = r.u64()?;
+            identity(&id, epoch)?;
+            Some((id, epoch))
+        };
+        r.end()?;
+        Ok(Self { resume })
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -25,6 +59,10 @@ pub enum Action {
     Reject = 4,
     End = 5,
     Heartbeat = 6,
+    Recover = 7,
+    RekeyOffer = 8,
+    RekeyAnswer = 9,
+    Recovered = 10,
 }
 impl Action {
     fn parse(value: u8) -> Result<Self, &'static str> {
@@ -35,6 +73,10 @@ impl Action {
             4 => Ok(Self::Reject),
             5 => Ok(Self::End),
             6 => Ok(Self::Heartbeat),
+            7 => Ok(Self::Recover),
+            8 => Ok(Self::RekeyOffer),
+            9 => Ok(Self::RekeyAnswer),
+            10 => Ok(Self::Recovered),
             _ => Err("invalid call action"),
         }
     }
@@ -100,7 +142,18 @@ impl Command {
             };
         }
         identity(&self.call_id, self.epoch)?;
-        let encrypted = matches!(self.action, Action::Invite | Action::Accept);
+        if (matches!(self.action, Action::Invite | Action::Accept) && self.epoch != 1)
+            || (matches!(
+                self.action,
+                Action::RekeyOffer | Action::RekeyAnswer | Action::Recovered
+            ) && self.epoch < 2)
+        {
+            return Err("invalid call action epoch");
+        }
+        let encrypted = matches!(
+            self.action,
+            Action::Invite | Action::Accept | Action::RekeyOffer | Action::RekeyAnswer
+        );
         if encrypted == self.ciphertext.is_empty()
             || ((self.action == Action::Invite) == (self.recipient == [0; 16]))
         {
@@ -178,6 +231,10 @@ pub enum EventKind {
     Accepted = 3,
     MediaReady = 4,
     Ended = 5,
+    Reconnecting = 6,
+    RekeyOffer = 7,
+    RekeyAnswer = 8,
+    Recovered = 9,
 }
 impl EventKind {
     fn parse(value: u8) -> Result<Self, &'static str> {
@@ -187,6 +244,10 @@ impl EventKind {
             3 => Ok(Self::Accepted),
             4 => Ok(Self::MediaReady),
             5 => Ok(Self::Ended),
+            6 => Ok(Self::Reconnecting),
+            7 => Ok(Self::RekeyOffer),
+            8 => Ok(Self::RekeyAnswer),
+            9 => Ok(Self::Recovered),
             _ => Err("invalid call event"),
         }
     }
@@ -225,8 +286,27 @@ impl Event {
         {
             return Err("invalid call event");
         }
-        if matches!(self.kind, EventKind::Invite | EventKind::Accepted)
-            == self.ciphertext.is_empty()
+        if (matches!(
+            self.kind,
+            EventKind::Invite | EventKind::Ringing | EventKind::Accepted
+        ) && self.epoch != 1)
+            || (matches!(
+                self.kind,
+                EventKind::Reconnecting
+                    | EventKind::RekeyOffer
+                    | EventKind::RekeyAnswer
+                    | EventKind::Recovered
+            ) && self.epoch < 2)
+        {
+            return Err("invalid call event epoch");
+        }
+        if matches!(
+            self.kind,
+            EventKind::Invite
+                | EventKind::Accepted
+                | EventKind::RekeyOffer
+                | EventKind::RekeyAnswer
+        ) == self.ciphertext.is_empty()
             || (self.kind != EventKind::Ended && self.reason != Reason::Ok)
         {
             return Err("invalid call event body");
@@ -313,8 +393,10 @@ impl Drop for KeyEnvelope {
 impl KeyEnvelope {
     fn validate(&self) -> Result<(), &'static str> {
         identity(&self.call_id, self.epoch)?;
-        if !matches!(self.action, Action::Invite | Action::Accept)
-            || self.sender_ed == [0; 32]
+        if !matches!(
+            (self.action, self.epoch),
+            (Action::Invite | Action::Accept, 1) | (Action::RekeyOffer | Action::RekeyAnswer, 2..)
+        ) || self.sender_ed == [0; 32]
             || self.sender_binding == [0; 32]
             || self.recipient_binding == [0; 32]
             || self.sender_binding == self.recipient_binding
@@ -378,7 +460,7 @@ impl KeyEnvelope {
 }
 
 fn identity(id: &[u8; 16], epoch: u64) -> Result<(), &'static str> {
-    if *id == [0; 16] || epoch != 1 {
+    if *id == [0; 16] || epoch == 0 {
         Err("invalid call identity/epoch")
     } else {
         Ok(())
@@ -430,6 +512,94 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn open_resume_and_recovery_are_strictly_versioned() {
+        assert_eq!(Open { resume: None }.encode().unwrap(), [2]);
+        let open = Open {
+            resume: Some(([7; 16], u64::MAX)),
+        };
+        let p = open.encode().unwrap();
+        assert_eq!(p.len(), 25);
+        assert_eq!(&p[17..], &u64::MAX.to_be_bytes());
+        assert_eq!(Open::decode(&p).unwrap(), open);
+        for n in 0..p.len() {
+            if n != 1 {
+                assert!(Open::decode(&p[..n]).is_err());
+            }
+        }
+        for p in [vec![1], vec![2, 0], [p.as_slice(), &[0]].concat()] {
+            assert!(Open::decode(&p).is_err());
+        }
+        for resume in [Some(([0; 16], 1)), Some(([1; 16], 0))] {
+            assert!(Open { resume }.encode().is_err());
+        }
+        let mut zero_id = p.clone();
+        zero_id[1..17].fill(0);
+        assert!(Open::decode(&zero_id).is_err());
+        let mut zero_epoch = p.clone();
+        zero_epoch[17..25].fill(0);
+        assert!(Open::decode(&zero_epoch).is_err());
+        for action in [
+            Action::Invite,
+            Action::Accept,
+            Action::RekeyOffer,
+            Action::RekeyAnswer,
+            Action::Recovered,
+            Action::Recover,
+            Action::End,
+        ] {
+            for epoch in [0, 1, 2, u64::MAX] {
+                let cmd = Command {
+                    request_id: 1,
+                    action,
+                    call_id: [1; 16],
+                    epoch,
+                    recipient: if action == Action::Invite {
+                        [2; 16]
+                    } else {
+                        [0; 16]
+                    },
+                    ciphertext: if matches!(
+                        action,
+                        Action::Invite | Action::Accept | Action::RekeyOffer | Action::RekeyAnswer
+                    ) {
+                        vec![3]
+                    } else {
+                        vec![]
+                    },
+                };
+                let valid = match action {
+                    Action::Invite | Action::Accept => epoch == 1,
+                    Action::RekeyOffer | Action::RekeyAnswer | Action::Recovered => epoch >= 2,
+                    _ => epoch > 0,
+                };
+                assert_eq!(cmd.encode().is_ok(), valid);
+                if valid {
+                    assert_eq!(Command::decode(&cmd.encode().unwrap()).unwrap(), cmd);
+                }
+            }
+        }
+        for (kind, encrypted) in [
+            (EventKind::Reconnecting, false),
+            (EventKind::RekeyOffer, true),
+            (EventKind::RekeyAnswer, true),
+            (EventKind::Recovered, false),
+        ] {
+            let mut e = Event {
+                kind,
+                call_id: [1; 16],
+                epoch: 2,
+                peer_user: [2; 16],
+                peer_device: [3; 32],
+                remaining_ms: 30_000,
+                reason: Reason::Ok,
+                ciphertext: if encrypted { vec![4] } else { vec![] },
+            };
+            assert_eq!(Event::decode(&e.encode().unwrap()).unwrap(), e);
+            e.epoch = 1;
+            assert!(e.encode().is_err());
+        }
+    }
     #[test]
     fn strict_signal_and_attach_vectors() {
         let command = Command {
@@ -488,7 +658,7 @@ mod tests {
     }
     #[test]
     fn keys_are_separate_from_message_history_and_profile_is_strict() {
-        let envelope = KeyEnvelope {
+        let mut envelope = KeyEnvelope {
             call_id: [1; 16],
             sender_ed: [2; 32],
             action: Action::Invite,
@@ -510,7 +680,28 @@ mod tests {
             assert!(KeyEnvelope::decode(&p[..n]).is_err());
         }
         let mut bad = p;
-        *bad.last_mut().unwrap() = 2;
+        *bad.last_mut().unwrap() = 1;
         assert!(KeyEnvelope::decode(&bad).is_err());
+        for action in [
+            Action::Invite,
+            Action::Accept,
+            Action::RekeyOffer,
+            Action::RekeyAnswer,
+            Action::Recover,
+        ] {
+            for epoch in [0, 1, 2, u64::MAX] {
+                envelope.action = action;
+                envelope.epoch = epoch;
+                let valid = matches!(
+                    (action, epoch),
+                    (Action::Invite | Action::Accept, 1)
+                        | (Action::RekeyOffer | Action::RekeyAnswer, 2..)
+                );
+                assert_eq!(envelope.encode().is_ok(), valid);
+                if valid {
+                    assert!(KeyEnvelope::decode(&envelope.encode().unwrap()).is_ok());
+                }
+            }
+        }
     }
 }

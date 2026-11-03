@@ -10,7 +10,10 @@ use tokio::sync::oneshot;
 use zeroize::Zeroizing;
 
 pub(super) enum Operation {
-    Encode(Zeroizing<Vec<i16>>),
+    EncodeAt {
+        pcm: Zeroizing<Vec<i16>>,
+        bitrate: u32,
+    },
     Decode {
         opus: Option<Zeroizing<Vec<u8>>>,
         reset: bool,
@@ -73,14 +76,15 @@ impl Owner {
                         let started = Instant::now();
                         #[cfg(test)]
                         if let Some(hold) = &hold {
-                            hold.wait(if matches!(&operation, Operation::Encode(_)) {
+                            hold.wait(if matches!(&operation, Operation::EncodeAt { .. }) {
                                 Kind::Encode
                             } else {
                                 Kind::Decode
                             });
                         }
                         let output = match operation {
-                            Operation::Encode(pcm) => {
+                            Operation::EncodeAt { pcm, bitrate } => {
+                                encoder.set_bitrate(bitrate)?;
                                 let packet = encoder.encode(&pcm)?;
                                 Output::Encoded {
                                     bytes: Zeroizing::new(packet.bytes),

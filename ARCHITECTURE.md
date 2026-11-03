@@ -197,9 +197,15 @@ streams/endpoint: persistent signal, RTP и SRTCP. Directional SRTP material
 Один DmsgService владеет Core-Telecom/audio/CallStyle; Activity не владеет звонком.
 Telecom выбирает endpoint, note/bulk owners приостанавливаются с сохранением
 durable data. No microphone before answer; mute сохраняет capture timeline.
-Потеря транспорта заканчивает вызов, следующая попытка получает fresh keys;
-active-call autoreconnect, history/video/hold отсутствуют. Frozen40ms/100B,
-80ms jitter/640sink/720ms ledger/2880B window не увеличены.
+Изначальный pilot заканчивает вызов при потере транспорта; это подтверждённое
+ограничение, а не желаемое продуктовое поведение. Пользователь2026-10-15 утвердил
+замену на same-call recovery: logical call/Telecom сохраняются, media epoch и
+directional keys/lanes обновляются;30s episode, no stale audio/replay, terminal
+End/revoke/block/physical errors. Код/приёмка ещё реализуются по
+`docs/goals/2026-10-15-recovering-long-calls.md`. Encoder load адаптируется12/8kbit,
+а40ms/100B,80ms jitter/640sink/720ms ledger/2880B window не увеличиваются.
+History/video/hold отсутствуют. Отсутствие самих пауз >720ms проверяется позже,
+не подменяется успешным восстановлением.
 
 ## 10. Эксплуатация, история и дальнейшее развитие
 

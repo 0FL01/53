@@ -15,6 +15,8 @@
     <string name="call_ringing">Ringing…</string>
     <string name="call_connecting">Connecting…</string>
     <string name="call_active">Connected</string>
+    <string name="call_reconnecting">Restoring call… Microphone paused until audio reconnects</string>
+    <string name="call_reduced_quality">Connected · reduced audio quality</string>
     <string name="call_ending">Ending call…</string>
     <string name="call_ended">Call ended</string>
     <string name="call_remote_ended">The other person ended the call</string>

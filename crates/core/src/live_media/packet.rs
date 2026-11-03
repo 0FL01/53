@@ -284,7 +284,7 @@ impl Ledger {
         Ok(())
     }
 
-    fn observe(&self, now: Instant) -> LedgerObservation {
+    pub(super) fn observe(&self, now: Instant) -> LedgerObservation {
         LedgerObservation {
             bytes: self.bytes,
             window: self.limit,

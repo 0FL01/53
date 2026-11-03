@@ -10,7 +10,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use tokio::{net::tcp::OwnedReadHalf, sync::watch};
+use tokio::{net::tcp::ReadHalf, sync::watch};
 
 use super::packet::{FEEDBACK_FRAMED_MAX, MEDIA_OVERHEAD};
 
@@ -206,7 +206,7 @@ pub(crate) struct IngressService {
 impl IngressService {
     pub(super) async fn read(
         &mut self,
-        reader: &mut OwnedReadHalf,
+        reader: &mut ReadHalf<'_>,
         buffer: &mut [u8],
     ) -> io::Result<usize> {
         while self.armed.borrow_and_update().is_none() {

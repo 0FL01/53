@@ -14,6 +14,7 @@ import androidx.core.telecom.CallEndpointCompat
 import androidx.core.telecom.CallsManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -34,6 +35,8 @@ internal data class CallUiState(val call: CallSnapshot? = null, val epoch: Long 
     val incomingAvailable: Boolean = false, val preparing: Boolean = false, val tearingDown: Boolean = false,
     val telecomActive: Boolean = false, val activeSince: Long? = null, val muted: Boolean = false,
     val telecomReady: Boolean = false, val endedAt: Long? = null,
+    val microphoneForeground: Boolean = false,
+    val telecomCallId: android.os.ParcelUuid? = null,
     val endpoints: List<CallEndpointCompat> = emptyList(), val endpoint: CallEndpointCompat? = null,
     val errorRes: Int? = null, val audio: CallAudio.Snapshot? = null) {
     val busy get() = preparing || tearingDown || call?.busy() == true
@@ -70,6 +73,11 @@ internal class CallSessionOwner(private val context: Context,
     private var platformMute = false
     private var audio: CallAudio? = null
     private var negotiatedHandle = 0L
+    private var negotiatedEpoch = 0uL
+    private var pendingHandle = 0L
+    private var pendingEpoch = 0uL
+    private var audioEpoch = 0uL
+    private var mediaJoin: Job? = null
     private var platform: TelecomAudioPlatform? = null
     private var note: VoiceNoteAudio? = null
     private var notesJoined = false
@@ -191,24 +199,31 @@ internal class CallSessionOwner(private val context: Context,
         val newCall = guard.current?.callId != next.callId
         if (!guard.receive(next)) {
             if (next.mediaHandle != 0L && next.mediaHandle != audio?.snapshot()?.activeHandle &&
+                next.mediaHandle != negotiatedHandle && next.mediaHandle != pendingHandle &&
                 next.mediaHandle != guard.current?.mediaHandle)
                 scope.launch(Dispatchers.IO) { runCatching { CallMediaJni.stop(next.mediaHandle) } }
             return
         }
-        if (next.mediaHandle != 0L) {
-            if (negotiatedHandle != 0L && negotiatedHandle != next.mediaHandle) {
-                scope.launch(Dispatchers.IO) { runCatching { CallMediaJni.stop(next.mediaHandle) } }
-                finish(CallEndReason.INVALID, signal = true)
-                return
-            }
-            negotiatedHandle = next.mediaHandle
-        }
         if (next.busy()) {
+            val replacing = next.phase == CallPhase.RECONNECTING ||
+                negotiatedHandle != 0L && next.mediaEpoch > negotiatedEpoch
+            if (replacing) audio?.requestStop("media_reconnecting")
+            if ((replacing || mediaJoin != null) && next.mediaHandle != 0L && next.mediaHandle != negotiatedHandle) {
+                pendingHandle = next.mediaHandle; pendingEpoch = next.mediaEpoch
+            }
+            if (!replacing && mediaJoin == null && next.mediaHandle != 0L) {
+                if (negotiatedHandle != 0L && negotiatedHandle != next.mediaHandle) {
+                    finish(CallEndReason.INVALID, signal = true)
+                    return
+                }
+                negotiatedHandle = next.mediaHandle; negotiatedEpoch = next.mediaEpoch
+            }
             reserve()
             update(if (newCall) state.copy(preparing = false, incomingAvailable = false, errorRes = null,
                 activeSince = null, endedAt = null, audio = null) else
                 state.copy(preparing = false, incomingAvailable = false, errorRes = null))
             addTelecom()
+            if (replacing) retireMedia()
             if (next.phase in setOf(CallPhase.CONNECTING, CallPhase.ACTIVE)) activateOutgoing()
             maybeAudio()
             if (next.phase == CallPhase.ACTIVE && state.activeSince == null)
@@ -264,7 +279,7 @@ internal class CallSessionOwner(private val context: Context,
                     scope.launch {
                         if (!guard.matches(id, token)) { control.disconnect(DisconnectCause(DisconnectCause.LOCAL)); return@launch }
                         telecom = control
-                        update(state.copy(telecomReady = true))
+                        update(state.copy(telecomReady = true, telecomCallId = control.getCallId()))
                         control.launch(Dispatchers.Main.immediate) { control.availableEndpoints.collect { if (guard.matches(id, token)) update(state.copy(endpoints = it)) } }
                         control.launch(Dispatchers.Main.immediate) { control.currentCallEndpoint.collect { endpoint ->
                             if (guard.matches(id, token)) {
@@ -318,25 +333,67 @@ internal class CallSessionOwner(private val context: Context,
         }
     }
     private fun permission() = context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-    private fun maybeAudio() {
-        if (audio != null || !notesJoined || !guard.mayCapture(state.telecomActive, permission())) return
-        val call = guard.current ?: return
+    /** Retire only this media generation. Telecom, reservation, mute, route and timer survive. */
+    private fun retireMedia() {
+        if (mediaJoin != null || guard.tearingDown) return
+        val physical = audio
+        val handle = negotiatedHandle
+        if (physical == null && handle == 0L) return
         val token = guard.epoch
-        val routing = TelecomAudioPlatform().also { it.routeChangeExpected() }; platform = routing
-        // The microphone FGS type is established while the permission-bearing UI is visible.
-        changed()
-        if (!guard.mayCapture(state.telecomActive, permission())) return
-        audio = CallAudio(context, NativeCallAudioPort(call.mediaHandle), routing, finished = { result ->
-            scope.launch {
-                if (guard.epoch == token) {
-                    update(state.copy(audio = result))
-                    guard.audioCompletionReason(token, result)?.let { finish(it, signal = true) }
+        physical?.requestStop("media_reconnecting")
+        mediaJoin = scope.launch(start = CoroutineStart.LAZY) {
+            try {
+                withContext(Dispatchers.IO) {
+                    if (physical != null) physical.join() else CallMediaJni.stop(handle)
+                }
+                val result = physical?.snapshot()
+                audio = null; platform = null; negotiatedHandle = 0L; negotiatedEpoch = 0uL; audioEpoch = 0uL
+                update(state.copy(audio = result ?: state.audio, microphoneForeground = false))
+                if (result != null) guard.audioCompletionReason(token, result, expectedStop = true)
+                    ?.let { finish(it, signal = true) }
+            } catch (_: Exception) {
+                finish(CallEndReason.AUDIO_UNAVAILABLE, signal = true)
+            } finally {
+                mediaJoin = null
+                // A fresh handle can be published after JNI retirement but before this Main continuation.
+                // End/teardown always preempts this queued startup.
+                if (guard.epoch == token && !guard.tearingDown) {
+                    if (pendingHandle != 0L) {
+                        negotiatedHandle = pendingHandle; negotiatedEpoch = pendingEpoch
+                        pendingHandle = 0L; pendingEpoch = 0uL
+                    }
+                    if (guard.current?.phase == CallPhase.RECONNECTING) retireMedia() else maybeAudio()
                 }
             }
-        }).also { it.setMuted(localMute || platformMute); it.start() }
+        }
+        mediaJoin?.start()
+    }
+    private fun maybeAudio() {
+        if (audio != null || mediaJoin != null || !notesJoined || !guard.mayCapture(state.telecomActive, permission())) return
+        val call = guard.current ?: return
+        val token = guard.epoch
+        val mediaEpoch = call.mediaEpoch
+        negotiatedHandle = call.mediaHandle; negotiatedEpoch = mediaEpoch
+        // The microphone FGS type is established while the permission-bearing UI is visible.
+        // Keep it until this actual recorder's owner has joined, including recovery/End.
+        update(state.copy(microphoneForeground = true))
+        if (!guard.mayCapture(state.telecomActive, permission())) return
+        val routing = TelecomAudioPlatform().also { it.routeChangeExpected() }; platform = routing
+        lateinit var physical: CallAudio
+        physical = CallAudio(context, NativeCallAudioPort(call.mediaHandle), routing, finished = { result ->
+            scope.launch {
+                if (guard.epoch == token && audio === physical && audioEpoch == mediaEpoch) {
+                    update(state.copy(audio = result))
+                    guard.audioCompletionReason(token, result, expectedStop = mediaJoin != null)
+                        ?.let { finish(it, signal = true) }
+                }
+            }
+        })
+        audio = physical; audioEpoch = mediaEpoch
+        physical.setMuted(localMute || platformMute); physical.start()
         scope.launch {
-            while (guard.epoch == token && !guard.tearingDown && audio != null) {
-                update(state.copy(audio = audio?.snapshot())); delay(500)
+            while (guard.epoch == token && !guard.tearingDown && audio === physical && audioEpoch == mediaEpoch) {
+                update(state.copy(audio = physical.snapshot())); delay(500)
             }
         }
     }
@@ -373,6 +430,10 @@ internal class CallSessionOwner(private val context: Context,
         if (teardown?.isActive == true || guard.tearingDown) return
         val call = guard.current
         val handleToRetire = negotiatedHandle
+        val pendingToRetire = pendingHandle.takeIf { it != 0L } ?:
+            call?.mediaHandle?.takeIf { it != handleToRetire } ?: 0L
+        val recoveryJoin = mediaJoin
+        val physical = audio
         guard.beginTeardown()
         teardownStage = "guard_set"
         afterActor = null
@@ -387,13 +448,14 @@ internal class CallSessionOwner(private val context: Context,
             try {
                 teardownStage = "audio_join_enter"
                 noteJoin?.join()
-                val physical = audio
+                recoveryJoin?.join()
                 withContext(Dispatchers.IO) {
                     physical?.join()
                     // A negotiated handle can exist before Telecom activation/permission. It has no audio workers yet.
-                    if (physical == null && handleToRetire != 0L) CallMediaJni.stop(handleToRetire)
+                    if (recoveryJoin == null && physical == null && handleToRetire != 0L) CallMediaJni.stop(handleToRetire)
+                    if (pendingToRetire != 0L) CallMediaJni.stop(pendingToRetire)
                 }
-                update(state.copy(audio = physical?.snapshot() ?: state.audio))
+                update(state.copy(audio = physical?.snapshot() ?: state.audio, microphoneForeground = false))
                 val cause = when (reason) {
                     CallEndReason.REJECTED -> DisconnectCause.REJECTED
                     CallEndReason.EXPIRED -> DisconnectCause.MISSED
@@ -411,13 +473,15 @@ internal class CallSessionOwner(private val context: Context,
                 teardownStage = "telecom_join_return"
             } finally {
                 telecom = null; telecomJob = null; audio = null; platform = null; negotiatedHandle = 0L; dialingPeer = null
+                negotiatedEpoch = 0uL; pendingHandle = 0L; pendingEpoch = 0uL; audioEpoch = 0uL; mediaJoin = null
                 localMute = false; platformMute = false; accepted = false; systemAnswered = false; activationPending = false
                 // ENDED/not-tearing-down is the joined-retirement publication.
                 // Release the audio reservation before observers can act on it.
                 releaseReservation()
                 guard.finishTeardown()
                 update(state.copy(incomingAvailable = wantedListener && actorAvailable && !closed,
-                    telecomActive = false, telecomReady = false, muted = false, endpoint = null, endpoints = emptyList()))
+                    telecomActive = false, telecomReady = false, telecomCallId = null, microphoneForeground = false,
+                    muted = false, endpoint = null, endpoints = emptyList()))
                 if (!wantedListener || closed) shutdownActor()
                 teardownStage = "idle"
                 idle()

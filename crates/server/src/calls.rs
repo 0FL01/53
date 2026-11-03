@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use dmsg_protocol::{
-    call::*, ERR_BUSY, ERR_REVOKED, OP_CALL_ACK, OP_CALL_ATTACHED, OP_CALL_COMMAND, OP_CALL_EVENT,
-    OP_CALL_READY, OP_ERROR,
+    call::*, ERR_BUSY, ERR_EXPIRED, ERR_REVOKED, OP_CALL_ACK, OP_CALL_ATTACHED, OP_CALL_COMMAND,
+    OP_CALL_EVENT, OP_CALL_READY, OP_ERROR,
 };
 use rusqlite::{Connection, OptionalExtension};
 use tokio::net::TcpStream;
@@ -57,6 +57,10 @@ struct Call {
     peers: [Endpoint; 2],
     stage: Stage,
     deadline: Option<Instant>,
+    recovery_deadline: Option<Instant>,
+    rekeys: [Option<Vec<u8>>; 2],
+    recovered: [bool; 2],
+    ready_at: Option<Instant>,
     lanes: [Option<Slot>; 4],
 }
 
@@ -82,7 +86,8 @@ impl Call {
             peer_user: peer.user,
             peer_device: peer.device,
             remaining_ms: self
-                .deadline
+                .recovery_deadline
+                .or(self.deadline)
                 .map(|d| d.saturating_duration_since(now).as_millis().min(30_000) as u32)
                 .unwrap_or(0),
             reason,
@@ -141,20 +146,173 @@ impl Hub {
             .is_some_and(|l| l.who == who && l.serial == serial && !l.stop.is_closed())
     }
 
-    // Full/closed event queues retire the whole signal and its routes. Accept/End
-    // are never silently discarded while a signal is left looking healthy.
-    fn emit(&mut self, device: [u8; 32], event: Event) -> bool {
-        let sent = self.listeners.get(&device).is_some_and(|l| {
+    fn open(
+        &mut self,
+        db: &Connection,
+        who: Endpoint,
+        open: Open,
+        events: mpsc::Sender<Frame>,
+        stop: Arc<Stop>,
+        now: Instant,
+    ) -> Result<u64, u8> {
+        self.expire(now);
+        if !current(db, who) {
+            self.close_device(&who.device, Reason::Revoked);
+            return Err(ERR_REVOKED);
+        }
+        let Some((id, epoch)) = open.resume else {
+            return self.listen(who, events, stop, now);
+        };
+        let call = self.calls.get(&id).ok_or(ERR_EXPIRED)?;
+        let side = call
+            .side(who)
+            .filter(|_| epoch > 0 && epoch <= call.epoch)
+            .ok_or(ERR_BUSY)?;
+        if !allowed(db, call.peers[0], call.peers[1]) {
+            self.end(&id, Reason::Unavailable, None, now);
+            return Err(ERR_EXPIRED);
+        }
+        if !matches!(call.stage, Stage::Attaching | Stage::Active) {
+            self.end(&id, Reason::ConnectionLost, None, now);
+            return Err(ERR_EXPIRED);
+        }
+        let begin = call.recovery_deadline.is_none()
+            || (epoch == call.epoch
+                && (call.stage == Stage::Active || call.lanes.iter().any(Option::is_some)));
+        // Stop/remove before inserting: the old owner's Drop cannot detach this
+        // replacement, even when it runs after the new stream starts receiving.
+        self.remove_listener(&who.device);
+        let serial = self.listen(who, events, stop, now)?;
+        if begin {
+            self.reconnect(id, now);
+        } else {
+            let call = self.calls.get(&id).expect("retained call");
+            let mut sync =
+                vec![call.event(id, side, EventKind::Reconnecting, Reason::Ok, vec![], now)];
+            if let Some(cipher) = &call.rekeys[1 - side] {
+                sync.push(call.event(
+                    id,
+                    side,
+                    if side == 1 {
+                        EventKind::RekeyOffer
+                    } else {
+                        EventKind::RekeyAnswer
+                    },
+                    Reason::Ok,
+                    cipher.clone(),
+                    now,
+                ));
+            }
+            if call.stage == Stage::Active {
+                sync.push(call.event(id, side, EventKind::MediaReady, Reason::Ok, vec![], now));
+            }
+            for event in sync {
+                if !self.emit(who.device, event, now) {
+                    return Err(ERR_BUSY);
+                }
+            }
+        }
+        if self.live(who, serial) && self.calls.contains_key(&id) {
+            Ok(serial)
+        } else {
+            Err(ERR_EXPIRED)
+        }
+    }
+
+    fn try_emit(&self, device: [u8; 32], event: Event) -> bool {
+        self.listeners.get(&device).is_some_and(|l| {
             !l.stop.is_closed()
                 && event
                     .encode()
                     .ok()
                     .is_some_and(|p| l.events.try_send(Frame::control(OP_CALL_EVENT, p)).is_ok())
-        });
+        })
+    }
+
+    // Queue loss is transient, not a terminal close_device. Reconnecting emits
+    // use try_emit directly, so two full queues cannot recursively advance epochs.
+    fn emit(&mut self, device: [u8; 32], event: Event, now: Instant) -> bool {
+        let sent = self.try_emit(device, event);
         if !sent {
-            self.close_device(&device, Reason::ConnectionLost);
+            self.detach_device(&device, now);
         }
         sent
+    }
+
+    fn remove_listener(&mut self, device: &[u8; 32]) {
+        if let Some(listener) = self.listeners.remove(device) {
+            listener.stop.close();
+        }
+    }
+
+    fn detach_device(&mut self, device: &[u8; 32], now: Instant) {
+        self.remove_listener(device);
+        let ids: Vec<_> = self
+            .calls
+            .iter()
+            .filter(|(_, c)| c.peers.iter().any(|p| &p.device == device))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ids {
+            let call = self.calls.get(&id).expect("selected call");
+            if matches!(call.stage, Stage::Invited | Stage::Ringing) {
+                self.end(&id, Reason::ConnectionLost, None, now);
+            } else if call.recovery_deadline.is_none()
+                || call.stage == Stage::Active
+                || call.lanes.iter().any(Option::is_some)
+            {
+                self.reconnect(id, now);
+            }
+        }
+    }
+
+    fn reconnect(&mut self, id: [u8; 16], now: Instant) {
+        let Some(call) = self.calls.get_mut(&id) else {
+            return;
+        };
+        if !matches!(call.stage, Stage::Attaching | Stage::Active) {
+            return;
+        }
+        let deadline = *call
+            .recovery_deadline
+            .get_or_insert(now + Duration::from_secs(RECOVERY_SECS));
+        let Some(epoch) = call.epoch.checked_add(1).filter(|_| now < deadline) else {
+            self.end(&id, Reason::Expired, None, now);
+            return;
+        };
+        for slot in &mut call.lanes {
+            if let Some(slot) = slot.take() {
+                slot.stop.close();
+            }
+        }
+        call.epoch = epoch;
+        call.stage = Stage::Attaching;
+        call.deadline = Some((now + Duration::from_secs(ATTACH_SECS)).min(deadline));
+        call.rekeys = [None, None];
+        call.recovered = [false; 2];
+        call.ready_at = None;
+        let events = std::array::from_fn::<_, 2, _>(|side| {
+            (
+                call.peers[side].device,
+                call.event(id, side, EventKind::Reconnecting, Reason::Ok, vec![], now),
+            )
+        });
+        for (device, event) in events {
+            if !self.try_emit(device, event) {
+                self.remove_listener(&device);
+            }
+        }
+    }
+
+    fn detach_media(&mut self, attach: Attach, index: usize, serial: u64, now: Instant) {
+        if self.calls.get(&attach.call_id).is_some_and(|call| {
+            call.epoch == attach.epoch
+                && call.lanes[index]
+                    .as_ref()
+                    .is_some_and(|s| s.serial == serial)
+        }) {
+            self.reconnect(attach.call_id, now);
+        }
     }
 
     fn end(&mut self, id: &[u8; 16], reason: Reason, local: Option<Endpoint>, now: Instant) {
@@ -171,6 +329,7 @@ impl Hub {
                 self.emit(
                     call.peers[side].device,
                     call.event(*id, side, EventKind::Ended, why, vec![], now),
+                    now,
                 );
             }
         }
@@ -216,16 +375,27 @@ impl Hub {
             .map(|(d, _)| *d)
             .collect();
         for device in devices {
-            self.close_device(&device, Reason::ConnectionLost);
+            self.detach_device(&device, now);
         }
         let ids: Vec<_> = self
             .calls
             .iter()
-            .filter(|(_, c)| c.deadline.is_some_and(|d| now >= d))
+            .filter(|(_, c)| {
+                c.recovery_deadline.is_some_and(|d| now >= d)
+                    || c.deadline.is_some_and(|d| now >= d)
+            })
             .map(|(id, _)| *id)
             .collect();
         for id in ids {
-            self.end(&id, Reason::Expired, None, now);
+            if self
+                .calls
+                .get(&id)
+                .is_some_and(|c| c.recovery_deadline.is_some_and(|d| now < d))
+            {
+                self.reconnect(id, now);
+            } else {
+                self.end(&id, Reason::Expired, None, now);
+            }
         }
     }
 
@@ -257,6 +427,9 @@ impl Hub {
     ) -> Reason {
         if !self.live(who, serial) {
             return Reason::ConnectionLost;
+        }
+        if cmd.validate().is_err() {
+            return Reason::Invalid;
         }
         if !current(db, who) {
             self.close_device(&who.device, Reason::Revoked);
@@ -296,6 +469,10 @@ impl Hub {
                 peers: [who, peer],
                 stage: Stage::Invited,
                 deadline: Some(now + Duration::from_secs(RING_SECS)),
+                recovery_deadline: None,
+                rekeys: [None, None],
+                recovered: [false; 2],
+                ready_at: None,
                 lanes: std::array::from_fn(|_| None),
             };
             let event = call.event(
@@ -307,7 +484,7 @@ impl Hub {
                 now,
             );
             self.calls.insert(cmd.call_id, call);
-            return if self.emit(peer.device, event) {
+            return if self.emit(peer.device, event, now) {
                 Reason::Ok
             } else {
                 Reason::Unavailable
@@ -320,9 +497,36 @@ impl Hub {
                 Reason::Expired
             };
         };
-        let Some(side) = call.side(who).filter(|_| call.epoch == cmd.epoch) else {
+        let Some(side) = call
+            .side(who)
+            .filter(|_| cmd.epoch > 0 && cmd.epoch <= call.epoch)
+        else {
             return Reason::Invalid;
         };
+        if cmd.action == Action::End {
+            self.end(&cmd.call_id, Reason::LocalEnded, Some(who), now);
+            return Reason::Ok;
+        }
+        if !allowed(db, call.peers[0], call.peers[1]) {
+            self.end(&cmd.call_id, Reason::Unavailable, None, now);
+            return Reason::Unavailable;
+        }
+        if cmd.action == Action::Recover {
+            if !matches!(call.stage, Stage::Attaching | Stage::Active) {
+                return Reason::Invalid;
+            }
+            if cmd.epoch == call.epoch {
+                self.reconnect(cmd.call_id, now);
+            }
+            return if self.calls.contains_key(&cmd.call_id) {
+                Reason::Ok
+            } else {
+                Reason::Expired
+            };
+        }
+        if cmd.epoch != call.epoch {
+            return Reason::Invalid;
+        }
         match cmd.action {
             Action::Ringing
                 if side == 1 && matches!(call.stage, Stage::Invited | Stage::Ringing) =>
@@ -333,7 +537,7 @@ impl Hub {
                     .get_mut(&cmd.call_id)
                     .expect("checked call")
                     .stage = Stage::Ringing;
-                if self.emit(device, event) {
+                if self.emit(device, event, now) {
                     Reason::Ok
                 } else {
                     Reason::ConnectionLost
@@ -356,7 +560,7 @@ impl Hub {
                     cmd.ciphertext.clone(),
                     now,
                 );
-                if self.emit(device, event) {
+                if self.emit(device, event, now) {
                     Reason::Ok
                 } else {
                     Reason::ConnectionLost
@@ -368,8 +572,93 @@ impl Hub {
                 self.end(&cmd.call_id, Reason::Rejected, None, now);
                 Reason::Ok
             }
-            Action::End => {
-                self.end(&cmd.call_id, Reason::LocalEnded, Some(who), now);
+            Action::RekeyOffer | Action::RekeyAnswer
+                if cmd.epoch >= 2
+                    && ((cmd.action == Action::RekeyOffer && side == 0)
+                        || (cmd.action == Action::RekeyAnswer && side == 1)) =>
+            {
+                if let Some(cipher) = &call.rekeys[side] {
+                    return if *cipher == cmd.ciphertext {
+                        Reason::Ok
+                    } else {
+                        Reason::Invalid
+                    };
+                }
+                if call.recovery_deadline.is_none() {
+                    return Reason::Invalid;
+                }
+                if side == 1 && call.rekeys[0].is_none() {
+                    return Reason::Invalid;
+                }
+                let call = self.calls.get_mut(&cmd.call_id).expect("checked call");
+                call.rekeys[side] = Some(cmd.ciphertext.clone());
+                let device = call.peers[1 - side].device;
+                let event = call.event(
+                    cmd.call_id,
+                    1 - side,
+                    if side == 0 {
+                        EventKind::RekeyOffer
+                    } else {
+                        EventKind::RekeyAnswer
+                    },
+                    Reason::Ok,
+                    cmd.ciphertext.clone(),
+                    now,
+                );
+                // Cached before relay: a lost ACK/event is replayed on resume.
+                self.emit(device, event, now);
+                Reason::Ok
+            }
+            Action::Recovered
+                if call.stage == Stage::Active
+                    && cmd.epoch >= 2
+                    && call.ready_at.is_some_and(|ready| {
+                        now.saturating_duration_since(ready)
+                            >= Duration::from_secs(RECOVERY_STABLE_SECS)
+                    }) =>
+            {
+                let call = self.calls.get_mut(&cmd.call_id).expect("checked call");
+                if call.recovery_deadline.is_none() {
+                    return Reason::Ok;
+                }
+                if !call.recovered[side] {
+                    eprintln!(
+                        concat!(
+                            "{{\"event\":\"call_recovery_confirmation\",",
+                            "\"epoch\":{},\"side\":{},\"peer_confirmed\":{},\"remaining_ms\":{}}}"
+                        ),
+                        call.epoch,
+                        side,
+                        call.recovered[1 - side],
+                        call.recovery_deadline.map_or(0, |deadline| deadline
+                            .saturating_duration_since(now)
+                            .as_millis()
+                            .min(30_000)
+                            as u64),
+                    );
+                    call.recovered[side] = true;
+                }
+                if call.recovered.iter().all(|r| *r) {
+                    call.recovery_deadline = None;
+                    let events = std::array::from_fn::<_, 2, _>(|side| {
+                        (
+                            call.peers[side].device,
+                            call.event(
+                                cmd.call_id,
+                                side,
+                                EventKind::Recovered,
+                                Reason::Ok,
+                                vec![],
+                                now,
+                            ),
+                        )
+                    });
+                    for (device, event) in events {
+                        if !self.emit(device, event, now) {
+                            break;
+                        }
+                    }
+                }
                 Reason::Ok
             }
             _ => Reason::Invalid,
@@ -394,7 +683,10 @@ impl Hub {
             .side(who)
             .filter(|_| call.epoch == attach.epoch)
             .ok_or(ERR_BUSY)?;
-        if call.stage != Stage::Attaching || !allowed(db, call.peers[0], call.peers[1]) {
+        if call.stage != Stage::Attaching
+            || !allowed(db, call.peers[0], call.peers[1])
+            || (call.recovery_deadline.is_some() && call.rekeys.iter().any(Option::is_none))
+        {
             return Err(ERR_BUSY);
         }
         let index = side * 2 + attach.lane as usize;
@@ -411,6 +703,7 @@ impl Hub {
         if call.lanes.iter().all(Option::is_some) {
             call.stage = Stage::Active;
             call.deadline = None;
+            call.ready_at = Some(now);
             let events = [
                 call.event(
                     attach.call_id,
@@ -431,7 +724,7 @@ impl Hub {
             ];
             let devices = [call.peers[0].device, call.peers[1].device];
             for (device, event) in devices.into_iter().zip(events) {
-                if !self.emit(device, event) {
+                if !self.emit(device, event, now) {
                     return Err(ERR_BUSY);
                 }
             }
@@ -448,24 +741,33 @@ impl Hub {
         payload: &[u8],
         completed: Instant,
         counters: &mut RelayCounters,
-    ) -> Result<(), ()> {
+    ) -> Result<(), call_lane::Error> {
         let (expected, cap) = media_shape(attach.lane);
         if opcode != expected || payload.is_empty() || payload.len() > cap {
-            return Err(());
+            return Err(call_lane::Error::Invalid);
         }
-        let call = self.calls.get(&attach.call_id).ok_or(())?;
+        let call = self
+            .calls
+            .get(&attach.call_id)
+            .ok_or(call_lane::Error::Invalid)?;
         if call.epoch != attach.epoch
             || call.stage != Stage::Active
             || !call.lanes[index]
                 .as_ref()
-                .is_some_and(|s| s.serial == serial)
+                .is_some_and(|s| s.serial == serial && !s.stop.is_closed())
         {
-            return Err(());
+            return Err(call_lane::Error::Invalid);
+        }
+        if call.recovery_deadline.is_some_and(|d| Instant::now() >= d) {
+            self.end(&attach.call_id, Reason::Expired, None, Instant::now());
+            return Err(call_lane::Error::Lost);
         }
         // Pair same-kind lanes across endpoints: 0<->2 RTP, 1<->3 SRTCP.
-        let peer = call.lanes[index ^ 2].as_ref().ok_or(())?;
+        let peer = call.lanes[index ^ 2]
+            .as_ref()
+            .ok_or(call_lane::Error::Lost)?;
         if peer.stop.is_closed() {
-            return Err(());
+            return Err(call_lane::Error::Lost);
         }
         if completed + HOP <= Instant::now() {
             counters.route_expired = counters.route_expired.saturating_add(1);
@@ -487,7 +789,7 @@ impl Hub {
                 }
                 Ok(())
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => Err(()),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(call_lane::Error::Lost),
         }
     }
 }
@@ -535,7 +837,7 @@ fn media_shape(kind: LaneKind) -> (u8, usize) {
 }
 
 pub enum Handoff {
-    Signal,
+    Signal(Open),
     Media(Attach),
 }
 
@@ -547,24 +849,41 @@ struct Registered {
     hub: Arc<Mutex<Hub>>,
     registration: Registration,
 }
+impl Registered {
+    fn invalid(&self, db: &Connection, now: Instant) {
+        let mut hub = self.hub.lock().expect("call hub");
+        match self.registration {
+            Registration::Signal(who, serial) if hub.live(who, serial) => {
+                let reason = if current(db, who) {
+                    Reason::Invalid
+                } else {
+                    Reason::Revoked
+                };
+                hub.close_device(&who.device, reason);
+            }
+            Registration::Media(attach, index, serial)
+                if hub.calls.get(&attach.call_id).is_some_and(|call| {
+                    call.epoch == attach.epoch
+                        && call.lanes[index]
+                            .as_ref()
+                            .is_some_and(|s| s.serial == serial && !s.stop.is_closed())
+                }) =>
+            {
+                hub.end(&attach.call_id, Reason::Invalid, None, now);
+            }
+            _ => (),
+        }
+    }
+}
 impl Drop for Registered {
     fn drop(&mut self) {
         let mut hub = self.hub.lock().expect("call hub");
         match self.registration {
             Registration::Signal(who, serial) if hub.live(who, serial) => {
-                hub.close_device(&who.device, Reason::ConnectionLost)
+                hub.detach_device(&who.device, Instant::now())
             }
-            Registration::Media(attach, index, serial)
-                if hub.calls.get(&attach.call_id).is_some_and(|c| {
-                    c.lanes[index].as_ref().is_some_and(|s| s.serial == serial)
-                }) =>
-            {
-                hub.end(
-                    &attach.call_id,
-                    Reason::ConnectionLost,
-                    None,
-                    Instant::now(),
-                )
+            Registration::Media(attach, index, serial) => {
+                hub.detach_media(attach, index, serial, Instant::now())
             }
             _ => (),
         }
@@ -584,7 +903,7 @@ pub async fn serve(
     let revoked = session.notify.clone();
     let stop = Arc::new(Stop::default());
     let capacity = match handoff {
-        Handoff::Signal => EVENT_CAP,
+        Handoff::Signal(_) => EVENT_CAP,
         Handoff::Media(_) => 1,
     };
     let (outgoing, requests) = mpsc::channel(capacity);
@@ -597,8 +916,8 @@ pub async fn serve(
             Err(ERR_REVOKED)
         } else {
             match handoff {
-                Handoff::Signal => hub
-                    .listen(who, outgoing, stop.clone(), Instant::now())
+                Handoff::Signal(open) => hub
+                    .open(&db, who, open, outgoing, stop.clone(), Instant::now())
                     .map(|serial| Registration::Signal(who, serial)),
                 Handoff::Media(attach) => hub
                     .attach(&db, who, attach, outgoing, stop.clone(), Instant::now())
@@ -642,7 +961,7 @@ pub async fn serve(
     };
     let mut media_counters = call_lane::MediaCounters::default();
     let mut relay_counters = RelayCounters::default();
-    let _ = call_lane::run(
+    let result = call_lane::run(
         stream,
         noise,
         requests,
@@ -654,9 +973,9 @@ pub async fn serve(
         |opcode, payload, completed| match registered.registration {
             Registration::Signal(who, serial) => {
                 if opcode != OP_CALL_COMMAND {
-                    return Err(());
+                    return Err(call_lane::Error::Invalid);
                 }
-                let cmd = Command::decode(payload).map_err(|_| ())?;
+                let cmd = Command::decode(payload).map_err(|_| call_lane::Error::Invalid)?;
                 let ack = {
                     let db = st.db.lock().expect("db");
                     st.calls.lock().expect("call hub").command(
@@ -684,6 +1003,12 @@ pub async fn serve(
         },
     )
     .await;
+    if result == Err(call_lane::Error::Invalid) {
+        // Same DB->hub order as registration/revocation. Only this live owner
+        // can terminate; an invalid retired lane cannot affect its replacement.
+        let db = st.db.lock().expect("db");
+        registered.invalid(&db, Instant::now());
+    }
     if let Registration::Media(attach, index, _) = registered.registration {
         // Fixed schema, numeric/null metadata only; no identity or packet material.
         // Receive/relay describe this side's ingress; writes/expiry its egress.
@@ -825,6 +1150,638 @@ mod tests {
             now,
         )
         .reason
+    }
+
+    fn accepted(
+        db: &Connection,
+        peers: [Endpoint; 2],
+        id: [u8; 16],
+        now: Instant,
+    ) -> (Hub, [u64; 2], [mpsc::Receiver<Frame>; 2]) {
+        let mut hub = Hub::default();
+        let (a, mut arx, _) = listener(&mut hub, peers[0], now);
+        let (b, mut brx, _) = listener(&mut hub, peers[1], now);
+        assert_eq!(invite(&mut hub, db, peers, a, id, now), Reason::Ok);
+        assert_eq!(event(&mut brx).kind, EventKind::Invite);
+        for action in [Action::Ringing, Action::Accept] {
+            assert_eq!(
+                hub.command(db, peers[1], b, command(action, id, [0; 16]), now)
+                    .reason,
+                Reason::Ok
+            );
+            event(&mut arx);
+        }
+        (hub, [a, b], [arx, brx])
+    }
+
+    fn recovery_command(action: Action, id: [u8; 16], epoch: u64) -> Command {
+        Command {
+            request_id: 2,
+            action,
+            call_id: id,
+            epoch,
+            recipient: [0; 16],
+            ciphertext: if matches!(action, Action::RekeyOffer | Action::RekeyAnswer) {
+                vec![action as u8; 48]
+            } else {
+                vec![]
+            },
+        }
+    }
+
+    fn attach_four(
+        hub: &mut Hub,
+        db: &Connection,
+        peers: [Endpoint; 2],
+        id: [u8; 16],
+        epoch: u64,
+        now: Instant,
+    ) -> Vec<(Attach, u64, mpsc::Receiver<Frame>, Arc<Stop>)> {
+        (0..4)
+            .map(|index| {
+                let attach = Attach {
+                    call_id: id,
+                    epoch,
+                    lane: if index % 2 == 0 {
+                        LaneKind::Rtp
+                    } else {
+                        LaneKind::Srtcp
+                    },
+                };
+                let (tx, rx) = mpsc::channel(1);
+                let stop = Arc::new(Stop::default());
+                let (serial, slot) = hub
+                    .attach(db, peers[index / 2], attach, tx, stop.clone(), now)
+                    .unwrap();
+                assert_eq!(slot, index);
+                (attach, serial, rx, stop)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn calls_recover_same_identity_fresh_routes_stable_handshake_and_stale_end() {
+        let (db, peers) = database();
+        let peers = [peers[0], peers[1]];
+        let now = Instant::now();
+        let id = [31; 16];
+        let (mut hub, [a, b], [mut arx, mut brx]) = accepted(&db, peers, id, now);
+        let old = attach_four(&mut hub, &db, peers, id, 1, now);
+        assert_eq!(event(&mut arx).kind, EventKind::MediaReady);
+        assert_eq!(event(&mut brx).kind, EventKind::MediaReady);
+        hub.detach_media(old[0].0, 0, old[0].1, now);
+        let deadline = now + Duration::from_secs(RECOVERY_SECS);
+        assert_eq!(hub.calls[&id].epoch, 2);
+        assert_eq!(hub.calls[&id].recovery_deadline, Some(deadline));
+        assert!(hub.busy(&peers[0].device) && hub.busy(&peers[1].device));
+        for (_, _, _, stop) in &old {
+            assert!(stop.is_closed());
+        }
+        for rx in [&mut arx, &mut brx] {
+            let e = event(rx);
+            assert_eq!(
+                (e.kind, e.call_id, e.epoch, e.remaining_ms),
+                (EventKind::Reconnecting, id, 2, 30_000)
+            );
+        }
+        for (index, (attach, serial, _, _)) in old.iter().enumerate() {
+            hub.detach_media(*attach, index, *serial, now);
+        }
+        assert_eq!(
+            hub.command(
+                &db,
+                peers[0],
+                a,
+                recovery_command(Action::Recover, id, 1),
+                now
+            )
+            .reason,
+            Reason::Ok
+        );
+        assert_eq!(hub.calls[&id].epoch, 2, "same failed epoch advances once");
+        let (tx, _rx) = mpsc::channel(1);
+        assert!(hub
+            .attach(
+                &db,
+                peers[0],
+                Attach {
+                    epoch: 2,
+                    ..old[0].0
+                },
+                tx,
+                Arc::new(Stop::default()),
+                now
+            )
+            .is_err());
+        let offer = recovery_command(Action::RekeyOffer, id, 2);
+        let answer = recovery_command(Action::RekeyAnswer, id, 2);
+        assert_eq!(
+            hub.command(&db, peers[1], b, offer.clone(), now).reason,
+            Reason::Invalid
+        );
+        assert_eq!(
+            hub.command(&db, peers[1], b, answer.clone(), now).reason,
+            Reason::Invalid
+        );
+        assert_eq!(
+            hub.command(&db, peers[0], a, offer.clone(), now).reason,
+            Reason::Ok
+        );
+        assert_eq!(event(&mut brx).ciphertext, offer.ciphertext);
+        assert_eq!(
+            hub.command(&db, peers[0], a, offer.clone(), now).reason,
+            Reason::Ok
+        );
+        assert!(
+            brx.try_recv().is_err(),
+            "exact retry does not enqueue duplicate event"
+        );
+        let mut different = offer.clone();
+        different.ciphertext[0] ^= 1;
+        assert_eq!(
+            hub.command(&db, peers[0], a, different, now).reason,
+            Reason::Invalid
+        );
+        assert_eq!(
+            hub.command(&db, peers[1], b, answer, now).reason,
+            Reason::Ok
+        );
+        assert_eq!(event(&mut arx).kind, EventKind::RekeyAnswer);
+        let ready = now + Duration::from_secs(2);
+        let mut new = attach_four(&mut hub, &db, peers, id, 2, ready);
+        for rx in [&mut arx, &mut brx] {
+            let e = event(rx);
+            assert_eq!(
+                (e.kind, e.epoch, e.remaining_ms),
+                (EventKind::MediaReady, 2, 28_000)
+            );
+        }
+        assert_eq!(
+            hub.calls[&id].recovery_deadline,
+            Some(deadline),
+            "four lanes do not clear episode"
+        );
+        let mut counters = RelayCounters::default();
+        assert!(hub
+            .relay(
+                old[0].0,
+                0,
+                old[0].1,
+                OP_RTP,
+                &[1],
+                Instant::now(),
+                &mut counters
+            )
+            .is_err());
+        hub.detach_media(
+            Attach {
+                epoch: 1,
+                ..new[0].0
+            },
+            0,
+            new[0].1,
+            ready,
+        );
+        hub.detach_media(new[0].0, 0, old[0].1, ready);
+        assert_eq!(
+            hub.calls[&id].epoch, 2,
+            "both epoch and serial guard cleanup"
+        );
+        hub.relay(
+            new[0].0,
+            0,
+            new[0].1,
+            OP_RTP,
+            &[7],
+            Instant::now(),
+            &mut counters,
+        )
+        .unwrap();
+        assert_eq!(new[2].2.try_recv().unwrap().payload, [7]);
+        let recovered = recovery_command(Action::Recovered, id, 2);
+        assert_eq!(
+            hub.command(&db, peers[0], a, recovered.clone(), ready)
+                .reason,
+            Reason::Invalid
+        );
+        let stable = ready + Duration::from_secs(RECOVERY_STABLE_SECS);
+        assert_eq!(
+            hub.command(&db, peers[0], a, recovered.clone(), stable)
+                .reason,
+            Reason::Ok
+        );
+        assert_eq!(hub.calls[&id].recovery_deadline, Some(deadline));
+        assert_eq!(
+            hub.command(
+                &db,
+                peers[1],
+                b,
+                recovery_command(Action::Recovered, id, 1),
+                stable
+            )
+            .reason,
+            Reason::Invalid
+        );
+        assert_eq!(
+            hub.command(&db, peers[1], b, recovered.clone(), stable)
+                .reason,
+            Reason::Ok
+        );
+        assert_eq!(hub.calls[&id].recovery_deadline, None);
+        assert_eq!(event(&mut arx).kind, EventKind::Recovered);
+        assert_eq!(event(&mut brx).kind, EventKind::Recovered);
+        assert_eq!(
+            hub.command(&db, peers[0], a, recovered, stable).reason,
+            Reason::Ok
+        );
+        assert_eq!(
+            hub.command(&db, peers[0], a, offer, stable).reason,
+            Reason::Ok
+        );
+        assert!(brx.try_recv().is_err());
+        hub.detach_media(new[0].0, 0, new[0].1, stable);
+        assert_eq!(hub.calls[&id].epoch, 3);
+        assert_eq!(
+            hub.calls[&id].recovery_deadline,
+            Some(stable + Duration::from_secs(RECOVERY_SECS))
+        );
+        event(&mut arx);
+        event(&mut brx);
+        assert_eq!(
+            hub.command(
+                &db,
+                peers[0],
+                a,
+                recovery_command(Action::End, id, 4),
+                stable
+            )
+            .reason,
+            Reason::Invalid
+        );
+        assert_eq!(
+            hub.command(&db, peers[0], a, command(Action::End, id, [0; 16]), stable)
+                .reason,
+            Reason::Ok
+        );
+        assert_eq!(event(&mut arx).reason, Reason::LocalEnded);
+        assert_eq!(event(&mut brx).reason, Reason::RemoteEnded);
+        assert!(hub.calls.is_empty());
+        assert_eq!(
+            hub.command(&db, peers[0], a, command(Action::End, id, [0; 16]), stable)
+                .reason,
+            Reason::Ok
+        );
+    }
+
+    #[test]
+    fn calls_resume_replays_bounded_peer_cache_and_old_signal_drop_is_inert() {
+        let (db, peers) = database();
+        let now = Instant::now();
+        let id = [32; 16];
+        let pair = [peers[0], peers[1]];
+        let (mut hub, [a, b], [mut arx, mut brx]) = accepted(&db, pair, id, now);
+        let old_stop = hub.listeners[&peers[1].device].stop.clone();
+        let (tx, mut resumed) = mpsc::channel(EVENT_CAP);
+        let serial = hub
+            .open(
+                &db,
+                peers[1],
+                Open {
+                    resume: Some((id, 1)),
+                },
+                tx,
+                Arc::new(Stop::default()),
+                now,
+            )
+            .unwrap();
+        assert_ne!(serial, b);
+        assert!(old_stop.is_closed());
+        assert_eq!(event(&mut resumed).kind, EventKind::Reconnecting);
+        assert_eq!(event(&mut arx).epoch, 2);
+        assert!(brx.try_recv().is_err());
+        let offer = recovery_command(Action::RekeyOffer, id, 2);
+        assert_eq!(
+            hub.command(&db, peers[0], a, offer.clone(), now).reason,
+            Reason::Ok
+        );
+        assert_eq!(event(&mut resumed).ciphertext, offer.ciphertext);
+        assert_eq!(
+            hub.command(
+                &db,
+                peers[1],
+                serial,
+                recovery_command(Action::RekeyAnswer, id, 2),
+                now
+            )
+            .reason,
+            Reason::Ok
+        );
+        event(&mut arx);
+        let lanes = attach_four(&mut hub, &db, pair, id, 2, now);
+        event(&mut arx);
+        event(&mut resumed);
+        let (tx, mut replay) = mpsc::channel(EVENT_CAP);
+        let newest = hub
+            .open(
+                &db,
+                peers[1],
+                Open {
+                    resume: Some((id, 1)),
+                },
+                tx,
+                Arc::new(Stop::default()),
+                now,
+            )
+            .unwrap();
+        assert_eq!(hub.calls[&id].epoch, 2);
+        assert_eq!(event(&mut replay).kind, EventKind::Reconnecting);
+        assert_eq!(event(&mut replay).ciphertext, offer.ciphertext);
+        assert_eq!(event(&mut replay).kind, EventKind::MediaReady);
+        assert!(replay.try_recv().is_err());
+        for (who, open, expected) in [
+            (peers[1], Open { resume: None }, ERR_BUSY),
+            (
+                peers[1],
+                Open {
+                    resume: Some(([99; 16], 1)),
+                },
+                ERR_EXPIRED,
+            ),
+            (
+                peers[1],
+                Open {
+                    resume: Some((id, 3)),
+                },
+                ERR_BUSY,
+            ),
+            (
+                peers[2],
+                Open {
+                    resume: Some((id, 2)),
+                },
+                ERR_BUSY,
+            ),
+        ] {
+            let (tx, _rx) = mpsc::channel(EVENT_CAP);
+            assert_eq!(
+                hub.open(&db, who, open, tx, Arc::new(Stop::default()), now),
+                Err(expected)
+            );
+            assert!(hub.live(peers[1], newest));
+        }
+        let deadline = hub.calls[&id].recovery_deadline;
+        let old_serial = newest;
+        let (tx, mut current) = mpsc::channel(EVENT_CAP);
+        let newest = hub
+            .open(
+                &db,
+                peers[1],
+                Open {
+                    resume: Some((id, 2)),
+                },
+                tx,
+                Arc::new(Stop::default()),
+                now + Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_eq!(hub.calls[&id].epoch, 3);
+        assert_eq!(hub.calls[&id].recovery_deadline, deadline);
+        assert!(hub.calls[&id].rekeys.iter().all(Option::is_none));
+        assert!(hub.calls[&id].lanes.iter().all(Option::is_none));
+        assert_eq!(event(&mut current).remaining_ms, 29_000);
+        for (index, (attach, serial, _, stop)) in lanes.iter().enumerate() {
+            assert!(stop.is_closed());
+            hub.detach_media(*attach, index, *serial, now + Duration::from_secs(1));
+        }
+        assert_eq!(hub.calls[&id].epoch, 3);
+        for (side, action) in [(0, Action::RekeyOffer), (1, Action::RekeyAnswer)] {
+            assert_eq!(
+                hub.command(
+                    &db,
+                    peers[side],
+                    [a, newest][side],
+                    recovery_command(action, id, 3),
+                    now + Duration::from_secs(1)
+                )
+                .reason,
+                Reason::Ok
+            );
+        }
+        let partial = Attach {
+            call_id: id,
+            epoch: 3,
+            lane: LaneKind::Rtp,
+        };
+        let partial_stop = Arc::new(Stop::default());
+        let (tx, _rx) = mpsc::channel(1);
+        let (partial_serial, index) = hub
+            .attach(
+                &db,
+                peers[0],
+                partial,
+                tx,
+                partial_stop.clone(),
+                now + Duration::from_secs(1),
+            )
+            .unwrap();
+        assert!(hub.calls[&id].stage == Stage::Attaching);
+        let partial_signal = newest;
+        let (tx, mut current) = mpsc::channel(EVENT_CAP);
+        let newest = hub
+            .open(
+                &db,
+                peers[1],
+                Open {
+                    resume: Some((id, 3)),
+                },
+                tx,
+                Arc::new(Stop::default()),
+                now + Duration::from_secs(2),
+            )
+            .unwrap();
+        assert_eq!(hub.calls[&id].epoch, 4);
+        assert_eq!(hub.calls[&id].recovery_deadline, deadline);
+        assert_eq!(event(&mut current).remaining_ms, 28_000);
+        assert!(partial_stop.is_closed());
+        assert!(hub.calls[&id].lanes.iter().all(Option::is_none));
+        hub.detach_media(partial, index, partial_serial, now + Duration::from_secs(2));
+        let hub = Arc::new(Mutex::new(hub));
+        for registration in [
+            Registration::Signal(peers[1], b),
+            Registration::Signal(peers[1], serial),
+            Registration::Signal(peers[1], old_serial),
+            Registration::Signal(peers[1], partial_signal),
+            Registration::Media(partial, index, partial_serial),
+        ] {
+            let old = Registered {
+                hub: hub.clone(),
+                registration,
+            };
+            old.invalid(&db, now + Duration::from_secs(2));
+            drop(old);
+        }
+        assert!(hub.lock().unwrap().live(peers[1], newest));
+        assert_eq!(hub.lock().unwrap().calls[&id].epoch, 4);
+        db.execute("UPDATE contact_permissions SET state='blocked'", [])
+            .unwrap();
+        let (tx, _rx) = mpsc::channel(EVENT_CAP);
+        assert_eq!(
+            hub.lock().unwrap().open(
+                &db,
+                peers[1],
+                Open {
+                    resume: Some((id, 2))
+                },
+                tx,
+                Arc::new(Stop::default()),
+                now
+            ),
+            Err(ERR_EXPIRED)
+        );
+        assert!(hub.lock().unwrap().calls.is_empty());
+    }
+
+    #[test]
+    fn calls_invalid_media_cleanup_requires_both_epoch_and_serial() {
+        let (db, peers) = database();
+        let pair = [peers[0], peers[1]];
+        let now = Instant::now();
+        let id = [36; 16];
+        let (mut hub, [a, _], [mut arx, mut brx]) = accepted(&db, pair, id, now);
+        let lanes = attach_four(&mut hub, &db, pair, id, 1, now);
+        event(&mut arx);
+        event(&mut brx);
+        let hub = Arc::new(Mutex::new(hub));
+        let (attach, serial, _, _) = &lanes[0];
+        for registration in [
+            Registration::Signal(peers[0], a + 100),
+            Registration::Media(
+                Attach {
+                    epoch: 2,
+                    ..*attach
+                },
+                0,
+                *serial,
+            ),
+            Registration::Media(*attach, 0, serial + 100),
+        ] {
+            let stale = Registered {
+                hub: hub.clone(),
+                registration,
+            };
+            stale.invalid(&db, now);
+            drop(stale);
+            assert_eq!(hub.lock().unwrap().calls[&id].epoch, 1);
+            assert!(hub.lock().unwrap().calls[&id].stage == Stage::Active);
+        }
+        let current = Registered {
+            hub: hub.clone(),
+            registration: Registration::Media(*attach, 0, *serial),
+        };
+        current.invalid(&db, now);
+        drop(current);
+        assert!(hub.lock().unwrap().calls.is_empty());
+        assert_eq!(event(&mut arx).reason, Reason::Invalid);
+        assert_eq!(event(&mut brx).reason, Reason::Invalid);
+    }
+
+    #[test]
+    fn calls_recovery_retries_never_extend_episode_and_epoch_never_wraps() {
+        let (db, peers) = database();
+        let now = Instant::now();
+        let id = [33; 16];
+        let (mut hub, [a, _], [mut arx, mut brx]) = accepted(&db, [peers[0], peers[1]], id, now);
+        assert_eq!(
+            hub.command(
+                &db,
+                peers[0],
+                a,
+                recovery_command(Action::Recover, id, 1),
+                now
+            )
+            .reason,
+            Reason::Ok
+        );
+        event(&mut arx);
+        event(&mut brx);
+        let deadline = now + Duration::from_secs(RECOVERY_SECS);
+        for (seconds, epoch, remaining) in [(10, 3, 20_000), (20, 4, 10_000)] {
+            let at = now + Duration::from_secs(seconds);
+            hub.calls.get_mut(&id).unwrap().rekeys = [Some(vec![1]), Some(vec![2])];
+            for listener in hub.listeners.values_mut() {
+                listener.last = at;
+            }
+            hub.expire(at);
+            assert_eq!(hub.calls[&id].epoch, epoch);
+            assert_eq!(hub.calls[&id].recovery_deadline, Some(deadline));
+            assert!(hub.calls[&id].rekeys.iter().all(Option::is_none));
+            for rx in [&mut arx, &mut brx] {
+                assert_eq!(event(rx).remaining_ms, remaining);
+            }
+        }
+        for listener in hub.listeners.values_mut() {
+            listener.last = deadline;
+        }
+        hub.expire(deadline);
+        assert!(hub.calls.is_empty());
+        assert_eq!(event(&mut arx).reason, Reason::Expired);
+        assert_eq!(event(&mut brx).reason, Reason::Expired);
+        let (mut hub, [a, _], [mut arx, mut brx]) = accepted(&db, [peers[0], peers[1]], id, now);
+        hub.calls.get_mut(&id).unwrap().epoch = u64::MAX;
+        assert_eq!(
+            hub.command(
+                &db,
+                peers[0],
+                a,
+                recovery_command(Action::Recover, id, u64::MAX),
+                now
+            )
+            .reason,
+            Reason::Expired
+        );
+        assert!(hub.calls.is_empty());
+        assert_eq!(event(&mut arx).epoch, u64::MAX);
+        assert_eq!(event(&mut brx).reason, Reason::Expired);
+    }
+
+    #[test]
+    fn calls_transient_queue_and_liveness_loss_keep_accepted_call_without_storms() {
+        let (db, peers) = database();
+        let now = Instant::now();
+        let id = [34; 16];
+        let (mut hub, _, [mut arx, mut brx]) = accepted(&db, [peers[0], peers[1]], id, now);
+        let _lanes = attach_four(&mut hub, &db, [peers[0], peers[1]], id, 1, now);
+        let ready = event(&mut arx);
+        event(&mut brx);
+        for _ in 0..EVENT_CAP {
+            assert!(hub.try_emit(peers[0].device, ready.clone()));
+            assert!(hub.try_emit(peers[1].device, ready.clone()));
+        }
+        assert!(!hub.emit(peers[0].device, ready, now));
+        assert!(hub.listeners.is_empty());
+        assert_eq!(
+            hub.calls[&id].epoch, 2,
+            "both overflowing listeners reserve only one epoch"
+        );
+        assert!(hub.calls[&id].lanes.iter().all(Option::is_none));
+        let (mut hub, _, [mut arx, mut brx]) = accepted(&db, [peers[0], peers[1]], id, now);
+        hub.expire(now + Duration::from_secs(LIVENESS_SECS));
+        assert_eq!(hub.calls[&id].epoch, 2);
+        assert!(hub.listeners.is_empty());
+        let mut reconnects = 0;
+        for rx in [&mut arx, &mut brx] {
+            while let Ok(frame) = rx.try_recv() {
+                assert_eq!(
+                    Event::decode(&frame.payload).unwrap().kind,
+                    EventKind::Reconnecting
+                );
+                reconnects += 1;
+            }
+        }
+        assert_eq!(
+            reconnects, 1,
+            "first expired listener notifies only the other"
+        );
     }
 
     #[test]
@@ -1323,7 +2280,7 @@ mod tests {
                 reason: Reason::RemoteEnded,
                 ciphertext: vec![],
             };
-            assert!(hub.emit(peers[1].device, dummy));
+            assert!(hub.emit(peers[1].device, dummy, now));
         }
         assert_eq!(
             invite(&mut hub, &db, [peers[0], peers[1]], a, id, now),
@@ -1614,6 +2571,243 @@ mod tests {
         let e = Event::decode(&p).unwrap();
         assert_eq!(e.kind, kind);
         e
+    }
+
+    #[tokio::test]
+    async fn calls_actual_tcp_invalid_signal_and_media_are_terminal_not_reconnecting() {
+        // Both source owners: corrupt Noise, authenticated trailing frame data,
+        // and a correctly encrypted but invalid media callback payload.
+        for case in 0..4 {
+            let (st, peers) = state().await;
+            let post = Arc::new(Semaphore::new(8));
+            let id = [37; 16];
+            let mut a = signal(st.clone(), 0, post.clone()).await;
+            let mut b = signal(st.clone(), 1, post.clone()).await;
+            assert_eq!(
+                ack(&mut a, command(Action::Invite, id, peers[1].user))
+                    .await
+                    .reason,
+                Reason::Ok
+            );
+            pushed(&mut b, EventKind::Invite).await;
+            for (action, kind) in [
+                (Action::Ringing, EventKind::Ringing),
+                (Action::Accept, EventKind::Accepted),
+            ] {
+                assert_eq!(
+                    ack(&mut b, command(action, id, [0; 16])).await.reason,
+                    Reason::Ok
+                );
+                pushed(&mut a, kind).await;
+            }
+            let mut media = Vec::new();
+            for index in 0..4 {
+                let attach = Attach {
+                    call_id: id,
+                    epoch: 1,
+                    lane: if index % 2 == 0 {
+                        LaneKind::Rtp
+                    } else {
+                        LaneKind::Srtcp
+                    },
+                };
+                let mut c = connect(st.clone(), index / 2, post.clone()).await;
+                c.send(OP_CALL_ATTACH, &attach.encode().unwrap()).await;
+                assert_eq!(c.recv().await, (OP_CALL_ATTACHED, attach.encode().unwrap()));
+                media.push(c);
+            }
+            pushed(&mut a, EventKind::MediaReady).await;
+            pushed(&mut b, EventKind::MediaReady).await;
+            let source = if case < 2 { &mut a } else { &mut media[0] };
+            let wire = match case {
+                0 | 2 => {
+                    let mut wire = source.encrypted(OP_RTP, &[1]);
+                    *wire.last_mut().unwrap() ^= 1;
+                    wire
+                }
+                1 => {
+                    let mut inner = encode_frame(
+                        OP_CALL_COMMAND,
+                        &command(Action::End, id, [0; 16]).encode().unwrap(),
+                    )
+                    .unwrap();
+                    inner.push(0);
+                    let mut wire = vec![0; inner.len() + 18];
+                    let n = source.noise.write_message(&inner, &mut wire[2..]).unwrap();
+                    wire[..2].copy_from_slice(&(n as u16).to_be_bytes());
+                    wire.truncate(n + 2);
+                    wire
+                }
+                3 => source.encrypted(OP_RTP, &[]),
+                _ => unreachable!(),
+            };
+            source.socket.write_all(&wire).await.unwrap();
+            let ended = pushed(&mut b, EventKind::Ended).await;
+            assert_eq!(
+                (ended.call_id, ended.epoch, ended.reason),
+                (id, 1, Reason::Invalid)
+            );
+            assert!(st.calls.lock().unwrap().calls.is_empty());
+            drop(a);
+            drop(b);
+            drop(media);
+            timeout(Duration::from_secs(2), async {
+                while post.available_permits() != 8 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn calls_actual_tcp_resume_replays_rekey_and_relay_uses_same_call_new_epoch() {
+        let (st, peers) = state().await;
+        let post = Arc::new(Semaphore::new(8));
+        let id = [35; 16];
+        let mut unknown = connect(st.clone(), 0, post.clone()).await;
+        unknown
+            .send(
+                OP_CALL_OPEN,
+                &Open {
+                    resume: Some((id, 1)),
+                }
+                .encode()
+                .unwrap(),
+            )
+            .await;
+        assert_eq!(unknown.recv().await, (OP_ERROR, vec![ERR_EXPIRED]));
+        assert!(st.calls.lock().unwrap().calls.is_empty());
+        drop(unknown);
+        let mut a = signal(st.clone(), 0, post.clone()).await;
+        let mut b = signal(st.clone(), 1, post.clone()).await;
+        assert_eq!(
+            ack(&mut a, command(Action::Invite, id, peers[1].user))
+                .await
+                .reason,
+            Reason::Ok
+        );
+        pushed(&mut b, EventKind::Invite).await;
+        for (action, kind) in [
+            (Action::Ringing, EventKind::Ringing),
+            (Action::Accept, EventKind::Accepted),
+        ] {
+            assert_eq!(
+                ack(&mut b, command(action, id, [0; 16])).await.reason,
+                Reason::Ok
+            );
+            pushed(&mut a, kind).await;
+        }
+        // Already accepted, but not yet attached, is also recoverable.
+        drop(a);
+        assert_eq!(pushed(&mut b, EventKind::Reconnecting).await.epoch, 2);
+        let mut a = connect(st.clone(), 0, post.clone()).await;
+        a.send(
+            OP_CALL_OPEN,
+            &Open {
+                resume: Some((id, 1)),
+            }
+            .encode()
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(a.recv().await, (OP_CALL_READY, vec![VERSION, PROFILE]));
+        assert_eq!(pushed(&mut a, EventKind::Reconnecting).await.epoch, 2);
+        let offer = recovery_command(Action::RekeyOffer, id, 2);
+        assert_eq!(ack(&mut a, offer.clone()).await.reason, Reason::Ok);
+        // Lose the offer event and resume the listener: server replays the exact
+        // stored cipher, without another epoch or another encrypt/ratchet step.
+        drop(b);
+        let mut b = connect(st.clone(), 1, post.clone()).await;
+        b.send(
+            OP_CALL_OPEN,
+            &Open {
+                resume: Some((id, 1)),
+            }
+            .encode()
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(b.recv().await, (OP_CALL_READY, vec![VERSION, PROFILE]));
+        assert_eq!(pushed(&mut b, EventKind::Reconnecting).await.epoch, 2);
+        assert_eq!(
+            pushed(&mut b, EventKind::RekeyOffer).await.ciphertext,
+            offer.ciphertext
+        );
+        assert_eq!(
+            ack(&mut b, recovery_command(Action::RekeyAnswer, id, 2))
+                .await
+                .reason,
+            Reason::Ok
+        );
+        assert_eq!(pushed(&mut a, EventKind::RekeyAnswer).await.epoch, 2);
+        assert_eq!(ack(&mut a, offer).await.reason, Reason::Ok);
+        let mut media = vec![];
+        for index in 0..4 {
+            let attach = Attach {
+                call_id: id,
+                epoch: 2,
+                lane: if index % 2 == 0 {
+                    LaneKind::Rtp
+                } else {
+                    LaneKind::Srtcp
+                },
+            };
+            let mut c = connect(st.clone(), index / 2, post.clone()).await;
+            c.send(OP_CALL_ATTACH, &attach.encode().unwrap()).await;
+            assert_eq!(c.recv().await, (OP_CALL_ATTACHED, attach.encode().unwrap()));
+            media.push(c);
+        }
+        assert_eq!(pushed(&mut a, EventKind::MediaReady).await.epoch, 2);
+        assert_eq!(pushed(&mut b, EventKind::MediaReady).await.epoch, 2);
+        media[0].send(OP_RTP, &[7; RTP_CAP]).await;
+        assert_eq!(media[2].recv().await, (OP_RTP, vec![7; RTP_CAP]));
+        media[3].send(OP_SRTCP, &[8; SRTCP_CAP]).await;
+        assert_eq!(media[1].recv().await, (OP_SRTCP, vec![8; SRTCP_CAP]));
+        assert!(st.calls.lock().unwrap().calls[&id]
+            .recovery_deadline
+            .is_some());
+        tokio::time::sleep(Duration::from_secs(RECOVERY_STABLE_SECS)).await;
+        for c in [&mut a, &mut b] {
+            assert_eq!(
+                ack(c, recovery_command(Action::Recovered, id, 2))
+                    .await
+                    .reason,
+                Reason::Ok
+            );
+        }
+        assert_eq!(pushed(&mut a, EventKind::Recovered).await.epoch, 2);
+        assert_eq!(pushed(&mut b, EventKind::Recovered).await.epoch, 2);
+        assert!(st.calls.lock().unwrap().calls[&id]
+            .recovery_deadline
+            .is_none());
+        drop(media.remove(0));
+        assert_eq!(pushed(&mut a, EventKind::Reconnecting).await.epoch, 3);
+        assert_eq!(pushed(&mut b, EventKind::Reconnecting).await.epoch, 3);
+        assert_eq!(
+            ack(&mut a, command(Action::End, id, [0; 16])).await.reason,
+            Reason::Ok
+        );
+        assert_eq!(
+            pushed(&mut a, EventKind::Ended).await.reason,
+            Reason::LocalEnded
+        );
+        assert_eq!(
+            pushed(&mut b, EventKind::Ended).await.reason,
+            Reason::RemoteEnded
+        );
+        assert!(st.calls.lock().unwrap().calls.is_empty());
+        drop(a);
+        drop(b);
+        drop(media);
+        timeout(Duration::from_secs(2), async {
+            while post.available_permits() != 8 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

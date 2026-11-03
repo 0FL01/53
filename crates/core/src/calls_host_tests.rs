@@ -335,6 +335,126 @@ fn pump(ports: &[AudioPort], millis: u64) {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn calls_host_transient_tcp_loss_rekeys_same_call_and_resumes_real_media() {
+    let mut server = Server::start("recover-media");
+    let (alice, bobby) = server.pair().await;
+    let upstream = server.addr.clone();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy_address = listener.local_addr().unwrap().to_string();
+    listener.set_nonblocking(true).unwrap();
+    let (outage, mut changed) = watch::channel(false);
+    let proxy = thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+            let mut streams = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    result = changed.changed() => { if result.is_err() { break; } }
+                    result = listener.accept() => {
+                        let (mut incoming, _) = result.unwrap();
+                        if *changed.borrow() { continue; }
+                        let upstream = upstream.clone();
+                        let mut loss = changed.clone();
+                        loss.borrow_and_update();
+                        streams.spawn(async move {
+                            let mut outgoing = tokio::net::TcpStream::connect(upstream).await.unwrap();
+                            tokio::select! {
+                                _ = tokio::io::copy_bidirectional(&mut incoming, &mut outgoing) => (),
+                                _ = loss.changed() => (),
+                            }
+                        });
+                    }
+                    _ = streams.join_next(), if !streams.is_empty() => (),
+                }
+            }
+            streams.abort_all();
+            while streams.join_next().await.is_some() {}
+        });
+    });
+    // Forward complete opaque TCP streams. This fixture cannot forge authenticated
+    // commands, media keys, ACKs or feedback, and never stands in for Android DNS.
+    let direct = std::mem::replace(&mut server.addr, proxy_address);
+    let a = Client::start(&server, &alice.0, None);
+    let b = Client::start(&server, &bobby.0, None);
+    server.addr = direct;
+    assert!(a.wait(CallPhase::Listening).available);
+    assert!(b.wait(CallPhase::Listening).available);
+    a.calls.dial(bobby.1.clone()).unwrap();
+    let outgoing = a.wait(CallPhase::Dialing);
+    a.wait(CallPhase::Ringing);
+    let incoming = b.wait(CallPhase::Ringing);
+    b.calls.accept(incoming.call_id).unwrap();
+    let mut am = a.wait(CallPhase::Connecting);
+    let mut bm = b.wait(CallPhase::Connecting);
+    pump(&[audio(am.media_handle), audio(bm.media_handle)], 1_000);
+    a.wait(CallPhase::Active);
+    b.wait(CallPhase::Active);
+    for _ in 0..2 {
+        outage.send_replace(true);
+        for client in [&a, &b] {
+            let reconnecting = client.wait(CallPhase::Reconnecting);
+            assert_eq!(reconnecting.call_id, outgoing.call_id);
+            assert_eq!(reconnecting.media_handle, 0);
+            assert!(busy(&client.owner));
+        }
+        for old in [am.media_handle, bm.media_handle] {
+            assert!(crate::call_media_handles::retire(old).unwrap().stopped);
+            assert!(crate::call_media_handles::get(old).is_none());
+        }
+        let old = (am.media_epoch, am.media_handle, bm.media_handle);
+        outage.send_replace(false);
+        am = a.wait(CallPhase::Connecting);
+        bm = b.wait(CallPhase::Connecting);
+        assert_eq!(am.call_id, outgoing.call_id);
+        assert_eq!(bm.call_id, outgoing.call_id);
+        assert!(am.media_epoch > old.0);
+        assert_eq!(am.media_epoch, bm.media_epoch);
+        assert_ne!(am.media_handle, old.1);
+        assert_ne!(bm.media_handle, old.2);
+        let ports = [audio(am.media_handle), audio(bm.media_handle)];
+        pump(&ports, 6_500); // Both endpoints must establish five seconds of real progress.
+        a.wait(CallPhase::Active);
+        b.wait(CallPhase::Active);
+        for port in ports {
+            let stats = port.snapshot();
+            assert!(
+                !stats.failed && !stats.stopped,
+                "recovered media failed: {}",
+                stats.error
+            );
+            assert!(stats.encoded_packets > 100 && stats.decoded_packets > 100);
+            assert!(stats.received_rtp_packets > 100 && stats.terminal_feedback > 20);
+        }
+    }
+    a.calls.end(outgoing.call_id).unwrap();
+    assert_eq!(a.wait(CallPhase::Ended).reason, CallEndReason::LocalEnded);
+    assert_eq!(b.wait(CallPhase::Ended).reason, CallEndReason::RemoteEnded);
+    retire(am.media_handle);
+    retire(bm.media_handle);
+    assert!(!busy(&alice.0) && !busy(&bobby.0));
+    a.calls.shutdown().unwrap();
+    b.calls.shutdown().unwrap();
+    for client in [&a, &b] {
+        let keys = client.offers.lock().unwrap();
+        assert!(keys.len() >= 3);
+        let distinct: std::collections::HashSet<_> = keys.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            keys.len(),
+            "each epoch needs fresh directional key material"
+        );
+        let core = Core::open_encrypted(Path::new(&client.owner), &STORE_KEY).unwrap();
+        let rows: i64 = core
+            .conn
+            .query_row("SELECT count(*) FROM core_messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0, "recovery must not create messages/history/outbox");
+    }
+    drop(outage);
+    proxy.join().unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn calls_host_real_offer_accept_media_end_redial_and_transport_loss() {
     let mut server = Server::start("media");
     let (alice, bobby) = server.pair().await;
@@ -468,10 +588,11 @@ async fn calls_host_real_offer_accept_media_end_redial_and_transport_loss() {
     let id = [91; 16];
     actor.call = Some(Call {
         id,
+        epoch: 1,
         generation: shared.admission.lock().unwrap().generation,
         contact: "peer".into(),
         direction: CallDirection::Incoming,
-        phase: CallPhase::Active,
+        phase: CallPhase::Connecting,
         peer_user: [92; 16],
         peer_device: [93; 32],
         local: None,
@@ -483,10 +604,68 @@ async fn calls_host_real_offer_accept_media_end_redial_and_transport_loss() {
         ending: None,
         lanes: None,
         media: None,
+        retiring_handle: None,
+        local_cipher: None,
+        remote_cipher: None,
+        recovery_deadline: None,
+        stable_since: None,
+        stable_sample: None,
+        recovered_sent: false,
+        bitrate: 12_000,
     });
+    // Initialized lanes are not established audio: cold AudioRecord source
+    // qualification must not consume the active-media stall sample.
+    let startup_at = Instant::now();
+    actor.call.as_mut().unwrap().deadline = Some(startup_at + Duration::from_secs(ATTACH_SECS));
+    let initialized = crate::live_media::Stats {
+        ready: true,
+        ..Default::default()
+    };
+    actor.media_progress(startup_at, &initialized, false).await;
+    actor
+        .media_progress(startup_at + Duration::from_secs(2), &initialized, false)
+        .await;
+    assert_eq!(actor.call.as_ref().unwrap().phase, CallPhase::Connecting);
+    assert!(actor.call.as_ref().unwrap().stable_sample.is_none());
+    assert!(actor.call.as_ref().unwrap().recovery_deadline.is_none());
+    assert!(receiver.try_recv().is_err());
+
+    // The physical call can keep authenticating RTP/feedback while every new
+    // packet is late: ready/failed alone must not leave silent media Active.
+    let episode_start = Instant::now();
+    let mut flowing = crate::live_media::Stats {
+        ready: true,
+        encoded_packets: 26,
+        decoded_packets: 10,
+        received_rtp_packets: 26,
+        terminal_feedback: 5,
+        ..Default::default()
+    };
+    actor.media_progress(episode_start, &flowing, false).await;
+    assert_eq!(
+        receiver
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap()
+            .phase,
+        CallPhase::Active
+    );
+    assert!(actor.call.as_ref().unwrap().deadline.is_none());
+    assert!(actor.call.as_ref().unwrap().recovery_deadline.is_none());
+    flowing.encoded_packets += 25;
+    flowing.received_rtp_packets += 25;
+    flowing.terminal_feedback += 5;
+    actor
+        .media_progress(episode_start + Duration::from_secs(1), &flowing, false)
+        .await;
+    assert_eq!(actor.call.as_ref().unwrap().phase, CallPhase::Reconnecting);
+    let stall_deadline = actor.call.as_ref().unwrap().recovery_deadline.unwrap();
+    let stalled = receiver.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(stalled.phase, CallPhase::Reconnecting);
+    assert_eq!(stalled.media_handle, 0);
     let (port, _capture) = crate::live_media::session::new_port();
     port.finish(Err("controlled native failure before END".into()));
-    let stats = port.snapshot();
+    let mut stats = port.snapshot();
+    stats.failure_kind = Some(crate::live_media::session::MediaFailureKind::ProgressExpired);
     assert!(stats.failed && stats.stopped);
     let (handle, entry) = crate::call_media_handles::register(&alice.0, port.audio()).unwrap();
     let retirement = thread::spawn(move || crate::call_media_handles::retire(handle).unwrap());
@@ -500,8 +679,15 @@ async fn calls_host_real_offer_accept_media_end_redial_and_transport_loss() {
         .media_progress(now, &stats, entry.stop_requested())
         .await;
     let ending = actor.call.as_ref().unwrap().ending;
-    let resolution_deadline = actor.call.as_ref().unwrap().deadline;
-    let local_end_sent = !actor.pending.is_empty();
+    let resolution_deadline = actor.call.as_ref().unwrap().recovery_deadline.unwrap();
+    assert_eq!(
+        resolution_deadline, stall_deadline,
+        "another failure must not extend the recovery episode"
+    );
+    let local_end_sent = actor
+        .pending
+        .iter()
+        .any(|p| matches!(p.action, Action::End | Action::Reject));
     let remote_end = Event {
         kind: EventKind::Ended,
         call_id: id,
@@ -518,14 +704,23 @@ async fn calls_host_real_offer_accept_media_end_redial_and_transport_loss() {
     entry.complete(stats);
     assert!(retirement.join().unwrap().stopped);
     ended.unwrap();
+    let reconnecting = receiver.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(reconnecting.phase, CallPhase::Reconnecting);
+    assert_eq!(reconnecting.media_handle, 0);
     let terminal = receiver.recv_timeout(Duration::from_secs(10)).unwrap();
     assert_eq!(terminal.phase, CallPhase::Ended);
     assert_eq!(terminal.reason, CallEndReason::RemoteEnded);
-    assert_eq!(ending, Some(Reason::ConnectionLost));
-    assert_eq!(resolution_deadline, Some(now + Duration::from_secs(30)));
+    assert_eq!(
+        ending, None,
+        "a known transient retires media, not the logical call"
+    );
+    assert!(
+        resolution_deadline >= episode_start + Duration::from_secs(30)
+            && resolution_deadline <= Instant::now() + Duration::from_secs(30)
+    );
     assert!(
         !local_end_sent,
-        "native failure must await authoritative END"
+        "a transient starts recovery, not a local End"
     );
 }
 
@@ -579,10 +774,28 @@ async fn calls_host_active_block_joins_media_and_releases_routes() {
         assert!(ports
             .iter()
             .all(|p| !p.snapshot().stopped && !p.snapshot().failed));
-        assert!(
-            a.events.try_recv().is_err() && b.events.try_recv().is_err(),
-            "unrelated block must not end the active call"
-        );
+        for (client, active) in [(&a, &am), (&b, &bm)] {
+            for update in client.events.try_iter() {
+                // Adaptive bitrate may publish another Active snapshot. It must
+                // not change the logical call, generation, handle or phase.
+                assert_eq!(
+                    (
+                        update.call_id,
+                        update.media_epoch,
+                        update.media_handle,
+                        update.phase
+                    ),
+                    (
+                        active.call_id.clone(),
+                        active.media_epoch,
+                        active.media_handle,
+                        CallPhase::Active
+                    ),
+                    "unrelated block must not interrupt the active call"
+                );
+                assert!(matches!(update.bitrate_bps, 8_000 | 12_000));
+            }
+        }
 
         if via_ffi {
             ffi.contact_block(alice.1.clone()).unwrap();

@@ -15,6 +15,8 @@
     <string name="call_ringing">Ожидание ответа…</string>
     <string name="call_connecting">Соединение…</string>
     <string name="call_active">Соединено</string>
+    <string name="call_reconnecting">Восстановление звонка… Микрофон приостановлен до подключения звука</string>
+    <string name="call_reduced_quality">Соединено · качество звука снижено</string>
     <string name="call_ending">Завершение звонка…</string>
     <string name="call_ended">Звонок завершён</string>
     <string name="call_remote_ended">Собеседник завершил звонок</string>

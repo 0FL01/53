@@ -423,9 +423,9 @@ async fn handle_conn(
                     return Err(());
                 }
                 let handoff = match op {
-                    OP_CALL_OPEN if payload == [dmsg_protocol::call::VERSION] => {
-                        calls::Handoff::Signal
-                    }
+                    OP_CALL_OPEN => calls::Handoff::Signal(
+                        dmsg_protocol::call::Open::decode(payload).map_err(|_| ())?,
+                    ),
                     OP_CALL_ATTACH => calls::Handoff::Media(
                         dmsg_protocol::call::Attach::decode(payload).map_err(|_| ())?,
                     ),

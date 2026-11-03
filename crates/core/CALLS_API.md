@@ -17,17 +17,39 @@ canonical core DB path. Kotlin bindings are generated, not handwritten.
   existing generation-scoped urgent path, independent of the four-command queue.
 - `shutdown()` joins the actor/media before releasing its DB-owner lease.
 - Observer snapshots: call_id, contact_id, phase, direction, reason,
-  media_handle, available. Initial `Listening/available=false` is startup,
+  media_handle, media_epoch, bitrate_bps, available. Initial `Listening/available=false` is startup,
   not terminal `Stopped`. Wait for availability before submitting a dial.
-- Phases: Stopped, Listening, Dialing, Ringing, Connecting, Active, Ended.
+- Phases: Stopped, Listening, Dialing, Ringing, Connecting, Active, Reconnecting, Ended.
   `Connecting` supplies the native audio handle after all media attachments;
-  `Active` reflects media readiness, not a measured conversational-quality PASS.
+  `Connecting` includes native/source initialization. `Active` requires actual
+  encoded, decoded and authenticated RTP progress, not merely `Stats.ready`.
+  First media retains the existing10s startup bound; this is not a measured
+  conversational-quality PASS.
 
 The actor owns three independently RESUME-authenticated Noise streams over the
-existing `dns::endpoint`: signaling, RTP and SRTCP. Attachments use consuming
-`DirectTcp::into_lane_parts`; Noise is never cloned. Idle signaling may reconnect;
-an active call never resumes/replays after transport loss. Each redial has fresh
-call ID, directional SRTP keys/salts, SSRCs and sequence/timestamp origins.
+existing DNS supervisor's current Ready endpoint: signaling, RTP and SRTCP.
+It does not synchronously restart DNS using a captured, obsolete resolver profile.
+Attachments use consuming `DirectTcp::into_lane_parts`; Noise is never cloned.
+Call-subprotocol/profile2 supports same-call recovery after transient loss. A
+Reconnecting snapshot exposes handle0; the logical call ID/action token/Telecom
+call remain unchanged. The server reserves a strictly increasing media epoch;
+the original caller sends an Olm RekeyOffer and the callee a RekeyAnswer, each
+bound to that epoch/call/contact identity. Exact ciphertext retries do not advance
+the ratchet twice. Four fresh authenticated attachments precede MediaReady.
+Every generation has fresh directional SRTP keys/salts, SSRCs and origins; old
+packets and old owner cleanup cannot affect the replacement.
+
+One recovery episode has a fixed30s deadline, not extended by heartbeat/retries
+or another failed epoch. Both endpoints must demonstrate5s real media/feedback
+progress and confirm Recovered before it clears. Explicit End, revoke/block,
+validated identity/crypto errors, permanent platform failures and exhausted
+recovery are terminal. A lost volatile hub (server restart) is not reconstructible
+by call ID. No call state enters the database/history/outbox.
+The actor's one-second real-progress sample also detects a stalled generation:
+encoding, decoding and authenticated RTP must advance, even when native remains
+`ready` and keeps receiving entirely late packets. A missing media advance starts
+recovery; terminal native/platform errors retain precedence. This does not extend
+any packet deadline or credit silence/PLC as restored audio.
 
 Ephemeral Olm uses the existing accepted-contact/identity/prekey policy and
 IMMEDIATE ratchet transactions. Successful call crypto writes account/sessions,
@@ -46,10 +68,16 @@ The call actor owns `MediaSession`; the Android driver owns AudioRecord/Track
 and capture/render threads. Android stops/joins both PCM workers before JNI
 retirement. Native stop closes/joins endpoint, codec and lanes, zeroizes PCM and
 notifies handle retirement. Calls ending without audio still retire Telecom.
-Failed/stopped native media resolves through the actor's existing terminal path;
-Android does not replace that reason with AudioUnavailable merely because JNI
-retirement finished first. Physical capture/playback/route failures still end
-with AudioUnavailable, including real hardware frame/time reversal.
+Typed progress expiry/lane loss/control stall triggers media-generation recovery;
+unknown/invalid media errors are not guessed from diagnostic strings. The actor
+publishes Reconnecting before stopping/joining old media and completing its handle
+entry. Android joins its PCM owners and retires that JNI handle; only after the
+registry entry disappears may core register the replacement. Telecom/reservation,
+mute/route and logical timer survive; no recorder survives a joined media-less
+interval. `closed` PCM-port state is separate from `stopped` worker-join evidence.
+Native closure is not proof of hardware clock failure. Physical capture/playback/
+route/cleanup failures still end with AudioUnavailable, including real hardware
+frame/time reversal. Hangup preempts pending media startup and retires all handles.
 
 `DmsgService` owns `CallSessionOwner`, one Core-Telecom call and the audio driver.
 Activity pause/recreation only detaches UI observation. Telecom owns focus/mode
@@ -80,13 +108,22 @@ diagnostics, not credit or proof of timely peer delivery. The server yields
 after successful media ingress so a ready peer can drain its existing one-slot
 queue; capacity, 20ms hop deadline and Noise ordering remain unchanged.
 
-## Fixed media and acceptance
+## Media bounds and acceptance
 
-Mono16k/12kbit/40ms/cap100, encoder10/decoder7, DTX/PLC, jitter80ms, sink640,
+Mono16k/40ms/cap100, encoder10/decoder7, DTX/PLC, jitter80ms, sink640,
 F0=600ms/ledger720ms/window2880B and75% admission remain unchanged. Production
+adapts codec12→8kbit on450ms oldest age/half-window/peer loss, restoring12 only
+after10s fresh healthy feedback with low pressure; diagnostic fixtures stay fixed12.
+This changes offered codec load, not a measured wire-capacity guarantee. An
+uncommitted frame denied by the window is dropped while the actual ledger and
+feedback continue; an expired committed generation is retired, never locally ACKed.
+Production
 declares50k useful capacity; it introduces no synthetic service and does not claim
 measured DNS C_safe. No automatic BBR/TCP_NODELAY experiment promotion.
 
 Current physical results and remaining gates live in
-`docs/goals/2026-10-11-call-client-apk.md`. Host tests, control readiness and a
+`docs/goals/2026-10-15-recovering-long-calls.md` (parent release goal remains
+`docs/goals/2026-10-11-call-client-apk.md`). The old uninterrupted gate stays
+separate from same-call recovery availability; >720ms pause elimination is the
+explicit later optimisation. Host tests, control readiness and a
 signed APK are not proof of sustained phone-to-phone conversational media.

@@ -1,8 +1,15 @@
 use dmsg_opus_sys::live::LiveProfile;
 use zeroize::Zeroize;
 
+#[derive(Clone, Copy)]
+pub enum RatePolicy {
+    Fixed,
+    Adaptive { initial_bps: u32 },
+}
+
 /// One already-negotiated directional media epoch. No carrier or relay identity.
 pub struct MediaConfig {
+    pub rate_policy: RatePolicy,
     pub profile_ms: u16,
     pub media_tx: [u8; 30],
     pub media_rx: [u8; 30],
@@ -21,6 +28,10 @@ pub struct MediaConfig {
 impl MediaConfig {
     pub(crate) fn validate(&self) -> Result<(), String> {
         profile(self.profile_ms)?;
+        if matches!(self.rate_policy, RatePolicy::Adaptive { initial_bps } if !matches!(initial_bps, 8_000 | 12_000))
+        {
+            return Err("invalid live bitrate".into());
+        }
         if self.ssrc_tx == 0
             || self.ssrc_rx == 0
             || self.ssrc_tx == self.ssrc_rx

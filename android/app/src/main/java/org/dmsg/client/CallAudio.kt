@@ -46,6 +46,13 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
                 else freshPullLimit(depth) > 0
         }
 
+        /** A native refusal is not proof of hardware failure. Only explicit native state may defer to core. */
+        internal fun nativePortCompletion(failed: Boolean, stopped: Boolean, closed: Boolean = false): String? = when {
+            failed -> "native_probe_failed"
+            stopped || closed -> "native_stopped_early"
+            else -> null
+        }
+
         private val nativeCounters = listOf("encoded_packets", "decoded_packets", "plc_slots",
             "tx_bytes", "rx_bytes", "dropped_capture", "dropped_render", "terminal_feedback",
             "late_packets", "max_unconfirmed_bytes", "max_feedback_cycle_ms", "sink_queue_samples",
@@ -248,6 +255,14 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
 
     data class Clock(val frame: Long, val nanoTime: Long) {
         fun json() = JSONObject().put("frame", frame).put("monotonic_ns", nanoTime)
+    }
+    /** Largest adjacent capture-clock step, evidence only; never an input correction. */
+    data class CaptureClockStep(val before: Clock, val after: Clock, val readPosition: Long,
+        val observedNs: Long, val routePublishedNs: Long) {
+        val extraNs get() = after.nanoTime - before.nanoTime - (after.frame - before.frame) * 62_500L
+        fun json() = JSONObject().put("before", before.json()).put("after", after.json())
+            .put("read_position", readPosition).put("observed_monotonic_ns", observedNs)
+            .put("route_published_monotonic_ns", routePublishedNs).put("extra_ns", extraNs)
     }
     data class ClockPair(val first: Clock? = null, val latest: Clock? = null, val unavailable: Long = 0) {
         // Observed slope includes stalls; it is not a remote clock/skew estimator.
@@ -517,7 +532,9 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
         val nativeStats: String, val stopResult: String?, val playbackCompensation: String,
         val lastRenderLoopTrace: RenderLoopTrace? = null, val outputMuted: Boolean = false,
         val outputRouteRestored: Boolean = true, val trackPerformanceMode: Int = -1,
-        val lastSlowWriteDiagnostic: SlowWriteDiagnostic? = null
+        val lastSlowWriteDiagnostic: SlowWriteDiagnostic? = null,
+        val captureClockStep: CaptureClockStep? = null,
+        val unqualifiedStartupBatches: Long = 0
     ) {
         fun json() = JSONObject().put("phase", phase).put("failure", failure ?: JSONObject.NULL)
             .put("stop_reason", stopReason ?: JSONObject.NULL).put("path", if (dns) "dns_fixture" else "local_memory_pair")
@@ -545,6 +562,8 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
             .put("previous_mode", previousMode).put("communication_mode", communicationMode).put("restored_mode", restoredMode)
             .put("aec", aec.json()).put("ns", ns.json()).put("playback_rate", playbackRate).put("requested_rate", requestedRate)
             .put("underruns", underruns).put("capture_clock", captureClock.json())
+            .put("capture_clock_step", captureClockStep?.json() ?: JSONObject.NULL)
+            .put("unqualified_startup_batches", unqualifiedStartupBatches)
             .put("playback_clock", playbackClock.json()).put("playback_head_clock", playbackHeadClock.json())
             .put("native", JSONObject(nativeStats)).put("native_stop", stopResult?.let(::JSONObject) ?: JSONObject.NULL)
             .put("playback_compensation", JSONObject(playbackCompensation))
@@ -577,6 +596,8 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
     private val manualRateOffset = AtomicInteger(0)
     private val playbackRate = AtomicInteger(0)
     private val captureClock = AtomicReference(ClockPair())
+    private val captureClockStep = AtomicReference<CaptureClockStep?>(null)
+    private val unqualifiedStartupBatches = AtomicLong(0)
     private val playbackClock = AtomicReference(ClockPair())
     private val headClock = AtomicReference(ClockPair())
     private val nativeStats = AtomicReference("{}")
@@ -647,11 +668,29 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
         inputId, inputType, outputId, outputType, micMuted, silenced, silencingObservable, focusGranted, focusAbandoned,
         previousMode, communicationMode, restoredMode, aecState, nsState, playbackRate.get(), requestedRate.get(), underruns,
         captureClock.get(), playbackClock.get(), headClock.get(), nativeStats.get(), stopResult.get(), playbackCompensation.get(),
-        renderLoopRecorder.latest, outputMuted, outputRouteRestored, trackPerformanceMode, slowWriteProbe?.latest)
+        renderLoopRecorder.latest, outputMuted, outputRouteRestored, trackPerformanceMode, slowWriteProbe?.latest,
+        captureClockStep.get(), unqualifiedStartupBatches.get())
 
     private class ProbeFailure(val diagnostic: String) : RuntimeException()
     private fun check(condition: Boolean, diagnostic: String) { if (!condition) throw ProbeFailure(diagnostic) }
-    private fun fail(diagnostic: String) { failure.compareAndSet(null, diagnostic); requestStop("failure") }
+    private fun noteFailure(diagnostic: String) {
+        failure.updateAndGet { before ->
+            // A native-owned stop must not hide a genuine Java/platform cleanup failure.
+            if (before == null || before in setOf("native_probe_failed", "native_stopped_early") &&
+                diagnostic !in setOf("native_probe_failed", "native_stopped_early")) diagnostic else before
+        }
+    }
+    private fun fail(diagnostic: String) { noteFailure(diagnostic); requestStop("failure") }
+
+    private fun nativePortFailure(nativeHandle: Long): String? {
+        val stats = JSONObject(port.stats(nativeHandle))
+        return nativePortCompletion(stats.getBoolean("failed"), stats.getBoolean("stopped"), stats.optBoolean("closed"))
+    }
+
+    private fun setSinkRate(nativeHandle: Long, ppb: Long) {
+        if (!port.sinkRate(nativeHandle, ppb))
+            throw ProbeFailure(nativePortFailure(nativeHandle) ?: "sink_clock_rate_rejected")
+    }
 
     private fun nativeEvidence(raw: String): String {
         val source = JSONObject(raw)
@@ -923,31 +962,31 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
                     micActive.set(record.recordingState == AudioRecord.RECORDSTATE_RECORDING)
                 }
                 catch (_: Throwable) {
-                    failure.compareAndSet(null, "record_stop_failed")
+                    noteFailure("record_stop_failed")
                     try { record.release(); recordOpen.set(false); micActive.set(false) }
-                    catch (_: Throwable) { failure.compareAndSet(null, "record_release_failed") }
+                    catch (_: Throwable) { noteFailure("record_release_failed") }
                 }
             }
-            try { track?.pause(); track?.flush() } catch (_: Throwable) { failure.compareAndSet(null, "track_stop_failed") }
+            try { track?.pause(); track?.flush() } catch (_: Throwable) { noteFailure("track_stop_failed") }
             captureThread?.join()
             renderThread?.join()
-            try { aec?.release(); aecOpen = false } catch (_: Throwable) { failure.compareAndSet(null, "aec_release_failed") }
-            try { ns?.release(); nsOpen = false } catch (_: Throwable) { failure.compareAndSet(null, "ns_release_failed") }
+            try { aec?.release(); aecOpen = false } catch (_: Throwable) { noteFailure("aec_release_failed") }
+            try { ns?.release(); nsOpen = false } catch (_: Throwable) { noteFailure("ns_release_failed") }
             try { if (recordOpen.get()) record?.release(); recordOpen.set(false); micActive.set(false) }
-            catch (_: Throwable) { failure.compareAndSet(null, "record_release_failed") }
+            catch (_: Throwable) { noteFailure("record_release_failed") }
             try { track?.release(); trackOpen.set(false); queued.set(0) }
-            catch (_: Throwable) { failure.compareAndSet(null, "track_release_failed") }
+            catch (_: Throwable) { noteFailure("track_release_failed") }
             val retired = handle.get()
             if (retired != 0L) {
                 try {
                     val result = nativeEvidence(port.stop(retired))
                     stopResult.set(result); nativeStats.set(result)
                     val json = JSONObject(result)
-                    if (json.getBoolean("stopped")) handle.set(0) else failure.compareAndSet(null, "native_stop_incomplete")
-                    if (json.getBoolean("failed")) failure.compareAndSet(null, "native_probe_failed")
-                } catch (_: Throwable) { failure.compareAndSet(null, "native_stop_failed") }
+                    if (json.getBoolean("stopped")) handle.set(0) else noteFailure("native_stop_incomplete")
+                    if (json.getBoolean("failed")) noteFailure("native_probe_failed")
+                } catch (_: Throwable) { noteFailure("native_stop_failed") }
             }
-            try { platform.release() } catch (_: Throwable) { failure.compareAndSet(null, "audio_platform_release_failed") }
+            try { platform.release() } catch (_: Throwable) { noteFailure("audio_platform_release_failed") }
             updatePlatformEvidence()
             complete.set(!micActive.get() && !recordOpen.get() && !trackOpen.get() && !aecOpen && !nsOpen && handle.get() == 0L &&
                 (!focusGranted || focusAbandoned) && platform.cleanupComplete && outputRouteRestored)
@@ -1008,6 +1047,7 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
         var valid = 0
         var readPosition = 0L
         var previousClock: Clock? = null
+        var lastRoutePublishedNs = 0L
         var nextTimestamp = 0L
         try {
             Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
@@ -1038,7 +1078,10 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
                     // sets this marker. Serialize the JNI command with pushes;
                     // preserve publication time even when read() was blocked.
                     val publishedNs = captureRoutePublishedNs.getAndSet(0)
-                    if (publishedNs != 0L) port.sourceRouteChanged(nativeHandle, publishedNs)
+                    if (publishedNs != 0L) {
+                        lastRoutePublishedNs = publishedNs
+                        port.sourceRouteChanged(nativeHandle, publishedNs)
+                    }
                     // The documented frame epoch resets at startRecording, not
                     // at the first successful timestamp or complete JNI batch.
                     // Poll before each handoff: old/unavailable anchors cannot
@@ -1050,7 +1093,13 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
                         if (before != null) check(timestamp.framePosition >= before.frame && timestamp.nanoTime >= before.nanoTime &&
                             ((timestamp.framePosition == before.frame) == (timestamp.nanoTime == before.nanoTime)),
                             "capture_clock_backwards")
-                        previousClock = Clock(timestamp.framePosition, timestamp.nanoTime)
+                        val next = Clock(timestamp.framePosition, timestamp.nanoTime)
+                        if (before != null) {
+                            val extraNs = next.nanoTime - before.nanoTime - (next.frame - before.frame) * 62_500L
+                            if (extraNs > (captureClockStep.get()?.extraNs ?: 0L))
+                                captureClockStep.set(CaptureClockStep(before, next, readPosition, System.nanoTime(), lastRoutePublishedNs))
+                        }
+                        previousClock = next
                     }
                     val clock = if (ok && timestamp.nanoTime > 0 && timestamp.framePosition >= 0)
                         Clock(timestamp.framePosition, timestamp.nanoTime) else null
@@ -1063,8 +1112,16 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
                     val batch = valid
                     valid = 0 // Ownership transfers once, even if JNI throws.
                     if (localMuted.get() || !platform.probeMode && micMuted) pcm.fill(0)
+                    // Cold AudioRecord timestamp sources can change during the
+                    // first second. Keep every physical position, but withhold
+                    // those unqualified points from native's frozen age floor.
+                    // No warmup PCM is retained or replayed; native calibration
+                    // and all age/clock bounds remain unchanged afterwards.
+                    val qualified = platform.probeMode || readPosition - batch >= SAMPLE_RATE
+                    if (!qualified) unqualifiedStartupBatches.incrementAndGet()
                     if (!port.push(nativeHandle, pcm, batch, readPosition - batch,
-                            clock?.frame ?: -1L, clock?.nanoTime ?: -1L)) rejected.incrementAndGet()
+                            if (qualified) clock?.frame ?: -1L else -1L,
+                            if (qualified) clock?.nanoTime ?: -1L else -1L)) rejected.incrementAndGet()
                     pcm.fill(0)
                 }
             }
@@ -1078,7 +1135,7 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
                     if (localMuted.get() || !platform.probeMode && micMuted) pcm.fill(0)
                     port.push(nativeHandle, pcm, valid, readPosition - valid, -1L, -1L)
                     rejected.incrementAndGet()
-                } catch (_: Throwable) { failure.compareAndSet(null, "capture_discard_failed") }
+                } catch (_: Throwable) { noteFailure("capture_discard_failed") }
             }
             pcm.fill(0)
         }
@@ -1116,7 +1173,7 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
                 val currentRoute = hardwareGeneration.get()
                 if (currentRoute != routeGeneration) {
                     compensation.resetHardwareCalibration()
-                    check(port.sinkRate(nativeHandle, 0), "sink_clock_rate_rejected")
+                    setSinkRate(nativeHandle, 0)
                     playbackClock.set(ClockPair()); headClock.set(ClockPair())
                     routeGeneration = currentRoute
                 }
@@ -1150,10 +1207,10 @@ class CallAudio internal constructor(context: Context, private val port: CallAud
                         source.optLong("remote_clock_ns"), source.optBoolean("remote_clock_valid"), manualRateOffset.get())
                     compensationCache.changedJson(command)?.let { playbackCompensation.set(it) }
                     requestedRate.set(command.rate)
-                    command.sinkPpb?.let { check(port.sinkRate(nativeHandle, it), "sink_clock_rate_rejected") }
                     if (!platform.probeMode) check(!compensation.backwards, "playback_clock_backwards")
                     if (!platform.probeMode) check(command.relativePpm?.let { abs(it) <= 500.0 } != false,
                         "unsupported_relative_audio_clock")
+                    command.sinkPpb?.let { setSinkRate(nativeHandle, it) }
                     val rate = requestedRate.get()
                     if (playbackRate.get() != rate) {
                         check(track.setPlaybackRate(rate) == AudioTrack.SUCCESS, "playback_rate_failed")

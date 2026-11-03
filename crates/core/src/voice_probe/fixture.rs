@@ -102,6 +102,7 @@ pub fn profile(ms: u16) -> Result<dmsg_opus_sys::live::LiveProfile, String> {
 impl EndpointFixture {
     pub(crate) fn media_config(&self) -> crate::live_media::MediaConfig {
         crate::live_media::MediaConfig {
+            rate_policy: crate::live_media::RatePolicy::Fixed,
             profile_ms: self.profile_ms,
             media_tx: self.media_tx,
             media_rx: self.media_rx,

@@ -143,6 +143,14 @@ impl LiveEncoder {
         u32::try_from(samples).map_err(|_| "Invalid live Opus lookahead".into())
     }
 
+    /// Called only by the exclusive live-codec owner; note encoding is separate.
+    pub fn set_bitrate(&mut self, bitrate: u32) -> Result<(), String> {
+        if !matches!(bitrate, 8_000 | 12_000) {
+            return Err("Invalid live bitrate".into());
+        }
+        checked(unsafe { opus_encoder_ctl(self.state.as_ptr(), 4002, bitrate as c_int) })
+    }
+
     /// Exactly one interval. Never retry the same PCM after an encoding error:
     /// the state may already have advanced. Retire the run instead.
     pub fn encode(&mut self, pcm: &[i16]) -> Result<EncodedPacket, String> {

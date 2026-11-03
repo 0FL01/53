@@ -337,13 +337,15 @@ impl Core {
     /// A foreign AUTHENTICATED reply is rejected, never attached or persisted.
     pub async fn login(&mut self, t: &mut impl Transport) -> Result<(), OlmError> {
         let (my_uid, my_cid) = self.my_account()?;
-        t.send_frame(OP_RESUME, &[])
-            .await
-            .map_err(|e| OlmError::Transport(e.to_string()))?;
-        let (op, p) = t
-            .recv_frame()
-            .await
-            .map_err(|e| OlmError::Transport(e.to_string()))?;
+        let frame_error = |error| match error {
+            crate::transport::TransportError::Invalid
+            | crate::transport::TransportError::Frame(_) => {
+                OlmError::Protocol("invalid resume transport frame")
+            }
+            other => OlmError::Transport(other.to_string()),
+        };
+        t.send_frame(OP_RESUME, &[]).await.map_err(frame_error)?;
+        let (op, p) = t.recv_frame().await.map_err(frame_error)?;
         if op == OP_AUTHENTICATED {
             let accepted = dmsg_protocol::auth::parse_authenticated(&p)
                 .map_err(|_| OlmError::Protocol("bad authenticated response"))?;

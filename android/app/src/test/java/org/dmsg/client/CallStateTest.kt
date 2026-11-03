@@ -8,8 +8,10 @@ import uniffi.dmsg_core.CallPhase
 import uniffi.dmsg_core.CallSnapshot
 
 class CallStateTest {
-    private fun snapshot(id: String = "first", phase: CallPhase = CallPhase.RINGING, handle: Long = 0) =
-        CallSnapshot(id, "peer", phase, CallDirection.INCOMING, CallEndReason.NONE, handle, true)
+    private fun snapshot(id: String = "first", phase: CallPhase = CallPhase.RINGING, handle: Long = 0,
+        mediaEpoch: ULong = 1uL) = CallSnapshot(callId = id, contactId = "peer", phase = phase,
+        direction = CallDirection.INCOMING, reason = CallEndReason.NONE, mediaHandle = handle,
+        available = true, mediaEpoch = mediaEpoch, bitrateBps = 12_000u)
 
     private fun completedAudio(failure: String?, finalNative: String = "{\"failed\":true,\"stopped\":true}") = CallAudio.Snapshot(
         phase = "failed", failure = failure, stopReason = failure, dns = true, cleanupComplete = true,
@@ -26,6 +28,16 @@ class CallStateTest {
         requestedRate = 16_000, underruns = 2, captureClock = CallAudio.ClockPair(),
         playbackClock = CallAudio.ClockPair(), playbackHeadClock = CallAudio.ClockPair(),
         nativeStats = finalNative, stopResult = finalNative, playbackCompensation = "{}")
+
+    @Test fun captureClockStepKeepsUnmodifiedAdjacentEvidence() {
+        val before = CallAudio.Clock(7_040, 10_000_000_000)
+        val after = CallAudio.Clock(7_200, before.nanoTime + 282_062_447)
+        val step = CallAudio.CaptureClockStep(before, after, 7_200, after.nanoTime + 1_000_000, 0)
+        assertEquals(272_062_447L, step.extraNs)
+        assertEquals(before, step.before)
+        assertEquals(after, step.after)
+        assertEquals(0L, step.routePublishedNs)
+    }
 
     @Test fun nativeAudioCompletionBeforeEndedWaitsForAuthoritativeRemoteReason() {
         for (failure in listOf("native_probe_failed", "native_stopped_early")) {
@@ -92,6 +104,78 @@ class CallStateTest {
         assertTrue(guard.mayCapture(telecomActive = true, permission = true))
         guard.beginTeardown()
         assertFalse(guard.mayCapture(telecomActive = true, permission = true))
+    }
+    @Test fun recoveryKeepsLogicalTokenButRejectsStaleMediaAndNeverCapturesWithoutReadyHandle() {
+        val guard = CallStateGuard()
+        val claim = CallAudioClaim()
+        claim.reserveCall()
+        guard.receive(snapshot(phase = CallPhase.ACTIVE, handle = 42))
+        val token = guard.epoch
+        assertTrue(guard.receive(snapshot(phase = CallPhase.RECONNECTING)))
+        assertTrue(guard.current!!.busy())
+        assertTrue(guard.matches("first", token))
+        assertFalse(guard.mayCapture(true, true))
+        assertFalse(claim.allowNote())
+        assertFalse(guard.receive(snapshot(phase = CallPhase.ACTIVE, handle = 42)))
+        assertFalse(guard.receive(snapshot(phase = CallPhase.CONNECTING, handle = 42)))
+        // Server reserves epoch 2 before the newly authenticated lanes/handle
+        // arrive. Connecting in that same fresh epoch is not a stale callback.
+        assertTrue(guard.receive(snapshot(phase = CallPhase.RECONNECTING, mediaEpoch = 2uL)))
+        assertTrue(guard.receive(snapshot(phase = CallPhase.CONNECTING, mediaEpoch = 2uL)))
+        assertFalse(guard.mayCapture(true, true))
+        assertTrue(guard.receive(snapshot(phase = CallPhase.CONNECTING, handle = 43, mediaEpoch = 2uL)))
+        assertEquals(token, guard.epoch)
+        assertFalse(guard.matchesMedia("first", token, 1uL))
+        assertTrue(guard.matchesMedia("first", token, 2uL))
+        assertFalse(guard.receive(snapshot(phase = CallPhase.RECONNECTING)))
+        assertTrue(guard.mayCapture(true, true))
+        assertTrue(guard.receive(snapshot(phase = CallPhase.ACTIVE, handle = 43, mediaEpoch = 2uL)))
+        assertFalse(guard.receive(snapshot(phase = CallPhase.CONNECTING, handle = 43, mediaEpoch = 2uL)))
+        // End always wins, even if the queued terminal callback has the previous media epoch.
+        assertTrue(guard.receive(snapshot(phase = CallPhase.ENDED).copy(reason = CallEndReason.REMOTE_ENDED)))
+        assertFalse(guard.matches("first", token))
+        assertFalse(guard.receive(snapshot(phase = CallPhase.ACTIVE, handle = 44, mediaEpoch = 3uL)))
+    }
+    @Test fun recoveryStopIsExpectedButPhysicalFailureAndEndStillWin() {
+        val guard = CallStateGuard()
+        guard.receive(snapshot(phase = CallPhase.RECONNECTING))
+        val token = guard.epoch
+        assertNull(guard.audioCompletionReason(token, completedAudio(null), expectedStop = true))
+        assertEquals(CallEndReason.AUDIO_UNAVAILABLE,
+            guard.audioCompletionReason(token, completedAudio("capture_read_failed"), expectedStop = true))
+        assertEquals(CallEndReason.AUDIO_UNAVAILABLE,
+            guard.audioCompletionReason(token, completedAudio("record_release_failed"), expectedStop = true))
+        assertEquals(CallEndReason.AUDIO_UNAVAILABLE, guard.audioCompletionReason(token,
+            completedAudio("native_probe_failed").copy(cleanupComplete = false), expectedStop = true))
+        guard.beginTeardown()
+        assertFalse(guard.receive(snapshot(phase = CallPhase.CONNECTING, handle = 43, mediaEpoch = 2uL)))
+        assertFalse(guard.mayCapture(true, true))
+    }
+    @Test fun closedNativePortDefersButHealthyNativeRefusalDoesNotMaskAudioValidation() {
+        assertEquals("native_probe_failed", CallAudio.nativePortCompletion(failed = true, stopped = false))
+        assertEquals("native_stopped_early", CallAudio.nativePortCompletion(failed = false, stopped = true))
+        assertEquals("native_stopped_early", CallAudio.nativePortCompletion(failed = false, stopped = false, closed = true))
+        assertNull(CallAudio.nativePortCompletion(failed = false, stopped = false))
+    }
+    @Test fun recoveryUiKeepsMuteTelecomAndTimerWhileMicrophoneOwnershipIsIndependentOfPhase() {
+        val active = CallUiState(call = snapshot(phase = CallPhase.ACTIVE, handle = 42), epoch = 7,
+            telecomActive = true, telecomReady = true, activeSince = 123L, muted = true, microphoneForeground = true)
+        val retiring = active.copy(call = active.call!!.copy(phase = CallPhase.RECONNECTING, mediaHandle = 0))
+        assertTrue(retiring.busy)
+        assertTrue("microphone FGS survives until the actual recorder joins", retiring.microphoneForeground)
+        val joined = retiring.copy(microphoneForeground = false)
+        assertTrue(joined.busy); assertTrue(joined.muted); assertTrue(joined.telecomActive); assertTrue(joined.telecomReady)
+        assertEquals(active.epoch, joined.epoch); assertEquals(active.activeSince, joined.activeSince)
+        assertFalse(joined.microphoneForeground)
+    }
+    @Test fun recoveryAndAdaptiveBitrateHaveDistinctAccessibleStatuses() {
+        assertEquals(R.string.call_reconnecting, callPhaseRes(snapshot(phase = CallPhase.RECONNECTING)))
+        assertEquals(R.string.call_connecting, callPhaseRes(snapshot(phase = CallPhase.CONNECTING)))
+        assertEquals(R.string.call_reconnecting,
+            callPhaseRes(snapshot(phase = CallPhase.CONNECTING, mediaEpoch = 2uL)))
+        assertEquals(R.string.call_reduced_quality,
+            callPhaseRes(snapshot(phase = CallPhase.ACTIVE).copy(bitrateBps = 8_000u)))
+        assertEquals(R.string.call_active, callPhaseRes(snapshot(phase = CallPhase.ACTIVE)))
     }
     @Test fun oldNotificationAndLateReadyCannotResurrectRetiredCall() {
         val guard = CallStateGuard()

@@ -101,13 +101,26 @@ R5 не verified: отрицательные результаты/unknown metric
 
 ## M6. Продуктовые звонки, если M1-V подтверждён
 
+**Утверждённая итерация 2026-10-15 — восстановление долгого звонка.** По новому
+запросу пользователя logical call отделяется от media epoch: temporary loss →
+Reconnecting → свежие authenticated media lanes/keys → продолжение того же call,
+без redial/Answer и без воспроизведения старого звука. Recovery episode ограничен30s,
+packet deadlines/720ms ledger и bounded queues не увеличиваются; они больше не
+являются безусловным завершением logical call. При pressure предлагаемый encoder
+load12→8kbit, возврат12 после healthy hysteresis; реальная DNS-wire экономия не
+обещана. Сначала >=180s реального ACTIVE media на двух телефонах с проверенным
+recovery/Telecom/audio retirement, затем commit/push. Устранение пауз >720ms —
+отдельная следующая точечная оптимизация. Контракт:
+`docs/goals/2026-10-15-recovering-long-calls.md`; предыдущие negative gates не PASS.
+
 **Текущий разрешённый client cut.** Shared `live_media`, ephemeral Olm/signaling,
 authenticated opaque relay, Core-Telecom в одном DmsgService и настоящий chat
 call UI реализуются по новой цели выше. Account/schema остаются server7/core10;
 fresh backend без нового backup разрешён отдельно. Приёмка этого пилота — один
 конечный3–5min actual-client call, controls/lifecycle/cleanup и подписанный
 release APK. Полный quality gate ниже остаётся неполученным; history/missed-call
-storage и active autoreconnect в этот cut не входят.
+storage в этот cut не входит; прежнее исключение active autoreconnect заменено
+новой пользовательской итерацией выше.
 
 **Задачи.** Состояния invite/ringing/accepted/active/reconnecting/ended/busy, call TTL, согласование возможностей. Раннее нажатие «завершить» идемпотентно. Короткий ring TTL исключает «входящий через час» после восстановления связи. Одновременно один вызов на устройство.
 

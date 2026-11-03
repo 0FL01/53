@@ -83,23 +83,28 @@ best-effort cleanup, не public secret link; секретов нет в navigat
 Android gallery/phrase import не выполняет autosubmit и не меняет trust/contact QR.
 Runtime contract — `android/SELF_SERVICE_INVITATION_GATES.md`.
 
-## Volatile calls v1
+## Volatile calls v2
 
 После отдельного `RESUME` каждого stream, на одном process-owned DNS carrier:
 
 | Opcode | Exact payload / meaning |
 |---|---|
-| CALL_OPEN52 / READY53 | `[1]` / `[1,1]`; отдельный persistent signaling stream |
+| CALL_OPEN52 / READY53 | `[2]` либо `[2]+call_id16+expected_epoch8` / `[2,2]`; отдельный persistent signaling stream |
 | CALL_COMMAND54 | request_id4 + action1 + call_id16 + epoch8 + recipient16 + ciphertext_len2 + ciphertext |
 | CALL_ACK55 | request_id4 + call_id16 + epoch8 + reason1 |
 | CALL_EVENT56 | kind1 + call_id16 + epoch8 + peer_user16 + peer_device32 + remaining_ms4 + reason1 + ciphertext_len2 + ciphertext |
 | CALL_ATTACH57 / ATTACHED58 | call_id16 + epoch8 + lane1 / exact echo; ownership transfer на media actor |
 
-Integers BE, request_id nonzero, call_id nonzero/epoch1. Actions Invite1,
-RingingConfirm2, Accept3, Reject4, End5, Heartbeat6; только Invite содержит
-recipient, только Invite/Accept — ciphertext (1..2048B). Heartbeat имеет zero
-call/epoch/recipient и пустой ciphertext. Events Invite1/Ringing2/Accepted3/
-MediaReady4/Ended5; ciphertext только Invite/Accepted. remaining_ms≤30000.
+Integers BE, request_id nonzero, call_id nonzero/epoch>0. Actions Invite1,
+RingingConfirm2, Accept3, Reject4, End5, Heartbeat6, Recover7, RekeyOffer8,
+RekeyAnswer9, Recovered10; только Invite содержит recipient. Ciphertext
+(1..2048B) обязателен только у Invite/Accept/RekeyOffer/RekeyAnswer. Invite и
+Accept допускают только epoch1, RekeyOffer/RekeyAnswer/Recovered — epoch≥2.
+Heartbeat имеет zero call/epoch/recipient и пустой ciphertext. Events
+Invite1/Ringing2/Accepted3/MediaReady4/Ended5/Reconnecting6/RekeyOffer7/
+RekeyAnswer8/Recovered9; ciphertext только Invite/Accepted/RekeyOffer/RekeyAnswer.
+Initial Invite/Ringing/Accepted — epoch1, recovery events — epoch≥2.
+remaining_ms≤30000; у recovery events это остаток неизменного episode deadline.
 Unknown tags, invalid field combinations, truncation/trailing bytes отвергаются.
 Причины ACK/Ended: Ok0, Unavailable1, Busy2, Expired3, Rejected4, LocalEnded5,
 RemoteEnded6, ConnectionLost7, Invalid8, Revoked9, AudioUnavailable10 — отдельное
@@ -108,12 +113,15 @@ RemoteEnded6, ConnectionLost7, Invalid8, Revoked9, AudioUnavailable10 — отд
 Клиент сначала decrypt/validates Invite и получает RingingConfirm ACK, затем
 показывает входящий. Ring TTL30s, attach10s, heartbeat10s/liveness30s; server
 monotonic time. Максимум2 calls/16 listeners, один call/device, events≤4.
-Overflow, revoke/replacement/block, disconnect и End убирают все routes.
+Revoke/device replacement/block/permanent auth failure и explicit End терминальны.
+EOF, потеря media, full/closed signal queue и liveness loss после Accept — transient:
+same call_id/members сохраняются, все media routes немедленно инвалидируются.
 Согласие в любой accepted стороне one-QR contact разрешает звонок; block в
 любой стороне запрещает. Local block также отменяет client owner после DB commit.
 
 Для каждой стороны RTP lane0 и SRTCP lane1 имеют собственные Noise states и
-account sessions. MediaReady выдаётся после всех четырёх attach. RTP242≤122B,
+account sessions. MediaReady выдаётся после всех четырёх fresh attach текущего
+epoch; в recovery сначала нужны оба rekey ciphertext. RTP242≤122B,
 SRTCP243≤130B, queues capacity1, relay hop20ms. Deadline/full drops только до
 Noise commitment; committed encrypted frame дописывается либо lane уничтожается.
 Сервер пересылает непрозрачные данные (opaque bytes), без media keys/PCM. Bulk/SEND/FETCH во время
@@ -122,13 +130,46 @@ call получают Busy; persistent mailbox/outbox остаются сохр�
 Ключевой plaintext — отдельный strict173B E2Ev2 kind5/no-Reply parser:
 `[2,5,call_id16,sender_ed32,0,action1,epoch8,sender_binding32,recipient_binding32,
 key_salt30,ssrc4,cname8,sequence2,timestamp4,profile1]`.
-Только Invite/Accept; profile1 = mono16k/12kbit/40ms/cap100. Обе bindings и call
-context проверяются внутри Olm; обычный message parser kind5 не принимает.
+Invite/Accept допускаются только с epoch1, RekeyOffer/RekeyAnswer только с
+epoch≥2; profile2 = mono16k/adaptive8–12kbit/40ms/cap100. Обе bindings, ожидаемые
+action/epoch/call_id/members/profile проверяются внутри Olm до ratchet commit;
+обычный message parser kind5 не принимает.
 Ratchet/account updates IMMEDIATE и только после validation; calls не создают
 history/inbox/outbox/blob rows. KeyEnvelope zeroizes key, без Debug/Serialize.
-После transport loss текущий call заканчивается; redial использует fresh ID,
-keys/SSRC/counters. API/lifetime — `crates/core/CALLS_API.md`; фактическая приёмка
-и ограничения пилота — `docs/goals/2026-10-11-call-client-apk.md`.
+При transient loss active либо already-accepted attaching call сервер резервирует
+следующий epoch (checked increment, без wrap), закрывает все старые media lanes и
+посылает Reconnecting. Episode начинается один раз на 30s; повторные failures,
+Recover и recovery attach timeout (10s) могут резервировать следующий epoch, но
+не продлевают episode. Повтор Recover со старым положительным epoch≤current
+идемпотентен и не резервирует ещё один epoch. До Accept disconnect остаётся
+терминальным; исходные ring30s и initial attach10s не превращаются в recovery.
+
+Original caller (side0) посылает RekeyOffer, callee (side1) — RekeyAnswer.
+Для каждого нового epoch обе стороны создают fresh directional keys/SSRC/cname/
+RTP origins. Сервер хранит максимум один точный opaque cipher каждого rekey
+текущего epoch: exact retry получает Ok без повторного event, different cipher
+для того же action/epoch отвергается. Caches сбрасываются при смене epoch.
+После MediaReady episode deadline сохраняется; обе стороны должны подтвердить
+Recovered после измеренных клиентом 5s stable media текущего epoch. Сервер также
+требует минимум 5s после всех четырёх attach. Только оба Recovered очищают
+episode deadline и вызывают Recovered event. Следующая потеря после этого
+открывает новый bounded episode для того же call_id.
+
+CALL_OPEN с resume требует current authenticated device, membership/contact
+permission и 0<expected_epoch≤retained current; future epoch отвергается. Старый
+signal owner останавливается до безопасной замены serial. Resume стабильного
+active call начинает recovery; resume уже текущего recovery только синхронизирует:
+READY `[2,2]`, затем Reconnecting, relevant cached peer rekey и MediaReady, если
+текущие четыре lanes уже готовы (не более трёх queued events из cap4).
+Unknown/expired call возвращает единственный OP_ERROR `[ERR_EXPIRED=2]` без
+READY и закрывает unregistered stream; call не создаётся заново. No-resume
+duplicate listener остаётся Busy. Старые signal Drop fenced serial; media cleanup
+и relay fenced одновременно epoch+serial, поэтому старый stream не завершает
+новый epoch. End от current member принимает любой положительный epoch≤current,
+чтобы cancellation выигрывал recovery race; future epoch запрещён, missing-call
+End идемпотентен. После terminal loss только explicit redial создаёт fresh ID.
+API/lifetime — `crates/core/CALLS_API.md`; приёмка recovery —
+`docs/goals/2026-10-15-recovering-long-calls.md`.
 
 ## Mailbox и peer binding
 

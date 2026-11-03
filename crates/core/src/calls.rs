@@ -35,6 +35,7 @@ pub enum CallPhase {
     Ringing,
     Connecting,
     Active,
+    Reconnecting,
     Ended,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -64,6 +65,8 @@ pub struct CallSnapshot {
     pub direction: CallDirection,
     pub reason: CallEndReason,
     pub media_handle: i64,
+    pub media_epoch: u64,
+    pub bitrate_bps: u32,
     pub available: bool,
 }
 #[uniffi::export(callback_interface)]
@@ -392,6 +395,15 @@ impl Context {
         if core.device_pub() != self.device || core.my_account().map_err(map_olm)? != self.account {
             return Err(FfiError::Revoked);
         }
+        let saved = crate::dns::load(&core.conn)
+            .map_err(FfiError::Store)?
+            .ok_or(FfiError::InvalidInput)?;
+        if saved.domain != self.profile.domain
+            || saved.noise_pubkey != self.profile.noise_pubkey
+            || saved.certificate != self.profile.certificate
+        {
+            return Err(FfiError::IdentityMismatch);
+        }
         Ok(core)
     }
     fn address(&self) -> Result<String, FfiError> {
@@ -401,26 +413,26 @@ impl Context {
             Endpoint::Dns => {
                 // Normal "online" owns carrier startup. Never wait synchronously
                 // for a 35s DNS bootstrap inside this current-thread event loop.
-                if !matches!(
-                    crate::dns::status(&self.db_path),
-                    Ok(crate::dns::State::Ready(_))
-                ) {
-                    return Err(FfiError::Transport("DNS unavailable".into()));
+                match crate::dns::status(&self.db_path) {
+                    Ok(crate::dns::State::Ready(address)) => Ok(address.to_string()),
+                    Ok(crate::dns::State::Failed(4 | 7)) => Err(FfiError::PinMismatch),
+                    Ok(crate::dns::State::Failed(_)) => Err(FfiError::Protocol(
+                        "DNS transport failed permanently".into(),
+                    )),
+                    _ => Err(FfiError::Transport("DNS unavailable".into())),
                 }
-                crate::dns::endpoint(&self.db_path, &self.profile)
-                    .map(|a| a.to_string())
-                    .map_err(|_| FfiError::Transport("DNS unavailable".into()))
             }
         }
     }
-    fn connected(&self) -> bool {
+    fn health(&self) -> Result<(), Reason> {
         match &self.endpoint {
             #[cfg(test)]
-            Endpoint::Local { .. } => true,
-            Endpoint::Dns => matches!(
-                crate::dns::status(&self.db_path),
-                Ok(crate::dns::State::Ready(_))
-            ),
+            Endpoint::Local { .. } => Ok(()),
+            Endpoint::Dns => match crate::dns::status(&self.db_path) {
+                Ok(crate::dns::State::Ready(_)) => Ok(()),
+                Ok(crate::dns::State::Failed(_)) => Err(Reason::Invalid),
+                _ => Err(Reason::ConnectionLost),
+            },
         }
     }
     async fn connect(&self) -> Result<DirectTcp, FfiError> {
@@ -440,34 +452,43 @@ impl Context {
             &key,
         )
         .await
-        .map_err(|_| FfiError::Transport("call handshake failed".into()))?;
+        .map_err(transport_error)?;
         self.core()?.login(&mut t).await.map_err(map_olm)?;
         Ok(t)
     }
-    async fn signal(&self) -> Result<Lane, FfiError> {
+    async fn signal(&self, resume: Option<([u8; 16], u64)>) -> Result<Lane, Reason> {
         tokio::time::timeout(Duration::from_secs(10), async {
-            let mut t = self.connect().await?;
-            t.send_frame(OP_CALL_OPEN, &[VERSION])
+            let mut t = self.connect().await.map_err(|e| failure_reason(&e))?;
+            t.send_frame(
+                OP_CALL_OPEN,
+                &Open { resume }.encode().map_err(|_| Reason::Invalid)?,
+            )
+            .await
+            .map_err(|error| failure_reason(&transport_error(error)))?;
+            let (op, p) = t
+                .recv_frame()
                 .await
-                .map_err(transport_error)?;
-            let (op, p) = t.recv_frame().await.map_err(transport_error)?;
-            server_error(op, &p)?;
-            if op != OP_CALL_READY || p != [VERSION, PROFILE] {
-                return Err(FfiError::Protocol("invalid call ready".into()));
+                .map_err(|error| failure_reason(&transport_error(error)))?;
+            if op == OP_ERROR && p == [dmsg_protocol::ERR_EXPIRED] {
+                return Err(Reason::Expired);
             }
-            into_lane(t)
+            server_error(op, &p).map_err(|e| failure_reason(&e))?;
+            if op != OP_CALL_READY || p != [VERSION, PROFILE] {
+                return Err(Reason::Invalid);
+            }
+            into_lane(t).map_err(|e| failure_reason(&e))
         })
         .await
-        .map_err(|_| FfiError::Transport("call open deadline".into()))?
+        .map_err(|_| Reason::ConnectionLost)?
     }
-    async fn attach(&self, id: [u8; 16]) -> Result<(DirectTcp, DirectTcp), FfiError> {
+    async fn attach(&self, id: [u8; 16], epoch: u64) -> Result<(DirectTcp, DirectTcp), FfiError> {
         tokio::time::timeout(Duration::from_secs(ATTACH_SECS), async {
             let mut lanes = Vec::with_capacity(2);
             for lane in [LaneKind::Rtp, LaneKind::Srtcp] {
                 let mut t = self.connect().await?;
                 let p = Attach {
                     call_id: id,
-                    epoch: 1,
+                    epoch,
                     lane,
                 }
                 .encode()
@@ -554,7 +575,7 @@ impl Context {
             let mut core = self.core()?;
             let peer = core.call_peer(&contact).map_err(map_olm)?;
             let local = core
-                .call_offer(&contact, id, Action::Invite)
+                .call_offer(&contact, id, Action::Invite, 1)
                 .map_err(map_olm)?;
             #[cfg(test)]
             self.observe_offer(&local);
@@ -587,8 +608,13 @@ fn open_core(path: &str, key: &Option<Zeroizing<Vec<u8>>>) -> Result<Core, FfiEr
     }
     .map_err(map_olm)
 }
-fn transport_error(_: crate::transport::TransportError) -> FfiError {
-    FfiError::Transport("call stream failed".into())
+fn transport_error(error: crate::transport::TransportError) -> FfiError {
+    match error {
+        crate::transport::TransportError::Invalid | crate::transport::TransportError::Frame(_) => {
+            FfiError::Protocol("invalid encrypted call frame".into())
+        }
+        _ => FfiError::Transport("call stream failed".into()),
+    }
 }
 fn protocol_error(_: impl std::fmt::Debug) -> FfiError {
     FfiError::Protocol("invalid call frame".into())
@@ -605,6 +631,12 @@ fn server_error(op: u8, p: &[u8]) -> Result<(), FfiError> {
 }
 fn into_lane(t: DirectTcp) -> Result<Lane, FfiError> {
     let (stream, noise, baseline) = t.into_traced_lane_parts().map_err(transport_error)?;
+    // Retiring a call stream abandons its old ordered bytes, not just its
+    // write half. TCP reset makes the local bridge reset both QUIC directions
+    // instead of retaining obsolete STREAM retransmissions after a FIN.
+    stream
+        .set_linger(Some(Duration::ZERO))
+        .map_err(|_| FfiError::Transport("call stream retirement unavailable".into()))?;
     lane::spawn_traced(stream, noise, baseline)
         .map_err(|_| FfiError::Transport("call lane unavailable".into()))
 }
@@ -618,6 +650,7 @@ struct Prepared {
 }
 struct Call {
     id: [u8; 16],
+    epoch: u64,
     generation: u64,
     contact: String,
     direction: CallDirection,
@@ -633,6 +666,14 @@ struct Call {
     ending: Option<Reason>,
     lanes: Option<(Lane, Lane)>,
     media: Option<(MediaSession, Arc<crate::call_media_handles::Entry>, i64)>,
+    retiring_handle: Option<i64>,
+    local_cipher: Option<Vec<u8>>,
+    remote_cipher: Option<Vec<u8>>,
+    recovery_deadline: Option<Instant>,
+    stable_since: Option<Instant>,
+    stable_sample: Option<(Instant, u64, u64, u64, u64)>,
+    recovered_sent: bool,
+    bitrate: u32,
 }
 impl Call {
     fn snapshot(&self, reason: Reason, available: bool) -> CallSnapshot {
@@ -642,7 +683,13 @@ impl Call {
             phase: self.phase,
             direction: self.direction,
             reason: end_reason(reason),
-            media_handle: self.media.as_ref().map_or(0, |m| m.2),
+            media_handle: if matches!(self.phase, CallPhase::Reconnecting | CallPhase::Ended) {
+                0
+            } else {
+                self.media.as_ref().map_or(0, |m| m.2)
+            },
+            media_epoch: self.epoch,
+            bitrate_bps: self.bitrate,
             available,
         }
     }
@@ -651,6 +698,7 @@ struct Pending {
     id: u32,
     call: [u8; 16],
     action: Action,
+    epoch: u64,
     deadline: Instant,
     payload: Option<Vec<u8>>,
     receipt: Option<oneshot::Receiver<Commit>>,
@@ -704,24 +752,89 @@ impl Actor {
             {
                 break;
             }
+            if self.cancelled() {
+                let urgent = *self.urgent.borrow_and_update();
+                self.local_end(if urgent.reject {
+                    Reason::Rejected
+                } else {
+                    Reason::LocalEnded
+                })
+                .await;
+            }
+            let now = Instant::now();
+            if self
+                .call
+                .as_ref()
+                .is_some_and(|c| c.ending.is_some() && c.deadline.is_some_and(|d| now >= d))
+            {
+                let reason = self
+                    .call
+                    .as_ref()
+                    .and_then(|c| c.ending)
+                    .unwrap_or(Reason::ConnectionLost);
+                self.finish(reason).await;
+            } else if self
+                .call
+                .as_ref()
+                .is_some_and(|c| c.recovery_deadline.is_some_and(|d| now >= d))
+            {
+                self.local_end(Reason::ConnectionLost).await;
+            }
             // Commands accepted by a former listener must never replay after loss.
             while self.commands.try_recv().is_ok() {}
             let context = self.context.clone();
-            let connect = context.signal();
+            let resume = self
+                .call
+                .as_ref()
+                .filter(|c| c.submitted)
+                .map(|c| (c.id, c.epoch));
+            let connect = context.signal(resume);
+            let deadline = self.call.as_ref().and_then(|c| {
+                if c.ending.is_some() {
+                    c.deadline
+                } else {
+                    c.recovery_deadline
+                }
+            });
             tokio::pin!(connect);
             let opened = tokio::select! {
                 biased;
                 _ = self.urgent.changed() => { continue; }
+                _ = async { tokio::time::sleep_until(deadline.expect("guarded deadline").into()).await }, if deadline.is_some() => { continue; }
                 result = &mut connect => result,
             };
             match opened {
                 Ok(mut signal) => {
                     backoff = 250;
                     self.signal_failed = false;
-                    publish_idle(&self.shared, &self.observer, CallPhase::Listening, true);
+                    set_available(&self.shared, true);
+                    if let Some(call) = &self.call {
+                        notify(
+                            &self.shared,
+                            &self.observer,
+                            call.snapshot(call.ending.unwrap_or(Reason::Ok), true),
+                        );
+                        if call.ending.is_some() {
+                            let id = call.id;
+                            let _ = self.send(Action::End, id, [0; 16], vec![]);
+                        }
+                    } else {
+                        publish_idle(&self.shared, &self.observer, CallPhase::Listening, true);
+                    }
                     let reason = self.listen(&mut signal).await;
                     set_available(&self.shared, false);
-                    self.finish(reason).await;
+                    if reason == Reason::ConnectionLost
+                        && self
+                            .call
+                            .as_ref()
+                            .is_some_and(|c| c.accepted && c.ending.is_none())
+                    {
+                        self.recover(None, false).await;
+                    } else if !self.call.as_ref().is_some_and(|c| c.ending.is_some())
+                        || matches!(reason, Reason::Revoked | Reason::Invalid)
+                    {
+                        self.finish(reason).await;
+                    }
                     signal.joined_close().await;
                     self.pending.clear();
                     if self.urgent.borrow().shutdown
@@ -736,15 +849,26 @@ impl Actor {
                         break;
                     }
                 }
-                Err(FfiError::Revoked) => break,
+                Err(Reason::Revoked) => {
+                    self.finish(Reason::Revoked).await;
+                    break;
+                }
+                Err(Reason::Expired) => {
+                    self.finish(Reason::ConnectionLost).await;
+                }
+                Err(reason) if !matches!(reason, Reason::ConnectionLost | Reason::Busy) => {
+                    self.finish(reason).await;
+                }
                 Err(_) => (),
             }
-            publish_idle(&self.shared, &self.observer, CallPhase::Stopped, false);
+            if self.call.is_none() {
+                publish_idle(&self.shared, &self.observer, CallPhase::Stopped, false);
+            }
             tokio::select! {
                 _ = self.urgent.changed() => (),
                 _ = tokio::time::sleep(Duration::from_millis(backoff)) => (),
             }
-            backoff = (backoff * 2).min(5000);
+            backoff = (backoff * 2).min(if self.call.is_some() { 1000 } else { 5000 });
         }
         self.finish(Reason::LocalEnded).await;
         publish_idle(&self.shared, &self.observer, CallPhase::Stopped, false);
@@ -797,14 +921,20 @@ impl Actor {
                 }
             }
             if self.flush(signal).is_err() {
-                return Reason::ConnectionLost;
+                return if signal.termination() == Some(lane::Termination::Invalid) {
+                    Reason::Invalid
+                } else {
+                    Reason::ConnectionLost
+                };
             }
             tokio::select! {
                 biased;
                 changed = self.urgent.changed() => { if changed.is_err() { return Reason::LocalEnded; } }
                 frame = signal.incoming.recv() => {
-                    let Some(Ok(frame)) = frame else { return Reason::ConnectionLost; };
-                    if !self.context.connected() { return Reason::ConnectionLost; }
+                    let Some(Ok(frame)) = frame else {
+                        return if signal.termination() == Some(lane::Termination::Invalid) { Reason::Invalid } else { Reason::ConnectionLost };
+                    };
+                    if let Err(reason) = self.context.health() { return reason; }
                     let result = self.frame(frame.frame.0, &frame.frame.1).await;
                     if let Err(reason) = result { return reason; }
                 }
@@ -848,15 +978,23 @@ impl Actor {
                             }
                             self.start_media().await;
                         }
-                        Err(error) => self.local_end(failure_reason(&error)).await,
+                        Err(error) => {
+                            let reason = failure_reason(&error);
+                            if reason == Reason::ConnectionLost { self.recover(None, true).await; }
+                            else { self.local_end(reason).await; }
+                        }
                     }
                 }
                 _ = tick.tick() => {
-                    if !self.context.connected() { return Reason::ConnectionLost; }
+                    if let Err(reason) = self.context.health() { return reason; }
                     let now = Instant::now();
+                    if self.call.as_ref().is_some_and(|c| c.ending.is_none() && c.recovery_deadline.is_some_and(|d| now >= d)) {
+                        self.local_end(Reason::ConnectionLost).await;
+                    }
                     if self.call.as_ref().is_some_and(|c| c.deadline.is_some_and(|d| now >= d)) {
                         if self.call.as_ref().is_some_and(|c| c.ending.is_some()) { return Reason::ConnectionLost; }
-                        self.local_end(Reason::Expired).await;
+                        if self.call.as_ref().is_some_and(|c| c.accepted) { self.recover(None, true).await; }
+                        else { self.local_end(Reason::Expired).await; }
                     }
                     if now >= heartbeat {
                         heartbeat = now + Duration::from_secs(HEARTBEAT_SECS);
@@ -867,6 +1005,7 @@ impl Actor {
                         let stop_requested = entry.stop_requested();
                         self.media_progress(now, &stats, stop_requested).await;
                     }
+                    self.start_media().await;
                 }
             }
         }
@@ -884,21 +1023,72 @@ impl Actor {
             return;
         }
         if stats.failed || stats.stopped {
-            // The media worker already joined/closed its lanes.
-            // Their server registration emits authoritative Ended;
-            // SIG distinguishes remote hangup from actual loss.
-            // JNI retirement after that failure must not replace its reason.
-            call.ending = Some(Reason::ConnectionLost);
-            call.deadline = Some(now + Duration::from_secs(30));
+            if stats.failure_kind.is_some() {
+                self.recover(None, true).await;
+            } else {
+                self.local_end(Reason::Invalid).await;
+            }
         } else if stop_requested {
             self.local_end(Reason::AudioUnavailable).await;
-        } else if stats.ready && call.phase != CallPhase::Active {
-            call.phase = CallPhase::Active;
-            notify(
-                &self.shared,
-                &self.observer,
-                call.snapshot(Reason::Ok, true),
+        } else if stats.ready
+            && stats.encoded_packets > 0
+            && stats.decoded_packets > 0
+            && stats.received_rtp_packets > 0
+        {
+            if call.phase != CallPhase::Active || call.bitrate != stats.target_bitrate_bps {
+                call.phase = CallPhase::Active;
+                call.deadline = None;
+                call.bitrate = stats.target_bitrate_bps;
+                notify(
+                    &self.shared,
+                    &self.observer,
+                    call.snapshot(Reason::Ok, true),
+                );
+            }
+            // Authenticated but entirely late RTP is not working audio. Use
+            // the same real-progress sample for liveness and recovery proof.
+            let sample = (
+                now,
+                stats.encoded_packets,
+                stats.decoded_packets,
+                stats.received_rtp_packets,
+                stats.terminal_feedback,
             );
+            if let Some((at, encoded, decoded, rtp, feedback)) = call.stable_sample {
+                if now.saturating_duration_since(at) >= Duration::from_secs(1) {
+                    if stats.encoded_packets > encoded
+                        && stats.decoded_packets > decoded
+                        && stats.received_rtp_packets > rtp
+                        && stats.terminal_feedback > feedback
+                    {
+                        call.stable_since.get_or_insert(at);
+                    } else {
+                        call.stable_since = None;
+                        if stats.encoded_packets == encoded
+                            || stats.decoded_packets == decoded
+                            || stats.received_rtp_packets == rtp
+                        {
+                            self.recover(None, true).await;
+                            return;
+                        }
+                    }
+                    call.stable_sample = Some(sample);
+                }
+            } else {
+                call.stable_sample = Some(sample);
+            }
+            if call.recovery_deadline.is_some() && !call.recovered_sent {
+                if call.stable_since.is_some_and(|at| {
+                    now.saturating_duration_since(at) >= Duration::from_secs(RECOVERY_STABLE_SECS)
+                }) {
+                    let id = call.id;
+                    if self.send(Action::Recovered, id, [0; 16], vec![]).is_ok() {
+                        self.call.as_mut().expect("stable call").recovered_sent = true;
+                    } else {
+                        self.signal_failed = true;
+                    }
+                }
+            }
         }
     }
     fn cancelled(&self) -> bool {
@@ -907,6 +1097,113 @@ impl Actor {
             .lock()
             .map(|a| a.call.is_some() && a.cancelled)
             .unwrap_or(true)
+    }
+    async fn retire_media(&mut self) {
+        self.attaching = None;
+        let Some(call) = &mut self.call else {
+            return;
+        };
+        if let Some((mut media, entry, handle)) = call.media.take() {
+            call.retiring_handle = Some(handle);
+            let stats = media.stop().await;
+            entry.complete(stats);
+        }
+        if let Some((mut rtp, mut control)) = call.lanes.take() {
+            rtp.joined_close().await;
+            control.joined_close().await;
+        }
+    }
+    async fn recover(&mut self, reserved: Option<(u64, u32)>, request: bool) {
+        let Some(call) = &mut self.call else {
+            return;
+        };
+        if !call.accepted || call.ending.is_some() {
+            return;
+        }
+        let now = Instant::now();
+        let remaining = reserved.map_or(Duration::from_secs(RECOVERY_SECS), |(_, ms)| {
+            Duration::from_millis(u64::from(ms))
+        });
+        let deadline = now + remaining;
+        call.recovery_deadline = Some(
+            call.recovery_deadline
+                .map_or(deadline, |old| old.min(deadline)),
+        );
+        let old_phase = call.phase;
+        if let Some((epoch, _)) = reserved {
+            if epoch < call.epoch {
+                return;
+            }
+            if epoch > call.epoch {
+                call.epoch = epoch;
+                call.local = None;
+                call.remote = None;
+                call.local_cipher = None;
+                call.remote_cipher = None;
+            } else if old_phase == CallPhase::Active && call.ready {
+                // Idempotent old Recover/Open sync cannot roll back working audio.
+                return;
+            }
+        }
+        call.phase = CallPhase::Reconnecting;
+        call.ready = false;
+        call.deadline = None;
+        call.stable_since = None;
+        call.stable_sample = None;
+        call.recovered_sent = false;
+        call.bitrate = 8_000;
+        let id = call.id;
+        notify(
+            &self.shared,
+            &self.observer,
+            call.snapshot(Reason::Ok, true),
+        );
+        self.retire_media().await;
+        if request
+            && old_phase != CallPhase::Reconnecting
+            && self.send(Action::Recover, id, [0; 16], vec![]).is_err()
+        {
+            self.signal_failed = true;
+        }
+    }
+    fn rekey(&mut self) -> Result<(), Reason> {
+        let Some(call) = &mut self.call else {
+            return Ok(());
+        };
+        if call.ending.is_some() || call.epoch < 2 {
+            return Ok(());
+        }
+        let action = if call.direction == CallDirection::Outgoing {
+            Action::RekeyOffer
+        } else if call.remote.is_some() {
+            Action::RekeyAnswer
+        } else {
+            return Ok(());
+        };
+        if call.local_cipher.is_none() {
+            let mut core = self.context.core().map_err(|e| failure_reason(&e))?;
+            let local = core
+                .call_offer(&call.contact, call.id, action, call.epoch)
+                .map_err(|_| Reason::Invalid)?;
+            #[cfg(test)]
+            self.context.observe_offer(&local);
+            let cipher = core
+                .encrypt_call(&call.contact, &local)
+                .map_err(|_| Reason::Invalid)?;
+            call.local = Some(local);
+            call.local_cipher = Some(cipher);
+        }
+        let id = call.id;
+        let cipher = call.local_cipher.clone().expect("cached rekey");
+        if !self.pending.iter().any(|p| {
+            p.call == id
+                && p.action == action
+                && p.epoch == self.call.as_ref().expect("rekey call").epoch
+        }) {
+            self.send(action, id, [0; 16], cipher)
+                .map_err(|_| Reason::ConnectionLost)?;
+        }
+        Ok(())
     }
     fn command(&mut self, command: LocalCommand) -> Result<(), FfiError> {
         match command {
@@ -927,6 +1224,7 @@ impl Actor {
                 drop(a);
                 self.call = Some(Call {
                     id,
+                    epoch: 1,
                     generation,
                     contact: contact.clone(),
                     direction: CallDirection::Outgoing,
@@ -942,6 +1240,14 @@ impl Actor {
                     ending: None,
                     lanes: None,
                     media: None,
+                    retiring_handle: None,
+                    local_cipher: None,
+                    remote_cipher: None,
+                    recovery_deadline: None,
+                    stable_since: None,
+                    stable_sample: None,
+                    recovered_sent: false,
+                    bitrate: 12_000,
                 });
                 notify(
                     &self.shared,
@@ -968,12 +1274,13 @@ impl Actor {
                 }
                 let mut core = self.context.core()?;
                 let local = core
-                    .call_offer(&call.contact, id, Action::Accept)
+                    .call_offer(&call.contact, id, Action::Accept, 1)
                     .map_err(map_olm)?;
                 #[cfg(test)]
                 self.context.observe_offer(&local);
                 let ciphertext = core.encrypt_call(&call.contact, &local).map_err(map_olm)?;
                 call.local = Some(local);
+                call.accepted = true;
                 let shared = self.shared.clone();
                 let a = shared.admission.lock().map_err(|_| FfiError::Busy)?;
                 if a.cancelled || a.stopped || a.generation != generation {
@@ -1000,7 +1307,14 @@ impl Actor {
             request_id: self.next_request,
             action,
             call_id: call,
-            epoch: if action == Action::Heartbeat { 0 } else { 1 },
+            epoch: if action == Action::Heartbeat {
+                0
+            } else {
+                self.call
+                    .as_ref()
+                    .filter(|c| c.id == call)
+                    .map_or(1, |c| c.epoch)
+            },
             recipient,
             ciphertext,
         };
@@ -1009,6 +1323,7 @@ impl Actor {
             id: command.request_id,
             call,
             action,
+            epoch: command.epoch,
             deadline: Instant::now() + Duration::from_secs(30),
             payload: Some(payload),
             receipt: None,
@@ -1059,6 +1374,14 @@ impl Actor {
         }
         if opcode == OP_CALL_ACK {
             let ack = Ack::decode(payload).map_err(|_| Reason::Invalid)?;
+            if self
+                .call
+                .as_ref()
+                .is_some_and(|c| c.id == ack.call_id && ack.epoch > 0 && ack.epoch < c.epoch)
+            {
+                self.pending.retain(|p| p.id != ack.request_id);
+                return Ok(());
+            }
             let index = self
                 .pending
                 .iter()
@@ -1066,12 +1389,7 @@ impl Actor {
                 .ok_or(Reason::Invalid)?;
             let pending = self.pending.remove(index).expect("matched request");
             if pending.call != ack.call_id
-                || ack.epoch
-                    != if pending.action == Action::Heartbeat {
-                        0
-                    } else {
-                        1
-                    }
+                || ack.epoch != pending.epoch
                 || pending.payload.is_some()
             {
                 return Err(Reason::Invalid);
@@ -1092,6 +1410,7 @@ impl Actor {
                     .as_ref()
                     .and_then(|c| c.ending)
                     .unwrap_or(ack.reason);
+                set_available(&self.shared, true);
                 self.finish(if ack.reason == Reason::Ok {
                     reason
                 } else {
@@ -1117,7 +1436,7 @@ impl Actor {
                         call.snapshot(Reason::Ok, true),
                     );
                 }
-                Action::Accept => {
+                Action::Accept | Action::RekeyAnswer => {
                     self.begin_attach();
                 }
                 _ => (),
@@ -1141,6 +1460,7 @@ impl Actor {
                     &event.ciphertext,
                     event.call_id,
                     Action::Invite,
+                    1,
                 )
                 .map_err(map_olm)
             });
@@ -1186,6 +1506,7 @@ impl Actor {
             drop(a);
             self.call = Some(Call {
                 id: event.call_id,
+                epoch: event.epoch,
                 generation,
                 contact,
                 direction: CallDirection::Incoming,
@@ -1203,6 +1524,14 @@ impl Actor {
                 ending: None,
                 lanes: None,
                 media: None,
+                retiring_handle: None,
+                local_cipher: None,
+                remote_cipher: None,
+                recovery_deadline: None,
+                stable_since: None,
+                stable_sample: None,
+                recovered_sent: false,
+                bitrate: 12_000,
             });
             // The UI must not expose an answerable incoming call before this ACK.
             self.send(Action::Ringing, event.call_id, [0; 16], vec![])
@@ -1220,6 +1549,25 @@ impl Actor {
         }
         if call.ending.is_some() && event.kind != EventKind::Ended {
             return Ok(());
+        }
+        if event.epoch < call.epoch && event.kind != EventKind::Ended {
+            return Ok(());
+        }
+        if event.kind == EventKind::Reconnecting {
+            if !call.accepted || event.epoch < 2 {
+                return Err(Reason::Invalid);
+            }
+            if event.epoch == call.epoch
+                && (call.media.is_some() || call.lanes.is_some() || self.attaching.is_some())
+            {
+                return Ok(());
+            }
+            self.recover(Some((event.epoch, event.remaining_ms)), false)
+                .await;
+            return self.rekey();
+        }
+        if event.kind != EventKind::Ended && event.epoch != call.epoch {
+            return Err(Reason::Invalid);
         }
         match event.kind {
             EventKind::Ringing if call.direction == CallDirection::Outgoing && !call.accepted => {
@@ -1241,6 +1589,7 @@ impl Actor {
                         &event.ciphertext,
                         event.call_id,
                         Action::Accept,
+                        1,
                     )
                     .map_err(|_| Reason::Invalid)?;
                 if contact != call.contact {
@@ -1253,11 +1602,53 @@ impl Actor {
                 call.ready = true;
                 self.start_media().await;
             }
+            EventKind::RekeyOffer | EventKind::RekeyAnswer if call.recovery_deadline.is_some() => {
+                let action = match (event.kind, call.direction) {
+                    (EventKind::RekeyOffer, CallDirection::Incoming) => Action::RekeyOffer,
+                    (EventKind::RekeyAnswer, CallDirection::Outgoing) => Action::RekeyAnswer,
+                    _ => return Err(Reason::Invalid),
+                };
+                if let Some(cipher) = &call.remote_cipher {
+                    if *cipher != event.ciphertext {
+                        return Err(Reason::Invalid);
+                    }
+                } else {
+                    let (contact, remote) = self
+                        .context
+                        .core()
+                        .map_err(|e| failure_reason(&e))?
+                        .decrypt_call(
+                            event.peer_user,
+                            event.peer_device,
+                            &event.ciphertext,
+                            event.call_id,
+                            action,
+                            event.epoch,
+                        )
+                        .map_err(|_| Reason::Invalid)?;
+                    if contact != call.contact {
+                        return Err(Reason::Invalid);
+                    }
+                    call.remote = Some(remote);
+                    call.remote_cipher = Some(event.ciphertext);
+                }
+                if action == Action::RekeyOffer {
+                    self.rekey()?;
+                } else {
+                    self.begin_attach();
+                }
+            }
+            EventKind::Recovered if call.accepted && call.ready => {
+                call.recovery_deadline = None;
+                call.stable_since = None;
+                call.stable_sample = None;
+            }
             EventKind::Ended => {
                 let reason = match call.ending {
                     Some(Reason::ConnectionLost) | None => event.reason,
                     Some(reason) => reason,
                 };
+                set_available(&self.shared, true);
                 self.finish(reason).await;
             }
             _ => return Err(Reason::Invalid),
@@ -1266,11 +1657,23 @@ impl Actor {
     }
     fn begin_attach(&mut self) {
         if let Some(call) = &mut self.call {
+            if self.attaching.is_some()
+                || call.lanes.is_some()
+                || call.media.is_some()
+                || call.ending.is_some()
+            {
+                return;
+            }
             call.accepted = true;
-            call.deadline = Some(Instant::now() + Duration::from_secs(ATTACH_SECS));
+            let deadline = Instant::now() + Duration::from_secs(ATTACH_SECS);
+            call.deadline = Some(
+                call.recovery_deadline
+                    .map_or(deadline, |old| old.min(deadline)),
+            );
             let context = self.context.clone();
             let id = call.id;
-            self.attaching = Some(Box::pin(async move { context.attach(id).await }));
+            let epoch = call.epoch;
+            self.attaching = Some(Box::pin(async move { context.attach(id, epoch).await }));
         }
     }
     async fn start_media(&mut self) {
@@ -1283,6 +1686,12 @@ impl Actor {
         if !call.ready || !call.accepted || call.lanes.is_none() || call.media.is_some() {
             return;
         }
+        if let Some(handle) = call.retiring_handle {
+            if crate::call_media_handles::get(handle).is_some() {
+                return;
+            }
+            call.retiring_handle = None;
+        }
         let (Some(local), Some(remote)) = (&call.local, &call.remote) else {
             self.local_end(Reason::Invalid).await;
             return;
@@ -1294,6 +1703,9 @@ impl Actor {
             return;
         }
         let config = MediaConfig {
+            rate_policy: crate::live_media::RatePolicy::Adaptive {
+                initial_bps: call.bitrate,
+            },
             profile_ms: 40,
             media_tx: local.key,
             media_rx: remote.key,
@@ -1327,7 +1739,9 @@ impl Actor {
             };
         call.local = None;
         call.remote = None;
-        call.deadline = None;
+        // Native initialization precedes source qualification and first media.
+        // Keep that startup bounded without sampling it as active-media loss.
+        call.deadline = Some(Instant::now() + Duration::from_secs(ATTACH_SECS));
         call.phase = CallPhase::Connecting;
         call.media = Some((session, entry, handle));
         notify(
@@ -1347,13 +1761,27 @@ impl Actor {
             if call.submitted {
                 call.ending = Some(reason);
                 call.deadline = Some(Instant::now() + Duration::from_secs(30));
+                call.recovery_deadline = None;
                 let id = call.id;
                 if self.send(action, id, [0; 16], vec![]).is_err() {
                     // Retiring SIG removes every server route on queue/send loss.
                     self.signal_failed = true;
                 }
-                // Keep attachment/media owners alive until SIG End is processed.
-                // Closing a media lane first would race End into ConnectionLost.
+                // End is terminal even offline. New hub serial/epoch guards let
+                // old lanes close without turning a pending End into resurrection.
+                self.retire_media().await;
+                if let Some(call) = &mut self.call {
+                    call.phase = CallPhase::Ended;
+                    if let Ok(mut a) = self.shared.admission.lock() {
+                        if a.generation == call.generation {
+                            a.call = None;
+                            a.contact = None;
+                            a.cancelled = false;
+                            a.available = false;
+                        }
+                    }
+                    notify(&self.shared, &self.observer, call.snapshot(reason, false));
+                }
                 return;
             }
         }
@@ -1398,12 +1826,14 @@ impl Actor {
             }
             a.available && !a.stopped
         };
-        call.phase = CallPhase::Ended;
-        notify(
-            &self.shared,
-            &self.observer,
-            call.snapshot(reason, available),
-        );
+        if call.phase != CallPhase::Ended {
+            call.phase = CallPhase::Ended;
+            notify(
+                &self.shared,
+                &self.observer,
+                call.snapshot(reason, available),
+            );
+        }
         if available {
             publish_idle(&self.shared, &self.observer, CallPhase::Listening, true);
         }
@@ -1440,6 +1870,8 @@ fn publish_idle(
             direction: CallDirection::Outgoing,
             reason: CallEndReason::None,
             media_handle: 0,
+            media_epoch: 0,
+            bitrate_bps: 0,
             available,
         },
     );

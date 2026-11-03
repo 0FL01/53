@@ -1,7 +1,7 @@
 //! One ordered lane: a single Noise owner, bounded queues, cancellable IO.
 
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicU64, AtomicU8, Ordering},
     Arc,
 };
 use std::time::Instant;
@@ -50,6 +50,39 @@ pub struct Lane {
     trace: Arc<SocketTrace>,
     local_port: Option<u16>,
     selection: Option<crate::dns::StreamSelection>,
+    termination: Arc<AtomicU8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Termination {
+    ConnectionLost,
+    Invalid,
+}
+
+struct LaneFailure {
+    kind: Termination,
+    message: String,
+}
+impl From<String> for LaneFailure {
+    fn from(message: String) -> Self {
+        Self {
+            kind: Termination::Invalid,
+            message,
+        }
+    }
+}
+impl From<&str> for LaneFailure {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
+impl LaneFailure {
+    fn lost(message: &str) -> Self {
+        Self {
+            kind: Termination::ConnectionLost,
+            message: message.into(),
+        }
+    }
 }
 
 /// Absolute byte frontiers; no socket identifier or cross-device timestamp.
@@ -145,6 +178,13 @@ impl SocketTrace {
 }
 
 impl Lane {
+    pub(crate) fn termination(&self) -> Option<Termination> {
+        match self.termination.load(Ordering::Acquire) {
+            1 => Some(Termination::ConnectionLost),
+            2 => Some(Termination::Invalid),
+            _ => None,
+        }
+    }
     pub(crate) fn select_native_stream(&mut self, owner: &str) {
         self.selection = self
             .local_port
@@ -234,6 +274,8 @@ fn spawn_inner(
         .map(|a| a.port());
     let trace = Arc::new(SocketTrace::new());
     let worker_trace = trace.clone();
+    let termination = Arc::new(AtomicU8::new(0));
+    let worker_termination = termination.clone();
     let actor = tokio::spawn(async move {
         if let Err(error) = run(
             stream,
@@ -247,8 +289,15 @@ fn spawn_inner(
         )
         .await
         {
+            worker_termination.store(
+                match error.kind {
+                    Termination::ConnectionLost => 1,
+                    Termination::Invalid => 2,
+                },
+                Ordering::Release,
+            );
             // Never wait for an unresponsive consumer during teardown.
-            let _ = received.try_send(Err(error));
+            let _ = received.try_send(Err(error.message));
         }
         requests.close();
         while let Ok(request) = requests.try_recv() {
@@ -262,6 +311,7 @@ fn spawn_inner(
         trace,
         local_port,
         selection: None,
+        termination,
     })
 }
 
@@ -272,15 +322,17 @@ fn dropped(request: SendRequest) {
 }
 
 async fn run(
-    stream: TcpStream,
+    mut stream: TcpStream,
     mut noise: snow::TransportState,
     requests: &mut mpsc::Receiver<SendRequest>,
     received: &mpsc::Sender<Result<InboundFrame, String>>,
     baseline: (u64, u64),
     trace: &SocketTrace,
     #[cfg(feature = "voice-probe")] mut service: Option<IngressService>,
-) -> Result<(), String> {
-    let (mut reader, mut writer) = stream.into_split();
+) -> Result<(), LaneFailure> {
+    // Keep the socket owned here: OwnedWriteHalf's Drop would first send a
+    // graceful write shutdown, defeating abortive retirement of call streams.
+    let (mut reader, mut writer) = stream.split();
     // Offsets live outside select futures: cancelled read/write calls lose no bytes.
     let mut cipher = vec![0; MAX_FRAME + 16 + 2];
     let mut filled = 0;
@@ -314,9 +366,9 @@ async fn run(
                 }
                 reader.read(&mut cipher[filled..wanted]).await
             }, if inbound.is_none() => {
-                let count = read.map_err(|_| "probe read failed".to_string())?;
+                let count = read.map_err(|_| LaneFailure::lost("probe read failed"))?;
                 if count == 0 {
-                    return Err("probe lane closed".into());
+                    return Err(LaneFailure::lost("probe lane closed"));
                 }
                 filled += count;
                 progress.rx_socket_read = progress.rx_socket_read.saturating_add(count as u64);
@@ -365,9 +417,9 @@ async fn run(
                 permit.send(inbound.take().expect("guarded pending frame"));
             }
             write = writer.write(&wire[written..]), if !wire.is_empty() => {
-                let count = write.map_err(|_| "probe write failed".to_string())?;
+                let count = write.map_err(|_| LaneFailure::lost("probe write failed"))?;
                 if count == 0 {
-                    return Err("probe write closed".into());
+                    return Err(LaneFailure::lost("probe write closed"));
                 }
                 written += count;
                 progress.tx_socket_written = progress.tx_socket_written.saturating_add(count as u64);
@@ -871,13 +923,16 @@ mod tests {
                 assert!(lane.incoming.try_recv().is_err());
             }
             let mut byte = [0];
-            assert_eq!(
-                timeout(Duration::from_secs(2), peer.read(&mut byte))
-                    .await
-                    .unwrap()
-                    .unwrap(),
-                0
-            );
+            match timeout(Duration::from_secs(2), peer.read(&mut byte))
+                .await
+                .unwrap()
+            {
+                Ok(0) => (),
+                // Full socket retirement can reset unread data instead of
+                // gracefully half-closing first. Neither path leaves a reader.
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => (),
+                other => panic!("retired lane remained readable: {other:?}"),
+            }
             assert!(outgoing.is_closed());
         }
     }

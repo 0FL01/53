@@ -31,15 +31,16 @@ impl Core {
         })
     }
 
-    /// A new directional key/salt and RTP identity for this Invite or Accept.
+    /// A new directional key/salt and RTP identity for this call epoch.
     /// No Olm message is consumed until encrypt_call commits successfully.
     pub(crate) fn call_offer(
         &self,
         contact_id: &str,
         call_id: [u8; 16],
         action: Action,
+        epoch: u64,
     ) -> Result<KeyEnvelope, OlmError> {
-        call_context(&call_id, action)?;
+        call_context(&call_id, action, epoch)?;
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
             .map_err(|_| OlmError::Store("call offer transaction failed".into()))?;
         let c = call_contact(&tx, contact_id)?;
@@ -49,7 +50,7 @@ impl Core {
             call_id,
             sender_ed: olm::ed_identity(&account),
             action,
-            epoch: 1,
+            epoch,
             sender_binding: binding,
             recipient_binding: recipient_binding(&c)?,
             key: [0; 30],
@@ -84,7 +85,7 @@ impl Core {
     }
 
     /// Encrypt exactly this offer on an already primed session. The returned
-    /// ciphertext is transient: an unsuccessful signal ends this call attempt.
+    /// ciphertext is transient; retries of an epoch retain these exact bytes.
     pub(crate) fn encrypt_call(
         &mut self,
         contact_id: &str,
@@ -136,8 +137,9 @@ impl Core {
         ciphertext: &[u8],
         call_id: [u8; 16],
         action: Action,
+        epoch: u64,
     ) -> Result<(String, KeyEnvelope), OlmError> {
-        call_context(&call_id, action)?;
+        call_context(&call_id, action, epoch)?;
         if ciphertext.is_empty() || ciphertext.len() > CIPHERTEXT_MAX {
             return Err(OlmError::Protocol("invalid call ciphertext length"));
         }
@@ -206,7 +208,7 @@ impl Core {
         let envelope = KeyEnvelope::decode(&plain).map_err(OlmError::Protocol)?;
         if envelope.call_id != call_id
             || envelope.action != action
-            || envelope.epoch != 1
+            || envelope.epoch != epoch
             || envelope.sender_binding != recipient_binding(&c)?
             || envelope.recipient_binding != binding
         {
@@ -253,8 +255,13 @@ impl Core {
     }
 }
 
-fn call_context(call_id: &[u8; 16], action: Action) -> Result<(), OlmError> {
-    if *call_id == [0; 16] || !matches!(action, Action::Invite | Action::Accept) {
+fn call_context(call_id: &[u8; 16], action: Action, epoch: u64) -> Result<(), OlmError> {
+    if *call_id == [0; 16]
+        || !matches!(
+            (action, epoch),
+            (Action::Invite | Action::Accept, 1) | (Action::RekeyOffer | Action::RekeyAnswer, 2..)
+        )
+    {
         return Err(OlmError::Protocol("invalid call identity/action"));
     }
     Ok(())
@@ -449,6 +456,7 @@ mod tests {
                 wire,
                 id,
                 action,
+                1,
             )
             .unwrap();
         assert_eq!(cid, peer.my_account().unwrap().1);
@@ -460,6 +468,97 @@ mod tests {
         let left = Zeroizing::new(left.encode().unwrap());
         let right = Zeroizing::new(right.encode().unwrap());
         assert!(left.as_slice() == right.as_slice(), "call envelope differs");
+    }
+
+    #[test]
+    fn recovery_rekeys_are_fresh_and_expected_epoch_is_bound_before_commit() {
+        let mut pair = Pair::new("recovery");
+        prime(&mut pair.a, &mut pair.b, BOB);
+        let id = [51; 16];
+        let invite = pair.a.call_offer(BOB, id, Action::Invite, 1).unwrap();
+        let wire = pair.a.encrypt_call(BOB, &invite).unwrap();
+        receive(&mut pair.b, &pair.a, &wire, id, Action::Invite);
+        let accept = pair.b.call_offer(ALICE, id, Action::Accept, 1).unwrap();
+        let wire = pair.b.encrypt_call(ALICE, &accept).unwrap();
+        receive(&mut pair.a, &pair.b, &wire, id, Action::Accept);
+        let mut previous = invite;
+        for epoch in [2, 3, u64::MAX] {
+            let offer = pair
+                .a
+                .call_offer(BOB, id, Action::RekeyOffer, epoch)
+                .unwrap();
+            assert!(offer.key != previous.key);
+            assert_ne!(offer.ssrc, previous.ssrc);
+            assert_ne!(offer.cname, previous.cname);
+            assert_ne!(
+                (offer.sequence, offer.timestamp),
+                (previous.sequence, previous.timestamp)
+            );
+            let wire = pair.a.encrypt_call(BOB, &offer).unwrap();
+            let before = session(&pair.b, ALICE).unwrap();
+            let account = crate::store::load_olm(&pair.b.conn).unwrap();
+            for (action, expected_epoch) in [
+                (Action::RekeyOffer, epoch - 1),
+                (Action::RekeyAnswer, epoch),
+            ] {
+                assert!(pair
+                    .b
+                    .decrypt_call(
+                        pair.a.my_account().unwrap().0,
+                        pair.a.device_pub(),
+                        &wire,
+                        id,
+                        action,
+                        expected_epoch
+                    )
+                    .is_err());
+                assert!(session(&pair.b, ALICE).unwrap() == before);
+                assert!(crate::store::load_olm(&pair.b.conn).unwrap() == account);
+            }
+            let (_, incoming) = pair
+                .b
+                .decrypt_call(
+                    pair.a.my_account().unwrap().0,
+                    pair.a.device_pub(),
+                    &wire,
+                    id,
+                    Action::RekeyOffer,
+                    epoch,
+                )
+                .unwrap();
+            assert_same_offer(&offer, &incoming);
+            let answer = pair
+                .b
+                .call_offer(ALICE, id, Action::RekeyAnswer, epoch)
+                .unwrap();
+            assert!(answer.key != offer.key);
+            assert_ne!(answer.ssrc, offer.ssrc);
+            let wire = pair.b.encrypt_call(ALICE, &answer).unwrap();
+            let (_, incoming) = pair
+                .a
+                .decrypt_call(
+                    pair.b.my_account().unwrap().0,
+                    pair.b.device_pub(),
+                    &wire,
+                    id,
+                    Action::RekeyAnswer,
+                    epoch,
+                )
+                .unwrap();
+            assert_same_offer(&answer, &incoming);
+            previous = offer;
+        }
+        for (action, epoch) in [
+            (Action::Invite, 2),
+            (Action::Accept, 2),
+            (Action::RekeyOffer, 1),
+            (Action::RekeyAnswer, 0),
+            (Action::Recover, 2),
+        ] {
+            assert!(pair.a.call_offer(BOB, id, action, epoch).is_err());
+        }
+        assert_no_messages(&pair.a, BOB);
+        assert_no_messages(&pair.b, ALICE);
     }
 
     fn text_event(core: &Core, mid: [u8; 16], seq: u64) -> RawEvent {
@@ -485,7 +584,7 @@ mod tests {
             peer.binding,
             crate::voice::own_binding(&pair.b.conn).unwrap()
         );
-        let invite = pair.a.call_offer(BOB, id, Action::Invite).unwrap();
+        let invite = pair.a.call_offer(BOB, id, Action::Invite, 1).unwrap();
         assert_eq!(
             pair.a.encrypt_call(BOB, &invite),
             Err(OlmError::MessageUnavailable)
@@ -498,7 +597,7 @@ mod tests {
         let incoming = receive(&mut pair.b, &pair.a, &wire, id, Action::Invite);
         assert_same_offer(&invite, &incoming);
         assert_eq!(pair.b.account.one_time_keys().len(), b_otks - 1);
-        let answer = pair.b.call_offer(ALICE, id, Action::Accept).unwrap();
+        let answer = pair.b.call_offer(ALICE, id, Action::Accept, 1).unwrap();
         assert!(answer.key != invite.key);
         assert_ne!(answer.ssrc, invite.ssrc);
         assert_ne!(answer.cname, invite.cname);
@@ -515,7 +614,7 @@ mod tests {
         );
         assert_no_messages(&pair.a, BOB);
         assert_no_messages(&pair.b, ALICE);
-        let repeated = pair.a.call_offer(BOB, [12; 16], Action::Invite).unwrap();
+        let repeated = pair.a.call_offer(BOB, [12; 16], Action::Invite, 1).unwrap();
         assert!(repeated.key != invite.key);
         assert_ne!(repeated.ssrc, invite.ssrc);
         assert_ne!(repeated.cname, invite.cname);
@@ -551,12 +650,15 @@ mod tests {
             .unwrap();
         let a_event = text_event(&pair.a, a_old, 1);
         let b_event = text_event(&pair.b, b_old, 1);
-        let invite = pair.a.call_offer(BOB, [21; 16], Action::Invite).unwrap();
+        let invite = pair.a.call_offer(BOB, [21; 16], Action::Invite, 1).unwrap();
         let wire = pair.a.encrypt_call(BOB, &invite).unwrap();
         let incoming = receive(&mut pair.b, &pair.a, &wire, [21; 16], Action::Invite);
         assert_same_offer(&invite, &incoming);
         // B can answer on either crossed session, depending on the shared sort.
-        let answer = pair.b.call_offer(ALICE, [21; 16], Action::Accept).unwrap();
+        let answer = pair
+            .b
+            .call_offer(ALICE, [21; 16], Action::Accept, 1)
+            .unwrap();
         let wire = pair.b.encrypt_call(ALICE, &answer).unwrap();
         receive(&mut pair.a, &pair.b, &wire, [21; 16], Action::Accept);
         assert_eq!(
@@ -614,7 +716,7 @@ mod tests {
         let mut pair = Pair::new("rollback");
         prime(&mut pair.a, &mut pair.b, BOB);
         let id = [31; 16];
-        let mut invite = pair.a.call_offer(BOB, id, Action::Invite).unwrap();
+        let mut invite = pair.a.call_offer(BOB, id, Action::Invite, 1).unwrap();
         let wire = pair.a.encrypt_call(BOB, &invite).unwrap();
         let mut bad_binding = Zeroizing::new(invite.encode().unwrap());
         bad_binding[92] ^= 1; // recipient binding in the first prekey session
@@ -637,7 +739,7 @@ mod tests {
         ] {
             assert!(pair
                 .b
-                .decrypt_call(user, device, &ct, expected_id, expected_action)
+                .decrypt_call(user, device, &ct, expected_id, expected_action, 1)
                 .is_err());
             assert!(session(&pair.b, ALICE).is_none());
             assert!(crate::store::load_olm(&pair.b.conn).unwrap() == before);
@@ -645,7 +747,7 @@ mod tests {
         }
         // Failed first decrypts did not consume the one-time key.
         receive(&mut pair.b, &pair.a, &wire, id, Action::Invite);
-        let answer = pair.b.call_offer(ALICE, id, Action::Accept).unwrap();
+        let answer = pair.b.call_offer(ALICE, id, Action::Accept, 1).unwrap();
         let answer_wire = pair.b.encrypt_call(ALICE, &answer).unwrap();
         receive(&mut pair.a, &pair.b, &answer_wire, id, Action::Accept);
         let a_before = session(&pair.a, BOB).unwrap();
@@ -675,14 +777,14 @@ mod tests {
         bad[1] = 1; // ordinary TEXT must not decode as CALL
         malformed.push(raw_call(&mut pair.a, BOB, &bad));
         let mut bad = Zeroizing::new(invite.encode().unwrap());
-        *bad.last_mut().unwrap() = 2; // unsupported profile
+        *bad.last_mut().unwrap() = 1; // unsupported profile
         malformed.push(raw_call(&mut pair.a, BOB, &bad));
         let before = session(&pair.b, ALICE).unwrap();
         let account = crate::store::load_olm(&pair.b.conn).unwrap();
         for wire in &malformed {
             assert!(pair
                 .b
-                .decrypt_call(a_user, a_device, wire, id, Action::Invite)
+                .decrypt_call(a_user, a_device, wire, id, Action::Invite, 1)
                 .is_err());
             assert!(session(&pair.b, ALICE).unwrap() == before);
             assert!(crate::store::load_olm(&pair.b.conn).unwrap() == account);
@@ -704,7 +806,7 @@ mod tests {
         let before = session(&pair.b, ALICE).unwrap();
         assert!(pair
             .b
-            .decrypt_call(a_user, a_device, &wire, id, Action::Invite)
+            .decrypt_call(a_user, a_device, &wire, id, Action::Invite, 1)
             .is_err());
         assert!(session(&pair.b, ALICE).unwrap() == before);
         assert_no_messages(&pair.a, BOB);
@@ -728,7 +830,7 @@ mod tests {
         });
         let call = std::thread::spawn(move || {
             let mut core = Core::open_encrypted(&path, &STORE_KEY).unwrap();
-            let offer = core.call_offer(BOB, [41; 16], Action::Invite).unwrap();
+            let offer = core.call_offer(BOB, [41; 16], Action::Invite, 1).unwrap();
             barrier.wait();
             core.encrypt_call(BOB, &offer).unwrap()
         });
@@ -742,7 +844,7 @@ mod tests {
         assert_eq!(received.text, "concurrent ordinary text");
         assert_eq!(pair.a.history_page(BOB, None, 100).unwrap().rows.len(), 1);
         assert_eq!(pair.b.history_page(ALICE, None, 100).unwrap().rows.len(), 1);
-        let next = pair.a.call_offer(BOB, [42; 16], Action::Invite).unwrap();
+        let next = pair.a.call_offer(BOB, [42; 16], Action::Invite, 1).unwrap();
         let wire = pair.a.encrypt_call(BOB, &next).unwrap();
         receive(&mut pair.b, &pair.a, &wire, [42; 16], Action::Invite);
     }
