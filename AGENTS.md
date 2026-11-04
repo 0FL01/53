@@ -22,6 +22,7 @@
 - Единая auth: `dmsg://server/`, wire2, deployed fresh server7/core10, strict E2Ev2; одна `core_messages` для TEXT/VOICE/Reply/операций, encrypted chunks внутри core.db. Main8 не мигрируется/не очищается автоматически; old-schema/plain→sealed/legacy decode запрещены, несовместимый rollout только по явному разрешению
 - Calls: один NativeClient, отдельные Noise owners signal/RTP/SRTCP; keys через ephemeral Olm, без call rows/history/outbox. Audio и Telecom принадлежат DmsgService, не Activity; routing через Telecom, не параллельные AudioManager setters
 - Build/diagnostic tools — clean allowlist environment без credentials; не печатать env. Внешнему disposable Rust harness свой `CARGO_TARGET_DIR`, не перезаписывать workspace host-cdylib/rlib
+- Компиляция и тесты — максимум 4 параллельных потока: `CARGO_BUILD_JOBS=4`, `cargo test -j 4`, Gradle `--max-workers=4`; не поднимать параллелизм выше, хост ограничен по CPU
 - `connectedDebugAndroidTest` удаляет target package/Keystore: только `-PgateInstall=true` (отдельный `.gate`). Предпочитать install-r/сохранение identity; reset только как намеренный документированный тестовый эксперимент. Device gates вручную по методам `am instrument`, не считать label-only install application acceptance.
 - Kotlin UniFFI bindings не править вручную; генерировать host-cdylib тестом ниже. USB/SSH DirectTCP smoke не выдавать за Android DNS acceptance.
 

@@ -516,6 +516,7 @@ class CallClientGatesTest {
         var afterLastMs = 0L; private set
         var stalledMs = 0L; private set
         private var qualifiedEpoch = 0uL
+        private var clockSample: JSONObject? = null
         private val observer = CoroutineScope(Dispatchers.Unconfined).launch(start = CoroutineStart.UNDISPATCHED) {
             CallUi.state.collect { observe(it) }
         }
@@ -573,12 +574,17 @@ class CallClientGatesTest {
         }
 
         @Synchronized fun sample(expectedMuted: Boolean? = null) {
+            clockSample = null
             val now = SystemClock.elapsedRealtime()
             episodeStart?.let { fact(now - it <= 30_000, "recovery episode exceeded 30 seconds") }
             assertNull(problem, problem)
             val state = CallUi.state.value
             val call = requireNotNull(state.call)
             assertEquals(id, call.callId); assertEquals(token, state.epoch)
+            clockSample = JSONObject().put("media_epoch", call.mediaEpoch.toString().toLongOrNull())
+                .put("highest_epoch", highestEpoch.toString().toLongOrNull())
+                .put("qualified_epoch", qualifiedEpoch.toString().toLongOrNull())
+                .put("active", false).put("qualification_evaluated", false)
             if (call.phase == CallPhase.ENDED) return
             assertTrue(state.telecomActive); assertEquals(telecomId, state.telecomCallId)
             expectedMuted?.let { assertEquals("mute must survive media replacement/recreation", it, state.muted) }
@@ -613,20 +619,51 @@ class CallClientGatesTest {
                 if (recovered > 0) afterLastMs += credit
                 if (credit == 0L) stalledMs += now - lastAt
                 lastCapture = a.capturedSamples; lastDecoded = decoded; lastReceived = received
+                val clock = JSONObject(a.playbackCompensation)
                 // Qualification is required again using this generation's actual >=20s capture, never wall age.
                 if (a.capturedSamples >= 20L * CallAudio.SAMPLE_RATE) {
-                    val clock = JSONObject(a.playbackCompensation)
                     qualifiedEpoch = if (native.getBoolean("capture_clock_calibrated") && native.getBoolean("remote_clock_calibrated") &&
                         native.getBoolean("remote_clock_valid") &&
                         clock.optBoolean("hardware_calibrated") && clock.optBoolean("healthy")) call.mediaEpoch else 0uL
                 }
+                val observedNs = System.nanoTime()
+                val value = JSONObject().put("media_epoch", call.mediaEpoch.toString().toLongOrNull())
+                    .put("highest_epoch", highestEpoch.toString().toLongOrNull())
+                    .put("qualified_epoch", qualifiedEpoch.toString().toLongOrNull())
+                    .put("active", true)
+                    .put("captured_samples", a.capturedSamples)
+                    .put("qualification_evaluated", a.capturedSamples >= 20L * CallAudio.SAMPLE_RATE)
+                    .put("active_handle_matches", a.activeHandle == call.mediaHandle)
+                    .put("observed_monotonic_ns", observedNs)
+                    .put("playback_compensation", clock)
+                    .put("playback_reference", a.playbackClock.json())
+                    // Snapshot publication and the render decision are not atomic. Do not label
+                    // this age as the age used by choose(), or invent an unavailable SR age.
+                    .put("snapshot_playback_reference_age_ns", a.playbackClock.latest?.let {
+                        observedNs - it.nanoTime
+                    } ?: JSONObject.NULL)
+                    .put("remote_timing_age_ns", JSONObject.NULL)
+                for (key in listOf("capture_clock_calibrated", "remote_clock_calibrated", "remote_clock_valid",
+                    "remote_clock_ticks", "remote_clock_ns", "remote_clock_rejected_reports", "remote_clock_rejection_mask"))
+                    value.put(key, native.get(key))
+                clockSample = value
             } else stalledMs += now - lastAt
             wasActive = active; lastAt = now
         }
 
-        @Synchronized fun progress(stage: String) = recoveryMarker(stage, highestEpoch, recovered,
-            activeMs, afterLastMs, maxEpisodeMs, stalledMs)
+        private fun reportClock(stage: String) {
+            clockSample?.let { value ->
+                instrumentation.sendStatus(0, android.os.Bundle().apply {
+                    putString("client_call_clock", value.put("stage", stage).toString())
+                })
+            }
+        }
+        @Synchronized fun progress(stage: String) {
+            recoveryMarker(stage, highestEpoch, recovered, activeMs, afterLastMs, maxEpisodeMs, stalledMs)
+            reportClock(stage)
+        }
         @Synchronized fun verify(requiredActiveMs: Long) {
+            reportClock("recovery_verify")
             assertNull(problem, problem)
             assertTrue("two actual recovery episodes required", recovered >= 2)
             assertNull("last recovery must have completed", episodeStart)

@@ -193,7 +193,7 @@ pub enum ProgressFailureReason {
 impl ProgressFailureReason {
     pub fn message(self) -> &'static str {
         match self {
-            Self::Expired => "remote media progress expired; retire generation",
+            Self::Expired => "remote media progress expired",
             Self::WindowExhausted => "remote media window exhausted; retire generation",
         }
     }
@@ -315,8 +315,14 @@ impl Ledger {
         if index >> 48 != 0 || self.highest.is_some_and(|old| index <= old) {
             return Err(LedgerCommitFailure::InvalidIndex);
         }
-        self.check_observed(at, bytes)
-            .map_err(LedgerCommitFailure::Progress)?;
+        // Admission checks age before Noise commitment. An actual commitment
+        // must still be charged if its receipt arrives after the head expired.
+        if self.bytes + bytes > self.limit {
+            return Err(LedgerCommitFailure::Progress(LedgerFailure {
+                reason: ProgressFailureReason::WindowExhausted,
+                observation: self.observe(at),
+            }));
+        }
         self.entries.push_back(Entry { index, bytes, at });
         self.bytes += bytes;
         self.highest = Some(index);
@@ -605,6 +611,27 @@ mod tests {
     }
 
     #[test]
+    fn committed_receipt_after_expiry_keeps_exact_frontier_and_credit() {
+        let origin = Instant::now();
+        let mut ledger = Ledger::new(100, 40, 600);
+        ledger.commit(7, 144, origin).unwrap();
+        let late = origin + Duration::from_millis(721);
+        assert_eq!(ledger.commit_observed(8, 104, late), Ok(()));
+        let view = ledger.observe(late);
+        assert_eq!((view.bytes, view.entries, view.highest), (248, 2, Some(8)));
+        assert_eq!(view.terminal, None);
+        assert_eq!(
+            ledger.check_observed(late, 0).unwrap_err().reason,
+            ProgressFailureReason::Expired
+        );
+        assert!(ledger.acknowledge(9, late).is_err());
+        ledger.acknowledge(7, late).unwrap();
+        assert_eq!(ledger.bytes(), 104);
+        ledger.acknowledge(8, late).unwrap();
+        assert_eq!(ledger.bytes(), 0);
+    }
+
+    #[test]
     fn ledger_commit_observation_preserves_index_priority_and_original_instant() {
         let origin = Instant::now();
         let at = |ms| origin + Duration::from_millis(ms);
@@ -612,23 +639,7 @@ mod tests {
         ledger.commit(7, 144, origin).unwrap();
         ledger.acknowledge(6, at(200)).unwrap();
         assert_eq!(ledger.commit_observed(8, 144, at(720)), Ok(()));
-        let expired = ledger.commit_observed(9, 144, at(721)).unwrap_err();
-        let LedgerCommitFailure::Progress(failure) = &expired else {
-            panic!("expected the original age failure");
-        };
-        assert_eq!(failure.reason, ProgressFailureReason::Expired);
-        assert_eq!(failure.observation.oldest_index, Some(7));
-        assert_eq!(
-            failure.observation.oldest_age,
-            Some(Duration::from_millis(721))
-        );
-        assert_eq!(failure.observation.bytes, 288);
-        assert_eq!(failure.observation.highest, Some(8));
-        assert_eq!(failure.observation.terminal, Some(6));
-        assert_eq!(
-            ledger.commit(9, 144, at(721)),
-            Err(expired.message().into())
-        );
+        assert_eq!(ledger.commit_observed(9, 144, at(721)), Ok(()));
         for invalid_index in [8, 1 << 48] {
             assert_eq!(
                 ledger.commit_observed(invalid_index, 3000, at(721)),
@@ -639,7 +650,7 @@ mod tests {
                 Err("invalid committed media index".into())
             );
         }
-        let window = ledger.commit_observed(9, 2593, at(721)).unwrap_err();
+        let window = ledger.commit_observed(10, 2449, at(721)).unwrap_err();
         let LedgerCommitFailure::Progress(window_failure) = &window else {
             panic!("expected the original byte failure");
         };
@@ -647,9 +658,15 @@ mod tests {
             window_failure.reason,
             ProgressFailureReason::WindowExhausted
         );
-        assert_eq!(window_failure.observation, failure.observation);
+        assert_eq!(window_failure.observation.oldest_index, Some(7));
         assert_eq!(
-            ledger.commit(9, 2593, at(721)),
+            window_failure.observation.oldest_age,
+            Some(Duration::from_millis(721))
+        );
+        assert_eq!(window_failure.observation.highest, Some(9));
+        assert_eq!(window_failure.observation.terminal, Some(6));
+        assert_eq!(
+            ledger.commit(10, 2449, at(721)),
             Err(window.message().into())
         );
         assert_eq!(
@@ -659,12 +676,11 @@ mod tests {
                 ledger.highest,
                 ledger.terminal
             ),
-            (288, 2, Some(8), Some(6))
+            (432, 3, Some(9), Some(6))
         );
         ledger.acknowledge(7, at(721)).unwrap();
-        assert_eq!(ledger.commit_observed(9, 144, at(721)), Ok(()));
-        assert_eq!(failure.observation.oldest_index, Some(7));
-        assert_eq!(ledger.highest, Some(9));
+        assert_eq!(ledger.commit_observed(10, 144, at(721)), Ok(()));
+        assert_eq!(ledger.highest, Some(10));
     }
 
     #[test]

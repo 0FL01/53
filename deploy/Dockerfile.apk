@@ -42,7 +42,7 @@ RUN --mount=type=tmpfs,target=/tmp \
 RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.97.1 --profile minimal \
  && rustup target add aarch64-linux-android --toolchain 1.97.1
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
-    cargo install cargo-ndk@4.1.2 --locked
+    cargo install cargo-ndk@4.1.2 --locked --jobs 4
 # Gradle on PATH: android/gradlew is a shim that falls back to `gradle`.
 RUN curl -fsSL https://services.gradle.org/distributions/gradle-8.14.3-bin.zip -o /tmp/gradle.zip \
  && unzip -q /tmp/gradle.zip -d /opt \
@@ -77,11 +77,11 @@ RUN --mount=type=cache,target=/root/.gradle,id=apk-gradle-home,sharing=locked \
     test -n "$SERVER_PROFILE_SHA256" && cd android && \
     case "$CLIENT_APK" in \
       true) test -f /run/secrets/server-profile && \
-        sh gradlew --no-daemon export53ClientApk -PclientRelease=true \
+        sh gradlew --no-daemon --max-workers=4 export53ClientApk -PclientRelease=true \
           -PserverProfileFile=/run/secrets/server-profile ;; \
       false) if [ -f /run/secrets/server-profile ]; then \
-        sh gradlew --no-daemon export53Apk -PserverProfileFile=/run/secrets/server-profile; \
-        else sh gradlew --no-daemon export53Apk; fi ;; \
+        sh gradlew --no-daemon --max-workers=4 export53Apk -PserverProfileFile=/run/secrets/server-profile; \
+        else sh gradlew --no-daemon --max-workers=4 export53Apk; fi ;; \
       *) echo "CLIENT_APK must be true or false" >&2; exit 2 ;; \
     esac
 

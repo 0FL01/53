@@ -68,7 +68,8 @@ The call actor owns `MediaSession`; the Android driver owns AudioRecord/Track
 and capture/render threads. Android stops/joins both PCM workers before JNI
 retirement. Native stop closes/joins endpoint, codec and lanes, zeroizes PCM and
 notifies handle retirement. Calls ending without audio still retire Telecom.
-Typed progress expiry/lane loss/control stall triggers media-generation recovery;
+Typed progress expiry before the generation's first authenticated peer terminal,
+lane loss or control stall triggers media-generation recovery;
 unknown/invalid media errors are not guessed from diagnostic strings. The actor
 publishes Reconnecting before stopping/joining old media and completing its handle
 entry. Android joins its PCM owners and retires that JNI handle; only after the
@@ -116,7 +117,10 @@ adapts codec12→8kbit on450ms oldest age/half-window/peer loss, restoring12 onl
 after10s fresh healthy feedback with low pressure; diagnostic fixtures stay fixed12.
 This changes offered codec load, not a measured wire-capacity guarantee. An
 uncommitted frame denied by the window is dropped while the actual ledger and
-feedback continue; an expired committed generation is retired, never locally ACKed.
+feedback continue. After this generation's first authenticated peer terminal,
+720ms blocks admission of new frames, not the generation: committed entries may
+wait longer and only real peer feedback releases credit. Before that terminal,
+expiry still retires the generation; no commitment is ever locally ACKed.
 Production
 declares50k useful capacity; it introduces no synthetic service and does not claim
 measured DNS C_safe. No automatic BBR/TCP_NODELAY experiment promotion.

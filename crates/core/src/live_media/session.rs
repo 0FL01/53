@@ -2481,6 +2481,17 @@ fn control_progress(
         });
         let checked_at = now();
         if let Err(failure) = ledger.check_observed(checked_at, extra_bytes) {
+            if failure.reason == packet::ProgressFailureReason::Expired
+                && failure.observation.terminal.is_some()
+            {
+                // This generation has authenticated peer progress. Keep real
+                // commitments pending; only deny new, not-yet-committed PCM.
+                return if waiting_bytes.is_some() {
+                    Err(ControlFailure::Progress(failure))
+                } else {
+                    Ok(handled)
+                };
+            }
             let pending_bytes = commits
                 .iter()
                 .map(|pending| pending.opus_bytes + packet::MEDIA_OVERHEAD)
@@ -2916,7 +2927,8 @@ async fn endpoint_run(
                         #[cfg(not(test))]
                         let _ = handled;
                     }
-                    Err(ControlFailure::Progress(failure)) if failure.reason == packet::ProgressFailureReason::WindowExhausted => {
+                    Err(ControlFailure::Progress(failure)) if failure.reason == packet::ProgressFailureReason::WindowExhausted
+                        || (failure.reason == packet::ProgressFailureReason::Expired && failure.observation.terminal.is_some()) => {
                         // This frame has not advanced SRTP/Noise. Keep the real
                         // outstanding ledger and feedback path, drop only its PCM.
                         port.stats(|stats| {
@@ -3113,6 +3125,114 @@ mod lifecycle_tests {
         assert!(next.stop().await.stopped);
         peer_media.joined_close().await;
         peer_control.joined_close().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn established_terminal_expiry_drops_pcm_before_noise_without_retiring_endpoint() {
+        let (media, mut peer_media) = lanes().await;
+        let (control, mut peer_control) = lanes().await;
+        let control_sender = peer_control.outgoing.clone();
+        let (stop_peer, mut peer_stopped) = watch::channel(false);
+        let drain_control = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = cancelled(&mut peer_stopped) => break,
+                    frame = peer_control.incoming.recv() => { if frame.is_none() { break; } }
+                }
+            }
+            peer_control.joined_close().await;
+        });
+        let peer = config(true);
+        let mut sender = dmsg_srtp_sys::Sender::new(&peer.media_tx, peer.ssrc_tx).unwrap();
+        let mut receiver = dmsg_srtp_sys::Receiver::new(&peer.media_rx, peer.ssrc_rx).unwrap();
+        let mut feedback = |terminal| {
+            let plain = packet::compound(packet::Report {
+                sender_ssrc: peer.ssrc_tx,
+                peer_ssrc: peer.ssrc_rx,
+                cname: &peer.cname,
+                sender: None,
+                feedback: packet::Feedback {
+                    terminal,
+                    ..Default::default()
+                },
+            });
+            control_sender
+                .try_send(SendRequest {
+                    opcode: OP_RTCP,
+                    payload: sender.protect_rtcp(&plain).unwrap(),
+                    deadline: None,
+                    committed: None,
+                })
+                .unwrap();
+        };
+        async fn capture_frame(audio: &AudioPort) {
+            for _ in 0..4 {
+                assert!(audio.push(&[123; 160]));
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+        let mut session = MediaSession::start(config(false), media, control).unwrap();
+        let audio = session.audio();
+        let result = tokio::time::timeout(Duration::from_secs(4), async {
+            feedback(None);
+            while !audio.snapshot().ready {
+                tokio::task::yield_now().await;
+            }
+            capture_frame(&audio).await;
+            let first = peer_media.incoming.recv().await.unwrap().unwrap();
+            assert_eq!(first.frame.0, OP_RTP);
+            let first_bytes = first.frame.1.len() + packet::FRAMING_BYTES;
+            let plain = receiver.unprotect_rtp(&first.frame.1).unwrap();
+            assert_eq!(packet::read_rtp(&plain, peer.ssrc_rx).unwrap().0, 1);
+            feedback(Some(0)); // Genuine terminal, but it releases no entry.
+            while audio.snapshot().terminal_feedback != 1 {
+                tokio::task::yield_now().await;
+            }
+            tokio::time::sleep(Duration::from_millis(800)).await;
+            let before = audio.snapshot();
+            assert!(!before.stopped && !before.failed);
+            assert_eq!(before.max_unconfirmed_bytes, first_bytes);
+            capture_frame(&audio).await;
+            while audio.snapshot().window_blocked_packets == 0 && !audio.snapshot().stopped {
+                tokio::task::yield_now().await;
+            }
+            let blocked = audio.snapshot();
+            assert!(!blocked.stopped && !blocked.failed, "{}", blocked.error);
+            assert_eq!(blocked.dropped_capture - before.dropped_capture, 640);
+            assert_eq!(
+                blocked.window_blocked_packets - before.window_blocked_packets,
+                1
+            );
+            assert_eq!(blocked.tx_bytes, before.tx_bytes);
+            assert_eq!(blocked.max_unconfirmed_bytes, first_bytes);
+            assert_eq!(blocked.terminal_feedback, 1);
+            assert!(blocked.failure_kind.is_none() && blocked.last_progress_failure.is_none());
+            assert!(matches!(
+                peer_media.incoming.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+            feedback(Some(1)); // Only this authenticated ACK releases the head.
+            while audio.snapshot().terminal_feedback != 2 {
+                tokio::task::yield_now().await;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            capture_frame(&audio).await;
+            let next = peer_media.incoming.recv().await.unwrap().unwrap();
+            let plain = receiver.unprotect_rtp(&next.frame.1).unwrap();
+            assert_eq!(
+                packet::read_rtp(&plain, peer.ssrc_rx).unwrap().0,
+                2,
+                "dropped PCM must not advance SRTP or the committed frontier"
+            );
+            assert!(audio.snapshot().max_feedback_cycle_ms >= 720);
+        })
+        .await;
+        let stopped = session.stop().await;
+        stop_peer.send(true).unwrap();
+        drain_control.await.unwrap();
+        peer_media.joined_close().await;
+        result.unwrap();
+        assert!(stopped.stopped && !stopped.failed, "{}", stopped.error);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -3529,7 +3649,7 @@ mod tests {
         // top turn: the unchanged 720ms age limit applies at this media wake.
         assert_eq!(
             turn.decide(721, Some(144)),
-            Err("remote media progress expired; retire generation".into())
+            Err("remote media progress expired".into())
         );
         assert!(turn.commits.is_empty());
         assert_eq!(turn.ledger.bytes(), 144);
@@ -3559,10 +3679,36 @@ mod tests {
         assert_eq!(turn.decide(720, None), Ok(false));
         assert_eq!(
             turn.decide(721, None),
-            Err("remote media progress expired; retire generation".into())
+            Err("remote media progress expired".into())
         );
         assert_eq!(turn.ledger.bytes(), 144);
         assert_eq!(turn.port.snapshot().terminal_feedback, 0);
+        assert_eq!(
+            turn.port.snapshot().failure_kind,
+            Some(MediaFailureKind::ProgressExpired)
+        );
+        assert_eq!(turn.ledger.observe(turn.at(721)).terminal, None);
+    }
+
+    #[test]
+    fn established_terminal_blocks_expired_admission_until_real_credit() {
+        let mut turn = ControlTurn::new();
+        turn.commit(7, 0);
+        turn.queue_ack(Some(6), 199);
+        assert_eq!(turn.decide(200, None), Ok(true));
+        let before = turn.ledger.observe(turn.at(721));
+        assert_eq!(turn.decide(721, None), Ok(false));
+        assert!(turn.decide(721, Some(144)).is_err());
+        assert_eq!(turn.ledger.observe(turn.at(721)), before);
+        assert!(turn.port.snapshot().last_progress_failure.is_none());
+        assert!(turn.port.snapshot().failure_kind.is_none());
+        assert_eq!(turn.port.snapshot().terminal_feedback, 1);
+        turn.queue_ack(Some(7), 799);
+        assert_eq!(turn.decide(800, Some(144)), Ok(true));
+        assert_eq!(turn.ledger.bytes(), 0);
+        turn.commit(8, 800);
+        assert_eq!(turn.decide(801, Some(144)), Ok(false));
+        assert_eq!(turn.ledger.observe(turn.at(801)).highest, Some(8));
     }
 
     #[test]
@@ -3702,16 +3848,13 @@ mod tests {
     }
 
     #[test]
-    fn known_prefix_does_not_hide_uncovered_or_invalid_receipt_failures() {
-        for failure_kind in 0..5 {
+    fn known_prefix_does_not_hide_invalid_receipt_failures() {
+        for failure_kind in 1..5 {
             let mut turn = ControlTurn::new();
             if failure_kind == 4 {
                 turn.ledger.commit(7, 143, turn.at(0)).unwrap();
             } else {
                 turn.commit(7, 0);
-            }
-            if failure_kind == 0 {
-                turn.commit(8, 0);
             }
             turn.queue_ack(Some(6), 199);
             assert_eq!(turn.decide(200, None), Ok(true));
@@ -3725,7 +3868,6 @@ mod tests {
                 assert_eq!(turn.ledger.bytes(), 2880);
             }
             let index = match failure_kind {
-                0 => 9,
                 1 => 7,
                 2 => 1 << 48,
                 3 => 8,
@@ -3754,7 +3896,6 @@ mod tests {
             assert_eq!(
                 turn.decide(999, None),
                 Err(match failure_kind {
-                    0 => "remote media progress expired; retire generation",
                     1 | 2 => "invalid committed media index",
                     3 => "probe commitment owner closed",
                     _ => "remote media window exhausted; retire generation",
@@ -3769,33 +3910,20 @@ mod tests {
             );
             assert_eq!(turn.port.snapshot().rx_bytes, 132);
             assert_eq!(turn.commits.len(), 1);
-            if failure_kind == 0 || failure_kind == 4 {
+            if failure_kind == 4 {
                 let failure = turn.port.snapshot().last_progress_failure.unwrap();
                 assert_eq!(failure.check_site, ProgressCheckSite::ReceiptCommit);
                 assert_eq!(failure.attempted_index, Some(index));
                 assert_eq!(failure.frame_bytes, Some(144));
                 assert_eq!(failure.oldest_index, Some(8));
-                assert_eq!(
-                    failure.oldest_age_us,
-                    Some(if failure_kind == 0 { 721000 } else { 21000 })
-                );
+                assert_eq!(failure.oldest_age_us, Some(21000));
                 assert_eq!(failure.terminal_frontier, Some(7));
                 assert_eq!(
                     failure.reason,
-                    if failure_kind == 0 {
-                        packet::ProgressFailureReason::Expired
-                    } else {
-                        packet::ProgressFailureReason::WindowExhausted
-                    }
+                    packet::ProgressFailureReason::WindowExhausted
                 );
-                assert_eq!(
-                    failure.ledger_bytes,
-                    if failure_kind == 0 { 144 } else { 2737 }
-                );
-                assert_eq!(
-                    failure.total_check_bytes,
-                    if failure_kind == 0 { 288 } else { 2881 }
-                );
+                assert_eq!(failure.ledger_bytes, 2737);
+                assert_eq!(failure.total_check_bytes, 2881);
                 assert_eq!(
                     failure.last_authenticated_control.unwrap().terminal,
                     Some(6)
@@ -3851,7 +3979,7 @@ mod tests {
                 let actor_ms = if kind == 4 { 723 } else { 721 };
                 turn.queue_ack(Some(terminal), queued_ms);
                 let result = turn.decide(actor_ms, None);
-                if kind == 0 {
+                if kind == 0 || kind == 4 {
                     assert_eq!(result, Ok(true));
                     assert!(turn.commits.is_empty());
                     assert_eq!(turn.ledger.highest_committed(), Some(index));
@@ -3860,31 +3988,21 @@ mod tests {
                     assert_eq!(turn.port.snapshot().terminal_feedback, 1);
                     assert_eq!(
                         turn.port.snapshot().max_feedback_cycle_ms,
-                        if already_known { 721 } else { 3 }
+                        if kind == 4 {
+                            723
+                        } else if already_known {
+                            721
+                        } else {
+                            3
+                        }
                     );
                     assert_eq!(turn.sent.last_control.unwrap().terminal, Some(index));
                     assert!(turn.port.snapshot().last_progress_failure.is_none());
                 } else {
-                    assert_eq!(
-                        result,
-                        Err(if kind == 4 {
-                            "remote media progress expired; retire generation"
-                        } else {
-                            "invalid remote terminal frontier"
-                        }
-                        .into())
-                    );
+                    assert_eq!(result, Err("invalid remote terminal frontier".into()));
                     assert_eq!(turn.port.snapshot().terminal_feedback, 0);
                     assert!(turn.sent.last_control.is_none());
-                    if kind == 4 {
-                        let failure = turn.port.snapshot().last_progress_failure.unwrap();
-                        assert_eq!(failure.check_site, ProgressCheckSite::ReceiptCommit);
-                        assert_eq!(failure.terminal_frontier, None);
-                        assert_eq!(failure.oldest_index, Some(7));
-                        assert_eq!(failure.oldest_age_us, Some(721000));
-                    } else {
-                        assert!(turn.port.snapshot().last_progress_failure.is_none());
-                    }
+                    assert!(turn.port.snapshot().last_progress_failure.is_none());
                     if kind == 2 {
                         assert_eq!(turn.commits.len(), 1);
                         assert_eq!(turn.ledger.highest_committed(), already_known.then_some(7));
@@ -3899,7 +4017,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_or_stale_prefix_never_rescues_uncovered_receipt_age() {
+    fn repeated_or_stale_prefix_never_releases_uncovered_receipt_credit() {
         for terminal in [Some(7), Some(6), None] {
             let mut turn = ControlTurn::new();
             turn.commit(7, 0);
@@ -3923,18 +4041,19 @@ mod tests {
                 receipt,
             });
             turn.queue_ack(terminal, 719);
-            assert_eq!(
-                turn.decide(721, None),
-                Err(if terminal == Some(6) {
-                    "invalid remote terminal frontier"
-                } else {
-                    "remote media progress expired; retire generation"
-                }
-                .into())
-            );
-            assert_eq!(turn.ledger.bytes(), 144);
-            assert_eq!(turn.ledger.highest_committed(), Some(8));
-            assert_eq!(turn.sent.last_control, prior_control);
+            if terminal == Some(6) {
+                assert_eq!(
+                    turn.decide(721, None),
+                    Err("invalid remote terminal frontier".into())
+                );
+                assert_eq!(turn.ledger.bytes(), 144);
+                assert_eq!(turn.ledger.highest_committed(), Some(8));
+                assert_eq!(turn.sent.last_control, prior_control);
+            } else {
+                assert_eq!(turn.decide(721, None), Ok(true));
+                assert_eq!(turn.ledger.bytes(), 288);
+                assert_eq!(turn.ledger.highest_committed(), Some(9));
+            }
             assert_eq!(
                 turn.port.snapshot().max_feedback_cycle_ms,
                 200,
@@ -3953,22 +4072,13 @@ mod tests {
                     ),
                     "stale validation precedes unrelated receipts"
                 );
-            } else {
-                let failure = turn.port.snapshot().last_progress_failure.unwrap();
-                assert_eq!(failure.check_site, ProgressCheckSite::ReceiptCommit);
-                assert_eq!(failure.oldest_index, Some(8));
-                assert_eq!(failure.oldest_age_us, Some(721000));
-                assert_eq!(failure.terminal_frontier, Some(7));
-                assert_eq!(
-                    failure.last_authenticated_control.unwrap().terminal,
-                    Some(7)
-                );
             }
+            assert!(turn.port.snapshot().last_progress_failure.is_none());
         }
     }
 
     #[test]
-    fn receipt_commit_failure_records_original_instant_before_queued_ack() {
+    fn expired_receipt_keeps_original_commit_instant_and_unconfirmed_credit() {
         for actor_ms in [721, 999] {
             let mut turn = ControlTurn::new();
             turn.commit(7, 0);
@@ -3981,7 +4091,6 @@ mod tests {
                 }))
                 .unwrap_or_else(|_| panic!("control inbox full"));
             assert_eq!(turn.decide(200, None), Ok(true));
-            let prior_control = turn.sent.last_control;
             let (outgoing, _requests) = mpsc::channel(1);
             let waiting = WaitingPacket::new(
                 vec![0; 30],
@@ -4026,7 +4135,7 @@ mod tests {
                 receipt,
             });
             // A new protected equal prefix covers none of the old entry 7.
-            // Receipt expiry must remain at its own instant, not actor time.
+            // Registration keeps the actual Noise-commit instant, not actor time.
             turn.queue_ack(Some(6), 719);
             let reads = std::cell::Cell::new(0);
             let actor_at = turn.at(actor_ms);
@@ -4049,51 +4158,39 @@ mod tests {
                     },
                 )
                 .map_err(|error| error.message().to_owned()),
-                Err("remote media progress expired; retire generation".into())
+                Ok(true)
             );
             assert_eq!(
                 reads.get(),
-                1,
-                "only the valid equal prefix reads actor time"
+                3,
+                "ACK, processed control, and admission each retain their clock read"
             );
-            assert_eq!(turn.ledger.bytes(), 144);
-            assert_eq!(turn.commits.len(), 2);
-            assert_eq!(turn.sent.packets, 1);
+            assert_eq!(turn.ledger.bytes(), 288);
+            assert_eq!(turn.commits.len(), 1);
+            assert_eq!(turn.sent.packets, 2);
             assert_eq!(turn.port.snapshot().terminal_feedback, 2);
-            assert_eq!(turn.port.snapshot().rx_bytes, 132);
-            assert_eq!(turn.sent.last_control, prior_control);
-            let failure = turn
-                .port
-                .snapshot()
-                .last_progress_failure
-                .expect("original receipt-commit failure must have an observation");
-            assert_eq!(failure.oldest_index, Some(7));
-            assert_eq!(failure.oldest_age_us, Some(721000));
+            assert_eq!(turn.port.snapshot().rx_bytes, 264);
+            assert!(turn.port.snapshot().last_progress_failure.is_none());
+            let view = turn.ledger.observe(turn.at(actor_ms));
+            assert_eq!(view.oldest_age, Some(Duration::from_millis(actor_ms)));
             assert_eq!(
-                serde_json::to_value(&failure).unwrap(),
-                serde_json::json!({
-                    "reason": "expired", "check_site": "receipt_commit",
-                    "attempted_index": 8, "frame_bytes": 144,
-                    "ledger_bytes": 144, "window_bytes": 2880, "entry_count": 1,
-                    "oldest_index": 7, "oldest_age_us": 721000,
-                    "highest_committed_index": 7, "terminal_frontier": 6, "max_age_us": 720000,
-                    "waiting_bytes": 74, "pending_bytes": 84, "pending_receipt_count": 1,
-                    "committed_receipt_count": 1, "check_extra_bytes": 144, "total_check_bytes": 288,
-                    "last_authenticated_control": {
-                        "terminal": 6, "sender_clock_present": false,
-                        "body_to_noise_us": 1000, "noise_to_processed_us": 99000,
-                        "since_processed_us": 521000, "since_noise_us": 620000, "since_body_us": 621000
-                    }
-                })
+                (view.highest, view.terminal, view.entries),
+                (Some(8), Some(6), 2)
             );
-            turn.port.closed.store(true, Ordering::Relaxed);
-            turn.port.stats(|stats| stats.stopped = true);
-            assert_eq!(turn.port.snapshot().last_progress_failure, Some(failure));
+            turn.queue_ack(Some(7), actor_ms);
+            assert_eq!(turn.decide(actor_ms + 1, None), Ok(true));
+            let view = turn.ledger.observe(turn.at(actor_ms + 1));
+            assert_eq!(view.oldest_index, Some(8));
+            assert_eq!(
+                view.oldest_age,
+                Some(Duration::from_millis(actor_ms + 1 - 721))
+            );
+            assert_eq!(view.bytes, 144);
         }
     }
 
     #[test]
-    fn receipt_commit_failure_observes_every_original_reaping_route_and_time() {
+    fn expired_receipt_is_charged_at_every_reaping_route_before_admission() {
         for route in 0..5 {
             let mut turn = ControlTurn::new();
             turn.commit(7, 0);
@@ -4186,33 +4283,40 @@ mod tests {
                 .map(|_| ())
                 .map_err(|error| error.message().to_owned())
             };
-            assert_eq!(
-                result,
-                Err("remote media progress expired; retire generation".into())
-            );
-            let failure = turn.port.snapshot().last_progress_failure.unwrap();
-            assert_eq!(failure.check_site, ProgressCheckSite::ReceiptCommit);
-            assert_eq!(
-                (failure.attempted_index, failure.frame_bytes),
-                (Some(8), Some(144))
-            );
-            assert_eq!(failure.oldest_age_us, Some(721000));
-            assert_eq!(failure.waiting_bytes, Some(74));
-            assert_eq!(
-                (failure.pending_bytes, failure.pending_receipt_count),
-                (0, 0)
-            );
-            assert_eq!(
-                (failure.check_extra_bytes, failure.total_check_bytes),
-                (144, 288)
-            );
-            assert!(failure.last_authenticated_control.is_none());
+            if route == 1 {
+                assert_eq!(result, Ok(()));
+                assert!(turn.port.snapshot().last_progress_failure.is_none());
+            } else if route == 4 {
+                assert_eq!(result, Err("remote media progress expired".into()));
+                assert!(turn.port.snapshot().last_progress_failure.is_none());
+            } else {
+                assert_eq!(result, Err("remote media progress expired".into()));
+                let failure = turn.port.snapshot().last_progress_failure.unwrap();
+                assert_eq!(
+                    failure.check_site,
+                    if route == 3 {
+                        ProgressCheckSite::MediaAdmission
+                    } else {
+                        ProgressCheckSite::TopTurn
+                    }
+                );
+                assert_eq!((failure.attempted_index, failure.frame_bytes), (None, None));
+                assert_eq!(failure.oldest_age_us, Some(999000));
+                assert_eq!(failure.waiting_bytes, Some(74));
+                assert_eq!(
+                    (failure.pending_bytes, failure.pending_receipt_count),
+                    (0, 0)
+                );
+                assert_eq!(failure.ledger_bytes, 288);
+                assert!(failure.last_authenticated_control.is_none());
+            }
             assert_eq!(
                 turn.port.snapshot().terminal_feedback,
                 u64::from(route == 1 || route == 4)
             );
-            assert_eq!(turn.ledger.bytes(), 144);
-            assert_eq!(turn.sent.packets, 1);
+            assert_eq!(turn.ledger.bytes(), 288);
+            assert_eq!(turn.sent.packets, 2);
+            assert!(turn.commits.is_empty());
         }
 
         for queued_ack in [false, true] {
@@ -4259,10 +4363,7 @@ mod tests {
                 assert!(turn.port.snapshot().last_progress_failure.is_none());
                 assert_eq!(turn.ledger.bytes(), 144);
             } else {
-                assert_eq!(
-                    result,
-                    Err("remote media progress expired; retire generation".into())
-                );
+                assert_eq!(result, Err("remote media progress expired".into()));
                 let failure = turn.port.snapshot().last_progress_failure.unwrap();
                 assert_eq!(failure.check_site, ProgressCheckSite::TopTurn);
                 assert_eq!((failure.attempted_index, failure.frame_bytes), (None, None));
@@ -4309,18 +4410,14 @@ mod tests {
                     &mut turn.sent,
                     None,
                 );
-                if commit_ms == 720 && !one_byte_over {
+                if !one_byte_over {
                     assert_eq!(result, Ok(()));
                     assert_eq!(turn.ledger.bytes(), 2880);
                     assert!(turn.commits.is_empty());
                     assert_eq!(turn.sent.packets, 19);
                     assert!(turn.port.snapshot().last_progress_failure.is_none());
                 } else {
-                    let reason = if one_byte_over {
-                        packet::ProgressFailureReason::WindowExhausted
-                    } else {
-                        packet::ProgressFailureReason::Expired
-                    };
+                    let reason = packet::ProgressFailureReason::WindowExhausted;
                     assert_eq!(result, Err(reason.message().into()));
                     let failure = turn.port.snapshot().last_progress_failure.unwrap();
                     assert_eq!(failure.reason, reason);
@@ -4347,14 +4444,14 @@ mod tests {
             for invalid in 0..5 {
                 let mut turn = ControlTurn::new();
                 turn.commit(7, 0);
-                let valid = turn.sender.protect_rtcp(&turn.compound(Some(6))).unwrap();
+                let valid = turn.sender.protect_rtcp(&turn.compound(None)).unwrap();
                 turn.queue_cipher(valid.clone(), 199);
                 assert_eq!(turn.decide(200, None), Ok(true));
                 let last_control = turn.sent.last_control;
                 if frozen_failure {
                     assert_eq!(
                         turn.decide(721, None),
-                        Err("remote media progress expired; retire generation".into())
+                        Err("remote media progress expired".into())
                     );
                 }
                 let before = turn.port.snapshot().last_progress_failure;
@@ -4426,7 +4523,7 @@ mod tests {
                 }
                 assert_eq!(turn.port.snapshot().last_progress_failure, before);
                 assert_eq!(turn.sent.last_control, last_control);
-                assert_eq!(turn.port.snapshot().terminal_feedback, 1);
+                assert_eq!(turn.port.snapshot().terminal_feedback, 0);
             }
         }
     }
@@ -4445,7 +4542,7 @@ mod tests {
             cname: &turn.peer.cname,
             sender: Some((1 << 32, 1920, 1, 100)),
             feedback: packet::Feedback {
-                terminal: Some(6),
+                terminal: None,
                 ..packet::Feedback::default()
             },
         });
@@ -4497,7 +4594,7 @@ mod tests {
                 },
             )
             .map_err(|error| error.message().to_owned()),
-            Err("remote media progress expired; retire generation".into())
+            Err("remote media progress expired".into())
         );
         assert_eq!(
             reads.get(),
@@ -4512,11 +4609,11 @@ mod tests {
                 "check_site": "media_admission", "attempted_index": null, "frame_bytes": null,
                 "ledger_bytes": 288, "window_bytes": 2880, "entry_count": 2,
                 "oldest_index": 7, "oldest_age_us": 721000,
-                "highest_committed_index": 8, "terminal_frontier": 6, "max_age_us": 720000,
+                "highest_committed_index": 8, "terminal_frontier": null, "max_age_us": 720000,
                 "waiting_bytes": 144, "pending_bytes": 144, "pending_receipt_count": 1,
                 "committed_receipt_count": 2, "check_extra_bytes": 288, "total_check_bytes": 576,
                 "last_authenticated_control": {
-                    "terminal": 6, "sender_clock_present": true,
+                    "terminal": null, "sender_clock_present": true,
                     "body_to_noise_us": 1000, "noise_to_processed_us": 99000,
                     "since_processed_us": 521000, "since_noise_us": 620000, "since_body_us": 621000
                 }
@@ -4659,9 +4756,12 @@ mod tests {
             assert_eq!(turn.sent.last_control, last);
             assert!(turn.port.snapshot().last_progress_failure.is_none());
             assert_eq!(turn.ledger.bytes(), 144);
+            for index in 8..=26 {
+                turn.commit(index, 700);
+            }
             assert_eq!(
-                turn.decide(721, None),
-                Err("remote media progress expired; retire generation".into())
+                turn.decide(721, Some(144)),
+                Err("remote media window exhausted; retire generation".into())
             );
             let failure = turn.port.snapshot().last_progress_failure.unwrap();
             assert_eq!(
@@ -4681,7 +4781,7 @@ mod tests {
                 Some(521000)
             );
             let frozen = failure.clone();
-            let invalid_plain = turn.compound(Some(8));
+            let invalid_plain = turn.compound(Some(27));
             let invalid_cipher = turn.sender.protect_rtcp(&invalid_plain).unwrap();
             turn.queue_cipher(invalid_cipher, 722);
             assert_eq!(
@@ -4717,7 +4817,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             turn.decide(721, None),
-            Err("remote media progress expired; retire generation".into())
+            Err("remote media progress expired".into())
         );
         let frozen = turn.port.snapshot().last_progress_failure.unwrap();
         assert_eq!(
@@ -4736,12 +4836,12 @@ mod tests {
             Some(frozen.clone())
         );
         turn.commit(8, 723);
+        assert_eq!(turn.decide(1444, None), Ok(false));
+        assert!(turn.decide(1444, Some(144)).is_err());
         assert_eq!(
-            turn.decide(1444, None),
-            Err("remote media progress expired; retire generation".into())
+            turn.port.snapshot().last_progress_failure,
+            Some(frozen.clone())
         );
-        let replacement = turn.port.snapshot().last_progress_failure.unwrap();
-        assert_eq!(replacement.oldest_index, Some(8));
         assert_eq!(frozen.oldest_index, Some(7));
 
         let metadata = AuthenticatedControl {
@@ -4814,7 +4914,7 @@ mod tests {
             // terminal ACK already queued. It has not authenticated that ACK.
             assert_eq!(
                 turn.ledger.check(turn.at(721), extra_bytes),
-                Err("remote media progress expired; retire generation".into())
+                Err("remote media progress expired".into())
             );
             let decision = turn.decide(721, Some(waiting.bytes()));
             if queued_ack {
@@ -4824,10 +4924,7 @@ mod tests {
                 assert_eq!(turn.port.snapshot().max_feedback_cycle_ms, 721);
                 assert_eq!(turn.port.snapshot().rx_bytes, 132);
             } else {
-                assert_eq!(
-                    decision,
-                    Err("remote media progress expired; retire generation".into())
-                );
+                assert_eq!(decision, Err("remote media progress expired".into()));
                 assert_eq!(turn.ledger.bytes(), 144);
                 assert_eq!(turn.port.snapshot().terminal_feedback, 0);
             }
@@ -4979,15 +5076,12 @@ mod tests {
     }
 
     #[test]
-    fn queued_prefix_ack_cannot_hide_remaining_expired_commitment() {
+    fn queued_prefix_ack_keeps_remaining_expired_commitment_without_retirement() {
         let mut turn = ControlTurn::new();
         turn.commit(7, 0);
         turn.commit(8, 0);
         turn.queue_ack(Some(7), 719);
-        assert_eq!(
-            turn.decide(721, None),
-            Err("remote media progress expired; retire generation".into())
-        );
+        assert_eq!(turn.decide(721, None), Ok(true));
         assert_eq!(turn.ledger.bytes(), 144);
         assert_eq!(turn.port.snapshot().terminal_feedback, 1);
         assert_eq!(turn.port.snapshot().max_feedback_cycle_ms, 721);
@@ -5003,11 +5097,15 @@ mod tests {
             turn.commit(8, 200);
             turn.queue_ack(terminal, 919);
             let expected = if terminal == Some(6) {
-                "invalid remote terminal frontier"
+                Err("invalid remote terminal frontier".into())
             } else {
-                "remote media progress expired; retire generation"
+                Ok(true)
             };
-            assert_eq!(turn.decide(921, None), Err(expected.into()));
+            assert_eq!(turn.decide(921, None), expected);
+            assert_eq!(
+                turn.ledger.observe(turn.at(921)).oldest_age,
+                Some(Duration::from_millis(721))
+            );
             assert_eq!(turn.ledger.bytes(), 144);
             assert_eq!(
                 turn.port.snapshot().terminal_feedback,
@@ -5029,7 +5127,7 @@ mod tests {
         turn.queue_cipher(cipher, 719);
         assert_eq!(
             turn.decide(721, None),
-            Err("remote media progress expired; retire generation".into())
+            Err("remote media progress expired".into())
         );
         assert_eq!(turn.ledger.bytes(), 144);
         assert_eq!(turn.port.snapshot().terminal_feedback, 0);
@@ -5121,10 +5219,7 @@ mod tests {
             },
         )
         .map_err(|error| error.message().to_owned());
-        assert_eq!(
-            result,
-            Err("remote media progress expired; retire generation".into())
-        );
+        assert_eq!(result, Err("remote media progress expired".into()));
         assert_eq!(turn.ledger.bytes(), 144);
         assert_eq!(turn.port.snapshot().terminal_feedback, 0);
         assert_eq!(turn.incoming.len(), 1);

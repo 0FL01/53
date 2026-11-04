@@ -204,6 +204,7 @@ directional keys/lanes обновляются;30s episode, no stale audio/replay
 End/revoke/block/physical errors. Код/приёмка ещё реализуются по
 `docs/goals/2026-10-15-recovering-long-calls.md`. Encoder load адаптируется12/8kbit,
 а40ms/100B,80ms jitter/640sink/720ms ledger/2880B window не увеличиваются.
+После первого authenticated peer terminal поколения720ms блокирует новые кадры, а не поколение; до terminal expiry по-прежнему запускает recovery, committed credit освобождает только peer.
 History/video/hold отсутствуют. Отсутствие самих пауз >720ms проверяется позже,
 не подменяется успешным восстановлением.
 

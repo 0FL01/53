@@ -10,6 +10,7 @@ case "${1:-}" in
 esac
 # cargo-ndk's panic reporter can print its environment: pass no credentials.
 exec env -i HOME="$HOME" PATH="$PATH" ANDROID_NDK_HOME="$ANDROID_NDK_HOME" \
+    CARGO_BUILD_JOBS=4 \
     TMPDIR="${TMPDIR:-}" \
     OPENSSL_SRC_PERL="${OPENSSL_SRC_PERL:-perl}" \
     CARGO_PROFILE_RELEASE_LTO=thin CARGO_PROFILE_RELEASE_STRIP=symbols \
